@@ -4,6 +4,9 @@ export { DEFAULT_WORLD, normalizeWorld } from '../core/world.js';
 // The SAME json feeds the WebGL viewport and the Blender render, so what you
 // scrub is what you render. Coordinates are metres, y is up, ground at y=0.
 
+// How far above a roof the camera may pass before the tower counts as clear.
+const CORRIDOR_CLEARANCE = 8;
+
 function mulberry32(a) {
   return function rng() {
     a |= 0; a = (a + 0x6D2B79F5) | 0;
@@ -24,8 +27,14 @@ const hexRgb = (h) => {
  *   buildings: [{x,y,z,w,h,d,tint,seed}]  y = base (0)
  *   neons:     [{x,y,z,w,h,d,color,seed}]
  *   ground/bounds/fog/sky for the renderers
+ *
+ * `path` (camera positions) is optional. When world.corridor.enabled, buildings
+ * the camera would fly through are dropped, so a new seed can never park a
+ * tower in the drone's way. The RNG sequence is untouched by the corridor, so
+ * changing radius only adds/removes the affected blocks — the rest of the city
+ * stays identical.
  */
-export function generateCity(worldInput) {
+export function generateCity(worldInput, { path = null } = {}) {
   const w = normalizeWorld(worldInput);
   const rng = mulberry32(w.seed | 0);
   const { nx, nz, block, street } = w.grid;
@@ -35,6 +44,11 @@ export function generateCity(worldInput) {
   const neons = [];
   const palette = w.palette.map(hexRgb);
   const neonCols = (w.neon.colors || w.neonColors || []).map(hexRgb);
+
+  const radius = Number(w.corridor.radius) || 0;
+  const samples = w.corridor.enabled && radius > 0 ? pathSamples(path) : [];
+  const corridor = samples.length >= 2;
+  let cleared = 0;
 
   const hMin = Number(w.height.min) || 20;
   const hMax = Math.max(hMin + 1, Number(w.height.max) || 200);
@@ -55,12 +69,18 @@ export function generateCity(worldInput) {
         const z = cz + (rng() - 0.5) * (block - bd) * 0.8;
         const tint = palette[Math.floor(rng() * palette.length)].map((c) => Math.min(1, c * (0.8 + rng() * 0.5)));
         const seed = Math.floor(rng() * 100000);
-        buildings.push({
-          x: r2(x), y: 0, z: r2(z), w: r2(bw), h: r2(h), d: r2(bd),
-          tint: tint.map((c) => r3(c)), seed,
-        });
 
-        // neon: vertical strips / signs on a fraction of the towers
+        const keep = !corridor || !corridorHit(x, z, bw, bd, h, samples, radius);
+        if (!keep) cleared++;
+        if (keep) {
+          buildings.push({
+            x: r2(x), y: 0, z: r2(z), w: r2(bw), h: r2(h), d: r2(bd),
+            tint: tint.map((c) => r3(c)), seed,
+          });
+        }
+
+        // Neons are generated unconditionally (same RNG draws) and only kept
+        // with their building, so a corridor never leaves a sign floating.
         const nRoll = rng();
         if (nRoll < 0.72 && h > 32) {
           const col = neonCols[Math.floor(rng() * neonCols.length)];
@@ -68,13 +88,17 @@ export function generateCity(worldInput) {
           const off = side === 0 ? [-bw / 2 - 0.6, 0, 0] : side === 1 ? [bw / 2 + 0.6, 0, 0]
             : side === 2 ? [0, 0, -bd / 2 - 0.6] : [0, 0, bd / 2 + 0.6];
           const tall = h * (0.3 + rng() * 0.45);
-          neons.push({
-            x: r2(x + off[0]), y: r2(h * (0.05 + rng() * 0.2)), z: r2(z + off[2]),
-            w: side < 2 ? 0.75 : Math.min(bw * 0.35, 6),
-            h: r2(tall * 0.8),
-            d: side < 2 ? 0.75 : Math.min(bw * 0.35, 6),
-            color: col.map((c) => r3(c)), seed: Math.floor(rng() * 100000),
-          });
+          const ny = h * (0.05 + rng() * 0.2);
+          const nseed = Math.floor(rng() * 100000);
+          if (keep) {
+            neons.push({
+              x: r2(x + off[0]), y: r2(ny), z: r2(z + off[2]),
+              w: side < 2 ? 0.75 : Math.min(bw * 0.35, 6),
+              h: r2(tall * 0.8),
+              d: side < 2 ? 0.75 : Math.min(bw * 0.35, 6),
+              color: col.map((c) => r3(c)), seed: nseed,
+            });
+          }
         }
         if (nRoll > 0.5 && h > 24) {
           const col = neonCols[Math.floor(rng() * neonCols.length)];
@@ -82,22 +106,26 @@ export function generateCity(worldInput) {
           const side = Math.floor(rng() * 4);
           const off2 = side === 0 ? [-bw / 2 - 0.35, 0, 0] : side === 1 ? [bw / 2 + 0.35, 0, 0]
             : side === 2 ? [0, 0, -bd / 2 - 0.35] : [0, 0, bd / 2 + 0.35];
-          neons.push({
-            x: r2(x + off2[0]),
-            y: r2(6 + rng() * Math.max(8, h * 0.5)),
-            z: r2(z + off2[2]),
-            w: side < 2 ? 0.6 : r2(Math.min(bw * 0.5, 9)),
-            h: 1.8,
-            d: side < 2 ? r2(Math.min(bd * 0.5, 9)) : 0.6,
-            color: col.map((c) => r3(c)), seed: Math.floor(rng() * 100000),
-          });
+          const ny = 6 + rng() * Math.max(8, h * 0.5);
+          const nseed = Math.floor(rng() * 100000);
+          if (keep) {
+            neons.push({
+              x: r2(x + off2[0]),
+              y: r2(ny),
+              z: r2(z + off2[2]),
+              w: side < 2 ? 0.6 : r2(Math.min(bw * 0.5, 9)),
+              h: 1.8,
+              d: side < 2 ? r2(Math.min(bd * 0.5, 9)) : 0.6,
+              color: col.map((c) => r3(c)), seed: nseed,
+            });
+          }
         }
       }
     }
   }
 
   return {
-    hash: cityHash(w),
+    hash: cityHash(w, path),
     seed: w.seed,
     bounds: { x0: -spanX / 2, x1: spanX / 2, z0: -spanZ / 2, z1: spanZ / 2 },
     grid: { ...w.grid },
@@ -107,6 +135,7 @@ export function generateCity(worldInput) {
     window: { density: Number(w.window.density) || 0.5, glow: Number(w.window.glow) || 3, color: hexRgb(w.window.color) },
     neonGlow: Number(w.neon.glow) || 6,
     ambient: Number(w.ambient) || 0.3,
+    corridor: { enabled: !!w.corridor.enabled, radius, cleared },
     buildings,
     neons,
     stats: { buildings: buildings.length, neons: neons.length },
@@ -116,9 +145,59 @@ export function generateCity(worldInput) {
 function r2(v) { return Math.round(v * 100) / 100; }
 function r3(v) { return Math.round(v * 1000) / 1000; }
 
-/** stable hash of the world params (cache key) */
-export function cityHash(w) {
-  const s = JSON.stringify(normalizeWorld(w));
+/** Camera path → points every ~2 m of travel, so sparse keyframes still cut a tube. */
+function pathSamples(path, step = 2) {
+  const pts = [];
+  for (const p of path || []) {
+    const v = Array.isArray(p) ? p : p && p.pos;
+    if (Array.isArray(v) && v.length >= 3 && v.every((n) => Number.isFinite(Number(n)))) {
+      pts.push([Number(v[0]), Number(v[1]), Number(v[2])]);
+    }
+  }
+  if (pts.length < 2) return pts;
+  const out = [pts[0]];
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1], b = pts[i];
+    const n = Math.max(1, Math.ceil(Math.hypot(b[0] - a[0], b[2] - a[2]) / step));
+    for (let k = 1; k <= n; k++) {
+      const u = k / n;
+      out.push([a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u, a[2] + (b[2] - a[2]) * u]);
+    }
+  }
+  return out;
+}
+
+/** Would the camera pass through (or too close to) this box's airspace? */
+function corridorHit(x, z, w, d, h, samples, radius) {
+  const x0 = x - w / 2, x1 = x + w / 2;
+  const z0 = z - d / 2, z1 = z + d / 2;
+  const rr = radius * radius;
+  const top = h + CORRIDOR_CLEARANCE; // clear a roof and the tower stays
+  for (let i = 0; i < samples.length; i++) {
+    const s = samples[i];
+    if (s[1] > top) continue;
+    const dx = Math.max(x0 - s[0], 0, s[0] - x1);
+    const dz = Math.max(z0 - s[2], 0, s[2] - z1);
+    if (dx * dx + dz * dz < rr) return true;
+  }
+  return false;
+}
+
+function pathSignature(path) {
+  const out = [];
+  for (const p of path || []) {
+    const v = Array.isArray(p) ? p : p && p.pos;
+    if (!Array.isArray(v) || v.length < 3) continue;
+    out.push([v[0], v[1], v[2]].map((n) => Math.round(Number(n) * 10) / 10).join(','));
+  }
+  return out.join(';');
+}
+
+/** Stable hash of world params (+ camera path when the corridor is on) — cache key. */
+export function cityHash(w, path) {
+  const world = normalizeWorld(w);
+  let s = JSON.stringify(world);
+  if (world.corridor.enabled && path) s += `|${pathSignature(path)}`;
   let h = 2166136261;
   for (let i = 0; i < s.length; i++) {
     h ^= s.charCodeAt(i);

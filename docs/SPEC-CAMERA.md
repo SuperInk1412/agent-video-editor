@@ -58,6 +58,7 @@ path 关键点 → Catmull-Rom 位置
 | `fog.color / density / glow` | 雾色、浓度、雾中辉光 |
 | `ground.color / wet` | 地面颜色与反光强度 |
 | `sky` / `ambient` | 天空色与环境光 |
+| `corridor.enabled` / `corridor.radius` | 航线避让（默认开、16m）：镜头航线半径内、楼顶高于机位 8m 以内的楼会被清掉，换 `seed` 不会把塔吊在航线上；只删受影响的楼，其余几何与 RNG 序列不变 |
 
 ## 三、镜头在时间轴上的其它部分
 

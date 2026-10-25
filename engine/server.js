@@ -19,7 +19,8 @@ import { analyzeBeats } from './beats.js';
 import { autoStoryboard, summarizeProject, STYLE_PRESETS } from './storyboard.js';
 import { AgentRunner, findDsh, CLI_PATH } from './agent.js';
 import { createLogger } from './log.js';
-import { cachedCity } from './shot.js';
+import { cachedCity, is3D } from './shot.js';
+import { bakeCameraTrack } from '../core/camera.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const APP_DIR = path.resolve(HERE, '..');
@@ -250,7 +251,8 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
 
       // ---------------- 3D world (shared by viewport + blender) ----------------
       if (pathname === '/api/world' && req.method === 'GET') {
-        const city = cachedCity(project.world);
+        const flight = is3D(project) ? bakeCameraTrack(project).map((c) => c.pos) : null;
+        const city = cachedCity(project.world, flight);
         return json(res, 200, { hash: city.hash, city });
       }
 

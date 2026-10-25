@@ -13,6 +13,10 @@ export const DEFAULT_WORLD = {
   ground: { color: '#04070c', wet: 0.65 },
   sky: '#03060d',
   ambient: 0.3,
+  // Flight corridor: clear buildings the camera would fly through. Geometry
+  // only — the camera path is untouched, so a new seed can never drop a tower
+  // into the drone's line of flight.
+  corridor: { enabled: true, radius: 16 },
 };
 
 export function normalizeWorld(w) {
@@ -27,6 +31,7 @@ export function normalizeWorld(w) {
     neon: { ...d.neon, ...(src.neon || {}) },
     fog: { ...d.fog, ...(src.fog || {}) },
     ground: { ...d.ground, ...(src.ground || {}) },
+    corridor: { ...d.corridor, ...(src.corridor || {}) },
     palette: Array.isArray(src.palette) && src.palette.length ? src.palette : d.palette,
     neonColors: Array.isArray(src.neonColors) && src.neonColors.length ? src.neonColors : d.neon.colors,
   };

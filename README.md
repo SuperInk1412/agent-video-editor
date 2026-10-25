@@ -68,7 +68,8 @@ node ../../cli/vdm.js render --from 0 --to 6 --scale 0.5
 ```
 
 参数设计见 `docs/SPEC-CAMERA.md`：轨道关键点 / 朝向 / 侧倾 / 抖动 / FOV / 景深 / 运动模糊 +
-城市 seed、街区尺寸、楼高分布、亮窗、霓虹、雾。
+城市 seed、街区尺寸、楼高分布、亮窗、霓虹、雾。`world.corridor`（默认开、半径 16m）沿航线
+清掉镜头会穿过的楼，换 `seed` 也不会撞楼；关掉用 `world set corridor.enabled false`。
 
 ## 三条设计原则
 

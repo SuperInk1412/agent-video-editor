@@ -11,8 +11,10 @@ export const is3D = (project) => !!(project.camera && Array.isArray(project.came
 export function buildShot(project, { from = 0, to = null, fps = null } = {}) {
   const frameRate = fps || project.meta.fps || 24;
   const end = to ?? project.meta.duration;
-  const city = generateCity(project.world);
+  // Bake the camera first: the corridor is cut from the path the camera
+  // actually flies, not from the raw keyframes.
   const camera = bakeCameraTrack(project, { fps: frameRate, from, to: end });
+  const city = generateCity(project.world, { path: camera.map((c) => c.pos) });
   const cam = project.camera || {};
   return {
     version: 1,
@@ -38,7 +40,7 @@ export function buildShot(project, { from = 0, to = null, fps = null } = {}) {
 export async function writeShot(dir, project, opts = {}) {
   const p = paths(dir);
   const shot = buildShot(project, opts);
-  const key = `${cityHash(project.world)}-${shot.fps}-${opts.from ?? 0}-${opts.to ?? project.meta.duration}`;
+  const key = `${shot.city.hash}-${shot.fps}-${opts.from ?? 0}-${opts.to ?? project.meta.duration}`;
   const file = path.join(p.cache, `shot-${key}.json`);
   await fs.mkdir(path.dirname(file), { recursive: true });
   await fs.writeFile(file, JSON.stringify(shot));
@@ -47,10 +49,10 @@ export async function writeShot(dir, project, opts = {}) {
 
 /** Cached city, used by the viewport endpoint. */
 const cityCache = new Map();
-export function cachedCity(world) {
-  const hash = cityHash(world);
+export function cachedCity(world, path = null) {
+  const hash = cityHash(world, path);
   if (cityCache.has(hash)) return cityCache.get(hash);
-  const city = generateCity(world);
+  const city = generateCity(world, { path });
   if (cityCache.size > 8) cityCache.delete(cityCache.keys().next().value);
   cityCache.set(hash, city);
   return city;
