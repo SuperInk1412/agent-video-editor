@@ -1,0 +1,29 @@
+{
+  "name": "vediomaker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AI-assisted video composer: realtime WebGL preview, Blender render backend, DSH-TUI edit agent",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node scripts/dev.mjs",
+    "web": "node engine/server.js --open",
+    "dev": "node scripts/dev.mjs --web",
+    "cli": "node cli/vdm.js",
+    "test": "node --test \"tests/*.test.mjs\"",
+    "demo": "node scripts/demo.mjs",
+    "still": "node cli/vdm.js still",
+    "blender:check": "node scripts/blender-check.mjs"
+  },
+  "keywords": [
+    "video",
+    "blender",
+    "timeline",
+    "ai",
+    "electron"
+  ],
+  "license": "MIT",
+  "main": "app/electron/main.js"
+}

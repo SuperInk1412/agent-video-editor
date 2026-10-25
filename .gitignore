@@ -1,0 +1,21 @@
+# deps (we ship zero npm dependencies, but electron may be linked in)
+node_modules/
+
+# scratch / build outputs
+.scratch/
+dist/
+out/
+
+# per-project generated state: caches, frames, renders, locks
+projects/*/.vdm/
+projects/*/media/
+projects/*/renders/
+assets/fonts/
+assets/media/
+
+# editor / os noise
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+List.efu

@@ -1,0 +1,70 @@
+# VedioMaker
+
+**自己定义编辑 · 实时预览 · AI 辅助 · Blender 出片**
+
+VedioMaker 是一个本地的视频作曲台：时间线由你自己定义，画面在浏览器里即时预览，
+最终画面交给 Blender 渲染，而 AI（DSH-TUI agent）和你操作的是**同一份项目文件**——
+所以你随时能看见它在改什么、打断它、或者自己接手。
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Electron 窗口 (或浏览器打开 localhost)                       │
+│  ┌──────────┬─────────────────────┬───────────────────────┐  │
+│  │ 分镜/媒体 │  WebGL2 实时预览     │ 检查器 / AI / 流水线   │  │
+│  └──────────┴─────────────────────┴───────────────────────┘  │
+│                    时间线（段落 + 元素 + 关键帧）              │
+└───────────────────────────┬─────────────────────────────────┘
+                            │ HTTP (127.0.0.1:random)
+┌───────────────────────────┴─────────────────────────────────┐
+│ Node 引擎：项目文件读写 · 媒体探测 · 渲染队列 · 截图 · SSE     │
+│   ├── Blender 5.x 无头渲染 (bpy：图层 + 合成器 + ffmpeg 封装) │
+│   └── dsh --profile headless --json  (AI 编辑代理，可打断)     │
+└──────────────────────────────────────────────────────────────┘
+```
+
+## 快速开始
+
+```bash
+# 1) 建一个项目
+node cli/vdm.js init projects/demo --title "锈梦 demo" --duration 12
+
+# 2) 浏览器里编辑（无需安装任何东西）
+npm run web
+
+# 3) 或者用 Electron 打开
+npm start
+
+# 4) 出一帧 / 出片
+node cli/vdm.js still 3.2 --out .vdm/frames/a.png
+node cli/vdm.js render --from 0 --to 6 --out .vdm/renders/part.mp4
+```
+
+## 三条设计原则
+
+1. **项目文件是唯一真相源。** `projects/<name>/project.vdm.json` 是纯 JSON，
+   UI、CLI、AI 都只通过同一套 `core/ops.js` 操作它；每次保存 rev+1、原子写入、带文件锁。
+2. **预览和成片共用一套模型。** `core/evaluate.js` 定义每个元素在任意时刻的状态
+   （变换 / 关键帧 / 运动 / 淡入淡出），WebGL 预览和 `blender/vdm_build.py` 各自实现同一套语义。
+   预览求快，Blender 求真。
+3. **AI 不拥有特权。** agent 用的是和人类一样的 CLI（`vdm set / key set / still / render`），
+   每一步都是可见、可回滚的项目变更；它"看图"靠的是引擎给它渲染的片段帧。
+
+## 目录
+
+| 路径 | 作用 |
+| --- | --- |
+| `core/` | 纯 JS 模型：时间、求值、ops、schema、存储（零依赖，浏览器/Node 共用） |
+| `cli/vdm.js` | `vdm` 命令：人用，也**是 AI 的工具面** |
+| `engine/` | Node 服务：静态/媒体服务、REST+SSE、Blender 调度、agent 调度、节拍分析 |
+| `app/renderer/` | 无构建步骤的 UI（原生 ESM + WebGL2） |
+| `app/electron/` | Electron 壳（启动引擎 + 开窗） |
+| `blender/` | bpy 场景构建与渲染（图层、文字、合成器、ffmpeg 封装） |
+| `projects/` | 项目（示例见 `projects/demo/`） |
+| `docs/` | 架构、项目格式、CLI、路线图 |
+
+## 状态
+
+v0.1（可跑通的 demo）：时间线编辑、实时预览、元素/细节检查器、关键帧、
+Blender 出帧与出片、节拍自动分镜、AI 片段编辑（流式 + 打断）。
+
+详见 `docs/ROADMAP.md`。
