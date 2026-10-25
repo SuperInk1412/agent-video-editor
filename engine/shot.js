@@ -40,7 +40,7 @@ export function buildShot(project, { from = 0, to = null, fps = null } = {}) {
 export async function writeShot(dir, project, opts = {}) {
   const p = paths(dir);
   const shot = buildShot(project, opts);
-  const key = `${shot.city.hash}-${shot.fps}-${opts.from ?? 0}-${opts.to ?? project.meta.duration}`;
+  const key = `${shot.city.hash}-r${project.rev || 0}-${shot.fps}-${opts.from ?? 0}-${opts.to ?? project.meta.duration}`;
   const file = path.join(p.cache, `shot-${key}.json`);
   await fs.mkdir(path.dirname(file), { recursive: true });
   await fs.writeFile(file, JSON.stringify(shot));
