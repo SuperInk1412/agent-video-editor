@@ -26,12 +26,16 @@ function findElectron() {
   return null;
 }
 
-// --project > the directory you launched from > projects/demo
+// --project > where you stood when launching > projects/demo
+// `npm start` runs the script from the package root, so cwd is the repo even
+// when you launched from projects/<name> — INIT_CWD keeps the real directory.
 const project = await (async () => {
   const i = argv.indexOf('--project');
   if (i >= 0 && argv[i + 1]) return path.resolve(argv[i + 1]);
-  const fromCwd = await findProjectRoot(process.cwd());
-  if (fromCwd) return fromCwd;
+  for (const start of [process.cwd(), process.env.INIT_CWD]) {
+    const found = start ? await findProjectRoot(start) : null;
+    if (found) return found;
+  }
   return path.join(REPO, 'projects', 'demo');
 })();
 console.log(`[vdm] opening ${project}`);

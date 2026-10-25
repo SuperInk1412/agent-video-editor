@@ -28,6 +28,9 @@ VedioMaker 是一个本地的视频作曲台：时间线由你自己定义，画
 # 打开示例项目（Electron 复用本机已装的 dist，不下载任何依赖）
 npm start
 
+# 在项目目录里启动就打开那个项目（npm start 会把 cwd 换成包根，脚本读 INIT_CWD）
+cd projects/nightcity && npm start
+
 # 或者纯浏览器形态
 npm run web
 
