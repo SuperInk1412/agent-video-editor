@@ -66,8 +66,11 @@ M = T(pivot) · R(dir, roll) · T(position) · S(scale) · geometry
 - 插值：`pivot/position/scale` 是三次贝塞尔（不写 `out/in` 时用 Catmull-Rom 切线/6，与相机一致）；
   `dir` 是球面贝塞尔（切线投到切平面后归一化）；标量按 `ease` 一维插值。
 - 每个键可带 `ease`（`linear / easeIn / easeOut / easeInOut / smooth / outExpo / inOutCubic / outBack`）。
-- 每个键可带段级 `speed: [[u,v], …]`（`speedWarp` 先积分成弧长再取样）；目前 UI 只露了 ease，speed 留给后续曲线编辑器。
-- 同轨同 `t`（±0.0001s）只有一个键；`objectKey` 重写值时保留旧键的 `ease/out/in/speed`。
+- 每个键可带段级 `speed: [[u,v], …]`（`speedWarp` 先积分成弧长再取样），
+  检查器里每个元素关键帧的 `∿` 打开速度曲线编辑器（拖点 / 匀速 / 慢入 / 慢出 / 冲击 / 清除）；
+  有 `speed` 时该段忽略 `ease`。
+- 同轨同 `t`（±0.0001s）只有一个键；`objectKey` 重写值时保留旧键的 `ease/out/in/speed`
+  （显式传 `speed: null` 清除速度曲线）。
 - vec3 轨存在时优先于 `.x/.y/.z` 子轨（`sampleAxes`）。
 
 ## Ops（`core/ops.js` / `vdm ops`）
@@ -101,6 +104,7 @@ vdm ops '{"op":"objectRemove","id":"ob_1"}'
 
 ## 已知限制（下一步）
 
-- 贴图/文字平面、父子（空元素）、子场景、速度曲线编辑器还没做。
+- 贴图/文字平面、父子（空元素）、子场景还没做。
+- 相机轨道还只支持 ease，没有逐段 speed 曲线（元素支持）。
 - 视口拾取是 CPU ray vs 有向盒子；不考虑城市楼体遮挡（时间线选中永远可用）。
 - 3D 元素的旋转只有检查器里的旋转球和「面向镜头」，还没有视口旋转手柄。

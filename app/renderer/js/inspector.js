@@ -3,6 +3,7 @@ import { evalElement } from '/core/evaluate.js';
 import { evalCamera } from '/core/camera.js';
 import { objectPose } from '/core/scene.js';
 import { RotBall } from './rotball.js';
+import { SpeedCurve, SPEED_PRESETS } from './speedcurve.js';
 import { escapeHtml } from './timeline.js';
 
 const MOTIONS = ['none', 'in', 'out', 'left', 'right', 'up', 'down', 'drift', 'shake'];
@@ -51,8 +52,9 @@ export class Inspector {
   }
 
   render(project, sel, time) {
+    this._last = { project, sel, time };
     const active = document.activeElement;
-    if (this._ballDragging) return;
+    if (this._ballDragging || this._speedDragging) return;
     if (this.root.contains(active) && /INPUT|TEXTAREA|SELECT/.test(active?.tagName || '')) return;
     const key = `${project.rev}|${sel?.camera ? 'cam' : ''}|${sel?.elementId}|${sel?.objectId}|${sel?.segmentId}|${Math.round(time * 10)}`;
     if (key === this.lastRenderKey) return;
@@ -111,6 +113,12 @@ export class Inspector {
       },
     }, '◆') : null;
     return h('div', { class: `fld span${span}` }, h('label', {}, label), input, kfBtn);
+  }
+
+  _refresh() {
+    if (!this._last) return;
+    this.lastRenderKey = '';
+    this.render(this._last.project, this._last.sel, this._last.time);
   }
 
   _renderElement(project, el, time) {
@@ -338,7 +346,9 @@ export class Inspector {
     const kfList = h('div', { class: 'kf-list' });
     if (!rows.length) kfList.appendChild(h('div', { class: 'hint' }, '还没有关键帧：拖动元素或点 ◆。'));
     for (const { path, k } of rows) {
-      kfList.appendChild(h('div', { class: `kf-row ${Math.abs(k.t - time) < 0.05 ? 'at' : ''}`, style: 'grid-template-columns: 46px 1fr 1fr 64px 22px' },
+      const open = this._speedOpen && this._speedOpen.id === id
+        && this._speedOpen.path === path && Math.abs(this._speedOpen.t - k.t) < 1e-3;
+      const row = h('div', { class: `kf-row ${Math.abs(k.t - time) < 0.05 ? 'at' : ''}`, style: 'grid-template-columns: 46px 1fr 1fr 58px 26px 22px' },
         h('button', {
           class: 'kf-t', title: '跳到这个关键帧', style: 'background:none;border:0;color:inherit;cursor:pointer;padding:0;text-align:left',
           onclick: () => this.opts.onSeek?.(k.t),
@@ -346,11 +356,38 @@ export class Inspector {
         h('span', { class: 'kf-p' }, path),
         h('span', { class: 'kf-v' }, Array.isArray(k.v) ? k.v.map((n) => round(n, 2)).join(', ') : String(k.v)),
         h('select', {
-          class: 'kf-ease', title: '到下一关键帧的速度曲线',
+          class: 'kf-ease', title: '到下一关键帧的 ease 预设（该键有速度曲线时被忽略）',
           onchange: (e) => this.opts.onOp({ op: 'objectKey', id, path, t: k.t, v: k.v, ease: e.target.value }),
         }, ...EASES.map((x) => h('option', { value: x, selected: (k.ease || 'easeInOut') === x }, x))),
+        h('button', {
+          class: `mini ${open ? 'on' : ''}`, title: '编辑这一段的速度曲线',
+          onclick: () => { this._speedOpen = open ? null : { id, path, t: k.t }; this._refresh(); },
+        }, '∿'),
         h('button', { class: 'mini danger', onclick: () => this.opts.onOp({ op: 'objectUnkey', id, path, t: k.t }) }, '×'),
-      ));
+      );
+      kfList.appendChild(row);
+      if (open) {
+        const wrap = h('div', { class: 'speed-wrap' });
+        new SpeedCurve(wrap, {
+          points: k.speed,
+          onStart: () => { this._speedDragging = true; },
+          onEnd: () => { this._speedDragging = false; },
+          onChange: (pts) => this._commit(
+            `${id}:speed:${path}:${k.t}`,
+            { op: 'objectKey', id, path, t: k.t, v: k.v, speed: pts },
+            90,
+          ),
+        });
+        const setPreset = (pts) => this.opts.onOp({ op: 'objectKey', id, path, t: k.t, v: k.v, speed: pts });
+        wrap.appendChild(h('div', { class: 'row-btns' },
+          h('button', { class: 'mini', onclick: () => setPreset(SPEED_PRESETS.linear) }, '匀速'),
+          h('button', { class: 'mini', onclick: () => setPreset(SPEED_PRESETS.easeIn) }, '慢入'),
+          h('button', { class: 'mini', onclick: () => setPreset(SPEED_PRESETS.easeOut) }, '慢出'),
+          h('button', { class: 'mini', onclick: () => setPreset(SPEED_PRESETS.punch) }, '冲击'),
+          h('button', { class: 'mini', onclick: () => this.opts.onOp({ op: 'objectKey', id, path, t: k.t, v: k.v, speed: null }) }, '清除'),
+        ));
+        kfList.appendChild(wrap);
+      }
     }
     this.root.appendChild(this._section(`关键帧 (${rows.length})`, kfList));
   }

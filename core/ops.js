@@ -426,7 +426,9 @@ export function applyOp(p, op) {
           else if (Array.isArray(old?.[h]) && old[h].length === 3) key[h] = old[h].slice();
         }
       }
-      if (Array.isArray(op.speed)) {
+      if (op.speed === null) {
+        // explicit clear
+      } else if (Array.isArray(op.speed)) {
         const pts = op.speed
           .filter((pt) => Array.isArray(pt) && pt.length >= 2 && Number.isFinite(Number(pt[0])) && Number.isFinite(Number(pt[1])))
           .map((pt) => [Math.max(0, Math.min(1, Number(pt[0]))), Math.max(0, Number(pt[1]))]);

@@ -99,6 +99,8 @@ test('objectKey: updating a key keeps its ease, handles and speed curve', () => 
   assert.deepEqual(k.out, [1, 0, 0]);
   assert.deepEqual(k.in, [-1, 0, 0]);
   assert.deepEqual(k.speed, [[0, 1], [1, 2]]);
+  applyOp(p, { op: 'objectKey', id: o.id, path: 'pivot', t: 2, v: [5, 6, 7], speed: null });
+  assert.equal(o.tracks.pivot[0].speed, undefined);
 });
 
 test('objectUnkey: drops one key, then the whole track, missing ids fail', () => {
