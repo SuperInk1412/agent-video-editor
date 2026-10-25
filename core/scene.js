@@ -302,7 +302,10 @@ export function normalizeScene(s = {}) {
   return {
     version: SCENE_VERSION,
     units: 'm',
+    name: String(s.name || ''),
     world: s.world ?? null,
+    lights: s.lights ?? null,
+    background: s.background ?? 'transparent',
     cameraId: cameraId || null,
     objects,
     annotations: (Array.isArray(s.annotations) ? s.annotations : [])
@@ -315,4 +318,19 @@ export function normalizeScene(s = {}) {
       }))
       .sort((a, b) => a.t - b.t),
   };
+}
+
+/**
+ * A project is a tree of scenes: the root scene plus one full scene per
+ * flattened container. Every scene has its own world, lights, background,
+ * objects and camera — the editor enters them the same way.
+ */
+export function normalizeSceneTree(tree = {}) {
+  const src = tree.scenes && typeof tree.scenes === 'object' ? tree.scenes : {};
+  const scenes = {};
+  for (const [id, sc] of Object.entries(src)) scenes[String(id)] = normalizeScene(sc || {});
+  let sceneId = tree.sceneId && scenes[tree.sceneId] ? tree.sceneId : null;
+  if (!sceneId) sceneId = Object.keys(scenes)[0] || 'root';
+  if (!scenes[sceneId]) scenes[sceneId] = normalizeScene({});
+  return { version: SCENE_VERSION, sceneId, scenes };
 }

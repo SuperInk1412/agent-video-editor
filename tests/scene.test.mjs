@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   SCENE_VERSION, PX_PER_M, pxToM, mToPx, speedWarp, sampleChannel, sampleVec3,
   sampleDir, basisFromDir, objectPose, poseMatrix, normalizeObject, normalizeScene,
+  normalizeSceneTree,
 } from '../core/scene.js';
 
 const near = (a, b, eps = 1e-6) => assert.ok(Math.abs(a - b) <= eps, `${a} != ${b}`);
@@ -130,4 +131,30 @@ test('normalizeScene: version, camera detection, annotations', () => {
   assert.equal(s.units, 'm');
   assert.equal(s.cameraId, 'cam1');
   assert.deepEqual(s.annotations.map((a) => a.text), ['开场', '起飞']);
+});
+
+test('normalizeSceneTree: every sub-scene is a full independent scene', () => {
+  const t = normalizeSceneTree({
+    sceneId: 'root',
+    scenes: {
+      root: { world: { seed: 4242 }, background: '#05070d', objects: [{ id: 'cam1', type: 'camera' }] },
+      sc_1: { world: null, background: 'transparent', objects: [{ id: 'el', type: 'text' }] },
+    },
+  });
+  assert.equal(t.sceneId, 'root');
+  assert.equal(t.scenes.root.world.seed, 4242);
+  assert.equal(t.scenes.root.background, '#05070d');
+  assert.equal(t.scenes.sc_1.world, null);
+  assert.equal(t.scenes.sc_1.background, 'transparent');
+  // objects do not leak between scenes
+  assert.equal(t.scenes.root.objects[0].type, 'camera');
+  assert.equal(t.scenes.sc_1.objects.length, 1);
+  assert.equal(t.scenes.sc_1.objects[0].type, 'text');
+});
+
+test('normalizeSceneTree: falls back to an empty root scene', () => {
+  const t = normalizeSceneTree({});
+  assert.equal(t.sceneId, 'root');
+  assert.ok(t.scenes.root);
+  assert.equal(t.scenes.root.background, 'transparent');
 });
