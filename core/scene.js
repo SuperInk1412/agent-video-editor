@@ -120,8 +120,7 @@ export function sampleChannel(keys, t, fallback = 0) {
 }
 
 /** vec3 channel: Catmull-Rom through the keys, re-timed by each segment's curve. */
-export function sampleVec3(keys, t, fallback = [0, 0, 0]) {
-  const k = sortKeys(keys);
+export function sampleVec3(keys, t, fallback = [0, 0, 0]) {  const k = sortKeys(keys);
   const fb = vec3(fallback);
   if (!k.length) return fb;
   if (t <= k[0].t) return vec3(k[0].v, fb);
@@ -141,6 +140,18 @@ export function sampleVec3(keys, t, fallback = [0, 0, 0]) {
     }
   }
   return fb;
+}
+
+/**
+ * Vector channel with two representations: a vec3 track (`pivot`), or scalar
+ * sub-tracks (`pivot.x` / `.y` / `.z`). Migration uses the sub-tracks so old
+ * per-axis eases keep their exact timing.
+ */
+export function sampleAxes(tracks, name, t, fallback = [0, 0, 0]) {
+  const vec = tracks?.[name];
+  if (Array.isArray(vec) && vec.length) return sampleVec3(vec, t, fallback);
+  const fb = vec3(fallback);
+  return [0, 1, 2].map((i) => Number(sampleChannel(tracks?.[`${name}.${'xyz'[i]}`], t, fb[i])));
 }
 
 /** Tangent at key `i` on the sphere, projected to the tangent plane. */
@@ -218,9 +229,9 @@ export function basisFromDir(dir, rollDeg = 0) {
 export function objectPose(obj, t) {
   const o = obj || {};
   const tr = o.tracks || {};
-  const pivot = sampleVec3(tr.pivot, t, o.pivot || [0, 0, 0]);
-  const position = sampleVec3(tr.position, t, o.position || [0, 0, 0]);
-  const scale = sampleVec3(tr.scale, t, o.scale || [1, 1, 1]);
+  const pivot = sampleAxes(tr, 'pivot', t, o.pivot || [0, 0, 0]);
+  const position = sampleAxes(tr, 'position', t, o.position || [0, 0, 0]);
+  const scale = sampleAxes(tr, 'scale', t, o.scale || [1, 1, 1]);
   const dir = sampleDir(tr.dir, t, o.rot?.dir);
   const roll = sampleChannel(tr.roll, t, o.rot?.roll ?? 0);
   const opacity = clamp(sampleChannel(tr.opacity, t, o.opacity ?? 1), 0, 1);

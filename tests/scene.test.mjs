@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   SCENE_VERSION, PX_PER_M, pxToM, mToPx, speedWarp, sampleChannel, sampleVec3,
   sampleDir, basisFromDir, objectPose, poseMatrix, normalizeObject, normalizeScene,
-  normalizeSceneTree,
+  normalizeSceneTree, sampleAxes,
 } from '../core/scene.js';
 
 const near = (a, b, eps = 1e-6) => assert.ok(Math.abs(a - b) <= eps, `${a} != ${b}`);
@@ -120,6 +120,19 @@ test('normalizeObject: defaults, type guard, sorted tracks', () => {
   near(len(o.rot.dir), 1);
   nearVec(o.scale, [1, 1, 1]);
   assert.deepEqual(o.tracks.opacity.map((k) => k.t), [0, 2]);
+});
+
+test('sampleAxes: per-axis tracks are exact, a vec3 track wins', () => {
+  const tracks = {
+    'pivot.x': [{ t: 0, v: 0, ease: 'linear' }, { t: 1, v: 10 }],
+    'pivot.y': [{ t: 0, v: 0 }, { t: 1, v: -10 }],
+  };
+  nearVec(sampleAxes(tracks, 'pivot', 0.5, [0, 0, 0]), [5, -5, 0]);
+  assert.deepEqual(sampleAxes(tracks, 'pivot', 0, [0, 0, 0]), [0, 0, 0]);
+  assert.deepEqual(sampleAxes(tracks, 'pivot', 1, [0, 0, 0]), [10, -10, 0]);
+
+  const both = { ...tracks, pivot: [{ t: 0, v: [1, 1, 1] }, { t: 1, v: [3, 3, 3] }] };
+  nearVec(sampleAxes(both, 'pivot', 0.5, [0, 0, 0]), [2, 2, 2]);
 });
 
 test('normalizeScene: version, camera detection, annotations', () => {
