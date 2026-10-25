@@ -296,8 +296,9 @@ export class Inspector {
       this._field({ label: '亮窗比例', value: w.window.density, step: 0.02, min: 0, max: 1, onChange: (v) => setW({ window: { ...w.window, density: v } }) }),
       this._field({ label: '窗光强度', value: w.window.glow, step: 0.1, onChange: (v) => setW({ window: { ...w.window, glow: v } }) }),
       this._field({ label: '霓虹强度', value: w.neon.glow, step: 0.1, onChange: (v) => setW({ neon: { ...w.neon, glow: v } }) }),
-      this._field({ label: '雾浓度', value: w.fog.density, step: 0.0005, onChange: (v) => setW({ fog: { ...w.fog, density: v } }) }),
-      this._field({ label: '雾强度', value: w.fog.strength ?? 0.9, step: 0.05, onChange: (v) => setW({ fog: { ...w.fog, strength: v } }) }),
+      this._field({ label: '雾开始 (m)', value: w.fog.start ?? 30, step: 5, min: 0, max: 500, onChange: (v) => setW({ fog: { ...w.fog, start: v } }) }),
+      this._field({ label: '雾深度 (m)', value: w.fog.depth ?? 700, step: 25, min: 10, max: 5000, onChange: (v) => setW({ fog: { ...w.fog, depth: v } }) }),
+      this._field({ label: '雾强度', value: w.fog.strength ?? 1, step: 0.05, min: 0, max: 1, onChange: (v) => setW({ fog: { ...w.fog, strength: v } }) }),
     ));
   }
 

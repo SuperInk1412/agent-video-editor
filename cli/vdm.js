@@ -543,7 +543,7 @@ ${C.b('素材 / 分镜')}
 
 ${C.b('3D 镜头')}
   vdm cam ls | set <path> <value> | add <t> <x> <y> <z> [--look x,y,z] | rm <t>
-  vdm world ls | set <path> <value>     例: world set seed 2077 / world set fog.density 0.004
+  vdm world ls | set <path> <value>     例: world set seed 2077 / world set fog.depth 900
 
 ${C.b('渲染')}
   vdm still <t> [--out a.png] [--scale 1] [--samples 16]

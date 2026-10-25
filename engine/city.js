@@ -130,7 +130,15 @@ export function generateCity(worldInput, { path = null } = {}) {
     bounds: { x0: -spanX / 2, x1: spanX / 2, z0: -spanZ / 2, z1: spanZ / 2 },
     grid: { ...w.grid },
     ground: { color: hexRgb(w.ground.color), wet: Number(w.ground.wet) || 0 },
-    fog: { color: hexRgb(w.fog.color), density: Number(w.fog.density) || 0.003, glow: Number(w.fog.glow) || 0.5 },
+    fog: {
+      color: hexRgb(w.fog.color),
+      density: Number(w.fog.density) || 0.003,
+      glow: Number(w.fog.glow) || 0.5,
+      // mist model shared with blender/vdm_city.py (start..depth, strength)
+      start: Number(w.fog.start) || 30,
+      depth: Number(w.fog.depth) || 700,
+      strength: w.fog.strength == null ? 1 : Number(w.fog.strength),
+    },
     sky: hexRgb(w.sky),
     window: { density: Number(w.window.density) || 0.5, glow: Number(w.window.glow) || 3, color: hexRgb(w.window.color) },
     neonGlow: Number(w.neon.glow) || 6,

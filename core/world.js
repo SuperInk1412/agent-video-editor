@@ -9,7 +9,7 @@ export const DEFAULT_WORLD = {
   palette: ['#141b26', '#1a2331', '#10161f', '#202b3a'],
   window: { density: 0.55, glow: 3.2, color: '#8fe8ff' },
   neon: { count: 260, glow: 7, colors: ['#ff2a6d', '#05d9e8', '#f9c80e', '#b967ff'] },
-  fog: { color: '#071527', density: 0.0032, glow: 0.55 },
+  fog: { color: '#071527', density: 0.0032, glow: 0.55, start: 30, depth: 700, strength: 1 },
   ground: { color: '#04070c', wet: 0.65 },
   sky: '#03060d',
   ambient: 0.3,

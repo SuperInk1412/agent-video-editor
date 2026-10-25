@@ -4,18 +4,21 @@ import { evalCamera } from '/core/camera.js';
 
 const VERT = `#version 300 es
 in vec3 a_corner;
+in vec3 a_normal;
 in vec3 a_pos;
 in vec3 a_size;
 in vec3 a_tint;
 in vec4 a_extra;      // x=seed, y=emissive, z=kind, w=unused
 uniform mat4 u_viewProj;
 out vec3 v_world;
+out vec3 v_normal;
 out vec3 v_tint;
 out float v_seed;
 out float v_emissive;
 void main(){
   vec3 c = a_corner * a_size + a_pos + vec3(0.0, a_size.y * 0.5, 0.0);
   v_world = c;
+  v_normal = a_normal;
   v_tint = a_tint;
   v_seed = a_extra.x;
   v_emissive = a_extra.y;
@@ -25,13 +28,17 @@ void main(){
 const FRAG = `#version 300 es
 precision highp float;
 in vec3 v_world;
+in vec3 v_normal;
 in vec3 v_tint;
 in float v_seed;
 in float v_emissive;
 out vec4 fragColor;
 uniform vec3 u_cam;
+uniform vec3 u_sunDir;
 uniform vec3 u_fogColor;
-uniform float u_fogDensity;
+uniform float u_fogStart;
+uniform float u_fogDepth;
+uniform float u_fogStrength;
 uniform vec3 u_windowColor;
 uniform float u_windowGlow;
 uniform float u_ambient;
@@ -41,11 +48,18 @@ float hash(vec3 p){
   q *= 17.0;
   return fract(q.x * q.y * q.z * (q.x + q.y + q.z));
 }
+// Blender renders with view_transform='Standard': scene colours are linear and
+// get sRGB-encoded on output. Do the same here or the viewport reads ~4x darker
+// than the render (a hex tint is a *display* colour, not a linear one).
+vec3 srgb(vec3 c){
+  c = max(c, vec3(0.0));
+  return mix(1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, c * 12.92, step(c, vec3(0.0031308)));
+}
 void main(){
   float dist = length(v_world - u_cam);
-  vec3 col;
+  vec3 lin;
   if (v_emissive > 0.5) {
-    col = v_tint * 2.2;
+    lin = v_tint * 2.2;
   } else {
     vec3 cell = v_world / vec3(2.6, 3.4, 2.6);
     vec3 f = abs(fract(cell) - 0.5);
@@ -53,12 +67,16 @@ void main(){
     float n = hash(floor(cell) + v_seed);
     float lit = step(0.72, n);
     vec3 win = u_windowColor * (pane * lit * u_windowGlow);
-    float shade = 0.55 + 0.45 * clamp(v_world.y / 160.0, 0.0, 1.0);
-    col = v_tint * u_ambient * shade + win;
+    // same rig as blender/vdm_city.py: world ambient + a weak cool moon
+    float amb = max(0.2, u_ambient) * 1.2;
+    float ndl = max(dot(normalize(v_normal), normalize(u_sunDir)), 0.0);
+    lin = v_tint * (amb + 0.14 * ndl) + win;
   }
-  float fog = 1.0 - exp(-u_fogDensity * dist);
-  col = mix(col, u_fogColor, clamp(fog, 0.0, 0.96));
-  fragColor = vec4(col, 1.0);
+  // Blender fogs with the Mist pass (start..depth, linear), not exp(-d); match it
+  // or the preview reads much hazier than the render.
+  float fog = clamp((dist - u_fogStart) / max(1.0, u_fogDepth), 0.0, 1.0) * u_fogStrength;
+  lin = mix(lin, u_fogColor, clamp(fog, 0.0, 0.96));
+  fragColor = vec4(srgb(lin), 1.0);
 }`;
 
 function compile(gl, type, src) {
@@ -84,6 +102,9 @@ const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
 const norm = (a) => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
 const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+
+// Same transfer function as the shader, for values we bake on the CPU (sky).
+const srgbEnc = (v) => (v <= 0.0031308 ? v * 12.92 : 1.055 * Math.pow(v, 1 / 2.4) - 0.055);
 
 function lookAt(eye, target, up, rollRad) {
   const f = norm(sub(target, eye));
@@ -123,9 +144,9 @@ const UNIT_CUBE = (() => {
     [[0, 1, 0], [[-0.5, 0.5, 0.5], [0.5, 0.5, 0.5], [0.5, 0.5, -0.5], [-0.5, 0.5, -0.5]]],
     [[0, -1, 0], [[-0.5, -0.5, -0.5], [0.5, -0.5, -0.5], [0.5, -0.5, 0.5], [-0.5, -0.5, 0.5]]],
   ];
-  for (const [, quad] of faces) {
+  for (const [nrm, quad] of faces) {
     const [a, b, c, d] = quad;
-    v.push(...a, ...b, ...c, ...a, ...c, ...d);
+    for (const p of [a, b, c, a, c, d]) v.push(...p, ...nrm);
   }
   return new Float32Array(v);
 })();
@@ -141,6 +162,7 @@ export class Scene3D {
     gl.bindAttribLocation(p, 2, 'a_size');
     gl.bindAttribLocation(p, 3, 'a_tint');
     gl.bindAttribLocation(p, 4, 'a_extra');
+    gl.bindAttribLocation(p, 5, 'a_normal');
     gl.linkProgram(p);
     if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
     this.prog = p;
@@ -156,7 +178,9 @@ export class Scene3D {
     gl.bindBuffer(gl.ARRAY_BUFFER, this.cornerBuf);
     gl.bufferData(gl.ARRAY_BUFFER, UNIT_CUBE, gl.STATIC_DRAW);
     gl.enableVertexAttribArray(0);
-    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 12, 0);
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
+    gl.enableVertexAttribArray(5);
+    gl.vertexAttribPointer(5, 3, gl.FLOAT, false, 24, 12);
     this.instBuf = gl.createBuffer();
     gl.bindVertexArray(null);
     this.count = 0;
@@ -210,17 +234,20 @@ export class Scene3D {
     gl.depthMask(true);
     gl.disable(gl.BLEND);
     const sky = city.sky || [0.01, 0.02, 0.04];
-    gl.clearColor(sky[0], sky[1], sky[2], 1);
+    gl.clearColor(srgbEnc(sky[0]), srgbEnc(sky[1]), srgbEnc(sky[2]), 1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
     gl.useProgram(this.prog);
     gl.uniformMatrix4fv(this.u.u_viewProj, false, vp);
     gl.uniform3f(this.u.u_cam, cam.pos[0], cam.pos[1], cam.pos[2]);
     gl.uniform3f(this.u.u_fogColor, city.fog.color[0], city.fog.color[1], city.fog.color[2]);
-    gl.uniform1f(this.u.u_fogDensity, city.fog.density);
+    gl.uniform1f(this.u.u_fogStart, Number(city.fog.start) || 30);
+    gl.uniform1f(this.u.u_fogDepth, Number(city.fog.depth) || 700);
+    gl.uniform1f(this.u.u_fogStrength, city.fog.strength == null ? 1 : Number(city.fog.strength));
     gl.uniform3f(this.u.u_windowColor, city.window.color[0], city.window.color[1], city.window.color[2]);
     gl.uniform1f(this.u.u_windowGlow, city.window.glow);
     gl.uniform1f(this.u.u_ambient, Math.max(0.25, city.ambient));
+    gl.uniform3f(this.u.u_sunDir, -0.3, 0.55, 0.78);
 
     gl.bindVertexArray(this.vao);
     gl.drawArraysInstanced(gl.TRIANGLES, 0, 36, this.count);

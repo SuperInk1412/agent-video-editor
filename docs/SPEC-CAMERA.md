@@ -55,7 +55,7 @@ path 关键点 → Catmull-Rom 位置
 | `palette[]` | 楼体基色（冷灰蓝/水泥） |
 | `window.density / glow / color` | 窗格密度、亮度、色温 |
 | `neon.count / glow / colors[]` | 霓虹条数量、强度、色板（粉/青/黄） |
-| `fog.color / density / glow` | 雾色、浓度、雾中辉光 |
+| `fog.color / start / depth / strength` | 雾色、起雾距离、多远到满、整体强度（预览与 Blender 的 Mist 用同一套：`(dist-start)/depth × strength`） |
 | `ground.color / wet` | 地面颜色与反光强度 |
 | `sky` / `ambient` | 天空色与环境光 |
 | `corridor.enabled` / `corridor.radius` | 航线避让（默认开、16m）：镜头航线半径内、楼顶高于机位 8m 以内的楼会被清掉，换 `seed` 不会把塔吊在航线上；只删受影响的楼，其余几何与 RNG 序列不变 |
