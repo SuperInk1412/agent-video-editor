@@ -10,7 +10,10 @@ import {
 } from '../core/store.js';
 import { createProject, normalizeProject, validateProject, DEFAULT_FX, clone } from '../core/schema.js';
 import { applyOps, applyOp, coerceValue } from '../core/ops.js';
-import { evalElement } from '../core/evaluate.js';
+import { evalElement, motionDelta, fadeMul } from '../core/evaluate.js';
+import { migrateProject, orthoScreen } from '../core/migrate.js';
+import { objectPose } from '../core/scene.js';
+import { evalCamera, normalizeCamera } from '../core/camera.js';
 import { timecode } from '../core/time.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -505,6 +508,64 @@ async function cmdWorld(root, argv, flags) {
   throw new Error(`unknown world subcommand ${sub}`);
 }
 
+async function cmdScene(root, argv, flags) {
+  const sub = argv[0] || 'tree';
+  const v2 = await loadProject(root);
+  const v3 = migrateProject(v2);
+  const scene = v3.scenes[v3.sceneId];
+
+  if (flags.json) {
+    console.log(JSON.stringify({ sceneId: v3.sceneId, units: v3.units, scenes: v3.scenes }, null, 2));
+    return;
+  }
+
+  if (sub === 'tree') {
+    console.log(`${C.b('scene')} ${v3.sceneId}  units ${v3.units}  camera ${scene.cameraId || '-'}`);
+    const counts = {};
+    for (const o of scene.objects) counts[o.type] = (counts[o.type] || 0) + 1;
+    console.log(`  ${Object.entries(counts).map(([k, v]) => `${k}×${v}`).join('  ') || '(空)'}`);
+    for (const o of scene.objects) {
+      const tracks = Object.keys(o.tracks || {}).length;
+      console.log(`  ${C.cy(o.id.padEnd(16))} ${o.type.padEnd(8)} pivot ${o.pivot.map((v) => v.toFixed(2)).join(',')}  tracks ${tracks}`);
+    }
+    for (const a of scene.annotations) console.log(`  ${C.ye('注释')} ${a.t.toFixed(2)}s  ${a.text}`);
+    return;
+  }
+
+  if (sub === 'check') {
+    let worstPx = 0;
+    for (const el of v2.elements || []) {
+      const obj = scene.objects.find((o) => o.id === el.id);
+      if (!obj) continue;
+      const step = Math.max(0.1, el.duration / 8);
+      for (let t = el.start; t <= el.start + el.duration; t += step) {
+        const old = evalElement(el, t, v2.meta);
+        const md = motionDelta(el, t, v2.meta);
+        const [px, py] = orthoScreen(v2.meta, objectPose(obj, t).pivot);
+        const dx = px - (v2.meta.width / 2 + old.x - md.x);
+        const dy = py - (v2.meta.height / 2 + old.y - md.y);
+        worstPx = Math.max(worstPx, Math.hypot(dx, dy));
+      }
+    }
+    let drift = 0;
+    const camObj = scene.objects.find((o) => o.type === 'camera');
+    if (v2.camera && camObj) {
+      const clean = { ...v2, camera: normalizeCamera({ ...v2.camera, shake: { ...v2.camera.shake, amp: 0 } }) };
+      for (let t = 0; t <= v2.meta.duration; t += 0.1) {
+        const old = evalCamera(clean, t);
+        const pose = objectPose(camObj, t);
+        drift = Math.max(drift, Math.hypot(...pose.pivot.map((v, i) => v - old.pos[i])));
+      }
+    }
+    const legacy = scene.objects.filter((o) => o.legacy).length;
+    console.log(`${C.gr('✓')} 迁移检查  2D 元素最大误差 ${worstPx.toFixed(6)} px  相机最大漂移 ${drift.toFixed(6)} m`);
+    console.log(C.dim(`  legacy 保留：${legacy} 个元素（运动预设/抖动/淡入淡出），待新编辑器重写成关键帧`));
+    return;
+  }
+
+  throw new Error(`unknown scene subcommand ${sub}`);
+}
+
 async function cmdEval(root, argv, flags) {
   const [id] = argv;
   const t = num(flags.t, 0);
@@ -544,6 +605,7 @@ ${C.b('素材 / 分镜')}
 ${C.b('3D 镜头')}
   vdm cam ls | set <path> <value> | add <t> <x> <y> <z> [--look x,y,z] | rm <t>
   vdm world ls | set <path> <value>     例: world set seed 2077 / world set fog.depth 900
+  vdm scene tree | check               迁移到 v3 场景树的结构 / 保真检查
 
 ${C.b('渲染')}
   vdm still <t> [--out a.png] [--scale 1] [--samples 16]
@@ -590,6 +652,7 @@ async function main() {
     case 'eval': return cmdEval(root, rest, flags);
     case 'cam': return cmdCam(root, rest, flags);
     case 'world': return cmdWorld(root, rest, flags);
+    case 'scene': return cmdScene(root, rest, flags);
     default:
       console.error(C.re(`unknown command: ${cmd}`));
       usage();
