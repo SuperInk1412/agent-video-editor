@@ -162,6 +162,22 @@ test('cityHash ignores derived defaults but tracks params', () => {
   assert.notEqual(cityHash({ seed: 7 }), cityHash({ seed: 8 }));
 });
 
+test('evalCamera never mutates path keys (shake at/before the ends)', () => {
+  const p = project();
+  p.camera.shake.amp = 3;
+  const before = JSON.stringify(p.camera.path.map((k) => k.pos));
+  for (const t of [-2, 0, 3, 6, 11]) evalCamera(p, t);
+  assert.equal(JSON.stringify(p.camera.path.map((k) => k.pos)), before);
+
+  const one = project();
+  one.camera.shake.amp = 3;
+  one.camera.path = [one.camera.path[0]];
+  const p0 = one.camera.path[0].pos.slice();
+  evalCamera(one, 1);
+  evalCamera(one, 0);
+  assert.deepEqual(one.camera.path[0].pos, p0);
+});
+
 test('cameraKey keeps ease and bezier handles when only the position changes', () => {
   const p = project();
   const t = p.camera.path[0].t;
@@ -175,4 +191,26 @@ test('cameraKey keeps ease and bezier handles when only the position changes', (
   assert.equal(k.ease, 'linear');
   assert.deepEqual(k.out, [4, 0, 0]);
   assert.deepEqual(k.in, [-4, 0, 0]);
+});
+
+test('camera path speed curve re-times a segment without moving its keys', () => {
+  const slowStart = project();
+  // v=0.1 at the start: half the time only covers 27.5% of the segment
+  slowStart.camera.path[0].speed = [[0, 0.1], [1, 1.9]];
+  slowStart.camera = normalizeCamera(slowStart.camera);
+  const a = slowStart.camera.path[0];
+  const b = slowStart.camera.path[1];
+  const tMid = (a.t + b.t) / 2;
+  const p = pathPos(slowStart.camera, tMid);
+  const d0 = Math.hypot(p[0] - a.pos[0], p[1] - a.pos[1], p[2] - a.pos[2]);
+  assert.ok(d0 < 0.35 * Math.hypot(b.pos[0] - a.pos[0], b.pos[1] - a.pos[1], b.pos[2] - a.pos[2]));
+  for (const k of slowStart.camera.path) {
+    const got = pathPos(slowStart.camera, k.t);
+    assert.ok(Math.hypot(got[0] - k.pos[0], got[1] - k.pos[1], got[2] - k.pos[2]) < 1e-6);
+  }
+  // and the op round-trips it
+  applyOp(slowStart, { op: 'cameraPath', path: slowStart.camera.path });
+  assert.deepEqual(slowStart.camera.path[0].speed, [[0, 0.1], [1, 1.9]]);
+  applyOp(slowStart, { op: 'cameraKey', t: a.t, pos: a.pos });
+  assert.deepEqual(slowStart.camera.path[0].speed, [[0, 0.1], [1, 1.9]]);
 });

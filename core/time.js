@@ -24,6 +24,42 @@ export function ease(name, p) {
   return fn(clamp(p));
 }
 
+/**
+ * Segment speed curve ([u, v] points) -> arc-length fraction in 0..1.
+ * Integrated (piecewise-linear) then normalized, so the segment always lands
+ * on the next key and only the timing inside the segment changes.
+ */
+export function speedWarp(curve, u) {
+  const uu = clamp(u, 0, 1);
+  const pts = (Array.isArray(curve) ? curve : [])
+    .filter((p) => Array.isArray(p) && p.length >= 2
+      && Number.isFinite(Number(p[0])) && Number.isFinite(Number(p[1])))
+    .map((p) => [clamp(Number(p[0]), 0, 1), Math.max(0, Number(p[1]))])
+    .sort((a, b) => a[0] - b[0]);
+  if (pts.length < 2) return uu;
+  const segs = [];
+  let total = 0;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const [x0, v0] = pts[i];
+    const [x1, v1] = pts[i + 1];
+    if (x1 - x0 <= 1e-9) continue;
+    const area = ((x1 - x0) * (v0 + v1)) / 2;
+    segs.push({ x0, x1, v0, v1, area, start: total });
+    total += area;
+  }
+  if (!segs.length || total <= 0) return uu;
+  let acc = 0;
+  for (const s of segs) {
+    if (uu >= s.x1) { acc = s.start + s.area; continue; }
+    if (uu <= s.x0) break;
+    const dx = uu - s.x0;
+    const v = s.v0 + (s.v1 - s.v0) * (dx / (s.x1 - s.x0));
+    acc = s.start + (dx * (s.v0 + v)) / 2;
+    break;
+  }
+  return clamp(acc / total, 0, 1);
+}
+
 /** index of last beat <= t, or -1 */
 export function beatIndexAt(beats, t) {
   if (!beats || !beats.length) return -1;

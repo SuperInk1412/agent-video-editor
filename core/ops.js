@@ -105,6 +105,15 @@ function trackValue(path, v) {
   fail(`unknown track path ${path}`);
 }
 
+/** Normalize a speed polyline: u clamped to 0..1, v >= 0, at least 2 points. */
+function normSpeed(pts) {
+  if (!Array.isArray(pts)) return null;
+  const list = pts
+    .filter((p) => Array.isArray(p) && p.length >= 2 && Number.isFinite(Number(p[0])) && Number.isFinite(Number(p[1])))
+    .map((p) => [Math.max(0, Math.min(1, Number(p[0]))), Math.max(0, Number(p[1]))]);
+  return list.length >= 2 ? list : null;
+}
+
 export function coerceValue(value) {
   if (typeof value !== 'string') return value;
   const s = value.trim();
@@ -323,6 +332,10 @@ export function applyOp(p, op) {
       const inn = Array.isArray(op.in) ? op.in.map(Number) : (Array.isArray(old?.in) ? old.in : null);
       if (out) entry.out = out;
       if (inn) entry.in = inn;
+      const speed = op.speed === null
+        ? null
+        : (Array.isArray(op.speed) ? normSpeed(op.speed) : (Array.isArray(old?.speed) ? old.speed : null));
+      if (speed) entry.speed = speed;
       cam.path.push(entry);
       cam.path.sort((a, b) => a.t - b.t);
       return { changed: ['camera'] };
@@ -358,6 +371,7 @@ export function applyOp(p, op) {
           ease: k.ease ? String(k.ease) : null,
           out: Array.isArray(k.out) && k.out.length === 3 ? k.out.map(Number) : null,
           in: Array.isArray(k.in) && k.in.length === 3 ? k.in.map(Number) : null,
+          speed: normSpeed(k.speed),
         }))
         .sort((a, b) => a.t - b.t);
       return { changed: ['camera'] };

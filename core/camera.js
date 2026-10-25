@@ -1,6 +1,6 @@
 // Camera rig: Catmull-Rom path, auto look-ahead, banking, shake, fov.
 // Pure math — used by the realtime viewport, the engine (bake for Blender) and the CLI.
-import { clamp } from './time.js';
+import { clamp, speedWarp } from './time.js';
 
 export const DEFAULT_CAMERA = {
   fov: 62,
@@ -84,6 +84,11 @@ export function normalizeCamera(cam) {
       ease: k.ease ? String(k.ease) : null,
       out: Array.isArray(k.out) && k.out.length === 3 ? k.out.map(Number) : null,
       in: Array.isArray(k.in) && k.in.length === 3 ? k.in.map(Number) : null,
+      speed: Array.isArray(k.speed) && k.speed.length >= 2
+        ? k.speed
+          .filter((p) => Array.isArray(p) && p.length >= 2 && Number.isFinite(Number(p[0])) && Number.isFinite(Number(p[1])))
+          .map((p) => [clamp(Number(p[0]), 0, 1), Math.max(0, Number(p[1]))])
+        : null,
     }))
     .sort((a, b) => a.t - b.t);
   return c;
@@ -104,16 +109,21 @@ function bez3(p0, p1, p2, p3, u) {
 export function pathPos(cam, t) {
   const keys = cam.path;
   if (!keys.length) return [0, 20, 0];
-  if (keys.length === 1) return keys[0].pos;
-  if (t <= keys[0].t) return keys[0].pos;
-  if (t >= keys[keys.length - 1].t) return keys[keys.length - 1].pos;
+  // Always return a fresh array: callers (evalCamera's shake) mutate `pos`,
+  // and handing back a key's own array would corrupt the project over time.
+  if (keys.length === 1) return keys[0].pos.slice();
+  if (t <= keys[0].t) return keys[0].pos.slice();
+  if (t >= keys[keys.length - 1].t) return keys[keys.length - 1].pos.slice();
   let i = 0;
   while (i < keys.length - 2 && t > keys[i + 1].t) i++;
   const k1 = keys[i], k2 = keys[i + 1];
   const k0 = keys[Math.max(0, i - 1)], k3 = keys[Math.min(keys.length - 1, i + 2)];
   const span = Math.max(1e-6, k2.t - k1.t);
   const u = clamp((t - k1.t) / span);
-  const s = ease(k1.ease || 'easeInOut', u);
+  // Per-segment speed curve wins; ease is the legacy fallback.
+  const s = Array.isArray(k1.speed) && k1.speed.length >= 2
+    ? speedWarp(k1.speed, u)
+    : ease(k1.ease || 'easeInOut', u);
   const p1 = k1.pos, p2 = k2.pos;
   // Auto handles are the Catmull-Rom tangents, so legacy paths (and any path
   // that never had its handles dragged) evaluate exactly as before.

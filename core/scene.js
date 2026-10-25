@@ -9,7 +9,7 @@
 //   opacity   0..1
 //
 // M = T(pivot) · R(dir, roll) · T(position) · S(scale) · geometry
-import { clamp, ease } from './time.js';
+import { clamp, ease, speedWarp } from './time.js';
 
 export const SCENE_VERSION = 3;
 export const PX_PER_M = 100; // v2 (pixels) -> v3 (metres) migration scale
@@ -39,36 +39,8 @@ const V = {
 
 // ---------------------------------------------------------------- channels
 
-/** Segment speed curve ([u, v] points) -> arc-length fraction in 0..1. */
-export function speedWarp(curve, u) {
-  const uu = clamp(num(u, 0), 0, 1);
-  const pts = (Array.isArray(curve) ? curve : [])
-    .filter((p) => Array.isArray(p) && p.length >= 2 && isNum(p[0]) && isNum(p[1]))
-    .map((p) => [clamp(Number(p[0]), 0, 1), Math.max(0, Number(p[1]))])
-    .sort((a, b) => a[0] - b[0]);
-  if (pts.length < 2) return uu;
-  const segs = [];
-  let total = 0;
-  for (let i = 0; i < pts.length - 1; i++) {
-    const [x0, v0] = pts[i];
-    const [x1, v1] = pts[i + 1];
-    if (x1 - x0 <= 1e-9) continue;
-    const area = ((x1 - x0) * (v0 + v1)) / 2;
-    segs.push({ x0, x1, v0, v1, area, start: total });
-    total += area;
-  }
-  if (!segs.length || total <= 0) return uu;
-  let acc = 0;
-  for (const s of segs) {
-    if (uu >= s.x1) { acc = s.start + s.area; continue; }
-    if (uu <= s.x0) break;
-    const dx = uu - s.x0;
-    const v = s.v0 + (s.v1 - s.v0) * (dx / (s.x1 - s.x0));
-    acc = s.start + (dx * (s.v0 + v)) / 2;
-    break;
-  }
-  return clamp(acc / total, 0, 1);
-}
+/** Re-exported from time.js so both camera and scene channels share one warp. */
+export { speedWarp };
 
 function warp(key, u) {
   if (Array.isArray(key.speed) && key.speed.length >= 2) return speedWarp(key.speed, u);

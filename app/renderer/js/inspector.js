@@ -448,7 +448,10 @@ export class Inspector {
     const keys = [...cam.path].sort((a, b) => a.t - b.t);
     const rows = h('div', { class: 'kf-list' });
     for (const k of keys) {
-      const row = h('div', { class: `kf-row ${Math.abs(k.t - time) < 0.08 ? 'at' : ''}`, style: 'grid-template-columns: 46px 1fr 1fr 1fr 58px 22px' },
+      const open = this._speedOpen && this._speedOpen.id === 'camera'
+        && this._speedOpen.path === 'pos' && Math.abs(this._speedOpen.t - k.t) < 1e-3;
+      const withSpeed = (pts) => keys.map((x) => (x === k ? { ...x, speed: pts } : x));
+      const row = h('div', { class: `kf-row ${Math.abs(k.t - time) < 0.08 ? 'at' : ''}`, style: 'grid-template-columns: 46px 1fr 1fr 1fr 58px 26px 22px' },
         h('button', {
           class: 'kf-t', title: '跳到这个关键点', style: 'background:none;border:0;color:inherit;cursor:pointer;padding:0;text-align:left',
           onclick: () => this.opts.onSeek?.(k.t),
@@ -457,12 +460,13 @@ export class Inspector {
         h('input', { class: 'kf-ease', type: 'number', step: 1, value: round(k.pos[1]) }),
         h('input', { class: 'kf-ease', type: 'number', step: 1, value: round(k.pos[2]) }),
         h('select', {
-          class: 'kf-ease', title: '这一段的速度曲线（ease 预设）',
-          onchange: (e) => {
-            const next = keys.map((x) => (x === k ? { ...x, ease: e.target.value } : x));
-            this.opts.onOp({ op: 'cameraPath', path: next });
-          },
+          class: 'kf-ease', title: '这一段到下一关键点的 ease 预设（有速度曲线时被忽略）',
+          onchange: (e) => this.opts.onOp({ op: 'cameraPath', path: keys.map((x) => (x === k ? { ...x, ease: e.target.value } : x)) }),
         }, ...EASES.map((x) => h('option', { value: x, selected: (k.ease || 'easeInOut') === x }, x))),
+        h('button', {
+          class: `mini ${open ? 'on' : ''}`, title: '编辑这一段的速度曲线',
+          onclick: () => { this._speedOpen = open ? null : { id: 'camera', path: 'pos', t: k.t }; this._refresh(); },
+        }, '∿'),
         h('button', { class: 'mini danger', onclick: () => this.opts.onOp({ op: 'cameraRemove', t: k.t }) }, '×'),
       );
       const inputs = row.querySelectorAll('input');
@@ -474,6 +478,24 @@ export class Inspector {
         });
       });
       rows.appendChild(row);
+      if (open) {
+        const wrap = h('div', { class: 'speed-wrap' });
+        new SpeedCurve(wrap, {
+          points: k.speed,
+          onStart: () => { this._speedDragging = true; },
+          onEnd: () => { this._speedDragging = false; },
+          onChange: (pts) => this._commit(`cam:speed:${k.t}`, { op: 'cameraPath', path: withSpeed(pts) }, 90),
+        });
+        const preset = (pts) => this.opts.onOp({ op: 'cameraPath', path: withSpeed(pts) });
+        wrap.appendChild(h('div', { class: 'row-btns' },
+          h('button', { class: 'mini', onclick: () => preset(SPEED_PRESETS.linear) }, '匀速'),
+          h('button', { class: 'mini', onclick: () => preset(SPEED_PRESETS.easeIn) }, '慢入'),
+          h('button', { class: 'mini', onclick: () => preset(SPEED_PRESETS.easeOut) }, '慢出'),
+          h('button', { class: 'mini', onclick: () => preset(SPEED_PRESETS.punch) }, '冲击'),
+          h('button', { class: 'mini', onclick: () => this.opts.onOp({ op: 'cameraPath', path: withSpeed(null) }) }, '清除'),
+        ));
+        rows.appendChild(wrap);
+      }
     }
     this.root.appendChild(this._section(`轨道关键点 (${keys.length})`, rows,
       h('div', { class: 'hint' }, '每行是 x / y / z（米）；下拉框是该段到下一关键点的速度曲线。')));
