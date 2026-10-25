@@ -52,7 +52,7 @@ Electron 路径可用 `VDM_ELECTRON` 覆盖；Blender 用 `VDM_BLENDER` 覆盖�
 
 ## 已验证
 
-- `npm test`：62 个单元测试全绿（ops / 求值 / 场景 / 相机 / 迁移 / 存储锁 / 节拍 / agent 解析）
+- `npm test`：63 个单元测试全绿（ops / 求值 / 场景 / 相机 / 迁移 / 存储锁 / 节拍 / agent 解析）
 - Blender 5.0.1 无头 EEVEE：1080p 单帧约 3–5s（含启动），24s@50% 成片约 70s
 - 示例项目 `projects/demo`：24s / 6 分镜 / 13 元素，成片在
   `projects/demo/.vdm/renders/master-*.mp4`（含音轨）
