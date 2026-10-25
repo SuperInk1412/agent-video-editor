@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 
-const LEVEL_TAG = { info: '·', warn: '!', error: '✗', debug: '·' };
+const LEVEL_TAG = { info: 'info', warn: 'warn', error: 'error', debug: 'debug' };
 
 export function createLogger({ dir, name = 'vdm', echo = true }) {
   const logsDir = path.join(dir, '.vdm', 'logs');
@@ -25,7 +25,7 @@ export function createLogger({ dir, name = 'vdm', echo = true }) {
     }
     fs.appendFile(fileFor(), JSON.stringify(rec) + '\n', () => {});
     if (echo) {
-      const line = `[vdm ${LEVEL_TAG[level] || '·'}] ${rec.msg}`;
+      const line = `[vdm ${LEVEL_TAG[level] || 'info'}] ${rec.msg}`;
       const extra = rec.meta ? ' ' + JSON.stringify(rec.meta).slice(0, 400) : '';
       (level === 'error' ? console.error : console.log)(line + extra);
     }
