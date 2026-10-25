@@ -635,6 +635,8 @@ async function boot() {
     if (k) k.v = val;
     else { list.push({ t, v: val }); list.sort((a, b) => a.t - b.t); }
   };
+  // Ctrl while dragging snaps to half a metre.
+  const snap3 = (v, e) => (e?.ctrlKey ? v.map((n) => Math.round(n * 2) / 2) : v);
   const selectAt = (sx, sy) => {
     const id = preview.hitTest(sx, sy, S.time);
     if (id) return select({ elementId: id });
@@ -925,7 +927,7 @@ async function boot() {
       if (!key) return;
       const w = preview.scene3d.planeHit(sx, sy, key.pos, drag.normal);
       if (!w) return;
-      key.pos = w.map(r2);
+      key.pos = snap3(w.map(r2), e);
       drag.moved = true;
       preview.render(S.time);
       gizmo.draw();
@@ -935,11 +937,11 @@ async function boot() {
       if (Math.abs(cx - drag.x) + Math.abs(cy - drag.y) < 3) return;
       const w = preview.scene3d.planeHit(sx, sy, drag.hit, drag.normal);
       if (!w) return;
-      drag.pivot = [
+      drag.pivot = snap3([
         r2(drag.pivot0[0] + w[0] - drag.hit[0]),
         r2(drag.pivot0[1] + w[1] - drag.hit[1]),
         r2(drag.pivot0[2] + w[2] - drag.hit[2]),
-      ];
+      ], e);
       const obj = (S.project.scene?.objects || []).find((o) => o.id === drag.id);
       const key = obj?.tracks?.pivot?.[drag.index];
       if (key) key.v = drag.pivot.slice();
@@ -953,11 +955,11 @@ async function boot() {
       const s = axisClosestS(preview.scene3d.ray(sx, sy), drag.p0, drag.axis);
       if (s == null) return;
       const delta = s - drag.s0;
-      drag.pivot = [
+      drag.pivot = snap3([
         r2(drag.p0[0] + drag.axis[0] * delta),
         r2(drag.p0[1] + drag.axis[1] * delta),
         r2(drag.p0[2] + drag.axis[2] * delta),
-      ];
+      ], e);
       const obj = (S.project.scene?.objects || []).find((o) => o.id === drag.id);
       if (obj) setLiveKey(obj, 'pivot', drag.pivot);
       drag.moved = true;
@@ -969,11 +971,11 @@ async function boot() {
       if (Math.abs(cx - drag.x) + Math.abs(cy - drag.y) < 3) return;
       const w = preview.scene3d.planeHit(sx, sy, drag.hit, drag.normal);
       if (!w) return;
-      drag.pivot = [
+      drag.pivot = snap3([
         r2(drag.pivot0[0] + w[0] - drag.hit[0]),
         r2(drag.pivot0[1] + w[1] - drag.hit[1]),
         r2(drag.pivot0[2] + w[2] - drag.hit[2]),
-      ];
+      ], e);
       const obj = (S.project.scene?.objects || []).find((o) => o.id === drag.id);
       if (obj) setLiveKey(obj, 'pivot', drag.pivot);
       drag.moved = true;
@@ -986,7 +988,7 @@ async function boot() {
     const w = preview.scene3d.planeHit(sx, sy, key.pos, drag.normal);
     if (!w) return;
     if (drag.kind === 'node') {
-      key.pos = w.map(r2);
+      key.pos = snap3(w.map(r2), e);
     } else {
       const v = [w[0] - key.pos[0], w[1] - key.pos[1], w[2] - key.pos[2]];
       key[drag.kind] = v.map(r2);
