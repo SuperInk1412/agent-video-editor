@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VedioMaker</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='26' x='6' font-size='26' fill='%2317d9ff'%3E%E2%97%86%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/app/renderer/app.css">
+</head>
+<body>
+  <div id="app">
+    <header id="top">
+      <div class="brand"><span class="logo">◆</span> <b>VedioMaker</b> <span class="ver">0.1</span></div>
+      <div class="proj"><span id="projTitle">—</span><span class="sep">/</span><span id="projMeta" class="dim"></span></div>
+      <div class="transport">
+        <button id="btnUndo" title="撤销 (Ctrl+Z)">↶</button>
+        <button id="btnRedo" title="重做 (Ctrl+Shift+Z)">↷</button>
+        <span class="vrule"></span>
+        <button id="btnPrev" title="上一帧 (←)">⏴</button>
+        <button id="btnPlay" title="播放 / 暂停 (Space)">▶</button>
+        <button id="btnNext" title="下一帧 (→)">⏵</button>
+        <span id="timecode" class="tc">0.00s</span>
+      </div>
+      <div class="actions">
+        <span id="renderBadge" class="badge" hidden></span>
+        <select id="renderScale" title="渲染分辨率">
+          <option value="0.5">50%</option>
+          <option value="1">100%</option>
+        </select>
+        <button id="btnStill" title="用 Blender 渲染当前时刻的一帧">预览帧</button>
+        <button id="btnRender" class="primary">渲染成片</button>
+      </div>
+    </header>
+
+    <main>
+      <aside id="left">
+        <div class="tabs" data-tabs="left">
+          <button data-tab="shots" class="on">分镜</button>
+          <button data-tab="media">媒体</button>
+        </div>
+        <div class="panel" id="panelShots"></div>
+        <div class="panel" id="panelMedia" hidden></div>
+      </aside>
+
+      <section id="center">
+        <div id="stageWrap">
+          <div id="stageBox">
+            <canvas id="stage"></canvas>
+            <div id="selBox"></div>
+          </div>
+        </div>
+        <div id="stageBar">
+          <span id="stageTime" class="mono">0.00 / 0.00s</span>
+          <span class="hint">点画面选元素 · 空格播放 · ←/→ 逐帧 · Alt 拖动取消吸附</span>
+        </div>
+      </section>
+
+      <aside id="right">
+        <div class="tabs" data-tabs="right">
+          <button data-tab="insp" class="on">检查器</button>
+          <button data-tab="ai">AI</button>
+          <button data-tab="pipe">流水线</button>
+        </div>
+        <div class="panel" id="panelInsp"></div>
+        <div class="panel" id="panelAI" hidden></div>
+        <div class="panel" id="panelPipe" hidden></div>
+      </aside>
+    </main>
+
+    <footer id="timeline"></footer>
+    <div id="toasts"></div>
+  </div>
+  <script type="module" src="/app/renderer/js/main.js"></script>
+</body>
+</html>
