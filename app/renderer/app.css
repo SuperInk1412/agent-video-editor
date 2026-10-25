@@ -179,6 +179,7 @@ body.look-mode #stageBox { box-shadow: 0 0 0 2px rgba(255,209,102,.65), 0 0 30px
   transform: rotate(45deg); cursor: pointer; z-index: 4;
 }
 .cam-key:hover { background: #fff27a; }
+.cam-key.at { background: #fff; border-color: #fff; box-shadow: 0 0 7px rgba(255,255,255,.75); }
 .blk {
   position: absolute; top: 4px; bottom: 4px; border-radius: 4px;
   background: #1b2432; border: 1px solid #2b3a4d;
@@ -440,6 +441,9 @@ body.look-mode #stageBox { box-shadow: 0 0 0 2px rgba(255,209,102,.65), 0 0 30px
 }
 .tl-camhint-text { display: block; }
 .tl-camkeyrow { height: 28px; }
+.tl-camkeyrow.at { background: #1c1a0e; }
+.tl-camkeyrow.at .tl-gutter { background: #1d1a0d; }
+.tl-camkeyrow.at .tl-track { background: #14120a; }
 .tl-camkeyrow .tl-gutter {
   display: grid; grid-template-columns: 34px repeat(3, minmax(0, 1fr)) 54px 22px 20px;
   gap: 4px; padding: 0 9px;

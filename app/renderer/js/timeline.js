@@ -172,6 +172,12 @@ export class Timeline {
     const x = this._trackX(t);
     this.playhead.style.transform = `translateX(${x}px)`;
     if (this.scroll.scrollLeft > x - 20) this.scroll.scrollLeft = Math.max(0, x - 80);
+    for (const key of this.camTrack?.querySelectorAll('.cam-key') || []) {
+      key.classList.toggle('at', Math.abs(Number(key.dataset.t) - t) < 5e-4);
+    }
+    for (const row of this.camPropsWrap?.querySelectorAll('.tl-camkeyrow') || []) {
+      row.classList.toggle('at', Math.abs(Number(row.dataset.t) - t) < 0.05);
+    }
     this._syncProps(true);
   }
 
@@ -497,6 +503,7 @@ export class Timeline {
 
   _camKeyRow(k) {
     const row = el('div', 'tl-row tl-camprop tl-camkeyrow');
+    row.dataset.t = String(k.t);
     const g = el('div', 'tl-gutter');
     const tBtn = el('button', 'tl-camtime', k.t.toFixed(2));
     tBtn.title = '跳到这个关键点';
