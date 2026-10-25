@@ -13,6 +13,7 @@ import { applyOps, applyOp, coerceValue } from '../core/ops.js';
 import { evalElement, motionDelta, fadeMul } from '../core/evaluate.js';
 import { migrateProject, orthoScreen } from '../core/migrate.js';
 import { objectPose } from '../core/scene.js';
+import { applyLegacy } from '../core/legacy.js';
 import { evalCamera, normalizeCamera } from '../core/camera.js';
 import { timecode } from '../core/time.js';
 
@@ -540,10 +541,9 @@ async function cmdScene(root, argv, flags) {
       const step = Math.max(0.1, el.duration / 8);
       for (let t = el.start; t <= el.start + el.duration; t += step) {
         const old = evalElement(el, t, v2.meta);
-        const md = motionDelta(el, t, v2.meta);
-        const [px, py] = orthoScreen(v2.meta, objectPose(obj, t).pivot);
-        const dx = px - (v2.meta.width / 2 + old.x - md.x);
-        const dy = py - (v2.meta.height / 2 + old.y - md.y);
+        const [px, py] = orthoScreen(v2.meta, applyLegacy(objectPose(obj, t), obj, t, v2.meta).pivot);
+        const dx = px - (v2.meta.width / 2 + old.x);
+        const dy = py - (v2.meta.height / 2 + old.y);
         worstPx = Math.max(worstPx, Math.hypot(dx, dy));
       }
     }

@@ -5,6 +5,7 @@ import { migrateProject, orthoScreen } from '../core/migrate.js';
 import { objectPose, sampleChannel } from '../core/scene.js';
 import { evalCamera, normalizeCamera } from '../core/camera.js';
 import { evalElement, motionDelta, fadeMul } from '../core/evaluate.js';
+import { applyLegacy } from '../core/legacy.js';
 
 const load = (name) => JSON.parse(fs.readFileSync(new URL(`../projects/${name}/project.vdm.json`, import.meta.url), 'utf8'));
 const near = (a, b, eps = 1e-6) => assert.ok(Math.abs(a - b) <= eps, `${a} != ${b}`);
@@ -62,6 +63,26 @@ test('migrate: legacy motion/fade is preserved for the switchover', () => {
   const title = v3.scenes.root.objects.find((o) => o.id === 'el_title');
   assert.equal(title.legacy.motion.type, 'in');
   near(title.legacy.motion.amount, 0.06);
+});
+
+test('migrate + legacy: demo matches the v2 evaluator pixel for pixel', () => {
+  const v2 = load('demo');
+  const v3 = migrateProject(v2);
+  const scene = v3.scenes.root;
+  for (const el of v2.elements) {
+    const obj = scene.objects.find((o) => o.id === el.id);
+    const step = el.duration / 10;
+    for (let t = el.start; t < el.start + el.duration; t += step) {
+      const old = evalElement(el, t, v2.meta);
+      const pose = applyLegacy(objectPose(obj, t), obj, t, v2.meta);
+      const [px, py] = orthoScreen(v2.meta, pose.pivot);
+      near(px, v2.meta.width / 2 + old.x, 1e-6);
+      near(py, v2.meta.height / 2 + old.y, 1e-6);
+      near(pose.scale[0], old.scale, 1e-6);
+      near(-pose.roll, old.rotation, 1e-6);
+      near(pose.opacity, old.opacity, 1e-6);
+    }
+  }
 });
 
 test('migrate: the 3D camera keeps its exact flight path', () => {
