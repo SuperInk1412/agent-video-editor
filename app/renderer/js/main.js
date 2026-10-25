@@ -134,10 +134,18 @@ function togglePlay() { S.playing ? pause() : play(); }
 
 // ---------------------------------------------------------------- selection
 function select(sel) {
-  S.selection = { segmentId: sel.segmentId ?? S.selection.segmentId, elementId: sel.elementId ?? null };
-  if (sel.elementId) {
-    const el = S.project.elements.find((e) => e.id === sel.elementId);
-    if (el?.segment) S.selection.segmentId = el.segment;
+  if (sel.camera) {
+    S.selection = { segmentId: null, elementId: null, camera: true };
+  } else {
+    S.selection = {
+      segmentId: sel.segmentId ?? S.selection.segmentId,
+      elementId: sel.elementId ?? null,
+      camera: false,
+    };
+    if (sel.elementId) {
+      const el = S.project.elements.find((e) => e.id === sel.elementId);
+      if (el?.segment) S.selection.segmentId = el.segment;
+    }
   }
   timeline.setSelection(S.selection);
   inspector.render(S.project, S.selection, S.time);
@@ -392,7 +400,9 @@ async function boot() {
     if (id) select({ elementId: id });
     else {
       const seg = S.project.segments.find((s) => S.time >= s.start && S.time < s.start + s.duration);
-      select({ elementId: null, segmentId: seg?.id || null });
+      if (seg) select({ elementId: null, segmentId: seg.id });
+      else if (S.project.camera) select({ camera: true });
+      else select({ elementId: null, segmentId: null });
     }
   });
 

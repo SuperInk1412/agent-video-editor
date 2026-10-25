@@ -44,9 +44,14 @@ export class Timeline {
     this.segTrack = el('div', 'tl-track');
     this.segRow.append(this.segGutter, this.segTrack);
 
+    this.camRow = el('div', 'tl-row tl-camrow');
+    this.camGutter = el('div', 'tl-gutter', '<span>相机</span>');
+    this.camTrack = el('div', 'tl-track');
+    this.camRow.append(this.camGutter, this.camTrack);
+
     this.elsWrap = el('div', 'tl-els');
     this.playhead = el('div', 'tl-playhead');
-    this.inner.append(this.rulerRow, this.segRow, this.elsWrap, this.playhead);
+    this.inner.append(this.rulerRow, this.segRow, this.camRow, this.elsWrap, this.playhead);
 
     this.inner.addEventListener('pointerdown', (e) => this._down(e));
     this.scroll.addEventListener('wheel', (e) => {
@@ -71,6 +76,7 @@ export class Timeline {
   setSelection(sel) {
     this.segmentId = sel?.segmentId || null;
     this.elementId = sel?.elementId || null;
+    this.cameraSel = !!sel?.camera;
     this._paintSelection();
   }
 
@@ -170,6 +176,27 @@ export class Timeline {
       this.segTrack.appendChild(b);
     }
 
+    // camera track: the 3D shot is a selectable row, keys included
+    this.camTrack.innerHTML = '';
+    const cam = p.camera;
+    this.camGutter.classList.toggle('dim', !cam);
+    this.camGutter.innerHTML = cam ? '<span>相机</span>' : '<span>相机 · 无</span>';
+    if (cam) {
+      const b = el('div', 'blk cam');
+      b.dataset.kind = 'camera';
+      b.style.left = '0px';
+      b.style.width = `${Math.max(8, p.meta.duration * this.pps)}px`;
+      b.innerHTML = `<span class="blk-name">镜头</span><span class="blk-meta">${cam.path.length} 关键点</span>`;
+      this.camTrack.appendChild(b);
+      for (const k of cam.path) {
+        const tag = el('div', 'cam-key');
+        tag.style.left = `${k.t * this.pps}px`;
+        tag.dataset.t = String(k.t);
+        tag.title = `相机关键点 ${k.t.toFixed(2)}s（双击跳转）`;
+        this.camTrack.appendChild(tag);
+      }
+    }
+
     // element lanes
     this.elsWrap.innerHTML = '';
     const els = [...p.elements].sort((a, b) => b.z - a.z);
@@ -208,6 +235,7 @@ export class Timeline {
       const b = this.inner.querySelector(`.blk.seg[data-id="${this.segmentId}"]`);
       b?.classList.add('sel');
     }
+    if (this.cameraSel) this.inner.querySelector('.blk.cam')?.classList.add('sel');
   }
 
   _down(ev) {
@@ -216,6 +244,25 @@ export class Timeline {
     this._noSnap = ev.altKey;
     const blk = target.closest?.('.blk');
     const gutterEl = target.closest?.('.tl-gutter[data-id]');
+
+    const camKey = target.closest?.('.cam-key');
+    if (camKey) {
+      this.cameraSel = true;
+      this.elementId = null;
+      this.segmentId = null;
+      this.onSelect?.({ camera: true });
+      this.onSeek?.(Number(camKey.dataset.t));
+      this._paintSelection();
+      return;
+    }
+    if (blk?.classList.contains('cam')) {
+      this.cameraSel = true;
+      this.elementId = null;
+      this.segmentId = null;
+      this.onSelect?.({ camera: true });
+      this._paintSelection();
+      return;
+    }
 
     if (blk) {
       const id = blk.dataset.id;

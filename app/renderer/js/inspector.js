@@ -51,14 +51,14 @@ export class Inspector {
   render(project, sel, time) {
     const active = document.activeElement;
     if (this.root.contains(active) && /INPUT|TEXTAREA|SELECT/.test(active?.tagName || '')) return;
-    const key = `${project.rev}|${sel?.elementId}|${sel?.segmentId}|${Math.round(time * 10)}`;
+    const key = `${project.rev}|${sel?.camera ? 'cam' : ''}|${sel?.elementId}|${sel?.segmentId}|${Math.round(time * 10)}`;
     if (key === this.lastRenderKey) return;
     this.lastRenderKey = key;
     this.root.innerHTML = '';
     const element = project.elements.find((e) => e.id === sel?.elementId);
     if (element) this._renderElement(project, element, time);
-    else if (project.camera) this._renderCamera(project, time);
     else if (sel?.segmentId) this._renderSegment(project, sel.segmentId);
+    else if (project.camera) this._renderCamera(project, time);
     else this._renderProject(project);
   }
 

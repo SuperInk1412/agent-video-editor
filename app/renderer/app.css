@@ -155,6 +155,20 @@ main { display: grid; grid-template-columns: 272px minmax(0, 1fr) 356px; min-hei
 .tl-ticklabel { position: absolute; left: 4px; top: 5px; font-size: 10px; color: var(--dim2); font-family: var(--mono); white-space: nowrap; }
 .tl-beat { position: absolute; bottom: 0; height: 6px; width: 1px; background: #2a3d4a; }
 .tl-segrow { height: 34px; }
+.tl-camrow { height: 30px; }
+.tl-gutter.dim { color: #4d5a68; }
+.blk.cam {
+  left: 0;
+  background: linear-gradient(180deg, #241a33, #1a1327);
+  border-color: #4b3a6b;
+}
+.blk.cam.sel { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(23,217,255,.3); }
+.cam-key {
+  position: absolute; top: 50%; width: 8px; height: 8px; margin-left: -4px; margin-top: -4px;
+  background: var(--yellow); border: 1px solid #6b5700;
+  transform: rotate(45deg); cursor: pointer; z-index: 4;
+}
+.cam-key:hover { background: #fff27a; }
 .blk {
   position: absolute; top: 4px; bottom: 4px; border-radius: 4px;
   background: #1b2432; border: 1px solid #2b3a4d;
