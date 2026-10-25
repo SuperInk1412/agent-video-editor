@@ -20,6 +20,7 @@ export class PathGizmo {
     this.ctx = canvas.getContext('2d');
     this.opts = opts; // { project, time, editMode, grid, project(world), stage() }
     this.sel = -1;
+    this.liveSel = false;
     this.hover = null;
   }
 
@@ -44,6 +45,40 @@ export class PathGizmo {
   camera() {
     const p = this.opts.project();
     return p?.camera || null;
+  }
+
+  /** Pose of the shot camera at the playhead (shake disabled). */
+  liveState() {
+    const project = this.opts.project();
+    if (!project?.camera) return null;
+    return evalCamera(this.clean(project), this.opts.time());
+  }
+
+  /** A path key already sits on the playhead (the live camera would double it). */
+  keyAtTime() {
+    const cam = this.camera();
+    const t = this.opts.time();
+    return !!cam?.path?.some((k) => Math.abs(k.t - t) < 1e-3);
+  }
+
+  /** The live frustum is only drawn when the editor camera is away from it. */
+  liveVisible() {
+    const st = this.liveState();
+    const vc = this.opts.viewCam?.();
+    if (!st || !vc) return false;
+    if (this.keyAtTime()) return false;
+    return Math.hypot(st.pos[0] - vc.pos[0], st.pos[1] - vc.pos[1], st.pos[2] - vc.pos[2]) > 2.5;
+  }
+
+  /** Hit test the live camera body (edit mode, select mode). */
+  hitLive(sx, sy) {
+    if (!this.opts.editMode() || !this.liveVisible()) return null;
+    const st = this.liveState();
+    const p = this.project(st.pos);
+    if (!p) return null;
+    const k = this.scale;
+    const d = Math.hypot(p[0] - sx / k, p[1] - sy / k);
+    return d <= 14 ? { kind: 'live', pos: st.pos } : null;
   }
 
   project(p) {
@@ -104,7 +139,9 @@ export class PathGizmo {
     const apex = this.project(st.pos);
     if (!apex) return;
     const center = add3(st.pos, mul3(f, depth));
-    const color = main ? 'rgba(255,255,255,.9)' : selected ? 'rgba(255,209,102,.95)' : 'rgba(23,217,255,.42)';
+    const color = main
+      ? (selected ? 'rgba(255,209,102,.95)' : 'rgba(255,255,255,.9)')
+      : selected ? 'rgba(255,209,102,.95)' : 'rgba(23,217,255,.42)';
     const k = this.scale;
     ctx.strokeStyle = color;
     ctx.lineWidth = main ? 1.5 : selected ? 1.2 : 1;
@@ -126,7 +163,7 @@ export class PathGizmo {
         ctx.lineTo(b1[0], b1[1]);
         ctx.lineTo(b2[0], b2[1]);
         ctx.closePath();
-        ctx.fillStyle = 'rgba(255,255,255,.16)';
+        ctx.fillStyle = selected ? 'rgba(255,209,102,.24)' : 'rgba(255,255,255,.16)';
         ctx.fill();
         ctx.stroke();
       }
@@ -144,10 +181,16 @@ export class PathGizmo {
       if (upEnd) { ctx.beginPath(); ctx.moveTo(apex[0], apex[1]); ctx.lineTo(upEnd[0], upEnd[1]); ctx.stroke(); }
       const labelAt = this.project(add3(center, mul3(u, halfH + 2)));
       if (labelAt) {
-        ctx.fillStyle = 'rgba(255,255,255,.92)';
+        ctx.fillStyle = selected ? 'rgba(255,209,102,.95)' : 'rgba(255,255,255,.92)';
         ctx.font = `${11 * k}px ui-monospace, monospace`;
         const txt = st.fov >= 180 ? 'FOV 360° · 鱼眼' : `FOV ${Math.round(st.fov)}°`;
         ctx.fillText(txt, labelAt[0] + 6 * k, labelAt[1] - 5 * k);
+      }
+      if (selected) {
+        ctx.beginPath();
+        ctx.arc(apex[0], apex[1], 9, 0, Math.PI * 2);
+        ctx.lineWidth = 1.6;
+        ctx.stroke();
       }
       return;
     }
@@ -241,11 +284,8 @@ export class PathGizmo {
     // editor camera has moved away from the lens (otherwise we are inside it)
     const clean = this.clean(project);
     keys.forEach((key, i) => this.glyph(ctx, clean, key.t, { selected: i === this.sel }));
-    if (this.opts.editMode()) {
-      const st = evalCamera(clean, time);
-      const vc = this.opts.viewCam?.();
-      const away = st && vc ? Math.hypot(st.pos[0] - vc.pos[0], st.pos[1] - vc.pos[1], st.pos[2] - vc.pos[2]) : Infinity;
-      if (away > 2.5) this.glyph(ctx, clean, time, { main: true });
+    if (this.opts.editMode() && this.liveVisible()) {
+      this.glyph(ctx, clean, time, { main: true, selected: this.liveSel });
     }
 
     // handles of the selected node

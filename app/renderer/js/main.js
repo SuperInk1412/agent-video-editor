@@ -600,18 +600,49 @@ async function boot() {
     { sep: true },
     { label: '切换到移动相机 (Alt)', run: () => setViewMode('move') },
   ];
+  // Right-click on the live lens (a time with no key): key it here, or grab it.
+  const liveMenu = () => [
+    {
+      label: '在当前时间打点',
+      run: () => {
+        const c = evalCamera(S.project, S.time);
+        op({ op: 'cameraKey', t: S.time, pos: c.pos.map((v) => Math.round(v * 100) / 100) });
+      },
+    },
+    {
+      label: '视口对齐到当前镜头',
+      run: () => {
+        if (!S.editCam) return;
+        const c = evalCamera(S.project, S.time);
+        S.editCam = { pos: c.pos.slice(), look: c.look.slice(), roll: c.roll || 0, fov: c.fov };
+        preview.editCam = S.editCam;
+        preview.render(S.time);
+        gizmo.draw();
+      },
+    },
+    { label: '选中相机', run: () => select({ camera: true }) },
+    { sep: true },
+    { label: '切换到移动相机 (Alt)', run: () => setViewMode('move') },
+  ];
 
   canvas.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     if (!S.editMode || S.viewMode !== 'select') return;
     const { sx, sy } = stageXY(e);
     const hit = gizmo?.hit(sx, sy);
+    const live = hit ? null : gizmo?.hitLive(sx, sy);
     if (hit) {
       gizmo.sel = hit.index;
       const key = S.project.camera?.path?.[hit.index];
       if (key) { setTime(key.t); select({ camera: true }); }
       gizmo.draw();
       showContextMenu(e.clientX, e.clientY, nodeMenu(hit.index));
+    } else if (live) {
+      gizmo.liveSel = true;
+      gizmo.sel = -1;
+      select({ camera: true });
+      gizmo.draw();
+      showContextMenu(e.clientX, e.clientY, liveMenu());
     } else {
       showContextMenu(e.clientX, e.clientY, canvasMenu());
     }
@@ -635,12 +666,34 @@ async function boot() {
     const hit = gizmo?.hit(sx, sy);
     if (hit) {
       gizmo.sel = hit.index;
+      gizmo.liveSel = false;
       const key = S.project.camera?.path?.[hit.index];
       const ac = preview.scene3d.lastCam;
       const normal = ac ? v3norm(v3sub(ac.look, ac.pos)) : [0, 0, -1];
-      drag = { kind: hit.kind, index: hit.index, normal, x: cx, y: cy, moved: false };
+      let other = null;
+      let oppLen = 0;
+      if (key && (hit.kind === 'out' || hit.kind === 'in')) {
+        other = hit.kind === 'out' ? 'in' : 'out';
+        const ow = gizmo.handleWorld(hit.index, other);
+        if (ow) oppLen = Math.hypot(ow[0] - key.pos[0], ow[1] - key.pos[1], ow[2] - key.pos[2]);
+      }
+      drag = { kind: hit.kind, index: hit.index, other, oppLen, normal, x: cx, y: cy, moved: false };
       try { canvas.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
       if (hit.kind === 'node' && key) setTime(key.t);
+      gizmo.draw();
+      e.preventDefault();
+      return;
+    }
+    const live = gizmo?.hitLive(sx, sy);
+    if (live) {
+      gizmo.liveSel = true;
+      gizmo.sel = -1;
+      select({ camera: true });
+      pause();
+      const ac = preview.scene3d.lastCam;
+      const normal = ac ? v3norm(v3sub(ac.look, ac.pos)) : [0, 0, -1];
+      drag = { kind: 'live', normal, x: cx, y: cy, moved: false, created: false, index: -1 };
+      try { canvas.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
       gizmo.draw();
       e.preventDefault();
       return;
@@ -652,10 +705,11 @@ async function boot() {
 
   canvas.addEventListener('pointermove', (e) => {
     const { sx, sy, cx, cy } = stageXY(e);
+    const r2 = (v) => Math.round(v * 100) / 100;
     if (!drag) {
       if (S.editMode) {
         if (S.viewMode === 'move') { canvas.style.cursor = 'grab'; return; }
-        const hit = gizmo?.hit(sx, sy);
+        const hit = gizmo?.hit(sx, sy) || gizmo?.hitLive(sx, sy);
         canvas.style.cursor = hit ? 'pointer' : 'default';
         return;
       }
@@ -687,13 +741,62 @@ async function boot() {
       if (Math.abs(cx - drag.x) + Math.abs(cy - drag.y) > 3) drag.moved = true;
       return;
     }
+    if (drag.kind === 'live') {
+      if (!drag.created && Math.abs(cx - drag.x) + Math.abs(cy - drag.y) < 4) return;
+      if (!drag.created) {
+        const cam = S.project.camera;
+        const t = Math.round(S.time * 1000) / 1000;
+        let key = cam.path.find((k) => Math.abs(k.t - t) < 1e-3);
+        if (!key) {
+          const c = evalCamera(S.project, t);
+          key = { t, pos: c.pos.slice(), look: null, fov: null, ease: 'easeInOut', out: null, in: null };
+          cam.path.push(key);
+          cam.path.sort((a, b) => a.t - b.t);
+        }
+        const idx = cam.path.indexOf(key);
+        if (e.shiftKey) {
+          const prev = cam.path[idx - 1] || key;
+          const next = cam.path[idx + 1] || key;
+          const out = [
+            (next.pos[0] - prev.pos[0]) / 6,
+            (next.pos[1] - prev.pos[1]) / 6,
+            (next.pos[2] - prev.pos[2]) / 6,
+          ].map(r2);
+          key.out = out;
+          key.in = out.map((v) => -v);
+        }
+        drag.created = true;
+        drag.index = idx;
+        // the new node becomes the selection so its handles show right away
+        gizmo.sel = idx;
+        gizmo.liveSel = false;
+      }
+      const key = S.project.camera?.path?.[drag.index];
+      if (!key) return;
+      const w = preview.scene3d.planeHit(sx, sy, key.pos, drag.normal);
+      if (!w) return;
+      key.pos = w.map(r2);
+      drag.moved = true;
+      preview.render(S.time);
+      gizmo.draw();
+      return;
+    }
     const key = S.project.camera?.path?.[drag.index];
     if (!key) return;
     const w = preview.scene3d.planeHit(sx, sy, key.pos, drag.normal);
     if (!w) return;
-    const r2 = (v) => Math.round(v * 100) / 100;
-    if (drag.kind === 'node') key.pos = w.map(r2);
-    else key[drag.kind] = [w[0] - key.pos[0], w[1] - key.pos[1], w[2] - key.pos[2]].map(r2);
+    if (drag.kind === 'node') {
+      key.pos = w.map(r2);
+    } else {
+      const v = [w[0] - key.pos[0], w[1] - key.pos[1], w[2] - key.pos[2]];
+      key[drag.kind] = v.map(r2);
+      // default keeps the two handles collinear; Shift frees the dragged one
+      if (!e.shiftKey && drag.other) {
+        const l = Math.hypot(v[0], v[1], v[2]) || 1;
+        const opp = drag.oppLen || l;
+        key[drag.other] = [(-v[0] / l) * opp, (-v[1] / l) * opp, (-v[2] / l) * opp].map(r2);
+      }
+    }
     drag.moved = true;
     preview.render(S.time);
     gizmo.draw();
@@ -706,9 +809,13 @@ async function boot() {
     if (d.kind === 'node' || d.kind === 'out' || d.kind === 'in') {
       if (d.moved) commitCameraPath();
       gizmo.draw();
+    } else if (d.kind === 'live') {
+      if (d.created) commitCameraPath();
+      gizmo.draw();
     } else if (d.kind === 'click' && !d.moved) {
       const { sx, sy } = stageXY(e);
       gizmo.sel = -1;
+      gizmo.liveSel = false;
       gizmo.draw();
       selectAt(sx, sy);
     }
