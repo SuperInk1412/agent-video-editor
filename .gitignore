@@ -19,3 +19,6 @@ Thumbs.db
 *.log
 *.tmp
 List.efu
+
+# reference app (large binary, local only)
+参考程序/
