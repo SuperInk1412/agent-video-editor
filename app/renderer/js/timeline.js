@@ -40,13 +40,20 @@ export class Timeline {
     this._editTimes = new Map();
     this._propRows = [];
     this._objHeads = new Map();
-    this._pointerDown = false;
+    this._anyPointerDown = false;
     this._pendingRender = false;
-    window.addEventListener('pointerup', () => {
-      if (!this._pointerDown) return;
-      this._pointerDown = false;
-      if (this._pendingRender) { this._pendingRender = false; this.render(true); }
-    });
+    // Expanding the timeline resizes the stage; if the user is dragging an
+    // element in the viewport, delay the expansion until the pointer is up so
+    // the drag's screen mapping does not jump under the cursor.
+    window.addEventListener('pointerdown', () => { this._anyPointerDown = true; }, true);
+    const release = () => {
+      this._anyPointerDown = false;
+      if (!this._pendingRender) return;
+      this._pendingRender = false;
+      this.render(true);
+    };
+    window.addEventListener('pointerup', release, true);
+    window.addEventListener('pointercancel', release, true);
     this._build();
     window.addEventListener('resize', () => this._layout());
   }
@@ -130,9 +137,8 @@ export class Timeline {
     }
     if (id !== prev) this.propSel = null;
     if (force) {
-      if (this._pointerDown) {
+      if (this._anyPointerDown) {
         this._pendingRender = true;
-        this._updateHeight();
         this._paintSelection();
       } else {
         this.render(true);
@@ -763,7 +769,6 @@ export class Timeline {
     if (/INPUT|TEXTAREA|SELECT/.test(target.tagName || '') || target.closest('button')) return;
     if (target.closest('.tl-sect')) return;
     ev.preventDefault();
-    this._pointerDown = true;
     this._noSnap = ev.altKey;
     const blk = target.closest?.('.blk');
     const gutterEl = target.closest?.('.tl-gutter[data-id]');
