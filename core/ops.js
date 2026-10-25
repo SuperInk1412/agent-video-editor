@@ -1,12 +1,14 @@
 // Edit operations: the ONE way anything (UI, CLI, AI) mutates a project.
 // Ops are plain JSON so they can be logged, replayed, diffed and undone.
 import { DEFAULT_TRANSFORM, DEFAULT_STYLE, DEFAULT_FX, ELEMENT_TYPES, newId } from './schema.js';
+import { SCENE_VERSION, normalizeObject } from './scene.js';
 
 export const OP_KINDS = [
   'addElement', 'updateElement', 'set', 'removeElement', 'moveElement',
   'splitElement', 'duplicateElement', 'reorder', 'addSegment', 'updateSegment',
   'removeSegment', 'setMeta', 'setFx', 'keySet', 'keyRemove', 'batch',
   'cameraKey', 'cameraRemove', 'cameraSet', 'cameraPath', 'worldSet',
+  'objectAdd', 'objectRemove', 'objectPatch', 'objectKey', 'objectUnkey',
 ];
 
 const isObj = (o) => o && typeof o === 'object' && !Array.isArray(o);
@@ -56,6 +58,51 @@ function findSeg(p, id) {
   const s = p.segments.find((x) => x.id === id);
   if (!s) fail(`no segment ${id}`);
   return s;
+}
+
+// ---------------------------------------------------------------- v3 objects
+
+function rootScene(p, create = false) {
+  if (!p.scene || typeof p.scene !== 'object') {
+    if (!create) return null;
+    p.scene = { version: SCENE_VERSION, units: 'm', objects: [], annotations: [] };
+  }
+  if (!Array.isArray(p.scene.objects)) p.scene.objects = [];
+  return p.scene;
+}
+
+function findObj(p, id) {
+  const obj = rootScene(p)?.objects?.find((o) => o.id === id);
+  if (!obj) fail(`no object ${id}`);
+  return obj;
+}
+
+const VEC_TRACKS = new Set(['pivot', 'position', 'scale']);
+const DIR_TRACKS = new Set(['dir']);
+const SCALAR_TRACKS = new Set([
+  'roll', 'opacity',
+  'scale.x', 'scale.y', 'scale.z',
+  'pivot.x', 'pivot.y', 'pivot.z',
+  'position.x', 'position.y', 'position.z',
+]);
+
+function trackValue(path, v) {
+  if (VEC_TRACKS.has(path) || DIR_TRACKS.has(path)) {
+    if (!Array.isArray(v) || v.length < 3 || !v.slice(0, 3).every((n) => Number.isFinite(Number(n)))) {
+      fail(`${path} needs [x,y,z]`);
+    }
+    let a = v.slice(0, 3).map(Number);
+    if (DIR_TRACKS.has(path)) {
+      const l = Math.hypot(a[0], a[1], a[2]) || 1;
+      a = a.map((n) => n / l);
+    }
+    return a;
+  }
+  if (SCALAR_TRACKS.has(path)) {
+    if (!Number.isFinite(Number(v))) fail(`${path} needs a number`);
+    return Number(v);
+  }
+  fail(`unknown track path ${path}`);
 }
 
 export function coerceValue(value) {
@@ -311,6 +358,80 @@ export function applyOp(p, op) {
     case 'worldSet': {
       p.world = deepMerge(p.world || {}, op.patch || {});
       return { changed: ['world'] };
+    }
+
+    case 'objectAdd': {
+      const scene = rootScene(p, true);
+      const src = isObj(op.object) ? op.object : {};
+      const obj = normalizeObject(src);
+      const taken = new Set(scene.objects.map((o) => o.id));
+      if (obj.id) { if (taken.has(obj.id)) fail(`object ${obj.id} already exists`); }
+      else obj.id = newId('ob', taken);
+      const total = Number(p.meta?.duration) || 12;
+      obj.start = Math.max(0, Math.min(total, Number(src.start) || 0));
+      const remain = total - obj.start || total;
+      const want = Number(src.duration);
+      obj.duration = Math.max(0.001, Math.min(remain, Number.isFinite(want) && want > 0 ? want : remain));
+      const g = isObj(src.geom) ? src.geom : {};
+      obj.geom = {
+        w: Math.max(0.01, Number(g.w) || 2),
+        h: Math.max(0.01, Number(g.h) || 2),
+        d: Math.max(0.01, Number(g.d) || 2),
+      };
+      if (isObj(src.style)) obj.style = { ...src.style };
+      scene.objects.push(obj);
+      return { changed: [obj.id, 'scene'] };
+    }
+
+    case 'objectRemove': {
+      const scene = rootScene(p);
+      const i = scene?.objects?.findIndex((o) => o.id === op.id) ?? -1;
+      if (i < 0) fail(`no object ${op.id}`);
+      scene.objects.splice(i, 1);
+      return { changed: [op.id, 'scene'] };
+    }
+
+    case 'objectPatch': {
+      const obj = findObj(p, op.id);
+      const patch = isObj(op.patch) ? op.patch : {};
+      delete patch.id;
+      delete patch.tracks;
+      const next = deepMerge(obj, patch);
+      const norm = normalizeObject({ ...next, id: obj.id, tracks: obj.tracks });
+      Object.keys(obj).forEach((k) => { delete obj[k]; });
+      Object.assign(obj, norm);
+      return { changed: [obj.id] };
+    }
+
+    case 'objectKey': {
+      const obj = findObj(p, op.id);
+      const path = String(op.path || '');
+      const t = Math.round(Number(op.t) * 1000) / 1000;
+      if (!Number.isFinite(t) || t < 0) fail('objectKey needs t >= 0');
+      const key = { t, v: trackValue(path, op.v !== undefined ? op.v : op.value) };
+      if (op.ease) key.ease = String(op.ease);
+      if (VEC_TRACKS.has(path) || DIR_TRACKS.has(path)) {
+        if (Array.isArray(op.out) && op.out.length === 3) key.out = op.out.map(Number);
+        if (Array.isArray(op.in) && op.in.length === 3) key.in = op.in.map(Number);
+      }
+      const tracks = obj.tracks || (obj.tracks = {});
+      tracks[path] = (tracks[path] || [])
+        .filter((k) => Math.abs(k.t - t) > 1e-4)
+        .concat(key)
+        .sort((a, b) => a.t - b.t);
+      return { changed: [obj.id], key };
+    }
+
+    case 'objectUnkey': {
+      const obj = findObj(p, op.id);
+      const path = String(op.path || '');
+      const t = Math.round(Number(op.t) * 1000) / 1000;
+      const tracks = obj.tracks || {};
+      if (!Array.isArray(tracks[path])) return { changed: [] };
+      const left = tracks[path].filter((k) => Math.abs(k.t - t) > 1e-4);
+      if (left.length) tracks[path] = left;
+      else delete tracks[path];
+      return { changed: [obj.id] };
     }
 
     case 'batch': {
