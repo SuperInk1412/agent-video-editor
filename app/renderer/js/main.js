@@ -493,6 +493,7 @@ async function boot() {
   inspector = new Inspector($('#panelInsp'), {
     onOp: (o) => op(o),
     getTime: () => S.time,
+    getViewCam: () => (S.editMode && S.editCam) ? S.editCam : evalCamera(S.project, S.time),
     getTimeValue: (path) => {
       const el = S.project.elements.find((e) => e.id === S.selection.elementId);
       if (!el) return 0;
@@ -988,6 +989,16 @@ async function boot() {
     } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
       e.preventDefault();
       if (e.shiftKey) $('#btnRedo').click(); else $('#btnUndo').click();
+    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'd') {
+      const o = (S.project.scene?.objects || []).find((x) => x.id === S.selection.objectId);
+      if (o) {
+        e.preventDefault();
+        const copy = JSON.parse(JSON.stringify(o));
+        copy.id = `ob_${Date.now().toString(36)}`;
+        copy.name = `${o.name || '元素'} 副本`;
+        copy.pivot = [copy.pivot[0] + 10, copy.pivot[1], copy.pivot[2]];
+        op({ op: 'objectAdd', object: copy }).then((j) => { if (j) select({ objectId: copy.id }); });
+      }
     }
   });
 

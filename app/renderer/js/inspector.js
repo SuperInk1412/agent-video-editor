@@ -225,6 +225,17 @@ export class Inspector {
           onclick: () => this.opts.onOp({ op: 'objectKey', id, path: 'pivot', t: tNow(), v: pose.pivot.map(round) }),
         }, '打点'),
         h('button', {
+          class: 'mini', title: '复制这个元素（含关键帧）',
+          onclick: async () => {
+            const copy = JSON.parse(JSON.stringify(obj));
+            copy.id = `ob_${Date.now().toString(36)}`;
+            copy.name = `${obj.name || '元素'} 副本`;
+            copy.pivot = [copy.pivot[0] + 10, copy.pivot[1], copy.pivot[2]];
+            const res = await this.opts.onOp({ op: 'objectAdd', object: copy });
+            if (res) this.opts.onSelect?.({ objectId: copy.id });
+          },
+        }, '复制'),
+        h('button', {
           class: 'mini danger',
           onclick: () => { if (confirm(`删除 ${obj.name || id}?`)) this.opts.onOp({ op: 'objectRemove', id }); },
         }, '删除'),
@@ -272,6 +283,26 @@ export class Inspector {
         label: '绕轴自转°', value: Math.round(pose.roll * 10) / 10, step: 1,
         onChange: (v) => key('roll', v),
       }),
+      h('div', { class: 'row-btns' },
+        h('button', {
+          class: 'mini', title: '让元素正面朝向当前镜头（在当前时间写方向关键帧）',
+          onclick: () => {
+            const cam = this.opts.getViewCam?.();
+            if (!cam) return;
+            const d = [cam.pos[0] - pose.worldPos[0], cam.pos[1] - pose.worldPos[1], cam.pos[2] - pose.worldPos[2]];
+            const l = Math.hypot(d[0], d[1], d[2]) || 1;
+            key('dir', d.map((v) => v / l));
+          },
+        }, '面向镜头'),
+        h('button', {
+          class: 'mini', title: '把盒子底面放到 y=0（在当前时间写位置关键帧）',
+          onclick: () => key('pivot', [pose.pivot[0], (Number(obj.geom?.h) || 2) / 2, pose.pivot[2]]),
+        }, '落地'),
+        h('button', {
+          class: 'mini', title: '删除播放头这一帧的位置关键帧',
+          onclick: () => this.opts.onOp({ op: 'objectUnkey', id, path: 'pivot', t: tNow() }),
+        }, '删本帧'),
+      ),
       h('div', { class: 'hint' }, '在视口里拖动元素会自动在播放头打位置关键帧；◆ 记录当前值。'),
     ));
 
