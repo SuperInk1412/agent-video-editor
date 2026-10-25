@@ -81,12 +81,26 @@ export function normalizeCamera(cam) {
       pos: k.pos.map(Number),
       look: Array.isArray(k.look) ? k.look.map(Number) : null,
       fov: k.fov != null ? clamp(Number(k.fov), 1, 360) : null,
+      ease: k.ease ? String(k.ease) : null,
+      out: Array.isArray(k.out) && k.out.length === 3 ? k.out.map(Number) : null,
+      in: Array.isArray(k.in) && k.in.length === 3 ? k.in.map(Number) : null,
     }))
     .sort((a, b) => a.t - b.t);
   return c;
 }
 
-/** position at time t along the smoothed path */
+/** Cubic bezier point at u. */
+function bez3(p0, p1, p2, p3, u) {
+  const it = 1 - u;
+  const a = it * it * it, b = 3 * it * it * u, c = 3 * it * u * u, d = u * u * u;
+  return [
+    a * p0[0] + b * p1[0] + c * p2[0] + d * p3[0],
+    a * p0[1] + b * p1[1] + c * p2[1] + d * p3[1],
+    a * p0[2] + b * p1[2] + c * p2[2] + d * p3[2],
+  ];
+}
+
+/** position at time t along the smoothed path (cubic bezier between keys) */
 export function pathPos(cam, t) {
   const keys = cam.path;
   if (!keys.length) return [0, 20, 0];
@@ -99,7 +113,15 @@ export function pathPos(cam, t) {
   const k0 = keys[Math.max(0, i - 1)], k3 = keys[Math.min(keys.length - 1, i + 2)];
   const span = Math.max(1e-6, k2.t - k1.t);
   const u = clamp((t - k1.t) / span);
-  return catmull(k0.pos, k1.pos, k2.pos, k3.pos, ease(k1.ease || 'easeInOut', u));
+  const s = ease(k1.ease || 'easeInOut', u);
+  const p1 = k1.pos, p2 = k2.pos;
+  // Auto handles are the Catmull-Rom tangents, so legacy paths (and any path
+  // that never had its handles dragged) evaluate exactly as before.
+  const out = k1.out || [(p2[0] - k0.pos[0]) / 6, (p2[1] - k0.pos[1]) / 6, (p2[2] - k0.pos[2]) / 6];
+  const inn = k2.in || [-(k3.pos[0] - p1[0]) / 6, -(k3.pos[1] - p1[1]) / 6, -(k3.pos[2] - p1[2]) / 6];
+  const c1 = [p1[0] + out[0], p1[1] + out[1], p1[2] + out[2]];
+  const c2 = [p2[0] + inn[0], p2[1] + inn[1], p2[2] + inn[2]];
+  return bez3(p1, c1, c2, p2, s);
 }
 
 /** fov at time t (keyframe override, else default) */

@@ -27,6 +27,7 @@
           <option value="0.5">50%</option>
           <option value="1">100%</option>
         </select>
+        <button id="btnEditMode" title="编辑视口 / 镜头视角 (Tab)">编辑视口</button>
         <button id="btnStill" title="用 Blender 渲染当前时刻的一帧">预览帧</button>
         <button id="btnRender" class="primary">渲染成片</button>
       </div>
@@ -46,12 +47,13 @@
         <div id="stageWrap">
           <div id="stageBox">
             <canvas id="stage"></canvas>
+            <canvas id="gizmo"></canvas>
             <div id="selBox"></div>
           </div>
         </div>
         <div id="stageBar">
           <span id="stageTime" class="mono">0.00 / 0.00s</span>
-          <span class="hint">点画面选元素 · 空格播放 · ←/→ 逐帧 · Alt 拖动取消吸附</span>
+          <span class="hint">Tab 编辑视口 · Alt 环视 · G 网格 · 拖节点/手柄改轨迹 · 空格播放</span>
         </div>
       </section>
 

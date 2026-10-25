@@ -6,7 +6,7 @@ export const OP_KINDS = [
   'addElement', 'updateElement', 'set', 'removeElement', 'moveElement',
   'splitElement', 'duplicateElement', 'reorder', 'addSegment', 'updateSegment',
   'removeSegment', 'setMeta', 'setFx', 'keySet', 'keyRemove', 'batch',
-  'cameraKey', 'cameraRemove', 'cameraSet', 'worldSet',
+  'cameraKey', 'cameraRemove', 'cameraSet', 'cameraPath', 'worldSet',
 ];
 
 const isObj = (o) => o && typeof o === 'object' && !Array.isArray(o);
@@ -286,6 +286,25 @@ export function applyOp(p, op) {
       const next = deepMerge(cam, patch);
       Object.keys(next).forEach((k) => { cam[k] = next[k]; });
       if (Array.isArray(cam.path)) cam.path.sort((a, b) => a.t - b.t);
+      return { changed: ['camera'] };
+    }
+
+    case 'cameraPath': {
+      // Whole-path write used by the 3D viewport (drag a node / pull a handle).
+      if (!Array.isArray(op.path)) fail('cameraPath needs path[]');
+      const cam = p.camera || (p.camera = { path: [] });
+      cam.path = op.path
+        .filter((k) => k && Array.isArray(k.pos) && k.pos.length === 3 && Number.isFinite(Number(k.t)))
+        .map((k) => ({
+          t: Math.round(Number(k.t) * 1000) / 1000,
+          pos: k.pos.map(Number),
+          look: Array.isArray(k.look) && k.look.length === 3 ? k.look.map(Number) : null,
+          fov: k.fov != null ? Number(k.fov) : null,
+          ease: k.ease ? String(k.ease) : null,
+          out: Array.isArray(k.out) && k.out.length === 3 ? k.out.map(Number) : null,
+          in: Array.isArray(k.in) && k.in.length === 3 ? k.in.map(Number) : null,
+        }))
+        .sort((a, b) => a.t - b.t);
       return { changed: ['camera'] };
     }
 

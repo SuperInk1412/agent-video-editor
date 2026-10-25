@@ -1,10 +1,12 @@
 // VedioMaker renderer main: state, playback, selection, wiring.
 import { Preview } from './preview.js';
+import { PathGizmo } from './pathgizmo.js';
 import { Timeline, escapeHtml } from './timeline.js';
 import { Inspector } from './inspector.js';
 import { AgentPanel } from './ai.js';
 import { PipelinePanel } from './pipeline.js';
 import { LogPanel } from './logs.js';
+import { evalCamera } from '/core/camera.js';
 
 const $ = (s) => document.querySelector(s);
 const S = {
@@ -19,9 +21,14 @@ const S = {
   render: null,
   renderScale: 0.5,
   dpr: Math.min(2, window.devicePixelRatio || 1),
+  editMode: false,
+  editCam: null,
+  lookMode: false,
+  grid: true,
+  keys: new Set(),
 };
 
-let preview, timeline, inspector, agentPanel, pipelinePanel, logPanel;
+let preview, timeline, inspector, agentPanel, pipelinePanel, logPanel, gizmo;
 
 // ---- error reporting: everything lands in .vdm/logs and the 日志 panel ----
 const reportedErrors = new Set();
@@ -96,6 +103,9 @@ function applyProject(p, source) {
   renderShots();
   $('#projTitle').textContent = p.meta.title;
   $('#projMeta').textContent = `${p.meta.width}×${p.meta.height} · ${p.meta.fps}fps · ${p.meta.duration.toFixed(1)}s · rev ${p.rev}`;
+  const editBtn = $('#btnEditMode');
+  if (editBtn) editBtn.hidden = !p.camera;
+  if (!p.camera && S.editMode) setEditMode(false);
   updateOverlay();
 }
 
@@ -181,8 +191,99 @@ function fitStage() {
   box.style.width = `${Math.round(w)}px`;
   box.style.height = `${Math.round(h)}px`;
   preview.resize(w, h);
+  gizmo?.resize();
   preview.render(S.time);
+  gizmo?.draw();
   updateOverlay();
+}
+
+// ---------------------------------------------------------------- 3D viewport
+const clampNum = (v, a, b) => Math.min(b, Math.max(a, v));
+const v3sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const v3len = (a) => Math.hypot(a[0], a[1], a[2]);
+const v3norm = (a) => { const l = v3len(a) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
+const v3cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+
+function setEditMode(on) {
+  const btn = $('#btnEditMode');
+  if (on && !S.project?.camera) { toast('这个项目没有相机'); return; }
+  S.editMode = !!on;
+  preview.editMode = S.editMode;
+  if (S.editMode) {
+    const c = evalCamera(S.project, S.time);
+    S.editCam = { pos: c.pos.slice(), look: c.look.slice(), roll: c.roll || 0, fov: c.fov };
+    preview.editCam = S.editCam;
+  } else {
+    S.editCam = null;
+    preview.editCam = null;
+    if (S.lookMode) toggleLookMode(false);
+  }
+  if (btn) {
+    btn.classList.toggle('on', S.editMode);
+    btn.textContent = S.editMode ? '镜头视角' : '编辑视口';
+  }
+  preview.render(S.time);
+  gizmo?.draw();
+}
+
+function toggleLookMode(on) {
+  if (on === undefined) on = !S.lookMode;
+  if (on && !S.editMode) { toast('先按 Tab 进编辑视口，再用 Alt 环视'); return; }
+  S.lookMode = on;
+  document.body.classList.toggle('look-mode', on);
+}
+
+function orbitEdit(dx, dy) {
+  const cam = S.editCam;
+  if (!cam) return;
+  const target = cam.look.slice();
+  const v = v3sub(cam.pos, target);
+  const dist = v3len(v) || 1;
+  let yaw = Math.atan2(v[0], v[2]);
+  let pitch = Math.asin(clampNum(v[1] / dist, -1, 1));
+  yaw -= dx * 0.006;
+  pitch = clampNum(pitch + dy * 0.006, -1.45, 1.45);
+  const cp = Math.cos(pitch);
+  cam.pos = [
+    target[0] + Math.sin(yaw) * cp * dist,
+    target[1] + Math.sin(pitch) * dist,
+    target[2] + Math.cos(yaw) * cp * dist,
+  ];
+}
+
+function flyEdit(dt) {
+  const cam = S.editCam;
+  if (!cam || !S.editMode || S.lookMode) return;
+  const k = S.keys;
+  const boost = k.has('ShiftLeft') || k.has('ShiftRight');
+  const speed = (boost ? 180 : 45) * dt;
+  const f = v3norm(v3sub(cam.look, cam.pos));
+  const r = v3norm(v3cross(f, [0, 1, 0]));
+  const up = [0, 1, 0];
+  const m = [0, 0, 0];
+  const add = (v, s) => { m[0] += v[0] * s; m[1] += v[1] * s; m[2] += v[2] * s; };
+  if (k.has('KeyW')) add(f, 1);
+  if (k.has('KeyS')) add(f, -1);
+  if (k.has('KeyD')) add(r, 1);
+  if (k.has('KeyA')) add(r, -1);
+  if (k.has('KeyE')) add(up, 1);
+  if (k.has('KeyQ')) add(up, -1);
+  const l = v3len(m);
+  if (l < 1e-6) return;
+  const step = m.map((v) => (v / l) * speed);
+  cam.pos = cam.pos.map((v, i) => v + step[i]);
+  cam.look = cam.look.map((v, i) => v + step[i]);
+}
+
+function dollyEdit(factor) {
+  const cam = S.editCam;
+  if (!cam) return;
+  const d = v3sub(cam.pos, cam.look).map((v) => v * factor);
+  cam.pos = cam.look.map((v, i) => v + d[i]);
+}
+
+function commitCameraPath() {
+  if (S.project?.camera) op({ op: 'cameraPath', path: S.project.camera.path });
 }
 
 // ---------------------------------------------------------------- panels
@@ -312,6 +413,16 @@ async function boot() {
   preview = new Preview(canvas);
   preview.setProject(S.project);
   preview.playing = false;
+  gizmo = new PathGizmo($('#gizmo'), {
+    project: () => S.project,
+    time: () => S.time,
+    editMode: () => S.editMode,
+    grid: () => S.grid,
+    visible: () => S.editMode || !!S.selection.camera,
+    projectPoint: (p) => preview.scene3d.projectPoint(p),
+    stage: () => canvas,
+  });
+  gizmo.resize();
 
   timeline = new Timeline($('#timeline'), {
     onSeek: (t) => { setTime(t); if (S.playing) { S.playFrom = t; S.playWall = performance.now(); preview.setAudioTime(t); } },
@@ -391,24 +502,149 @@ async function boot() {
     try { await post('/api/render', { from: 0, to: S.project.meta.duration, scale: S.renderScale }); toast('开始渲染成片'); } catch (e) { toast(e.message, 'error'); }
   };
   $('#renderScale').onchange = (e) => { S.renderScale = Number(e.target.value); };
+  $('#btnEditMode').onclick = () => setEditMode(!S.editMode);
 
-  // canvas clicks
-  canvas.addEventListener('pointerdown', (e) => {
+  // ---------- 3D viewport: path nodes, handles, orbit, look ----------
+  const stageXY = (e) => {
     const r = canvas.getBoundingClientRect();
-    const sx = canvas.width / r.width, sy = canvas.height / r.height;
-    const id = preview.hitTest((e.clientX - r.left) * sx, (e.clientY - r.top) * sy, S.time);
-    if (id) select({ elementId: id });
-    else {
-      const seg = S.project.segments.find((s) => S.time >= s.start && S.time < s.start + s.duration);
-      if (seg) select({ elementId: null, segmentId: seg.id });
-      else if (S.project.camera) select({ camera: true });
-      else select({ elementId: null, segmentId: null });
-    }
+    const kx = canvas.width / Math.max(1, r.width);
+    const ky = canvas.height / Math.max(1, r.height);
+    return { sx: (e.clientX - r.left) * kx, sy: (e.clientY - r.top) * ky, cx: e.clientX, cy: e.clientY };
+  };
+  let drag = null;
+  const selectAt = (sx, sy) => {
+    const id = preview.hitTest(sx, sy, S.time);
+    if (id) return select({ elementId: id });
+    const seg = S.project.segments.find((s) => S.time >= s.start && S.time < s.start + s.duration);
+    if (seg) return select({ elementId: null, segmentId: seg.id });
+    if (S.project.camera) return select({ camera: true });
+    select({ elementId: null, segmentId: null });
+  };
+
+  canvas.addEventListener('contextmenu', (e) => {
+    if (S.editMode || S.selection.camera) e.preventDefault();
   });
+
+  canvas.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 && e.button !== 2) return;
+    const { sx, sy, cx, cy } = stageXY(e);
+    if (S.editMode && S.lookMode) {
+      drag = { kind: 'look', button: e.button, x: cx, y: cy };
+      try { canvas.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
+      e.preventDefault();
+      return;
+    }
+    const canEditPath = S.editMode || !!S.selection.camera;
+    const hit = canEditPath ? gizmo?.hit(sx, sy) : null;
+    if (hit) {
+      gizmo.sel = hit.index;
+      const key = S.project.camera?.path?.[hit.index];
+      const ac = preview.scene3d.lastCam;
+      const normal = ac ? v3norm(v3sub(ac.look, ac.pos)) : [0, 0, -1];
+      drag = { kind: hit.kind, index: hit.index, normal, x: cx, y: cy, moved: false };
+      try { canvas.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
+      if (hit.kind === 'node' && key) setTime(key.t);
+      gizmo.draw();
+      e.preventDefault();
+      return;
+    }
+    if (S.editMode) {
+      drag = { kind: 'orbit', x: cx, y: cy, moved: false };
+      try { canvas.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
+      e.preventDefault();
+      return;
+    }
+    selectAt(sx, sy);
+  });
+
+  canvas.addEventListener('pointermove', (e) => {
+    const { sx, sy, cx, cy } = stageXY(e);
+    if (!drag) {
+      const canEditPath = S.editMode || !!S.selection.camera;
+      const hit = canEditPath ? gizmo?.hit(sx, sy) : null;
+      canvas.style.cursor = hit ? 'pointer' : (S.editMode ? 'grab' : 'default');
+      return;
+    }
+    if (drag.kind === 'look') {
+      const dx = cx - drag.x, dy = cy - drag.y;
+      drag.x = cx; drag.y = cy;
+      if (S.editCam) {
+        if (drag.button === 2) S.editCam.roll = clampNum(S.editCam.roll + dx * 0.25, -180, 180);
+        else S.editCam.fov = clampNum(S.editCam.fov + dy * 0.2, 1, 360);
+        preview.render(S.time);
+        gizmo.draw();
+      }
+      return;
+    }
+    if (drag.kind === 'orbit') {
+      const dx = cx - drag.x, dy = cy - drag.y;
+      drag.x = cx; drag.y = cy;
+      if (Math.abs(dx) + Math.abs(dy) > 1) drag.moved = true;
+      orbitEdit(dx, dy);
+      preview.render(S.time);
+      gizmo.draw();
+      return;
+    }
+    const key = S.project.camera?.path?.[drag.index];
+    if (!key) return;
+    const w = preview.scene3d.planeHit(sx, sy, key.pos, drag.normal);
+    if (!w) return;
+    const r2 = (v) => Math.round(v * 100) / 100;
+    if (drag.kind === 'node') key.pos = w.map(r2);
+    else key[drag.kind] = [w[0] - key.pos[0], w[1] - key.pos[1], w[2] - key.pos[2]].map(r2);
+    drag.moved = true;
+    preview.render(S.time);
+    gizmo.draw();
+  });
+
+  const endDrag = (e) => {
+    const d = drag;
+    drag = null;
+    if (!d) return;
+    if (d.kind === 'node' || d.kind === 'out' || d.kind === 'in') {
+      if (d.moved) commitCameraPath();
+      gizmo.draw();
+    } else if (d.kind === 'orbit' && !d.moved) {
+      const { sx, sy } = stageXY(e);
+      selectAt(sx, sy);
+    }
+  };
+  canvas.addEventListener('pointerup', endDrag);
+  canvas.addEventListener('pointercancel', () => { drag = null; });
+
+  // double-click a handle to drop it back to the automatic Catmull tangent
+  canvas.addEventListener('dblclick', (e) => {
+    const canEditPath = S.editMode || !!S.selection.camera;
+    if (!canEditPath) return;
+    const { sx, sy } = stageXY(e);
+    const hit = gizmo?.hit(sx, sy);
+    if (!hit || (hit.kind !== 'out' && hit.kind !== 'in')) return;
+    const key = S.project.camera?.path?.[hit.index];
+    if (!key) return;
+    key[hit.kind] = null;
+    commitCameraPath();
+    gizmo.draw();
+  });
+
+  canvas.addEventListener('wheel', (e) => {
+    if (!S.editMode) return;
+    e.preventDefault();
+    dollyEdit(Math.exp(e.deltaY * 0.0012));
+    preview.render(S.time);
+    gizmo.draw();
+  }, { passive: false });
 
   // keyboard
   window.addEventListener('keydown', (e) => {
     if (/INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
+    S.keys.add(e.code);
+    if (e.key === 'Tab') { e.preventDefault(); setEditMode(!S.editMode); return; }
+    if (e.key === 'Alt' && !e.repeat) { e.preventDefault(); toggleLookMode(); return; }
+    if (e.key === 'Escape') {
+      if (S.lookMode) { toggleLookMode(false); return; }
+      if (S.editMode) { setEditMode(false); return; }
+    }
+    if (e.key.toLowerCase() === 'g' && !e.ctrlKey && !e.metaKey) { S.grid = !S.grid; gizmo?.draw(); return; }
     const dur = S.project?.meta.duration || 12;
     const frame = 1 / (S.project?.meta.fps || 24);
     if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
@@ -425,6 +661,9 @@ async function boot() {
       if (e.shiftKey) $('#btnRedo').click(); else $('#btnUndo').click();
     }
   });
+
+  window.addEventListener('keyup', (e) => S.keys.delete(e.code));
+  window.addEventListener('blur', () => S.keys.clear());
 
   // events
   const es = new EventSource('/api/events');
@@ -457,19 +696,30 @@ async function boot() {
   // playback loop
   let last = performance.now();
   const loop = (now) => {
+    const dt = Math.min(0.1, Math.max(0, (now - last) / 1000));
+    last = now;
     if (S.playing) {
       const t = S.playFrom + (now - S.playWall) / 1000;
       if (t >= (S.project?.meta.duration || 12)) { setTime(S.project.meta.duration); pause(); }
       else { S.time = t; timeline.setTime(t); $('#timecode').textContent = `${t.toFixed(2)}s`; $('#stageTime').textContent = `${t.toFixed(2)} / ${S.project.meta.duration.toFixed(2)}s`; }
     }
     if (S.project) {
+      if (S.editMode) flyEdit(dt);
       preview.render(S.time);
+      gizmo?.draw();
       updateOverlay();
     }
     requestAnimationFrame(loop);
   };
   requestAnimationFrame(loop);
-  window.__vdm = { S, preview, timeline, inspector, op, toast, setTime: (t) => setTime(t), select: (s) => select(s), pause: () => pause(), play: () => play() };
+  window.__vdm = {
+    S, preview, timeline, inspector, gizmo, op, toast,
+    setTime: (t) => setTime(t),
+    select: (s) => select(s),
+    setEditMode: (on) => setEditMode(on),
+    pause: () => pause(),
+    play: () => play(),
+  };
 }
 
 boot().catch((e) => {

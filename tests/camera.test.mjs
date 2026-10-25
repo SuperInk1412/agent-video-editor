@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { normalizeCamera, pathPos, pathFov, evalCamera, bakeCameraTrack, v3 } from '../core/camera.js';
+import { ease } from '../core/time.js';
 import { generateCity, cityHash, DEFAULT_WORLD } from '../engine/city.js';
 import { normalizeProject } from '../core/schema.js';
 
@@ -46,6 +47,49 @@ test('fov is clamped to 1..360 (fisheye takes over at 180)', () => {
   const cam = normalizeCamera({ fov: 60, path: [{ t: 0, pos: [0, 0, 0], fov: 999 }, { t: 2, pos: [0, 0, -10], fov: -20 }] });
   assert.equal(cam.path[0].fov, 360);
   assert.equal(cam.path[1].fov, 1);
+});
+
+test('auto handles reproduce the legacy Catmull-Rom path exactly', () => {
+  const cam = normalizeCamera({
+    fov: 60,
+    path: [
+      { t: 0, pos: [0, 10, 0] },
+      { t: 1, pos: [5, 12, -3] },
+      { t: 2.5, pos: [10, 8, -8] },
+      { t: 4, pos: [3, 20, -15] },
+    ],
+  });
+  const catmull = (p0, p1, p2, p3, u) => {
+    const u2 = u * u, u3 = u2 * u;
+    const f = (a, b, c, d) => 0.5 * (2 * b + (-a + c) * u + (2 * a - 5 * b + 4 * c - d) * u2 + (-a + 3 * b - 3 * c + d) * u3);
+    return [0, 1, 2].map((i) => f(p0[i], p1[i], p2[i], p3[i]));
+  };
+  const keys = cam.path;
+  for (let t = 0; t <= 4; t += 0.05) {
+    let i = 0;
+    while (i < keys.length - 2 && t > keys[i + 1].t) i++;
+    const k1 = keys[i], k2 = keys[i + 1];
+    const k0 = keys[Math.max(0, i - 1)];
+    const k3 = keys[Math.min(keys.length - 1, i + 2)];
+    const u = (t - k1.t) / (k2.t - k1.t);
+    const old = catmull(k0.pos, k1.pos, k2.pos, k3.pos, ease(k1.ease || 'easeInOut', u));
+    const now = pathPos(cam, t);
+    [0, 1, 2].forEach((j) => assert.ok(Math.abs(old[j] - now[j]) < 1e-9, `t=${t} axis ${j}: ${old[j]} vs ${now[j]}`));
+  }
+});
+
+test('explicit handles bend the path; normalize keeps them', () => {
+  const cam = normalizeCamera({
+    fov: 60,
+    path: [
+      { t: 0, pos: [0, 0, 0], out: [0, 0, -10], ease: 'linear' },
+      { t: 1, pos: [10, 0, 0] },
+    ],
+  });
+  assert.deepEqual(cam.path[0].out, [0, 0, -10]);
+  const mid = pathPos(cam, 0.5);
+  assert.ok(mid[2] < -1, 'pulled toward the out handle');
+  assert.ok(mid[0] > 3 && mid[0] < 6);
 });
 
 test('evalCamera is deterministic and speed follows the path', () => {

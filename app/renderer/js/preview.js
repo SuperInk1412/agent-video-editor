@@ -266,6 +266,8 @@ export class Preview {
     this.layers = [];
     this.audioEl = null;
     this.scene3d = new Scene3D(this.gl);
+    this.editMode = false;
+    this.editCam = null;
     this._initGL();
   }
 
@@ -547,7 +549,7 @@ export class Preview {
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.sceneFBO.fb);
       gl.viewport(0, 0, W, H);
       gl.clearDepth(1);
-      this.scene3d.draw(p, t, W, H);
+      this.scene3d.draw(p, t, W, H, this.editMode ? this.editCam : null);
     }
 
     const layers = is3d ? [] : this.computeLayers(t);

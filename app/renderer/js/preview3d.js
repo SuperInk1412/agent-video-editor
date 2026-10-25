@@ -384,11 +384,15 @@ export class Scene3D {
     gl.bindVertexArray(null);
   }
 
-  draw(project, time, W, H) {
+  draw(project, time, W, H, overrideCam = null) {
     const gl = this.gl;
     const city = this.city;
     if (!city) return;
-    const cam = evalCamera(project, time);
+    const cam = overrideCam || evalCamera(project, time);
+    this.lastCam = cam;
+    this.lastW = W;
+    this.lastH = H;
+    this.lastVP = null;
     if (cam.fov >= 180) {
       this._drawFisheye(cam, city, W, H);
       return;
@@ -399,6 +403,7 @@ export class Scene3D {
     const proj = perspective(vfov, aspect, 0.5, 6000);
     const view = lookAt(cam.pos, cam.look, [0, 1, 0], (cam.roll || 0) * Math.PI / 180);
     const vp = mul4(proj, view);
+    this.lastVP = vp;
 
     gl.enable(gl.DEPTH_TEST);
     gl.depthFunc(gl.LEQUAL);
@@ -410,5 +415,62 @@ export class Scene3D {
     this._drawScene(vp, cam.pos, city);
     gl.disable(gl.DEPTH_TEST);
     gl.depthMask(false);
+  }
+
+  /** World -> canvas pixels for the camera of the last draw (null if behind). */
+  projectPoint(p) {
+    const m = this.lastVP;
+    if (!m) return null;
+    const x = m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12];
+    const y = m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13];
+    const w = m[3] * p[0] + m[7] * p[1] + m[11] * p[2] + m[15];
+    if (w <= 1e-6) return null;
+    return {
+      x: (x / w * 0.5 + 0.5) * this.lastW,
+      y: (1 - (y / w * 0.5 + 0.5)) * this.lastH,
+      w,
+    };
+  }
+
+  /** Screen pixel -> world ray for the camera of the last draw. */
+  ray(sx, sy) {
+    const cam = this.lastCam;
+    if (!cam || !this.lastVP || !this.lastW) return null;
+    const aspect = this.lastW / this.lastH;
+    const vfov = 2 * Math.atan(Math.tan((cam.fov * Math.PI / 180) / 2) / aspect);
+    const f = norm(sub(cam.look, cam.pos));
+    let right = norm(cross(f, [0, 1, 0]));
+    let up = cross(right, f);
+    const roll = ((cam.roll || 0) * Math.PI) / 180;
+    if (roll) {
+      const c = Math.cos(roll), s = Math.sin(roll);
+      const r2 = [right[0] * c + up[0] * s, right[1] * c + up[1] * s, right[2] * c + up[2] * s];
+      const u2 = [up[0] * c - right[0] * s, up[1] * c - right[1] * s, up[2] * c - right[2] * s];
+      right = norm(r2);
+      up = norm(u2);
+    }
+    const nx = (sx / this.lastW) * 2 - 1;
+    const ny = 1 - (sy / this.lastH) * 2;
+    const th = Math.tan(vfov / 2);
+    const dir = norm([
+      f[0] + right[0] * nx * th * aspect + up[0] * ny * th,
+      f[1] + right[1] * nx * th * aspect + up[1] * ny * th,
+      f[2] + right[2] * nx * th * aspect + up[2] * ny * th,
+    ]);
+    return { origin: cam.pos.slice(), dir };
+  }
+
+  /** Screen pixel -> point on the plane through `at` facing the active camera. */
+  planeHit(sx, sy, at = null, normal = null) {
+    const r = this.ray(sx, sy);
+    const cam = this.lastCam;
+    if (!r || !cam) return null;
+    const point = at || cam.look;
+    const n = normal || norm(sub(cam.look, cam.pos));
+    const denom = dot(r.dir, n);
+    if (Math.abs(denom) < 1e-6) return null;
+    const t = dot(sub(point, r.origin), n) / denom;
+    if (!Number.isFinite(t) || t <= 0) return null;
+    return [r.origin[0] + r.dir[0] * t, r.origin[1] + r.dir[1] * t, r.origin[2] + r.dir[2] * t];
   }
 }
