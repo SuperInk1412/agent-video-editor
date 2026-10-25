@@ -24,6 +24,7 @@ export class PathGizmo {
     this.liveSel = false;
     this.objSel = null;
     this.objHover = null;
+    this.axisHover = null;
     this.hover = null;
   }
 
@@ -394,7 +395,91 @@ export class PathGizmo {
     if (active) {
       this._objectMotion(ctx, active, time);
       this._objectBox(ctx, active, time, 'rgba(255,209,102,.95)', active.name || active.id);
+      this._objectAxes(ctx, active, time);
     }
+  }
+
+  /** Axis length for the move gizmo: ~72 CSS px at the current view distance. */
+  _axisLen(pose) {
+    const vc = this.opts.viewCam?.();
+    const dist = vc ? Math.hypot(
+      pose.pivot[0] - vc.pos[0], pose.pivot[1] - vc.pos[1], pose.pivot[2] - vc.pos[2],
+    ) : 40;
+    const fov = Math.max(5, Math.min(179, Number(vc?.fov) || 62));
+    const w = this.canvas.width / Math.max(1, this.scale);
+    const worldPerPx = (2 * Math.tan((fov * Math.PI) / 360) * dist) / Math.max(1, w);
+    return Math.max(0.5, Math.min(40, worldPerPx * 72));
+  }
+
+  _axisPoint(pose, axis, len) {
+    return [
+      pose.pivot[0] + (axis === 'x' ? len : 0),
+      pose.pivot[1] + (axis === 'y' ? len : 0),
+      pose.pivot[2] + (axis === 'z' ? len : 0),
+    ];
+  }
+
+  /** X/Y/Z arrows at the selected element's pivot (drag one to move on that axis). */
+  _objectAxes(ctx, obj, time) {
+    const pose = objectPose(obj, time);
+    const p0 = this.project(pose.pivot);
+    if (!p0) return;
+    const k = this.scale;
+    const len = this._axisLen(pose);
+    const COLORS = { x: '#ff5c7a', y: '#4ade80', z: '#5aa9ff' };
+    for (const axis of ['x', 'y', 'z']) {
+      const p1 = this.project(this._axisPoint(pose, axis, len));
+      if (!p1) continue;
+      const active = this.axisHover === axis;
+      const color = COLORS[axis];
+      ctx.strokeStyle = active ? '#ffffff' : color;
+      ctx.lineWidth = active ? 2.4 : 1.4;
+      ctx.beginPath();
+      ctx.moveTo(p0[0], p0[1]);
+      ctx.lineTo(p1[0], p1[1]);
+      ctx.stroke();
+      const dx = p1[0] - p0[0], dy = p1[1] - p0[1];
+      const l = Math.hypot(dx, dy) || 1;
+      const ux = dx / l, uy = dy / l;
+      const s = active ? 8 : 6;
+      ctx.beginPath();
+      ctx.moveTo(p1[0], p1[1]);
+      ctx.lineTo(p1[0] - ux * s - uy * s * 0.5, p1[1] - uy * s + ux * s * 0.5);
+      ctx.lineTo(p1[0] - ux * s + uy * s * 0.5, p1[1] - uy * s - ux * s * 0.5);
+      ctx.closePath();
+      ctx.fillStyle = active ? '#ffffff' : color;
+      ctx.fill();
+      ctx.font = `${9.5 * k}px ui-monospace, monospace`;
+      ctx.fillStyle = active ? '#ffffff' : color;
+      ctx.fillText(axis.toUpperCase(), p1[0] + 5 * k, p1[1] - 4 * k);
+    }
+  }
+
+  /** Hit test the move-gizmo arrows (outer 80% only, so the box stays grabbable). */
+  hitObjectAxis(sx, sy) {
+    const project = this.opts.project();
+    const obj = (project?.scene?.objects || []).find((o) => o.id === this.objSel);
+    if (!obj) return null;
+    const time = this.opts.time();
+    const start = Number(obj.start) || 0;
+    if (time < start - 1e-6 || time >= start + (Number(obj.duration) || 0)) return null;
+    const pose = objectPose(obj, time);
+    const p0 = this.project(pose.pivot);
+    if (!p0) return null;
+    const k = this.scale;
+    const len = this._axisLen(pose);
+    let best = null;
+    for (const axis of ['x', 'y', 'z']) {
+      const p1 = this.project(this._axisPoint(pose, axis, len));
+      if (!p1) continue;
+      const dx = p1[0] - p0[0], dy = p1[1] - p0[1];
+      const l2 = dx * dx + dy * dy;
+      if (l2 < 1) continue;
+      const t = Math.max(0.3, Math.min(1.05, ((sx / k - p0[0]) * dx + (sy / k - p0[1]) * dy) / l2));
+      const d = Math.hypot(p0[0] + dx * t - sx / k, p0[1] + dy * t - sy / k);
+      if (d <= 7 && (!best || d < best.d)) best = { axis, d, len, pivot: pose.pivot };
+    }
+    return best;
   }
 
   /** Sampled world path + pivot key nodes of the selected element. */

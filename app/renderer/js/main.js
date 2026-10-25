@@ -205,6 +205,7 @@ function select(sel) {
   if (gizmo) {
     gizmo.objSel = S.selection.objectId || null;
     gizmo.objHover = null;
+    gizmo.axisHover = null;
     gizmo.draw();
   }
   timeline.setSelection(S.selection);
@@ -253,6 +254,20 @@ const v3sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 const v3len = (a) => Math.hypot(a[0], a[1], a[2]);
 const v3norm = (a) => { const l = v3len(a) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
 const v3cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+
+/** Parameter along the line `p + a*s` closest to a screen ray (axis drags). */
+function axisClosestS(ray, p, a) {
+  if (!ray) return null;
+  const d = ray.dir;
+  const w = [ray.origin[0] - p[0], ray.origin[1] - p[1], ray.origin[2] - p[2]];
+  const b = a[0] * d[0] + a[1] * d[1] + a[2] * d[2];
+  const c = a[0] * w[0] + a[1] * w[1] + a[2] * w[2];
+  const e = d[0] * w[0] + d[1] * w[1] + d[2] * w[2];
+  const denom = 1 - b * b;
+  if (denom < 1e-6) return null;
+  const tRay = (b * c - e) / denom;
+  return c + b * tRay;
+}
 
 function setEditMode(on) {
   const btn = $('#btnEditMode');
@@ -609,6 +624,17 @@ async function boot() {
     return { sx: (e.clientX - r.left) * kx, sy: (e.clientY - r.top) * ky, cx: e.clientX, cy: e.clientY };
   };
   let drag = null;
+  // Write a value straight into the in-memory track so the viewport previews a
+  // drag before the op lands (the op rewrites the same key on pointerup).
+  const setLiveKey = (obj, path, v) => {
+    const t = Math.round(S.time * 1000) / 1000;
+    const tracks = obj.tracks || (obj.tracks = {});
+    const list = tracks[path] || (tracks[path] = []);
+    const k = list.find((x) => Math.abs(x.t - t) < 1e-3);
+    const val = Array.isArray(v) ? v.slice() : v;
+    if (k) k.v = val;
+    else { list.push({ t, v: val }); list.sort((a, b) => a.t - b.t); }
+  };
   const selectAt = (sx, sy) => {
     const id = preview.hitTest(sx, sy, S.time);
     if (id) return select({ elementId: id });
@@ -770,6 +796,28 @@ async function boot() {
         return;
       }
     }
+    // move-gizmo arrow: constrained drag along one world axis
+    const ax = gizmo?.hitObjectAxis(sx, sy);
+    if (ax) {
+      const obj = (S.project.scene?.objects || []).find((o) => o.id === gizmo.objSel);
+      if (obj) {
+        const axisVec = [ax.axis === 'x' ? 1 : 0, ax.axis === 'y' ? 1 : 0, ax.axis === 'z' ? 1 : 0];
+        const s0 = axisClosestS(preview.scene3d.ray(sx, sy), ax.pivot, axisVec);
+        if (s0 != null) {
+          pause();
+          select({ objectId: obj.id });
+          gizmo.axisHover = ax.axis;
+          drag = {
+            kind: 'objaxis', id: obj.id, axis: axisVec, p0: ax.pivot.slice(),
+            s0, pivot: ax.pivot.slice(), x: cx, y: cy, moved: false,
+          };
+          try { canvas.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
+          gizmo.draw();
+          e.preventDefault();
+          return;
+        }
+      }
+    }
     // timeline element in the 3D scene: pick it and start a keyed move
     const pick = preview.scene3d?.pickObject(S.project, S.time, sx, sy);
     if (pick) {
@@ -804,10 +852,15 @@ async function boot() {
       if (S.editMode) {
         if (S.viewMode === 'move') { canvas.style.cursor = 'grab'; return; }
         const hit = gizmo?.hit(sx, sy) || gizmo?.hitLive(sx, sy) || gizmo?.hitObjectKey(sx, sy);
-        const obj = hit ? null : preview.scene3d?.pickObject(S.project, S.time, sx, sy);
+        const axHit = hit ? null : gizmo?.hitObjectAxis(sx, sy);
+        const obj = (hit || axHit) ? null : preview.scene3d?.pickObject(S.project, S.time, sx, sy);
         const hoverId = obj?.id || null;
-        if (gizmo && gizmo.objHover !== hoverId) { gizmo.objHover = hoverId; gizmo.draw(); }
-        canvas.style.cursor = hit || obj ? 'pointer' : 'default';
+        if (gizmo && (gizmo.objHover !== hoverId || gizmo.axisHover !== (axHit?.axis || null))) {
+          gizmo.objHover = hoverId;
+          gizmo.axisHover = axHit?.axis || null;
+          gizmo.draw();
+        }
+        canvas.style.cursor = hit || axHit || obj ? 'pointer' : 'default';
         return;
       }
       const hit = S.selection.camera ? gizmo?.hit(sx, sy) : null;
@@ -895,6 +948,23 @@ async function boot() {
       gizmo.draw();
       return;
     }
+    if (drag.kind === 'objaxis') {
+      if (Math.abs(cx - drag.x) + Math.abs(cy - drag.y) < 2) return;
+      const s = axisClosestS(preview.scene3d.ray(sx, sy), drag.p0, drag.axis);
+      if (s == null) return;
+      const delta = s - drag.s0;
+      drag.pivot = [
+        r2(drag.p0[0] + drag.axis[0] * delta),
+        r2(drag.p0[1] + drag.axis[1] * delta),
+        r2(drag.p0[2] + drag.axis[2] * delta),
+      ];
+      const obj = (S.project.scene?.objects || []).find((o) => o.id === drag.id);
+      if (obj) setLiveKey(obj, 'pivot', drag.pivot);
+      drag.moved = true;
+      preview.render(S.time);
+      gizmo.draw();
+      return;
+    }
     if (drag.kind === 'object') {
       if (Math.abs(cx - drag.x) + Math.abs(cy - drag.y) < 3) return;
       const w = preview.scene3d.planeHit(sx, sy, drag.hit, drag.normal);
@@ -905,15 +975,7 @@ async function boot() {
         r2(drag.pivot0[2] + w[2] - drag.hit[2]),
       ];
       const obj = (S.project.scene?.objects || []).find((o) => o.id === drag.id);
-      if (obj) {
-        // live preview: write the pivot straight into a key at the playhead
-        const t = Math.round(S.time * 1000) / 1000;
-        const tracks = obj.tracks || (obj.tracks = {});
-        const list = tracks.pivot || (tracks.pivot = []);
-        const k = list.find((x) => Math.abs(x.t - t) < 1e-3);
-        if (k) k.v = drag.pivot.slice();
-        else { list.push({ t, v: drag.pivot.slice() }); list.sort((a, b) => a.t - b.t); }
-      }
+      if (obj) setLiveKey(obj, 'pivot', drag.pivot);
       drag.moved = true;
       preview.render(S.time);
       gizmo.draw();
@@ -961,6 +1023,14 @@ async function boot() {
     } else if (d.kind === 'objkey') {
       if (d.moved && d.pivot) {
         op({ op: 'objectKey', id: d.id, path: 'pivot', t: d.keyT, v: d.pivot });
+      }
+      gizmo.draw();
+    } else if (d.kind === 'objaxis') {
+      if (d.moved && d.pivot) {
+        op({
+          op: 'objectKey', id: d.id, path: 'pivot',
+          t: Math.round(S.time * 1000) / 1000, v: d.pivot,
+        });
       }
       gizmo.draw();
     } else if (d.kind === 'click' && !d.moved) {
