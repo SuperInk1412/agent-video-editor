@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { findProjectRoot } from '../core/store.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..');
@@ -25,11 +26,15 @@ function findElectron() {
   return null;
 }
 
-const project = (() => {
+// --project > the directory you launched from > projects/demo
+const project = await (async () => {
   const i = argv.indexOf('--project');
   if (i >= 0 && argv[i + 1]) return path.resolve(argv[i + 1]);
+  const fromCwd = await findProjectRoot(process.cwd());
+  if (fromCwd) return fromCwd;
   return path.join(REPO, 'projects', 'demo');
 })();
+console.log(`[vdm] opening ${project}`);
 
 if (webMode) {
   const port = Number(process.env.VDM_PORT || 47100);
