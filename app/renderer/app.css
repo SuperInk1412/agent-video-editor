@@ -237,6 +237,8 @@ body.look-mode #stageBox { box-shadow: 0 0 0 2px rgba(255,209,102,.65), 0 0 30px
 .kf-v { color: var(--yellow); font-family: var(--mono); overflow: hidden; }
 .kf-ease { font-size: 10px; padding: 1px 2px; }
 .kf-row .mini { padding: 1px 4px; font-size: 10px; }
+.rotball-wrap { display: flex; justify-content: center; padding: 4px 0 4px; }
+.rotball { display: block; cursor: crosshair; border-radius: 50%; }
 
 /* ---------------- agent ---------------- */
 .agent-status { font-size: 11px; color: var(--ok); }

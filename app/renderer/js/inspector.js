@@ -2,6 +2,7 @@
 import { evalElement } from '/core/evaluate.js';
 import { evalCamera } from '/core/camera.js';
 import { objectPose } from '/core/scene.js';
+import { RotBall } from './rotball.js';
 import { escapeHtml } from './timeline.js';
 
 const MOTIONS = ['none', 'in', 'out', 'left', 'right', 'up', 'down', 'drift', 'shake'];
@@ -51,6 +52,7 @@ export class Inspector {
 
   render(project, sel, time) {
     const active = document.activeElement;
+    if (this._ballDragging) return;
     if (this.root.contains(active) && /INPUT|TEXTAREA|SELECT/.test(active?.tagName || '')) return;
     const key = `${project.rev}|${sel?.camera ? 'cam' : ''}|${sel?.elementId}|${sel?.objectId}|${sel?.segmentId}|${Math.round(time * 10)}`;
     if (key === this.lastRenderKey) return;
@@ -311,6 +313,21 @@ export class Inspector {
       this._field({ label: '宽', value: g.w ?? 2, step: 0.1, min: 0.01, onChange: (v) => patch('gw', { geom: { ...g, w: v } }) }),
       this._field({ label: '高', value: g.h ?? 2, step: 0.1, min: 0.01, onChange: (v) => patch('gh', { geom: { ...g, h: v } }) }),
       this._field({ label: '厚', value: g.d ?? 2, step: 0.1, min: 0.01, onChange: (v) => patch('gd', { geom: { ...g, d: v } }) }),
+    ));
+
+    const dirKeys = (obj.tracks?.dir || []).filter((k) => Array.isArray(k.v));
+    const ballHost = h('div', { class: 'rotball-wrap' });
+    new RotBall(ballHost, {
+      dir: pose.dir,
+      keys: dirKeys,
+      time,
+      onStart: () => { this._ballDragging = true; },
+      onEnd: () => { this._ballDragging = false; },
+      onChange: (d) => this._commit(`${id}:dir`, { op: 'objectKey', id, path: 'dir', t: tNow(), v: d }, 90),
+    });
+    this.root.appendChild(this._section('朝向（球面）',
+      ballHost,
+      h('div', { class: 'hint' }, '拖动球面上的点改朝向；小菱形是已有的方向关键帧。'),
     ));
 
     const rows = [];
