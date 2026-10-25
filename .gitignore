@@ -22,3 +22,7 @@ List.efu
 
 # reference app (large binary, local only)
 参考程序/
+
+# python bytecode
+__pycache__/
+*.pyc
