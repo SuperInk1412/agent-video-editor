@@ -1,6 +1,6 @@
 {
   "schema": "vdm.project/1",
-  "rev": 12,
+  "rev": 14,
   "meta": {
     "title": "夜之城 · 无人机穿城",
     "fps": 24,
@@ -23,12 +23,12 @@
       "shake": 0
     },
     "style": "default",
-    "savedAt": "2026-10-25T07:07:25.027Z"
+    "savedAt": "2026-10-25T07:15:59.433Z"
   },
   "segments": [],
   "elements": [],
   "camera": {
-    "fov": 68,
+    "fov": 78,
     "near": 0.5,
     "far": 5000,
     "lookAhead": 90,
@@ -168,7 +168,7 @@
   },
   "world": {
     "source": "procedural",
-    "seed": 2077,
+    "seed": 4242,
     "grid": {
       "nx": 14,
       "nz": 20,
