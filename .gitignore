@@ -20,8 +20,9 @@ Thumbs.db
 *.tmp
 List.efu
 
-# reference app (large binary, local only)
+# reference app / design refs (local only)
 参考程序/
+参考设计/
 
 # python bytecode
 __pycache__/

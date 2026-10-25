@@ -282,8 +282,8 @@ export class Inspector {
     };
 
     this.root.appendChild(this._section('变换（m）',
-      vec('位置', pose.pivot, 'pivot'),
-      vec('几何偏移', pose.position, 'position'),
+      vec('中心点', pose.pivot, 'pivot'),
+      vec('位置', pose.position, 'position'),
       vec('缩放', pose.scale, 'scale'),
       this._field({
         label: '不透明度', value: Math.round(pose.opacity * 1000) / 1000, step: 0.01, min: 0, max: 1,

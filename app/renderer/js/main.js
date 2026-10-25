@@ -2,6 +2,7 @@
 import { Preview } from './preview.js';
 import { PathGizmo } from './pathgizmo.js';
 import { Timeline, escapeHtml } from './timeline.js';
+import { TimelineProps } from './tlprops.js';
 import { Inspector } from './inspector.js';
 import { AgentPanel } from './ai.js';
 import { PipelinePanel } from './pipeline.js';
@@ -30,7 +31,7 @@ const S = {
   keys: new Set(),
 };
 
-let preview, timeline, inspector, agentPanel, pipelinePanel, logPanel, gizmo, projects;
+let preview, timeline, tlProps, inspector, agentPanel, pipelinePanel, logPanel, gizmo, projects;
 
 // ---- error reporting: everything lands in .vdm/logs and the 日志 panel ----
 const reportedErrors = new Set();
@@ -139,6 +140,10 @@ function applyProject(p, source) {
   preview.setProject(p);
   timeline.setProject(p);
   timeline.setSelection(S.selection);
+  if (tlProps) {
+    tlProps.setProject(p);
+    tlProps.setSelection(S.selection);
+  }
   inspector.render(p, S.selection, S.time);
   renderShots();
   $('#projTitle').textContent = p.meta.title;
@@ -156,6 +161,7 @@ function setTime(t, { seekAudio = true } = {}) {
   const dur = S.project?.meta.duration || 12;
   S.time = Math.max(0, Math.min(dur, t));
   timeline?.setTime(S.time);
+  tlProps?.setTime(S.time);
   $('#timecode').textContent = `${S.time.toFixed(2)}s`;
   $('#stageTime').textContent = `${S.time.toFixed(2)} / ${dur.toFixed(2)}s`;
   if (seekAudio && S.playing) preview.setAudioTime(S.time);
@@ -209,6 +215,8 @@ function select(sel) {
     gizmo.draw();
   }
   timeline.setSelection(S.selection);
+  tlProps?.setSelection(S.selection);
+  tlProps?.setTime(S.time);
   inspector.render(S.project, S.selection, S.time);
   renderShots();
   updateOverlay();
@@ -497,13 +505,19 @@ async function boot() {
   });
   gizmo.resize();
 
-  timeline = new Timeline($('#timeline'), {
+  timeline = new Timeline($('#tlTracks'), {
     onSeek: (t) => { setTime(t); if (S.playing) { S.playFrom = t; S.playWall = performance.now(); preview.setAudioTime(t); } },
     onSelect: (sel) => select(sel),
-    onSegment: (id) => { S.selection = { segmentId: id, elementId: null }; renderShots(); inspector.render(S.project, S.selection, S.time); },
+    onSegment: (id) => { S.selection = { segmentId: id, elementId: null, objectId: null }; tlProps?.setSelection(S.selection); renderShots(); inspector.render(S.project, S.selection, S.time); },
     onOp: (o) => op(o),
   });
   timeline.setProject(S.project);
+
+  tlProps = new TimelineProps($('#tlProps'), {
+    onOp: (o) => op(o),
+    getTime: () => S.time,
+    onPause: () => pause(),
+  });
 
   inspector = new Inspector($('#panelInsp'), {
     onOp: (o) => op(o),
@@ -1161,7 +1175,13 @@ async function boot() {
     if (S.playing) {
       const t = S.playFrom + (now - S.playWall) / 1000;
       if (t >= (S.project?.meta.duration || 12)) { setTime(S.project.meta.duration); pause(); }
-      else { S.time = t; timeline.setTime(t); $('#timecode').textContent = `${t.toFixed(2)}s`; $('#stageTime').textContent = `${t.toFixed(2)} / ${S.project.meta.duration.toFixed(2)}s`; }
+      else {
+        S.time = t;
+        timeline.setTime(t);
+        tlProps?.setTime(t);
+        $('#timecode').textContent = `${t.toFixed(2)}s`;
+        $('#stageTime').textContent = `${t.toFixed(2)} / ${S.project.meta.duration.toFixed(2)}s`;
+      }
     }
     if (S.project) {
       if (S.editMode) flyEdit(dt);
@@ -1173,7 +1193,7 @@ async function boot() {
   };
   requestAnimationFrame(loop);
   window.__vdm = {
-    S, preview, timeline, inspector, gizmo, projects, op, toast,
+    S, preview, timeline, tlProps, inspector, gizmo, projects, op, toast,
     setTime: (t) => setTime(t),
     select: (s) => select(s),
     setEditMode: (on) => setEditMode(on),

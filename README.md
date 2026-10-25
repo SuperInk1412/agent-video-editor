@@ -52,7 +52,7 @@ Electron 路径可用 `VDM_ELECTRON` 覆盖；Blender 用 `VDM_BLENDER` 覆盖�
 
 ## 已验证
 
-- `npm test`：63 个单元测试全绿（ops / 求值 / 场景 / 相机 / 迁移 / 存储锁 / 节拍 / agent 解析）
+- `npm test`：64 个单元测试全绿（ops / 求值 / 场景 / 相机 / 迁移 / 存储锁 / 节拍 / agent 解析）
 - Blender 5.0.1 无头 EEVEE：1080p 单帧约 3–5s（含启动），24s@50% 成片约 70s
 - 示例项目 `projects/demo`：24s / 6 分镜 / 13 元素，成片在
   `projects/demo/.vdm/renders/master-*.mp4`（含音轨）
@@ -83,6 +83,8 @@ node ../../cli/vdm.js render --from 0 --to 6 --scale 0.5
 位置关键帧；选中元素会画出它的运动轨迹，轨迹上的菱形是位置关键帧（播放头所在的那个可以拖）。
 检查器里可以改颜色/尺寸/缩放/不透明度、用**旋转球**改朝向（同样写 `dir` 关键帧），
 以及「面向镜头 / 落地 / 复制（Ctrl+D）」；关键帧列表可以改每一段的 ease 或跳到该帧。
+选中元素时，**时间轴左侧**还会出现它的属性面板（中心点/位置/缩放/不透明度，各 3 维）：
+数值随播放头按关键帧实时同步；已有键时改值=在当前时间写键，没有键时改值=改基础属性。
 字段与 ops 细节见 `docs/SPEC-OBJECTS.md`。
 
 视口和 Blender 共用 `core/scene.js::objectPose()`，`engine/shot.js` 把逐帧变换烘进 shot 包，
