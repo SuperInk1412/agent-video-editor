@@ -962,6 +962,7 @@ async function boot() {
       drag.moved = true;
       preview.render(S.time);
       gizmo.draw();
+      tlProps?.setTime(S.time);
       return;
     }
     if (drag.kind === 'objaxis') {
@@ -979,6 +980,7 @@ async function boot() {
       drag.moved = true;
       preview.render(S.time);
       gizmo.draw();
+      tlProps?.setTime(S.time);
       return;
     }
     if (drag.kind === 'object') {
@@ -995,6 +997,7 @@ async function boot() {
       drag.moved = true;
       preview.render(S.time);
       gizmo.draw();
+      tlProps?.setTime(S.time);
       return;
     }
     const key = S.project.camera?.path?.[drag.index];
