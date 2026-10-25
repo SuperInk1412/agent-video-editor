@@ -1,0 +1,750 @@
+# -*- coding: utf-8 -*-
+"""
+VedioMaker -> Blender scene builder.
+
+Mirrors core/evaluate.js exactly:
+    transform = base -> keyframes -> motion delta -> fade
+    y axis points DOWN in the project, UP in Blender (we negate it)
+    world units == project pixels (orthographic camera, ortho_scale = width)
+
+Everything is built once, then a frame_change_pre handler updates each layer,
+so an animation render stays fast.
+"""
+import bpy
+import json
+import math
+import os
+import numpy as np
+
+# ---------------------------------------------------------------- utilities
+
+def srgb_to_linear(c):
+    return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+
+def hex_rgba(h, alpha=1.0):
+    if isinstance(h, (list, tuple)):
+        return tuple(h[:3]) + (alpha,)
+    s = str(h or '#ffffff').strip().lstrip('#')
+    if len(s) == 3:
+        s = ''.join(ch * 2 for ch in s)
+    if len(s) < 6:
+        s = 'ffffff'
+    r, g, b = (int(s[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
+    return (srgb_to_linear(r), srgb_to_linear(g), srgb_to_linear(b), alpha)
+
+
+def clamp(v, a=0.0, b=1.0):
+    return a if v < a else b if v > b else v
+
+
+def lerp(a, b, t):
+    return a + (b - a) * t
+
+
+def ease(name, p):
+    p = clamp(p)
+    if name == 'linear':
+        return p
+    if name == 'easeIn':
+        return p * p
+    if name == 'easeOut':
+        return 1 - (1 - p) ** 2
+    if name == 'smooth':
+        return p * p * (3 - 2 * p)
+    if name == 'outExpo':
+        return 1 if p >= 1 else 1 - 2 ** (-10 * p)
+    if name == 'inOutCubic':
+        return 4 * p ** 3 if p < 0.5 else 1 - (-2 * p + 2) ** 3 / 2
+    if name == 'outBack':
+        c1, c3 = 1.70158, 2.70158
+        return 1 + c3 * (p - 1) ** 3 + c1 * (p - 1) ** 2
+    # easeInOut (default)
+    return 2 * p * p if p < 0.5 else 1 - (-2 * p + 2) ** 2 / 2
+
+
+def sample_track(keys, path, t, base):
+    if not keys:
+        return base
+    track = sorted([k for k in keys if k.get('path') == path], key=lambda k: k['t'])
+    if not track:
+        return base
+    if t <= track[0]['t']:
+        return track[0]['value']
+    if t >= track[-1]['t']:
+        return track[-1]['value']
+    for i in range(len(track) - 1):
+        a, b = track[i], track[i + 1]
+        if a['t'] <= t < b['t']:
+            p = (t - a['t']) / max(1e-6, b['t'] - a['t'])
+            if isinstance(a['value'], (int, float)) and isinstance(b['value'], (int, float)):
+                return lerp(a['value'], b['value'], ease(a.get('ease', 'easeInOut'), p))
+            return a['value']
+    return base
+
+
+def motion_delta(el, t, meta):
+    m = el.get('motion') or {}
+    amt = float(m.get('amount') or 0)
+    d = {'x': 0.0, 'y': 0.0, 'scale': 1.0, 'rotation': 0.0}
+    if not amt:
+        return d
+    p = clamp((t - el['start']) / max(1e-6, el['duration']))
+    q = 0.35 * ease('easeInOut', p) + 0.65 * p
+    w, h = meta['width'], meta['height']
+    typ = m.get('type', 'none')
+    if typ == 'in':
+        d['scale'] = 1 + amt * q
+    elif typ == 'out':
+        d['scale'] = 1 + amt * (1 - q)
+    elif typ == 'left':
+        d['x'] = -amt * w * (q - 0.5); d['scale'] = 1.02
+    elif typ == 'right':
+        d['x'] = amt * w * (q - 0.5); d['scale'] = 1.02
+    elif typ == 'up':
+        d['y'] = amt * h * (q - 0.5); d['scale'] = 1.02
+    elif typ == 'down':
+        d['y'] = -amt * h * (q - 0.5); d['scale'] = 1.02
+    elif typ == 'drift':
+        d['x'] = amt * w * (q - 0.5); d['y'] = -amt * h * 0.25 * (q - 0.5)
+    elif typ == 'shake':
+        s = amt * 0.5
+        d['x'] = s * 14 * (math.sin(t * 37) + math.sin(t * 23.3) * 0.6)
+        d['y'] = s * 14 * math.sin(t * 29.1)
+        d['rotation'] = s * 0.7 * math.sin(t * 17.7)
+    return d
+
+
+def eval_element(el, t, meta):
+    tr = el.get('transform') or {}
+    kf = el.get('keyframes') or []
+
+    def g(path, default):
+        return sample_track(kf, path, t, default)
+
+    st = {
+        'x': float(g('transform.x', tr.get('x', 0)) or 0),
+        'y': float(g('transform.y', tr.get('y', 0)) or 0),
+        'scale': float(g('transform.scale', tr.get('scale', 1)) or 1),
+        'rotation': float(g('transform.rotation', tr.get('rotation', 0)) or 0),
+        'opacity': float(g('transform.opacity', tr.get('opacity', 1)) or 0),
+        'glow': float(g('fx.glow', (el.get('fx') or {}).get('glow', 0)) or 0),
+        'text': g('style.text', (el.get('style') or {}).get('text', '')),
+        'size': float(g('style.size', (el.get('style') or {}).get('size', 96)) or 96),
+        'color': g('style.color', (el.get('style') or {}).get('color', '#ffffff')),
+    }
+    md = motion_delta(el, t, meta)
+    st['x'] += md['x']
+    st['y'] += md['y']
+    st['scale'] *= md['scale']
+    st['rotation'] += md['rotation']
+
+    fin = float(el.get('fadeIn') or 0)
+    fout = float(el.get('fadeOut') or 0)
+    fade = 1.0
+    if fin > 0:
+        fade *= clamp((t - el['start']) / fin)
+    if fout > 0:
+        fade *= clamp((el['start'] + el['duration'] - t) / fout)
+    st['opacity'] = clamp(st['opacity'] * fade)
+    st['active'] = el['start'] - 1e-6 <= t < el['start'] + el['duration'] - 1e-6
+    return st
+
+
+# ---------------------------------------------------------------- scene bits
+
+def reset_scene():
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    return bpy.context.scene
+
+
+def make_world(scene, color):
+    world = bpy.data.worlds.new('VDM_World')
+    world.use_nodes = True
+    scene.world = world
+    bg = world.node_tree.nodes.get('Background')
+    if bg:
+        bg.inputs[0].default_value = hex_rgba(color)
+        bg.inputs[1].default_value = 1.0
+    return world
+
+
+def make_camera(scene, width, height):
+    cam_data = bpy.data.cameras.new('VDM_Cam')
+    cam_data.type = 'ORTHO'
+    cam_data.ortho_scale = float(width)
+    cam = bpy.data.objects.new('VDM_Cam', cam_data)
+    cam.location = (0.0, 0.0, 100.0)
+    cam.rotation_euler = (0.0, 0.0, 0.0)
+    scene.collection.objects.link(cam)
+    scene.camera = cam
+    return cam
+
+
+def plane_mesh(name, w, h, uv_rect=(0, 0, 1, 1)):
+    mesh = bpy.data.meshes.new(name)
+    hx, hy = w / 2.0, h / 2.0
+    verts = [(-hx, -hy, 0), (hx, -hy, 0), (hx, hy, 0), (-hx, hy, 0)]
+    mesh.from_pydata(verts, [], [(0, 1, 2, 3)])
+    mesh.update()
+    uv = mesh.uv_layers.new(name='UVMap')
+    u0, v0, u1, v1 = uv_rect
+    corners = [(u0, v0), (u1, v0), (u1, v1), (u0, v1)]
+    for poly in mesh.polygons:
+        for li in poly.loop_indices:
+            vi = mesh.loops[li].vertex_index
+            uv.data[li].uv = corners[vi]
+    return mesh
+
+
+def disc_mesh(name, w, h, segments=96):
+    mesh = bpy.data.meshes.new(name)
+    verts = [(0.0, 0.0, 0.0)]
+    for i in range(segments):
+        a = 2 * math.pi * i / segments
+        verts.append((math.cos(a) * w / 2.0, math.sin(a) * h / 2.0, 0.0))
+    faces = [(0, i + 1, (i + 1) % segments + 1) for i in range(segments)]
+    mesh.from_pydata(verts, [], faces)
+    mesh.update()
+    return mesh
+
+
+def new_material(name):
+    mat = bpy.data.materials.new(name)
+    mat.use_nodes = True
+    nt = mat.node_tree
+    for n in list(nt.nodes):
+        nt.nodes.remove(n)
+    return mat, nt
+
+
+def finish_shader(nt, shader):
+    out = nt.nodes.new('ShaderNodeOutputMaterial')
+    nt.links.new(shader.outputs[0], out.inputs['Surface'])
+    return out
+
+
+def textured_material(name, image, opacity=1.0):
+    mat, nt = new_material(name)
+    tex = nt.nodes.new('ShaderNodeTexImage')
+    tex.image = image
+    tex.extension = 'CLIP'
+    tex.interpolation = 'Linear'
+    em = nt.nodes.new('ShaderNodeEmission')
+    trans = nt.nodes.new('ShaderNodeBsdfTransparent')
+    mix = nt.nodes.new('ShaderNodeMixShader')
+    amul = nt.nodes.new('ShaderNodeMath')
+    amul.operation = 'MULTIPLY'
+    amul.inputs[1].default_value = opacity
+    nt.links.new(tex.outputs['Color'], em.inputs['Color'])
+    nt.links.new(tex.outputs['Alpha'], amul.inputs[0])
+    nt.links.new(amul.outputs[0], mix.inputs[0])
+    nt.links.new(trans.outputs[0], mix.inputs[1])
+    nt.links.new(em.outputs[0], mix.inputs[2])
+    finish_shader(nt, mix)
+    mat.surface_render_method = 'BLENDED'
+    mat.use_transparent_shadow = False
+    return mat, {'mix': mix, 'em': em, 'alpha': amul.inputs[1], 'tex': tex}
+
+
+def flat_material(name, color, opacity=1.0):
+    mat, nt = new_material(name)
+    em = nt.nodes.new('ShaderNodeEmission')
+    em.inputs['Color'].default_value = hex_rgba(color)
+    trans = nt.nodes.new('ShaderNodeBsdfTransparent')
+    mix = nt.nodes.new('ShaderNodeMixShader')
+    amul = nt.nodes.new('ShaderNodeValue')
+    amul.outputs[0].default_value = opacity
+    nt.links.new(amul.outputs[0], mix.inputs[0])
+    nt.links.new(trans.outputs[0], mix.inputs[1])
+    nt.links.new(em.outputs[0], mix.inputs[2])
+    finish_shader(nt, mix)
+    mat.surface_render_method = 'BLENDED'
+    mat.use_transparent_shadow = False
+    return mat, {'mix': mix, 'em': em, 'alpha': amul.outputs[0]}
+
+
+FONT_MAP = {
+    'simhei': 'C:/Windows/Fonts/simhei.ttf',
+    'microsoft yahei': 'C:/Windows/Fonts/msyh.ttc',
+    'yahei': 'C:/Windows/Fonts/msyh.ttc',
+    'arial': 'C:/Windows/Fonts/arial.ttf',
+    'impact': 'C:/Windows/Fonts/impact.ttf',
+    'bahnschrift': 'C:/Windows/Fonts/bahnschrift.ttf',
+}
+
+
+def resolve_font(style):
+    fp = style.get('fontPath')
+    if fp and os.path.exists(fp):
+        return fp
+    name = str(style.get('font') or 'SimHei')
+    key = name.lower()
+    if key in FONT_MAP and os.path.exists(FONT_MAP[key]):
+        return FONT_MAP[key]
+    for k, v in FONT_MAP.items():
+        if k in key and os.path.exists(v):
+            return v
+    return FONT_MAP['simhei'] if os.path.exists(FONT_MAP['simhei']) else None
+
+
+def cover_uv(img_w, img_h, frame_w, frame_h):
+    """UV rect so an image COVERS the frame without distortion."""
+    if not img_w or not img_h:
+        return (0, 0, 1, 1)
+    img_aspect = img_w / img_h
+    frame_aspect = frame_w / frame_h
+    if img_aspect > frame_aspect:  # image wider -> crop sides
+        f = frame_aspect / img_aspect
+        return ((1 - f) / 2, 0, 1 - (1 - f) / 2, 1)
+    f = img_aspect / frame_aspect  # image taller -> crop top/bottom
+    return (0, (1 - f) / 2, 1, 1 - (1 - f) / 2)
+
+
+# ---------------------------------------------------------------- compositor
+
+def _noise_png(path, w, h, seed=7):
+    rng = np.random.default_rng(seed)
+    base = rng.normal(0.5, 0.16, size=(h, w))
+    base = np.clip(base, 0, 1)
+    rgba = np.ones((h, w, 4), dtype=np.float32)
+    rgba[:, :, 0] = base
+    rgba[:, :, 1] = base
+    rgba[:, :, 2] = base
+    rgba[:, :, 3] = 1.0
+    img = bpy.data.images.new('vdm_grain_src', width=w, height=h, alpha=True)
+    img.pixels.foreach_set(rgba.ravel())
+    img.filepath_raw = path
+    img.file_format = 'PNG'
+    img.save()
+    bpy.data.images.remove(img)
+    return path
+
+
+def _scan_png(path, w, h):
+    rgba = np.ones((h, w, 4), dtype=np.float32)
+    rows = np.arange(h)
+    val = np.where(rows % 3 == 0, 0.80, 1.0).astype(np.float32)
+    rgba[:, :, 0] = val[:, None]
+    rgba[:, :, 1] = val[:, None]
+    rgba[:, :, 2] = val[:, None]
+    img = bpy.data.images.new('vdm_scan_src', width=w, height=h, alpha=True)
+    img.pixels.foreach_set(rgba.ravel())
+    img.filepath_raw = path
+    img.file_format = 'PNG'
+    img.save()
+    bpy.data.images.remove(img)
+    return path
+
+
+
+def set_menu(sock, *vals):
+    """Menu sockets differ in casing across versions; try each spelling."""
+    for v in vals:
+        try:
+            sock.default_value = v
+            return True
+        except Exception:
+            continue
+    return False
+
+def _mix(ng, a, b, fac=1.0, blend='MIX'):
+    m = ng.nodes.new('ShaderNodeMix')
+    m.data_type = 'RGBA'
+    m.blend_type = blend
+    # RGBA sockets: Factor[0], A[6], B[7]; result RGBA = outputs[2]
+    m.inputs[0].default_value = fac
+    for src, sock in ((a, m.inputs[6]), (b, m.inputs[7])):
+        if isinstance(src, (int, float)):
+            sock.default_value = (src, src, src, 1.0)
+        elif isinstance(src, tuple):
+            sock.default_value = src
+        else:
+            ng.links.new(src, sock)
+    return m
+
+
+def _val(ng, v):
+    n = ng.nodes.new('ShaderNodeValue')
+    n.outputs[0].default_value = float(v)
+    return n.outputs[0]
+
+
+def build_compositor(scene, meta, cache_dir):
+    fx = meta.get('fx') or {}
+    w, h = scene.render.resolution_x, scene.render.resolution_y
+    os.makedirs(cache_dir, exist_ok=True)
+
+    ng = bpy.data.node_groups.new('VDM_Composite', 'CompositorNodeTree')
+    scene.compositing_node_group = ng
+    scene.render.use_compositing = True
+
+    rl = ng.nodes.new('CompositorNodeRLayers')
+    chain = rl.outputs['Image']
+
+    # grade ---------------------------------------------------------------
+    cb = ng.nodes.new('CompositorNodeColorBalance')
+    cb.inputs['Factor'].default_value = 1.0
+    set_menu(cb.inputs['Type'], 'Lift/Gamma/Gain', 'LIFT_GAMMA_GAIN')
+    for nm in ('Lift', 'Gamma', 'Gain'):
+        for i in cb.inputs:
+            if i.name == nm and i.type == 'RGBA':
+                i.default_value = (1, 1, 1, 1)
+    grad = float(fx.get('grade') or 0)
+    if grad:
+        warm, cool = (1.0, 0.94, 0.86), (0.88, 0.95, 1.0)
+        gain = warm if grad > 0 else cool
+        k = abs(grad)
+        for i in cb.inputs:
+            if i.name == 'Gain' and i.type == 'RGBA':
+                i.default_value = tuple(lerp(1.0, gain[j], k) for j in range(3)) + (1.0,)
+    ng.links.new(chain, cb.inputs['Image'])
+    chain = cb.outputs['Image']
+
+    hs = ng.nodes.new('CompositorNodeHueSat')
+    hs.inputs['Saturation'].default_value = float(fx.get('saturation', 1) or 1)
+    ng.links.new(chain, hs.inputs['Image'])
+    chain = hs.outputs['Image']
+
+    bc = ng.nodes.new('CompositorNodeBrightContrast')
+    bc.inputs['Contrast'].default_value = float(fx.get('contrast', 0) or 0) * 40
+    ng.links.new(chain, bc.inputs['Image'])
+    chain = bc.outputs['Image']
+
+    # chromatic aberration ------------------------------------------------
+    ca = float(fx.get('ca') or 0)
+    if ca > 0.001:
+        ld = ng.nodes.new('CompositorNodeLensdist')
+        ld.inputs['Dispersion'].default_value = ca * 0.06
+        ng.links.new(chain, ld.inputs['Image'])
+        chain = ld.outputs['Image']
+
+    # bloom ---------------------------------------------------------------
+    bloom = float(fx.get('bloom') or 0)
+    if bloom > 0.001:
+        gl = ng.nodes.new('CompositorNodeGlare')
+        set_menu(gl.inputs['Type'], 'Fog Glow', 'FOG_GLOW')
+        set_menu(gl.inputs['Quality'], 'High', 'HIGH')
+        gl.inputs['Threshold'].default_value = 0.62
+        gl.inputs['Strength'].default_value = bloom * 1.4
+        gl.inputs['Size'].default_value = 0.65
+        ng.links.new(chain, gl.inputs['Image'])
+        chain = gl.outputs['Image']
+
+    # scanlines -----------------------------------------------------------
+    scan = float(fx.get('scanline') or 0)
+    if scan > 0.001:
+        p = os.path.join(cache_dir, f'scan_{w}x{h}.png')
+        if not os.path.exists(p):
+            _scan_png(p, w, h)
+        img = bpy.data.images.load(p, check_existing=True)
+        node = ng.nodes.new('CompositorNodeImage')
+        node.image = img
+        m = _mix(ng, chain, node.outputs['Image'], scan, 'MULTIPLY')
+        chain = m.outputs[2]
+
+    # grain ---------------------------------------------------------------
+    grain = float(fx.get('grain') or 0)
+    if grain > 0.001:
+        p = os.path.join(cache_dir, f'grain_{w}x{h}.png')
+        if not os.path.exists(p):
+            _noise_png(p, w, h)
+        img = bpy.data.images.load(p, check_existing=True)
+        inode = ng.nodes.new('CompositorNodeImage')
+        inode.image = img
+        tr = ng.nodes.new('CompositorNodeTranslate')
+        set_menu(tr.inputs['Extension X'], 'Repeat', 'REPEAT')
+        set_menu(tr.inputs['Extension Y'], 'Repeat', 'REPEAT')
+        ng.links.new(inode.outputs['Image'], tr.inputs['Image'])
+        # animate the grain by scrolling it with the frame counter
+        st = ng.nodes.new('CompositorNodeSceneTime')
+        mx = ng.nodes.new('ShaderNodeMath')
+        mx.operation = 'MULTIPLY'
+        mx.inputs[1].default_value = 37.0
+        ng.links.new(st.outputs['Frame'], mx.inputs[0])
+        ng.links.new(mx.outputs[0], tr.inputs['X'])
+        my = ng.nodes.new('ShaderNodeMath')
+        my.operation = 'MULTIPLY'
+        my.inputs[1].default_value = 17.0
+        ng.links.new(st.outputs['Frame'], my.inputs[0])
+        ng.links.new(my.outputs[0], tr.inputs['Y'])
+        m = _mix(ng, chain, tr.outputs['Image'], grain * 0.9, 'OVERLAY')
+        chain = m.outputs[2]
+
+    # vignette ------------------------------------------------------------
+    vig = float(fx.get('vignette') or 0)
+    if vig > 0.001:
+        ell = ng.nodes.new('CompositorNodeEllipseMask')
+        ell.inputs['Mask'].default_value = 1.0
+        ell.inputs['Value'].default_value = 1.0
+        ell.inputs['Size'].default_value = (0.82, 0.72)
+        blur = ng.nodes.new('CompositorNodeBlur')
+        set_menu(blur.inputs['Type'], 'Gaussian', 'GAUSSIAN')
+        br = max(w, h) * 0.22
+        blur.inputs['Size'].default_value = (br, br)
+        ng.links.new(ell.outputs['Mask'], blur.inputs['Image'])
+        dark = ng.nodes.new('CompositorNodeRGB')
+        dark.outputs[0].default_value = (0, 0, 0, 1)
+        inv = ng.nodes.new('CompositorNodeInvert')
+        ng.links.new(blur.outputs['Image'], inv.inputs['Color'])
+        mul = ng.nodes.new('ShaderNodeMath')
+        mul.operation = 'MULTIPLY'
+        mul.inputs[1].default_value = vig
+        ng.links.new(inv.outputs['Color'], mul.inputs[0])
+        ao = ng.nodes.new('CompositorNodeAlphaOver')
+        ao.inputs['Factor'].default_value = 1.0
+        ng.links.new(chain, ao.inputs['Background'])
+        ng.links.new(dark.outputs[0], ao.inputs['Foreground'])
+        ng.links.new(mul.outputs[0], ao.inputs['Factor'])
+        chain = ao.outputs['Image']
+
+    out = ng.nodes.new('NodeGroupOutput')
+    ng.links.new(chain, out.inputs[0])
+    return ng
+
+
+# ---------------------------------------------------------------- builder
+
+class SceneBuilder:
+    def __init__(self, project, opts):
+        self.p = project
+        self.opts = opts
+        self.meta = project['meta']
+        self.fps = float(self.meta.get('fps') or 24)
+        self.W = float(self.meta.get('width') or 1920)
+        self.H = float(self.meta.get('height') or 1080)
+        self.root = opts.get('root') or os.path.dirname(opts['project'])
+        self.cache = os.path.join(self.root, '.vdm', 'cache')
+        self.updaters = []
+        self.el_index = 0
+
+    # -- assets ------------------------------------------------------------
+    def resolve_src(self, src):
+        if not src:
+            return None
+        if os.path.isabs(src):
+            return src
+        return os.path.normpath(os.path.join(self.root, src))
+
+    def load_image(self, path, sequence=False):
+        if not path or not os.path.exists(path):
+            return None
+        img = bpy.data.images.load(path, check_existing=True)
+        if sequence:
+            img.source = 'SEQUENCE'
+        return img
+
+    # -- materials ---------------------------------------------------------
+    def tex_material(self, name, image, opacity):
+        return textured_material(name, image, opacity)
+
+    # -- objects -----------------------------------------------------------
+    def add_object(self, mesh, material, name):
+        obj = bpy.data.objects.new(name, mesh)
+        obj.data.materials.append(material)
+        obj.location = (0, 0, 0.002 * self.el_index)
+        self.el_index += 1
+        obj.visible_shadow = False
+        bpy.context.scene.collection.objects.link(obj)
+        return obj
+
+    def build_text(self, el, style, st0, z):
+        font_path = resolve_font(style)
+        cu = bpy.data.curves.new(f'{el["id"]}_txt', 'FONT')
+        cu.body = str(st0['text'] or ' ')
+        cu.size = float(st0['size'])
+        cu.align_x = {'left': 'LEFT', 'right': 'RIGHT'}.get(style.get('align', 'center'), 'CENTER')
+        cu.align_y = 'CENTER'
+        cu.space_line = float(style.get('lineHeight') or 1.18)
+        cu.space_character = 1.0 + float(style.get('letterSpacing') or 0) / max(1.0, float(st0['size']))
+        if font_path:
+            try:
+                cu.font = bpy.data.fonts.load(font_path, check_existing=True)
+            except Exception:
+                pass
+        mat, nodes = flat_material(f'{el["id"]}_mat', st0['color'], st0['opacity'])
+        obj = self.add_object(cu, mat, el['id'])
+        obj.location.z = 0.002 * z
+        obj.scale = (1, 1, 1)
+        return obj, nodes
+
+    def build_media(self, el, style, st0, z, src_path, sequence=None):
+        if sequence:
+            img = self.load_image(sequence['first'], sequence=True)
+            if img:
+                img.frame_duration = max(1, int(sequence['count']))
+        else:
+            img = self.load_image(src_path)
+        if img is None:
+            # missing asset -> magenta placeholder so it is obvious in the render
+            mat, nodes = flat_material(f'{el["id"]}_mat', '#ff00aa', st0['opacity'])
+            mesh = plane_mesh(f'{el["id"]}_mesh', self.W, self.H)
+            obj = self.add_object(mesh, mat, el['id'])
+            obj.location.z = 0.002 * z
+            return obj, nodes, None
+
+        fit = style.get('fit', 'cover')
+        if img.size[0] and img.size[1]:
+            uv = (0, 0, 1, 1) if fit == 'stretch' else cover_uv(img.size[0], img.size[1], self.W, self.H)
+        else:
+            uv = (0, 0, 1, 1)
+        mesh = plane_mesh(f'{el["id"]}_mesh', self.W, self.H, uv)
+        mat, nodes = textured_material(f'{el["id"]}_mat', img, st0['opacity'])
+        obj = self.add_object(mesh, mat, el['id'])
+        obj.location.z = 0.002 * z
+        return obj, nodes, nodes['tex']
+
+    def build_shape(self, el, style, st0, z):
+        w = float(style.get('w') or self.W)
+        h = float(style.get('h') or self.H)
+        kind = style.get('shape', 'rect')
+        mesh = disc_mesh(f'{el["id"]}_mesh', w, h) if kind == 'ellipse' else plane_mesh(f'{el["id"]}_mesh', w, h)
+        mat, nodes = flat_material(f'{el["id"]}_mat', st0['color'] if el['type'] == 'text' else style.get('fill', '#ffffff'), st0['opacity'])
+        obj = self.add_object(mesh, mat, el['id'])
+        obj.location.z = 0.002 * z
+        return obj, nodes
+
+    # -- main --------------------------------------------------------------
+    def build(self):
+        scene = reset_scene()
+        scene.render.engine = 'BLENDER_EEVEE'
+        scene.render.resolution_x = int(round(self.W * self.opts.get('scale', 1.0)))
+        scene.render.resolution_y = int(round(self.H * self.opts.get('scale', 1.0)))
+        scene.render.resolution_percentage = 100
+        scene.render.fps = int(round(self.fps))
+        scene.render.fps_base = 1.0
+        scene.render.image_settings.file_format = 'PNG'
+        scene.render.image_settings.color_mode = 'RGB'
+        scene.render.image_settings.compression = 15
+        scene.render.filter_size = 0.8
+        scene.render.film_transparent = False
+        scene.view_settings.view_transform = 'Standard'
+        scene.view_settings.look = 'None'
+        scene.view_settings.exposure = 0
+        scene.view_settings.gamma = 1
+        try:
+            scene.eevee.taa_render_samples = int(self.opts.get('samples', 16))
+            scene.eevee.use_raytracing = False
+        except Exception:
+            pass
+
+        make_world(scene, self.meta.get('background', '#05070d'))
+        make_camera(scene, self.W, self.H)
+
+        duration = float(self.meta.get('duration') or 12)
+        scene.frame_start = 1
+        scene.frame_end = max(1, int(round(duration * self.fps)))
+
+        # layer order: stable by z then start
+        elements = sorted(self.p.get('elements', []), key=lambda e: (e.get('z', 0), e.get('start', 0)))
+
+        for idx, el in enumerate(elements):
+            if el.get('visible') is False:
+                continue
+            style = el.get('style') or {}
+            z = el.get('z', 0) + idx * 0.001
+            st0 = eval_element(el, el['start'], self.meta)
+            src_path = self.resolve_src(el.get('src'))
+            tex = None
+
+            if el['type'] == 'text':
+                obj, nodes = self.build_text(el, style, st0, z)
+            elif el['type'] in ('solid', 'shape'):
+                obj, nodes = self.build_shape(el, style, st0, z)
+            else:
+                seq = None
+                if el['type'] == 'video':
+                    seq_dir = el.get('_sequenceDir')
+                    if seq_dir and os.path.isdir(seq_dir):
+                        files = sorted(f for f in os.listdir(seq_dir) if f.endswith('.png'))
+                        if files:
+                            seq = {'first': os.path.join(seq_dir, files[0]), 'count': len(files), 'dir': seq_dir}
+                obj, nodes, tex = self.build_media(el, style, st0, z, src_path, seq)
+
+            obj.hide_render = True
+            self.updaters.append(self.make_updater(el, obj, nodes, tex, z, style))
+
+        def on_frame(scn, depsgraph=None):
+            t = (scn.frame_current - 1) / self.fps
+            for u in self.updaters:
+                u(t, scn.frame_current)
+
+        bpy.app.handlers.frame_change_pre.append(on_frame)
+        on_frame(scene, None)
+
+        build_compositor(scene, self.meta, os.path.join(self.cache, 'comp'))
+        return scene
+
+    def make_updater(self, el, obj, nodes, tex, z, style):
+        fps = self.fps
+        meta = self.meta
+        is_text = el['type'] == 'text'
+        glow_max = 1.0 + 6.0 * float((el.get('fx') or {}).get('glow', 0) or 0)
+        shadow = bool(style.get('shadow')) and is_text
+        shadow_obj = None
+        if shadow:
+            # a black copy slightly offset behind the text
+            sh = bpy.data.objects.new(el['id'] + '_shadow', obj.data.copy())
+            sh.location = (obj.location.x + 5, obj.location.y - 5, obj.location.z - 0.0004)
+            sh.data.materials.clear()
+            smat, _ = flat_material(el['id'] + '_shmat', '#000000', 0.55)
+            sh.data.materials.append(smat)
+            bpy.context.scene.collection.objects.link(sh)
+            sh.hide_render = True
+            shadow_obj = sh
+
+        def update(t, frame):
+            st = eval_element(el, t, meta)
+            if not st['active']:
+                obj.hide_render = True
+                if shadow_obj:
+                    shadow_obj.hide_render = True
+                return
+            obj.hide_render = False
+            obj.location.x = st['x']
+            obj.location.y = -st['y']
+            obj.location.z = 0.002 * z
+            obj.rotation_euler = (0, 0, math.radians(st['rotation']))
+            s = st['scale']
+            if is_text:
+                obj.scale = (s, s, 1)
+                try:
+                    obj.data.body = str(st['text']) if st['text'] is not None else ''
+                    obj.data.size = float(st['size'])
+                except Exception:
+                    pass
+            else:
+                obj.scale = (s, s, 1)
+
+            if 'alpha' in nodes:
+                nodes['alpha'].default_value = st['opacity']
+            if 'em' in nodes:
+                nodes['em'].inputs['Strength'].default_value = glow_max
+                if is_text:
+                    try:
+                        nodes['em'].inputs['Color'].default_value = hex_rgba(st['color'])
+                    except Exception:
+                        pass
+
+            if tex is not None and tex.image and tex.image.source == 'SEQUENCE':
+                local = max(0, int(round((t - el['start']) * fps)))
+                tex.image_user.frame_offset = local - frame + 1
+                tex.image_user.frame_start = 1
+
+            if shadow_obj:
+                shadow_obj.hide_render = False
+                shadow_obj.location.x = st['x'] + 5
+                shadow_obj.location.y = -st['y'] - 5
+                shadow_obj.rotation_euler = (0, 0, math.radians(st['rotation']))
+                shadow_obj.scale = (s, s, 1)
+                try:
+                    shadow_obj.data.body = str(st['text'] or '')
+                    shadow_obj.data.size = float(st['size'])
+                except Exception:
+                    pass
+
+        return update
+
+
+def build_scene(project, opts):
+    return SceneBuilder(project, opts).build()
