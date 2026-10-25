@@ -1,6 +1,7 @@
 // Inspector: edit the selected element down to the details (or project fx when nothing is selected).
 import { evalElement } from '/core/evaluate.js';
 import { evalCamera } from '/core/camera.js';
+import { objectPose } from '/core/scene.js';
 import { escapeHtml } from './timeline.js';
 
 const MOTIONS = ['none', 'in', 'out', 'left', 'right', 'up', 'down', 'drift', 'shake'];
@@ -51,12 +52,14 @@ export class Inspector {
   render(project, sel, time) {
     const active = document.activeElement;
     if (this.root.contains(active) && /INPUT|TEXTAREA|SELECT/.test(active?.tagName || '')) return;
-    const key = `${project.rev}|${sel?.camera ? 'cam' : ''}|${sel?.elementId}|${sel?.segmentId}|${Math.round(time * 10)}`;
+    const key = `${project.rev}|${sel?.camera ? 'cam' : ''}|${sel?.elementId}|${sel?.objectId}|${sel?.segmentId}|${Math.round(time * 10)}`;
     if (key === this.lastRenderKey) return;
     this.lastRenderKey = key;
     this.root.innerHTML = '';
+    const object = (project.scene?.objects || []).find((o) => o.id === sel?.objectId);
     const element = project.elements.find((e) => e.id === sel?.elementId);
-    if (element) this._renderElement(project, element, time);
+    if (object) this._renderObject(project, object, time);
+    else if (element) this._renderElement(project, element, time);
     else if (sel?.segmentId) this._renderSegment(project, sel.segmentId);
     else if (project.camera) this._renderCamera(project, time);
     else this._renderProject(project);
@@ -203,6 +206,98 @@ export class Inspector {
     ));
 
     this._renderKeyframes(project, el, time);
+  }
+
+  // ---------------------------------------------------------------- 3D object
+  _renderObject(project, obj, time) {
+    const id = obj.id;
+    const pose = objectPose(obj, time);
+    const tNow = () => Math.round(this.opts.getTime() * 1000) / 1000;
+    const key = (path, v) => this.opts.onOp({ op: 'objectKey', id, path, t: tNow(), v });
+    const patch = (tag, p) => this._commit(`${id}:${tag}`, { op: 'objectPatch', id, patch: p });
+
+    this.root.appendChild(h('div', { class: 'insp-head' },
+      h('div', { class: 'insp-kind' }, '3D 元素'),
+      h('div', { class: 'insp-id' }, id),
+      h('div', { class: 'insp-actions' },
+        h('button', {
+          class: 'mini', title: '在当前时间记录位置关键帧',
+          onclick: () => this.opts.onOp({ op: 'objectKey', id, path: 'pivot', t: tNow(), v: pose.pivot.map(round) }),
+        }, '打点'),
+        h('button', {
+          class: 'mini danger',
+          onclick: () => { if (confirm(`删除 ${obj.name || id}?`)) this.opts.onOp({ op: 'objectRemove', id }); },
+        }, '删除'),
+      ),
+    ));
+
+    this.root.appendChild(this._section('基础',
+      this._field({ label: '名称', type: 'text', value: obj.name, onChange: (v) => patch('name', { name: v }) }),
+      this._field({
+        label: '颜色', type: 'color', value: obj.style?.color || '#17d9ff',
+        onChange: (v) => patch('color', { style: { ...(obj.style || {}), color: v } }),
+      }),
+      this._field({ label: '起点 (s)', value: round(obj.start), step: 0.01, min: 0, onChange: (v) => patch('start', { start: v }) }),
+      this._field({ label: '时长 (s)', value: round(obj.duration), step: 0.01, min: 0.05, onChange: (v) => patch('dur', { duration: v }) }),
+    ));
+
+    const vec = (label, arr, path) => {
+      const cur = arr.map((v) => Math.round(v * 1000) / 1000);
+      const inputs = cur.map((v, i) => {
+        const inp = h('input', { type: 'number', step: 0.1 });
+        inp.value = v;
+        inp.addEventListener('input', () => { cur[i] = Number(inp.value) || 0; key(path, cur); });
+        inp.addEventListener('blur', () => this._flush());
+        return inp;
+      });
+      return h('div', { class: 'fld span2' }, h('label', {}, label), ...inputs,
+        h('button', {
+          class: 'kf-btn', title: `在当前时间记录${label}（Shift+点击删除）`,
+          onclick: (e) => {
+            if (e.shiftKey) this.opts.onOp({ op: 'objectUnkey', id, path, t: tNow() });
+            else key(path, cur);
+          },
+        }, '◆'));
+    };
+
+    this.root.appendChild(this._section('变换（m）',
+      vec('位置', pose.pivot, 'pivot'),
+      vec('几何偏移', pose.position, 'position'),
+      vec('缩放', pose.scale, 'scale'),
+      this._field({
+        label: '不透明度', value: Math.round(pose.opacity * 1000) / 1000, step: 0.01, min: 0, max: 1,
+        onChange: (v) => key('opacity', v),
+      }),
+      this._field({
+        label: '绕轴自转°', value: Math.round(pose.roll * 10) / 10, step: 1,
+        onChange: (v) => key('roll', v),
+      }),
+      h('div', { class: 'hint' }, '在视口里拖动元素会自动在播放头打位置关键帧；◆ 记录当前值。'),
+    ));
+
+    const g = obj.geom || {};
+    this.root.appendChild(this._section('几何（m）',
+      this._field({ label: '宽', value: g.w ?? 2, step: 0.1, min: 0.01, onChange: (v) => patch('gw', { geom: { ...g, w: v } }) }),
+      this._field({ label: '高', value: g.h ?? 2, step: 0.1, min: 0.01, onChange: (v) => patch('gh', { geom: { ...g, h: v } }) }),
+      this._field({ label: '厚', value: g.d ?? 2, step: 0.1, min: 0.01, onChange: (v) => patch('gd', { geom: { ...g, d: v } }) }),
+    ));
+
+    const rows = [];
+    for (const [path, list] of Object.entries(obj.tracks || {})) {
+      for (const k of list || []) rows.push({ path, k });
+    }
+    rows.sort((a, b) => a.k.t - b.k.t);
+    const kfList = h('div', { class: 'kf-list' });
+    if (!rows.length) kfList.appendChild(h('div', { class: 'hint' }, '还没有关键帧：拖动元素或点 ◆。'));
+    for (const { path, k } of rows) {
+      kfList.appendChild(h('div', { class: `kf-row ${Math.abs(k.t - time) < 0.05 ? 'at' : ''}` },
+        h('span', { class: 'kf-t' }, k.t.toFixed(2) + 's'),
+        h('span', { class: 'kf-p' }, path),
+        h('span', { class: 'kf-v' }, Array.isArray(k.v) ? k.v.map((n) => round(n, 2)).join(', ') : String(k.v)),
+        h('button', { class: 'mini danger', onclick: () => this.opts.onOp({ op: 'objectUnkey', id, path, t: k.t }) }, '×'),
+      ));
+    }
+    this.root.appendChild(this._section(`关键帧 (${rows.length})`, kfList));
   }
 
   _renderKeyframes(project, el, time) {

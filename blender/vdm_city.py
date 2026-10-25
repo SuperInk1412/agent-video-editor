@@ -209,6 +209,89 @@ def _ground_material(name, ground):
     return mat
 
 
+# ---------------------------------------------------------------- elements
+
+def _raw_rgb(h):
+    """0..1 channels straight from the hex, like the viewport shader (the city
+    palette is treated as linear there too, so both sides agree)."""
+    s = str(h or '#ffffff').strip().lstrip('#')
+    if len(s) == 3:
+        s = ''.join(ch * 2 for ch in s)
+    if len(s) < 6:
+        s = 'ffffff'
+    return tuple(int(s[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
+
+
+def _element_material(name, color, emissive):
+    mat = bpy.data.materials.new(name)
+    mat.use_nodes = True
+    nt = mat.node_tree
+    bsdf = nt.nodes.get('Principled BSDF')
+    c = _raw_rgb(color)
+    bsdf.inputs['Base Color'].default_value = (c[0], c[1], c[2], 1.0)
+    bsdf.inputs['Roughness'].default_value = 0.38
+    bsdf.inputs['Metallic'].default_value = 0.05
+    try:
+        bsdf.inputs['Emission Color'].default_value = (c[0], c[1], c[2], 1.0)
+        bsdf.inputs['Emission Strength'].default_value = max(0.0, 1.9 * float(emissive or 0.0))
+    except Exception:
+        pass
+    try:
+        mat.surface_render_method = 'DITHERED'
+    except Exception:
+        pass
+    return mat
+
+
+def _unit_cube_mesh(name):
+    verts = [
+        (-0.5, -0.5, -0.5), (0.5, -0.5, -0.5), (0.5, 0.5, -0.5), (-0.5, 0.5, -0.5),
+        (-0.5, -0.5, 0.5), (0.5, -0.5, 0.5), (0.5, 0.5, 0.5), (-0.5, 0.5, 0.5),
+    ]
+    faces = [(0, 3, 2, 1), (4, 5, 6, 7), (0, 1, 5, 4), (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)]
+    mesh = bpy.data.meshes.new(name)
+    mesh.from_pydata(verts, [], faces)
+    mesh.update()
+    return mesh
+
+
+def _build_objects(scene, shot):
+    """Timeline elements as emissive boxes, animated exactly like the viewport."""
+    from mathutils import Matrix
+    for i, o in enumerate(shot.get('objects') or []):
+        frames = o.get('frames') or []
+        if not frames:
+            continue
+        name = str(o.get('name') or o.get('id') or f'element_{i}')
+        mesh = _unit_cube_mesh('el_' + str(o.get('id') or i))
+        obj = bpy.data.objects.new(name, mesh)
+        obj.rotation_mode = 'QUATERNION'
+        mat = _element_material('elmat_' + str(o.get('id') or i), o.get('color'), o.get('emissive'))
+        obj.data.materials.append(mat)
+        scene.collection.objects.link(obj)
+
+        alpha_input = None
+        try:
+            alpha_input = mat.node_tree.nodes.get('Principled BSDF').inputs['Alpha']
+        except Exception:
+            pass
+        animated_alpha = min(float(f.get('opacity', 1.0)) for f in frames) < 0.999
+
+        for f in frames:
+            fr = int(f['f'])
+            obj.location = Vector(f['loc'])
+            r = f['rot']
+            rot = Matrix((r[0], r[1], r[2])).transposed().to_quaternion()
+            obj.rotation_quaternion = rot
+            obj.scale = Vector(f['size'])
+            obj.keyframe_insert('location', frame=fr)
+            obj.keyframe_insert('rotation_quaternion', frame=fr)
+            obj.keyframe_insert('scale', frame=fr)
+            if animated_alpha and alpha_input is not None:
+                alpha_input.default_value = float(f.get('opacity', 1.0))
+                alpha_input.keyframe_insert('default_value', frame=fr)
+
+
 # ---------------------------------------------------------------- camera
 
 def _build_camera(scene, shot, width, height):
@@ -390,6 +473,9 @@ def build_shot_scene(shot, opts):
     nobj = bpy.data.objects.new('neon', nmesh)
     nobj.data.materials.append(_neon_material('neon', city.get('neonGlow', 6.0)))
     scene.collection.objects.link(nobj)
+
+    # timeline elements (emissive boxes with baked per-frame transforms)
+    _build_objects(scene, shot)
 
     # frame range from the baked camera
     cam_frames = [int(e['f']) for e in shot.get('camera', [])]

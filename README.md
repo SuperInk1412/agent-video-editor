@@ -52,7 +52,7 @@ Electron 路径可用 `VDM_ELECTRON` 覆盖；Blender 用 `VDM_BLENDER` 覆盖�
 
 ## 已验证
 
-- `npm test`：14 个单元测试全绿（ops / 求值 / 存储锁 / 节拍 / agent 解析）
+- `npm test`：60 个单元测试全绿（ops / 求值 / 场景 / 相机 / 迁移 / 存储锁 / 节拍 / agent 解析）
 - Blender 5.0.1 无头 EEVEE：1080p 单帧约 3–5s（含启动），24s@50% 成片约 70s
 - 示例项目 `projects/demo`：24s / 6 分镜 / 13 元素，成片在
   `projects/demo/.vdm/renders/master-*.mp4`（含音轨）
@@ -75,6 +75,14 @@ node ../../cli/vdm.js render --from 0 --to 6 --scale 0.5
 参数设计见 `docs/SPEC-CAMERA.md`：轨道关键点 / 朝向 / 侧倾 / 抖动 / FOV / 景深 / 运动模糊 +
 城市 seed、街区尺寸、楼高分布、亮窗、霓虹、雾。`world.corridor`（默认开、半径 16m）沿航线
 清掉镜头会穿过的楼，换 `seed` 也不会撞楼；关掉用 `world set corridor.enabled false`。
+
+### 3D 元素
+
+点工具栏 **＋元素** 会在编辑视口前方放一个米制盒子（`project.scene.objects`），同时在时间轴
+出现一条 `元素 · 3D` 轨道。选中后可以直接在视口里拖动：拖动会自动在播放头写一个 `pivot`
+位置关键帧；检查器里可以改颜色/尺寸/缩放/不透明度，并按同样方式给 `pivot`/`scale`/`opacity`
+打帧（`◆`，Shift+点击删除）。视口和 Blender 共用 `core/scene.js::objectPose()`，
+`engine/shot.js` 把逐帧变换烘进 shot 包，`blender/vdm_city.py` 按同一组位置/旋转/缩放建盒子。
 
 ## 三条设计原则
 

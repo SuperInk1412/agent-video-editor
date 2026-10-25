@@ -8,13 +8,14 @@ import { PipelinePanel } from './pipeline.js';
 import { LogPanel } from './logs.js';
 import { ProjectsPanel } from './projects.js';
 import { evalCamera } from '/core/camera.js';
+import { objectPose } from '/core/scene.js';
 
 const $ = (s) => document.querySelector(s);
 const S = {
   project: null,
   time: 0,
   playing: false,
-  selection: { segmentId: null, elementId: null },
+  selection: { segmentId: null, elementId: null, objectId: null },
   media: [],
   blender: null,
   agentAvailable: false,
@@ -133,6 +134,8 @@ function applyProject(p, source) {
   syncWorld(p);
   if (S.selection.elementId && !p.elements.find((e) => e.id === S.selection.elementId)) S.selection.elementId = null;
   if (S.selection.segmentId && !p.segments.find((s) => s.id === S.selection.segmentId)) S.selection.segmentId = null;
+  if (S.selection.objectId && !(p.scene?.objects || []).some((o) => o.id === S.selection.objectId)) S.selection.objectId = null;
+  if (gizmo) gizmo.objSel = S.selection.objectId || null;
   preview.setProject(p);
   timeline.setProject(p);
   timeline.setSelection(S.selection);
@@ -142,6 +145,8 @@ function applyProject(p, source) {
   $('#projMeta').textContent = `${p.meta.width}×${p.meta.height} · ${p.meta.fps}fps · ${p.meta.duration.toFixed(1)}s · rev ${p.rev}`;
   const editBtn = $('#btnEditMode');
   if (editBtn) editBtn.hidden = !p.camera;
+  const addBtn = $('#btnAddElement');
+  if (addBtn) addBtn.hidden = !p.world;
   if (!p.camera && S.editMode) setEditMode(false);
   updateOverlay();
 }
@@ -182,17 +187,25 @@ function togglePlay() { S.playing ? pause() : play(); }
 // ---------------------------------------------------------------- selection
 function select(sel) {
   if (sel.camera) {
-    S.selection = { segmentId: null, elementId: null, camera: true };
+    S.selection = { segmentId: null, elementId: null, objectId: null, camera: true };
+  } else if (sel.objectId) {
+    S.selection = { segmentId: null, elementId: null, objectId: sel.objectId, camera: false };
   } else {
     S.selection = {
       segmentId: sel.segmentId ?? S.selection.segmentId,
       elementId: sel.elementId ?? null,
+      objectId: sel.objectId ?? null,
       camera: false,
     };
     if (sel.elementId) {
       const el = S.project.elements.find((e) => e.id === sel.elementId);
       if (el?.segment) S.selection.segmentId = el.segment;
     }
+  }
+  if (gizmo) {
+    gizmo.objSel = S.selection.objectId || null;
+    gizmo.objHover = null;
+    gizmo.draw();
   }
   timeline.setSelection(S.selection);
   inspector.render(S.project, S.selection, S.time);
@@ -462,7 +475,7 @@ async function boot() {
     time: () => S.time,
     editMode: () => S.editMode,
     grid: () => S.grid,
-    visible: () => S.editMode || !!S.selection.camera,
+    visible: () => S.editMode || !!S.selection.camera || !!S.selection.objectId,
     projectPoint: (p) => preview.scene3d.projectPoint(p),
     viewCam: () => preview.scene3d.lastCam,
     stage: () => canvas,
@@ -549,6 +562,39 @@ async function boot() {
   $('#renderScale').onchange = (e) => { S.renderScale = Number(e.target.value); };
   $('#btnEditMode').onclick = () => setEditMode(!S.editMode);
 
+  // Add a 3D element in front of the editing camera, then select it so it can
+  // be dragged (which keys its pivot at the playhead).
+  const addSceneElement = async () => {
+    if (!S.project) return null;
+    if (!S.project.world) { toast('这个项目没有 3D 世界，先给它一个城市/背景', 'error'); return null; }
+    if (!S.editMode) setEditMode(true);
+    const c = S.editCam || evalCamera(S.project, S.time);
+    const fwd = v3norm(v3sub(c.look, c.pos));
+    const right = v3norm(v3cross(fwd, [0, 1, 0]));
+    const up = v3cross(right, fwd);
+    const n = (S.project.scene?.objects?.length || 0) + 1;
+    // stagger new elements so they do not stack at the same spot
+    const ox = ((n - 1) % 3 - 1) * 9;
+    const oy = -Math.floor((n - 1) / 3) * 5;
+    const base = [c.pos[0] + fwd[0] * 30, c.pos[1] + fwd[1] * 30, c.pos[2] + fwd[2] * 30];
+    const pivot = base.map((v, i) => Math.round((v + right[i] * ox + up[i] * oy) * 100) / 100);
+    const id = `ob_${Date.now().toString(36)}`;
+    const j = await op({
+      op: 'objectAdd',
+      object: {
+        id, type: 'solid', name: `元素 ${n}`, pivot,
+        geom: { w: 8, h: 4, d: 0.5 },
+        style: { color: '#17d9ff', emissive: 1 },
+        start: 0, duration: S.project.meta.duration,
+      },
+    });
+    if (!j) return null;
+    select({ objectId: id });
+    toast('已添加元素：拖动它会在当前时间打位置关键帧', 'success');
+    return id;
+  };
+  $('#btnAddElement').onclick = addSceneElement;
+
   projects = new ProjectsPanel({ toast });
   $('#btnProject').onclick = () => projects.open();
   $('#btnRestart').onclick = () => projects.restart();
@@ -564,6 +610,8 @@ async function boot() {
   const selectAt = (sx, sy) => {
     const id = preview.hitTest(sx, sy, S.time);
     if (id) return select({ elementId: id });
+    const obj = preview.scene3d?.pickObject(S.project, S.time, sx, sy);
+    if (obj) return select({ objectId: obj.id });
     const seg = S.project.segments.find((s) => S.time >= s.start && S.time < s.start + s.duration);
     if (seg) return select({ elementId: null, segmentId: seg.id });
     if (S.project.camera) return select({ camera: true });
@@ -698,6 +746,28 @@ async function boot() {
       e.preventDefault();
       return;
     }
+    // timeline element in the 3D scene: pick it and start a keyed move
+    const pick = preview.scene3d?.pickObject(S.project, S.time, sx, sy);
+    if (pick) {
+      const obj = (S.project.scene?.objects || []).find((o) => o.id === pick.id);
+      select({ objectId: pick.id });
+      if (obj) {
+        const ac = preview.scene3d.lastCam;
+        const normal = ac ? v3norm(v3sub(ac.look, ac.pos)) : [0, 0, -1];
+        const pose = objectPose(obj, S.time);
+        drag = {
+          kind: 'object', id: obj.id, normal, hit: pick.point,
+          pivot0: pose.pivot.slice(), pivot: pose.pivot.slice(),
+          x: cx, y: cy, moved: false,
+        };
+        try { canvas.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
+        gizmo.draw();
+        e.preventDefault();
+        return;
+      }
+    }
+    gizmo.objHover = null;
+    gizmo.draw();
     drag = { kind: 'click', x: cx, y: cy };
     try { canvas.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
     e.preventDefault();
@@ -710,7 +780,10 @@ async function boot() {
       if (S.editMode) {
         if (S.viewMode === 'move') { canvas.style.cursor = 'grab'; return; }
         const hit = gizmo?.hit(sx, sy) || gizmo?.hitLive(sx, sy);
-        canvas.style.cursor = hit ? 'pointer' : 'default';
+        const obj = hit ? null : preview.scene3d?.pickObject(S.project, S.time, sx, sy);
+        const hoverId = obj?.id || null;
+        if (gizmo && gizmo.objHover !== hoverId) { gizmo.objHover = hoverId; gizmo.draw(); }
+        canvas.style.cursor = hit || obj ? 'pointer' : 'default';
         return;
       }
       const hit = S.selection.camera ? gizmo?.hit(sx, sy) : null;
@@ -781,6 +854,30 @@ async function boot() {
       gizmo.draw();
       return;
     }
+    if (drag.kind === 'object') {
+      if (Math.abs(cx - drag.x) + Math.abs(cy - drag.y) < 3) return;
+      const w = preview.scene3d.planeHit(sx, sy, drag.hit, drag.normal);
+      if (!w) return;
+      drag.pivot = [
+        r2(drag.pivot0[0] + w[0] - drag.hit[0]),
+        r2(drag.pivot0[1] + w[1] - drag.hit[1]),
+        r2(drag.pivot0[2] + w[2] - drag.hit[2]),
+      ];
+      const obj = (S.project.scene?.objects || []).find((o) => o.id === drag.id);
+      if (obj) {
+        // live preview: write the pivot straight into a key at the playhead
+        const t = Math.round(S.time * 1000) / 1000;
+        const tracks = obj.tracks || (obj.tracks = {});
+        const list = tracks.pivot || (tracks.pivot = []);
+        const k = list.find((x) => Math.abs(x.t - t) < 1e-3);
+        if (k) k.v = drag.pivot.slice();
+        else { list.push({ t, v: drag.pivot.slice() }); list.sort((a, b) => a.t - b.t); }
+      }
+      drag.moved = true;
+      preview.render(S.time);
+      gizmo.draw();
+      return;
+    }
     const key = S.project.camera?.path?.[drag.index];
     if (!key) return;
     const w = preview.scene3d.planeHit(sx, sy, key.pos, drag.normal);
@@ -811,6 +908,14 @@ async function boot() {
       gizmo.draw();
     } else if (d.kind === 'live') {
       if (d.created) commitCameraPath();
+      gizmo.draw();
+    } else if (d.kind === 'object') {
+      if (d.moved && d.pivot) {
+        op({
+          op: 'objectKey', id: d.id, path: 'pivot',
+          t: Math.round(S.time * 1000) / 1000, v: d.pivot,
+        });
+      }
       gizmo.draw();
     } else if (d.kind === 'click' && !d.moved) {
       const { sx, sy } = stageXY(e);
@@ -858,6 +963,7 @@ async function boot() {
     if (e.key === 'Escape') {
       const menu = $('#ctxMenu');
       if (menu && !menu.hidden) { hideContextMenu(); return; }
+      if (gizmo?.objSel) { select({ elementId: null, segmentId: null }); return; }
       if (S.editMode && S.viewMode === 'move') { setViewMode('select'); return; }
       if (S.editMode) { setEditMode(false); return; }
     }
@@ -871,6 +977,12 @@ async function boot() {
     else if (e.key === 'End') { pause(); setTime(dur); }
     else if (e.key === 'Delete' || e.key === 'Backspace') {
       if (S.selection.elementId) { e.preventDefault(); op({ op: 'removeElement', id: S.selection.elementId }); S.selection.elementId = null; }
+      else if (S.selection.objectId) {
+        e.preventDefault();
+        const id = S.selection.objectId;
+        S.selection.objectId = null;
+        op({ op: 'objectRemove', id });
+      }
     } else if (e.key === 's' && !e.ctrlKey) {
       if (S.selection.elementId) { e.preventDefault(); op({ op: 'splitElement', id: S.selection.elementId, at: Math.round(S.time * 1000) / 1000 }); }
     } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
@@ -937,6 +1049,8 @@ async function boot() {
     setTime: (t) => setTime(t),
     select: (s) => select(s),
     setEditMode: (on) => setEditMode(on),
+    setViewMode: (m) => setViewMode(m),
+    addElement: addSceneElement,
     pause: () => pause(),
     play: () => play(),
   };

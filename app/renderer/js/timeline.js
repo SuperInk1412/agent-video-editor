@@ -21,6 +21,7 @@ export class Timeline {
     this.time = 0;
     this.segmentId = null;
     this.elementId = null;
+    this.objectId = null;
     this.zoom = 1;
     this.pps = 60;
     this._build();
@@ -76,6 +77,7 @@ export class Timeline {
   setSelection(sel) {
     this.segmentId = sel?.segmentId || null;
     this.elementId = sel?.elementId || null;
+    this.objectId = sel?.objectId || null;
     this.cameraSel = !!sel?.camera;
     this._paintSelection();
   }
@@ -220,6 +222,43 @@ export class Timeline {
       this.elsWrap.appendChild(row);
     }
 
+    // v3 scene objects: the same elements, but with real 3D position tracks
+    const objs = Array.isArray(p.scene?.objects) ? p.scene.objects : [];
+    if (objs.length) {
+      const head = el('div', 'tl-row tl-objhead');
+      head.append(el('div', 'tl-gutter', '<span>元素 · 3D</span>'), el('div', 'tl-track'));
+      this.elsWrap.appendChild(head);
+    }
+    for (const o of objs) {
+      const row = el('div', 'tl-row tl-objrow');
+      const g = el('div', 'tl-gutter');
+      g.innerHTML = `<i class="type-dot" style="background:#17d9ff"></i><span title="${escapeHtml(o.name || o.id)}">${escapeHtml(o.name || o.id)}</span>`;
+      g.dataset.obj = o.id;
+      const track = el('div', 'tl-track');
+      const b = el('div', 'blk ob');
+      b.dataset.obj = o.id;
+      b.style.left = `${(Number(o.start) || 0) * this.pps}px`;
+      b.style.width = `${Math.max(4, (Number(o.duration) || 0) * this.pps)}px`;
+      b.innerHTML = `<span class="blk-name">${escapeHtml(o.name || o.id)}</span><span class="blk-meta">${(Number(o.duration) || 0).toFixed(2)}s</span>`;
+      b.appendChild(el('div', 'handle handle-l'));
+      b.appendChild(el('div', 'handle handle-r'));
+      track.appendChild(b);
+      const kts = new Set();
+      for (const list of Object.values(o.tracks || {})) {
+        for (const k of list || []) kts.add(Math.round(k.t * 1000) / 1000);
+      }
+      for (const t of [...kts].sort((a, b) => a - b)) {
+        const tag = el('div', 'obj-key');
+        tag.dataset.obj = o.id;
+        tag.dataset.t = String(t);
+        tag.style.left = `${t * this.pps}px`;
+        tag.title = `${o.name || o.id} · ${t.toFixed(2)}s`;
+        track.appendChild(tag);
+      }
+      row.append(g, track);
+      this.elsWrap.appendChild(row);
+    }
+
     // element lane height: 26px rows handled by CSS
     this.setTime(this.time);
     this._paintSelection();
@@ -229,6 +268,10 @@ export class Timeline {
     this.inner.querySelectorAll('.blk.sel').forEach((n) => n.classList.remove('sel'));
     if (this.elementId) {
       const b = this.inner.querySelector(`.blk.el[data-id="${this.elementId}"]`);
+      b?.classList.add('sel');
+    }
+    if (this.objectId) {
+      const b = this.inner.querySelector(`.blk.ob[data-obj="${this.objectId}"]`);
       b?.classList.add('sel');
     }
     if (this.segmentId) {
@@ -244,6 +287,69 @@ export class Timeline {
     this._noSnap = ev.altKey;
     const blk = target.closest?.('.blk');
     const gutterEl = target.closest?.('.tl-gutter[data-id]');
+
+    // ---- v3 scene objects ----
+    const objKey = target.closest?.('.obj-key');
+    if (objKey) {
+      this.objectId = objKey.dataset.obj;
+      this.elementId = null; this.segmentId = null; this.cameraSel = false;
+      this.onSelect?.({ objectId: this.objectId });
+      this.onSeek?.(Number(objKey.dataset.t));
+      this._paintSelection();
+      return;
+    }
+    const objGutter = target.closest?.('.tl-gutter[data-obj]');
+    if (objGutter) {
+      this.objectId = objGutter.dataset.obj;
+      this.elementId = null; this.segmentId = null; this.cameraSel = false;
+      this.onSelect?.({ objectId: this.objectId });
+      this._paintSelection();
+      return;
+    }
+    const objBlk = target.closest?.('.blk.ob');
+    if (objBlk) {
+      const id = objBlk.dataset.obj;
+      this.objectId = id;
+      this.elementId = null; this.segmentId = null; this.cameraSel = false;
+      this.onSelect?.({ objectId: id });
+      this._paintSelection();
+      const item = (this.project.scene?.objects || []).find((o) => o.id === id);
+      if (!item) return;
+      const mode = target.classList.contains('handle-l') ? 'l'
+        : target.classList.contains('handle-r') ? 'r' : 'move';
+      const startX = ev.clientX;
+      const t0 = this._timeAt(ev.clientX);
+      const orig = { start: item.start, duration: item.duration };
+      const move = (e) => {
+        this._noSnap = e.altKey;
+        const t = this._timeAt(e.clientX);
+        const dt = t - t0;
+        let ns = orig.start, nd = orig.duration;
+        if (mode === 'move') {
+          ns = Math.max(0, this._snap(orig.start + dt));
+        } else if (mode === 'r') {
+          const end = this._snap(orig.start + orig.duration + dt);
+          nd = Math.max(0.08, end - orig.start);
+        } else {
+          const s = Math.min(orig.start + orig.duration - 0.08, Math.max(0, this._snap(orig.start + dt)));
+          nd = Math.max(0.08, orig.start + orig.duration - s);
+          ns = s;
+        }
+        objBlk.style.left = `${ns * this.pps}px`;
+        objBlk.style.width = `${nd * this.pps}px`;
+        objBlk._ns = ns; objBlk._nd = nd;
+      };
+      const up = () => {
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', up);
+        const ns = objBlk._ns, nd = objBlk._nd;
+        if (ns == null || (Math.abs(ns - orig.start) < 1e-4 && Math.abs(nd - orig.duration) < 1e-4)) return;
+        this.onOp({ op: 'objectPatch', id, patch: { start: round3(ns), duration: round3(nd) } });
+      };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', up);
+      return;
+    }
 
     const camKey = target.closest?.('.cam-key');
     if (camKey) {

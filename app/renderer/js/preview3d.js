@@ -1,6 +1,7 @@
 // 3D viewport for camera shots: instanced boxes from the SAME city json Blender uses.
 // Draws into the preview's scene FBO so the existing post chain (bloom/grain/…) applies.
 import { evalCamera } from '/core/camera.js';
+import { objectPose, poseMatrix } from '/core/scene.js';
 
 const VERT = `#version 300 es
 in vec3 a_corner;
@@ -79,6 +80,52 @@ void main(){
   fragColor = vec4(srgb(lin), 1.0);
 }`;
 
+// Scene objects (timeline elements promoted to metres): one draw per object so
+// rotation/scale/opacity stay exact. Same fog/light rig as the city.
+const OBJ_VERT = `#version 300 es
+in vec3 a_corner;
+in vec3 a_normal;
+uniform mat4 u_viewProj;
+uniform mat4 u_model;
+uniform mat3 u_normalMat;
+out vec3 v_world;
+out vec3 v_normal;
+void main(){
+  vec4 w = u_model * vec4(a_corner, 1.0);
+  v_world = w.xyz;
+  v_normal = normalize(u_normalMat * a_normal);
+  gl_Position = u_viewProj * w;
+}`;
+
+const OBJ_FRAG = `#version 300 es
+precision highp float;
+in vec3 v_world;
+in vec3 v_normal;
+out vec4 fragColor;
+uniform vec3 u_cam;
+uniform vec3 u_color;
+uniform float u_emissive;
+uniform float u_alpha;
+uniform vec3 u_sunDir;
+uniform vec3 u_fogColor;
+uniform float u_fogStart;
+uniform float u_fogDepth;
+uniform float u_fogStrength;
+uniform float u_ambient;
+vec3 srgb(vec3 c){
+  c = max(c, vec3(0.0));
+  return mix(1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, c * 12.92, step(c, vec3(0.0031308)));
+}
+void main(){
+  float amb = max(0.2, u_ambient) * 1.2;
+  float ndl = max(dot(normalize(v_normal), normalize(u_sunDir)), 0.0);
+  vec3 lin = u_color * (amb + 0.5 * ndl + u_emissive * 1.9);
+  float dist = length(v_world - u_cam);
+  float fog = clamp((dist - u_fogStart) / max(1.0, u_fogDepth), 0.0, 1.0) * u_fogStrength;
+  lin = mix(lin, u_fogColor, clamp(fog, 0.0, 0.96));
+  fragColor = vec4(srgb(lin), u_alpha);
+}`;
+
 // Fisheye composite: sample a world-space cubemap with equidistant rays, so a
 // horizontal fov of 180..360 keeps working like Blender's FISHEYE_EQUIDISTANT.
 const FISH_VERT = `#version 300 es
@@ -136,6 +183,38 @@ const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 
 // Same transfer function as the shader, for values we bake on the CPU (sky).
 const srgbEnc = (v) => (v <= 0.0031308 ? v * 12.92 : 1.055 * Math.pow(v, 1 / 2.4) - 0.055);
+
+function hexRgb(c) {
+  const s = String(c || '#000').replace('#', '');
+  const h = s.length === 3 ? s.split('').map((x) => x + x).join('') : s;
+  return [parseInt(h.slice(0, 2), 16) / 255, parseInt(h.slice(2, 4), 16) / 255, parseInt(h.slice(4, 6), 16) / 255];
+}
+
+const DRAWABLE = new Set(['solid', 'shape', 'text', 'image', 'video', 'container']);
+
+/** Timeline elements promoted to 3D. Empty until the project gets a v3 scene. */
+export function sceneObjects(project) {
+  const s = project?.scene;
+  return Array.isArray(s?.objects) ? s.objects : [];
+}
+
+/** Object time range: elements only exist between start and start+duration. */
+export function objectVisibleAt(obj, t) {
+  if (!obj || obj.visible === false) return false;
+  const start = Number(obj.start) || 0;
+  const dur = Number(obj.duration) || 0;
+  return t >= start - 1e-6 && t < start + dur - 1e-6;
+}
+
+/** World scale of the unit cube for an object at time t. */
+export function objectSize(obj, pose) {
+  const g = obj?.geom && typeof obj.geom === 'object' ? obj.geom : {};
+  return [
+    Math.max(0.001, Number(g.w) || 2) * Math.abs(pose.scale[0] || 1),
+    Math.max(0.001, Number(g.h) || 2) * Math.abs(pose.scale[1] || 1),
+    Math.max(0.001, Number(g.d) || 2) * Math.abs(pose.scale[2] || 1),
+  ];
+}
 
 function lookAt(eye, target, up, rollRad) {
   const f = norm(sub(target, eye));
@@ -237,6 +316,29 @@ export class Scene3D {
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 8, 0);
     gl.bindVertexArray(null);
 
+    // ---- scene-object program (timeline elements in metres) ----
+    this.objProg = gl.createProgram();
+    gl.attachShader(this.objProg, compile(gl, gl.VERTEX_SHADER, OBJ_VERT));
+    gl.attachShader(this.objProg, compile(gl, gl.FRAGMENT_SHADER, OBJ_FRAG));
+    gl.bindAttribLocation(this.objProg, 0, 'a_corner');
+    gl.bindAttribLocation(this.objProg, 1, 'a_normal');
+    gl.linkProgram(this.objProg);
+    if (!gl.getProgramParameter(this.objProg, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(this.objProg));
+    this.objU = {};
+    const on = gl.getProgramParameter(this.objProg, gl.ACTIVE_UNIFORMS);
+    for (let i = 0; i < on; i++) {
+      const info = gl.getActiveUniform(this.objProg, i);
+      this.objU[info.name] = gl.getUniformLocation(this.objProg, info.name);
+    }
+    this.objVao = gl.createVertexArray();
+    gl.bindVertexArray(this.objVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.cornerBuf);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
+    gl.bindVertexArray(null);
+
     this.cube = null;
     this.count = 0;
     this.city = null;
@@ -298,7 +400,7 @@ export class Scene3D {
     return c;
   }
 
-  _drawScene(vp, camPos, city) {
+  _drawScene(vp, camPos, city, project, time) {
     const gl = this.gl;
     gl.useProgram(this.prog);
     gl.uniformMatrix4fv(this.u.u_viewProj, false, vp);
@@ -314,6 +416,68 @@ export class Scene3D {
     gl.bindVertexArray(this.vao);
     gl.drawArraysInstanced(gl.TRIANGLES, 0, 36, this.count);
     gl.bindVertexArray(null);
+    this._drawObjects(project, time, camPos, vp, city);
+  }
+
+  /** One draw per timeline element; opaque first, then alpha-blended. */
+  _drawObjects(project, time, camPos, vp, city) {
+    const gl = this.gl;
+    const objs = sceneObjects(project).filter((o) => objectVisibleAt(o, time) && DRAWABLE.has(o.type));
+    if (!objs.length) return;
+    const opaque = [];
+    const transparent = [];
+    for (const obj of objs) {
+      const pose = objectPose(obj, time);
+      if (pose.opacity <= 0.003) continue;
+      const size = objectSize(obj, pose);
+      const m = poseMatrix({ ...pose, scale: size });
+      const { right: r, up: u, forward: f } = pose.basis;
+      const nm = new Float32Array([
+        r[0] / size[0], r[1] / size[0], r[2] / size[0],
+        u[0] / size[1], u[1] / size[1], u[2] / size[1],
+        f[0] / size[2], f[1] / size[2], f[2] / size[2],
+      ]);
+      const col = hexRgb(obj.style?.color || obj.style?.fill || '#8fe0ff');
+      const alpha = pose.opacity * Math.max(0, Math.min(1, Number(obj.style?.opacity ?? 1)));
+      const dist = Math.hypot(pose.worldPos[0] - camPos[0], pose.worldPos[1] - camPos[1], pose.worldPos[2] - camPos[2]);
+      const item = { m, nm, col, alpha, dist, emissive: Math.max(0, Number(obj.style?.emissive) || 0) };
+      if (alpha >= 0.999) opaque.push(item);
+      else transparent.push(item);
+    }
+    transparent.sort((a, b) => b.dist - a.dist);
+
+    gl.useProgram(this.objProg);
+    gl.uniformMatrix4fv(this.objU.u_viewProj, false, vp);
+    gl.uniform3f(this.objU.u_cam, camPos[0], camPos[1], camPos[2]);
+    gl.uniform3f(this.objU.u_fogColor, city.fog.color[0], city.fog.color[1], city.fog.color[2]);
+    gl.uniform1f(this.objU.u_fogStart, Number(city.fog.start) || 30);
+    gl.uniform1f(this.objU.u_fogDepth, Number(city.fog.depth) || 700);
+    gl.uniform1f(this.objU.u_fogStrength, city.fog.strength == null ? 1 : Number(city.fog.strength));
+    gl.uniform1f(this.objU.u_ambient, Math.max(0.25, city.ambient));
+    gl.uniform3f(this.objU.u_sunDir, -0.3, 0.55, 0.78);
+    gl.bindVertexArray(this.objVao);
+    gl.disable(gl.BLEND);
+    for (const it of opaque) this._drawObject(it);
+    if (transparent.length) {
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.depthMask(false);
+      for (const it of transparent) this._drawObject(it);
+      gl.depthMask(true);
+      gl.disable(gl.BLEND);
+    }
+    gl.bindVertexArray(null);
+  }
+
+  _drawObject(it) {
+    const gl = this.gl;
+    const u = this.objU;
+    gl.uniformMatrix4fv(u.u_model, false, it.m);
+    gl.uniformMatrix3fv(u.u_normalMat, false, it.nm);
+    gl.uniform3f(u.u_color, it.col[0], it.col[1], it.col[2]);
+    gl.uniform1f(u.u_emissive, it.emissive);
+    gl.uniform1f(u.u_alpha, it.alpha);
+    gl.drawArrays(gl.TRIANGLES, 0, 36);
   }
 
   _cubeFaces(cam) {
@@ -332,7 +496,7 @@ export class Scene3D {
     });
   }
 
-  _drawFisheye(cam, city, W, H) {
+  _drawFisheye(cam, city, W, H, project, time) {
     const gl = this.gl;
     const max = gl.getParameter(gl.MAX_CUBE_MAP_TEXTURE_SIZE) || 1024;
     const size = Math.min(1024, max);
@@ -352,7 +516,7 @@ export class Scene3D {
       gl.viewport(0, 0, size, size);
       gl.clearColor(srgbEnc(sky[0]), srgbEnc(sky[1]), srgbEnc(sky[2]), 1);
       gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-      this._drawScene(faces[i], cam.pos, city);
+      this._drawScene(faces[i], cam.pos, city, project, time);
     }
     gl.bindFramebuffer(gl.FRAMEBUFFER, prevFbo);
     gl.viewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
@@ -394,7 +558,7 @@ export class Scene3D {
     this.lastH = H;
     this.lastVP = null;
     if (cam.fov >= 180) {
-      this._drawFisheye(cam, city, W, H);
+      this._drawFisheye(cam, city, W, H, project, time);
       return;
     }
     const aspect = W / H;
@@ -412,7 +576,7 @@ export class Scene3D {
     const sky = city.sky || [0.01, 0.02, 0.04];
     gl.clearColor(srgbEnc(sky[0]), srgbEnc(sky[1]), srgbEnc(sky[2]), 1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-    this._drawScene(vp, cam.pos, city);
+    this._drawScene(vp, cam.pos, city, project, time);
     gl.disable(gl.DEPTH_TEST);
     gl.depthMask(false);
   }
@@ -472,5 +636,45 @@ export class Scene3D {
     const t = dot(sub(point, r.origin), n) / denom;
     if (!Number.isFinite(t) || t <= 0) return null;
     return [r.origin[0] + r.dir[0] * t, r.origin[1] + r.dir[1] * t, r.origin[2] + r.dir[2] * t];
+  }
+
+  /** Screen pixel -> the closest timeline element (ray vs its oriented box). */
+  pickObject(project, time, sx, sy) {
+    const r = this.ray(sx, sy);
+    if (!r) return null;
+    let best = null;
+    for (const obj of sceneObjects(project)) {
+      if (!DRAWABLE.has(obj.type) || !objectVisibleAt(obj, time)) continue;
+      const pose = objectPose(obj, time);
+      if (pose.opacity <= 0.003) continue;
+      const size = objectSize(obj, pose);
+      const { right, up, forward } = pose.basis;
+      const rel = sub(r.origin, pose.worldPos);
+      const o = [dot(rel, right) / size[0], dot(rel, up) / size[1], dot(rel, forward) / size[2]];
+      const d = [dot(r.dir, right) / size[0], dot(r.dir, up) / size[1], dot(r.dir, forward) / size[2]];
+      let tmin = -Infinity, tmax = Infinity, miss = false;
+      for (let a = 0; a < 3; a++) {
+        if (Math.abs(d[a]) < 1e-9) {
+          if (o[a] < -0.5 || o[a] > 0.5) { miss = true; break; }
+          continue;
+        }
+        let t1 = (-0.5 - o[a]) / d[a];
+        let t2 = (0.5 - o[a]) / d[a];
+        if (t1 > t2) { const s = t1; t1 = t2; t2 = s; }
+        tmin = Math.max(tmin, t1);
+        tmax = Math.min(tmax, t2);
+        if (tmax < tmin) { miss = true; break; }
+      }
+      if (miss || tmax < 0) continue;
+      const t = tmin >= 0 ? tmin : 0;
+      if (!best || t < best.dist) {
+        best = {
+          id: obj.id,
+          dist: t,
+          point: [r.origin[0] + r.dir[0] * t, r.origin[1] + r.dir[1] * t, r.origin[2] + r.dir[2] * t],
+        };
+      }
+    }
+    return best;
   }
 }

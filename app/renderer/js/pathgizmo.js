@@ -2,6 +2,7 @@
 // Draws on a transparent canvas sitting on top of the WebGL stage; the stage
 // owns pointer events, this module only knows how to draw and hit-test.
 import { evalCamera, pathPos } from '/core/camera.js';
+import { objectPose } from '/core/scene.js';
 
 const CYAN = '#17d9ff';
 const YELLOW = '#ffd166';
@@ -21,6 +22,8 @@ export class PathGizmo {
     this.opts = opts; // { project, time, editMode, grid, project(world), stage() }
     this.sel = -1;
     this.liveSel = false;
+    this.objSel = null;
+    this.objHover = null;
     this.hover = null;
   }
 
@@ -248,6 +251,8 @@ export class PathGizmo {
     const ctx = this.ctx;
     const project = this.opts.project();
     if (!project || this.opts.visible?.() === false) return;
+    const time = this.opts.time();
+    this._sceneObjects(ctx, project, time);
     const cam = this.camera();
     if (!cam || !Array.isArray(cam.path) || !cam.path.length) return;
     const k = this.scale;
@@ -269,7 +274,6 @@ export class PathGizmo {
     }
     ctx.stroke();
 
-    const time = this.opts.time();
     if (time >= t0 && time <= t1) {
       const now = this.project(pathPos(cam, time));
       if (now) {
@@ -328,6 +332,66 @@ export class PathGizmo {
     ctx.fillRect(b[0] - 3.2, b[1] - 3.2, 6.4, 6.4);
     ctx.strokeStyle = '#071018'; ctx.lineWidth = 1;
     ctx.strokeRect(b[0] - 3.2, b[1] - 3.2, 6.4, 6.4);
+  }
+
+  /** Eight world corners of a timeline element at time t. */
+  objectCorners(obj, time) {
+    const pose = objectPose(obj, time);
+    const g = obj.geom && typeof obj.geom === 'object' ? obj.geom : {};
+    const hx = 0.5 * Math.max(0.001, Number(g.w) || 2) * Math.abs(pose.scale[0] || 1);
+    const hy = 0.5 * Math.max(0.001, Number(g.h) || 2) * Math.abs(pose.scale[1] || 1);
+    const hz = 0.5 * Math.max(0.001, Number(g.d) || 2) * Math.abs(pose.scale[2] || 1);
+    const { right: r, up: u, forward: f } = pose.basis;
+    const c = pose.worldPos;
+    const out = [];
+    for (const sx of [-1, 1]) {
+      for (const sy of [-1, 1]) {
+        for (const sz of [-1, 1]) {
+          out.push([
+            c[0] + r[0] * hx * sx + u[0] * hy * sy + f[0] * hz * sz,
+            c[1] + r[1] * hx * sx + u[1] * hy * sy + f[1] * hz * sz,
+            c[2] + r[2] * hx * sx + u[2] * hy * sy + f[2] * hz * sz,
+          ]);
+        }
+      }
+    }
+    return out;
+  }
+
+  /** Projected wireframe for the selected/hovered element. */
+  _objectBox(ctx, obj, time, color, label) {
+    const k = this.scale;
+    const pts = this.objectCorners(obj, time).map((c) => this.project(c));
+    if (pts.some((p) => !p)) return;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    for (let i = 0; i < 8; i++) {
+      for (const bit of [1, 2, 4]) {
+        if (i & bit) continue;
+        ctx.moveTo(pts[i][0], pts[i][1]);
+        ctx.lineTo(pts[i | bit][0], pts[i | bit][1]);
+      }
+    }
+    ctx.stroke();
+    ctx.fillStyle = color;
+    for (const p of pts) ctx.fillRect(p[0] - 1.6, p[1] - 1.6, 3.2, 3.2);
+    if (label) {
+      const top = pts.slice().sort((a, b) => a[1] - b[1])[0];
+      ctx.font = `${10.5 * k}px ui-monospace, monospace`;
+      ctx.fillStyle = color;
+      ctx.fillText(label, top[0] + 6 * k, top[1] - 6 * k);
+    }
+  }
+
+  _sceneObjects(ctx, project, time) {
+    const objs = Array.isArray(project.scene?.objects) ? project.scene.objects : [];
+    if (!objs.length) return;
+    const live = (o) => time >= (Number(o.start) || 0) - 1e-6 && time < (Number(o.start) || 0) + (Number(o.duration) || 0) - 1e-6;
+    const active = objs.find((o) => o.id === this.objSel && live(o));
+    const hover = objs.find((o) => o.id === this.objHover && live(o));
+    if (hover && hover !== active) this._objectBox(ctx, hover, time, 'rgba(23,217,255,.55)', null);
+    if (active) this._objectBox(ctx, active, time, 'rgba(255,209,102,.95)', active.name || active.id);
   }
 
   _grid(ctx, k) {
