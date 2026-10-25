@@ -239,7 +239,8 @@ export class Inspector {
 
     const setCam = (patch) => this._commit('cam', { op: 'cameraSet', patch });
     this.root.appendChild(this._section('相机',
-      this._field({ label: '视场角 FOV', value: cam.fov, step: 1, min: 20, max: 120, onChange: (v) => setCam({ fov: v }) }),
+      this._field({ label: '视场角 FOV', value: cam.fov, step: 1, min: 1, max: 360, onChange: (v) => setCam({ fov: v }) }),
+      h('div', { class: 'hint' }, '≥180° 自动切等距鱼眼（可到 360°）；Blender 侧用 Cycles 渲这一档。'),
       this._field({ label: '看向前方 (m)', value: cam.lookAhead, step: 5, min: 2, max: 500, onChange: (v) => setCam({ lookAhead: v }) }),
       this._field({ label: '转弯侧倾', value: cam.bankGain, step: 0.1, min: 0, max: 4, onChange: (v) => setCam({ bankGain: v }) }),
       this._field({ label: '最大侧倾°', value: cam.maxRoll, step: 1, min: 0, max: 60, onChange: (v) => setCam({ maxRoll: v }) }),

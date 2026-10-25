@@ -39,6 +39,15 @@ test('camera fov keyframes override the default', () => {
   assert.ok(mid > 40 && mid < 90);
 });
 
+test('fov is clamped to 1..360 (fisheye takes over at 180)', () => {
+  assert.equal(normalizeCamera({ fov: 0 }).fov, 1);
+  assert.equal(normalizeCamera({ fov: 400 }).fov, 360);
+  assert.equal(normalizeCamera({ fov: 240 }).fov, 240);
+  const cam = normalizeCamera({ fov: 60, path: [{ t: 0, pos: [0, 0, 0], fov: 999 }, { t: 2, pos: [0, 0, -10], fov: -20 }] });
+  assert.equal(cam.path[0].fov, 360);
+  assert.equal(cam.path[1].fov, 1);
+});
+
 test('evalCamera is deterministic and speed follows the path', () => {
   const p = project();
   const a = evalCamera(p, 3.3);

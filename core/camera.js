@@ -70,12 +70,18 @@ function ease(name, p) {
 
 export function normalizeCamera(cam) {
   const c = { ...DEFAULT_CAMERA, ...(cam || {}) };
+  c.fov = clamp(Number.isFinite(Number(c.fov)) ? Number(c.fov) : DEFAULT_CAMERA.fov, 1, 360);
   c.shake = { ...DEFAULT_CAMERA.shake, ...(cam?.shake || {}) };
   c.dof = { ...DEFAULT_CAMERA.dof, ...(cam?.dof || {}) };
   c.motionBlur = { ...DEFAULT_CAMERA.motionBlur, ...(cam?.motionBlur || {}) };
   c.path = (Array.isArray(cam?.path) ? cam.path : [])
     .filter((k) => Array.isArray(k.pos) && k.pos.length === 3)
-    .map((k) => ({ t: Number(k.t) || 0, pos: k.pos.map(Number), look: Array.isArray(k.look) ? k.look.map(Number) : null, fov: k.fov != null ? Number(k.fov) : null }))
+    .map((k) => ({
+      t: Number(k.t) || 0,
+      pos: k.pos.map(Number),
+      look: Array.isArray(k.look) ? k.look.map(Number) : null,
+      fov: k.fov != null ? clamp(Number(k.fov), 1, 360) : null,
+    }))
     .sort((a, b) => a.t - b.t);
   return c;
 }

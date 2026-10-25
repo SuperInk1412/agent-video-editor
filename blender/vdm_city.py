@@ -249,7 +249,20 @@ def _build_camera(scene, shot, width, height):
         roll = math.radians(float(e.get('roll', 0.0)))
         q = q @ Quaternion((0.0, 0.0, 1.0), roll)
         cam.rotation_quaternion = q
-        cam_data.angle = math.radians(float(e.get('fov', 62.0)))
+        # A rectilinear projection degenerates at 180°: from there on render
+        # with an equidistant fisheye so the fov can keep going up to 360°.
+        fov = float(e.get('fov', 62.0))
+        if fov >= 180.0:
+            try:
+                cam_data.type = 'PANO'
+                cam_data.panorama_type = 'FISHEYE_EQUIDISTANT'
+                cam_data.fisheye_fov = math.radians(min(360.0, max(180.0, fov)))
+            except Exception:
+                cam_data.type = 'PERSP'
+                cam_data.angle = math.radians(179.0)
+        else:
+            cam_data.type = 'PERSP'
+            cam_data.angle = math.radians(max(1.0, min(179.5, fov)))
         if dof.get('enabled'):
             cam_data.dof.focus_distance = max(1.0, d.length)
 
@@ -268,7 +281,11 @@ def build_shot_scene(shot, opts):
     scene = reset_scene()
     W = int(round(shot.get('width', 1920) * opts.get('scale', 1.0)))
     H = int(round(shot.get('height', 1080) * opts.get('scale', 1.0)))
-    scene.render.engine = 'BLENDER_EEVEE'
+    # A rectilinear camera has no projection at >= 180°, so those shots fall
+    # back to the equidistant fisheye. EEVEE does not support panorama cameras;
+    # Cycles does, so fisheye shots render in Cycles.
+    fisheye = any(float(e.get('fov', 62.0)) >= 180.0 for e in (shot.get('camera') or []))
+    scene.render.engine = 'CYCLES' if fisheye else 'BLENDER_EEVEE'
     scene.render.resolution_x = W
     scene.render.resolution_y = H
     scene.render.resolution_percentage = 100
@@ -282,9 +299,14 @@ def build_shot_scene(shot, opts):
     scene.view_settings.look = 'None'
     scene.render.filter_size = 1.2
     try:
-        scene.eevee.taa_render_samples = int(opts.get('samples', 32))
-        scene.eevee.use_raytracing = True
-        scene.eevee.ray_tracing_options.resolution_scale = '2'
+        if fisheye:
+            scene.cycles.samples = max(16, int(opts.get('samples', 32)))
+            scene.cycles.use_denoising = True
+            scene.cycles.max_bounces = 4
+        else:
+            scene.eevee.taa_render_samples = int(opts.get('samples', 32))
+            scene.eevee.use_raytracing = True
+            scene.eevee.ray_tracing_options.resolution_scale = '2'
     except Exception:
         pass
     # motion blur (EEVEE Next exposes it on the eevee settings in 5.x)
@@ -296,7 +318,7 @@ def build_shot_scene(shot, opts):
     except Exception:
         pass
     try:
-        if mb.get('enabled', True):
+        if not fisheye and mb.get('enabled', True):
             scene.eevee.use_motion_blur = True
             scene.eevee.motion_blur_steps = 2
     except Exception:
