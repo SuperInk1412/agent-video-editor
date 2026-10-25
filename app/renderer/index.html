@@ -55,7 +55,8 @@
         </div>
         <div id="stageBar">
           <span id="stageTime" class="mono">0.00 / 0.00s</span>
-          <span class="hint">Tab 编辑视口 · Alt 环视 · G 网格 · 拖节点/手柄改轨迹 · 空格播放</span>
+          <span id="viewMode" class="mode-badge" hidden>选择</span>
+          <span class="hint">Tab 编辑视口 · Alt 切换 选择/移动相机 · G 网格 · 右键菜单 · 空格播放</span>
         </div>
       </section>
 
@@ -75,6 +76,7 @@
 
     <footer id="timeline"></footer>
     <div id="toasts"></div>
+    <div id="ctxMenu" class="ctx-menu" hidden></div>
 
     <div id="projectModal" class="modal" hidden>
       <div class="modal-card">

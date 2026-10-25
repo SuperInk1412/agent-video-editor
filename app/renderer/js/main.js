@@ -24,7 +24,7 @@ const S = {
   dpr: Math.min(2, window.devicePixelRatio || 1),
   editMode: false,
   editCam: null,
-  lookMode: false,
+  viewMode: 'select',
   grid: true,
   keys: new Set(),
 };
@@ -76,6 +76,42 @@ function toast(msg, level = 'info') {
   toastTimer.push(setTimeout(() => { t.classList.add('out'); setTimeout(() => t.remove(), 260); }, level === 'error' ? 5200 : 2600));
   if (toastTimer.length > 8) toastTimer.shift();
 }
+
+// ---------------------------------------------------------------- context menu
+function hideContextMenu() {
+  const m = $('#ctxMenu');
+  if (m) m.hidden = true;
+}
+
+function showContextMenu(x, y, items) {
+  const m = $('#ctxMenu');
+  if (!m || !items?.length) return;
+  m.innerHTML = '';
+  for (const it of items) {
+    if (it.sep) {
+      const d = document.createElement('div');
+      d.className = 'ctx-sep';
+      m.appendChild(d);
+      continue;
+    }
+    const b = document.createElement('button');
+    b.textContent = it.label;
+    if (it.danger) b.classList.add('danger');
+    b.onclick = () => { hideContextMenu(); it.run?.(); };
+    m.appendChild(b);
+  }
+  m.hidden = false;
+  m.style.left = '0px';
+  m.style.top = '0px';
+  const r = m.getBoundingClientRect();
+  m.style.left = `${Math.max(6, Math.min(x, innerWidth - r.width - 8))}px`;
+  m.style.top = `${Math.max(6, Math.min(y, innerHeight - r.height - 8))}px`;
+}
+
+window.addEventListener('pointerdown', (e) => {
+  const m = $('#ctxMenu');
+  if (m && !m.hidden && !m.contains(e.target)) hideContextMenu();
+}, true);
 
 let worldTimer = null;
 let worldKey = '';
@@ -217,21 +253,28 @@ function setEditMode(on) {
   } else {
     S.editCam = null;
     preview.editCam = null;
-    if (S.lookMode) toggleLookMode(false);
   }
   if (btn) {
     btn.classList.toggle('on', S.editMode);
     btn.textContent = S.editMode ? '镜头视角' : '编辑视口';
   }
+  setViewMode('select');
   preview.render(S.time);
   gizmo?.draw();
 }
 
-function toggleLookMode(on) {
-  if (on === undefined) on = !S.lookMode;
-  if (on && !S.editMode) { toast('先按 Tab 进编辑视口，再用 Alt 环视'); return; }
-  S.lookMode = on;
-  document.body.classList.toggle('look-mode', on);
+/** Edit viewport modes: 'select' (pick / drag / context menu) or 'move' (camera). */
+function setViewMode(mode) {
+  S.viewMode = mode === 'move' ? 'move' : 'select';
+  const badge = $('#viewMode');
+  if (badge) {
+    badge.hidden = !S.editMode;
+    badge.textContent = S.viewMode === 'move' ? '移动相机 · Alt 切回选择' : '选择 · Alt 切到移动';
+    badge.classList.toggle('move', S.viewMode === 'move');
+  }
+  document.body.classList.toggle('body-move', S.editMode && S.viewMode === 'move');
+  const stage = $('#stage');
+  if (stage) stage.style.cursor = S.editMode && S.viewMode === 'move' ? 'grab' : 'default';
 }
 
 function orbitEdit(dx, dy) {
@@ -254,7 +297,7 @@ function orbitEdit(dx, dy) {
 
 function flyEdit(dt) {
   const cam = S.editCam;
-  if (!cam || !S.editMode || S.lookMode) return;
+  if (!cam || !S.editMode || S.viewMode !== 'move') return;
   const k = S.keys;
   const boost = k.has('ShiftLeft') || k.has('ShiftRight');
   const speed = (boost ? 180 : 45) * dt;
@@ -527,21 +570,69 @@ async function boot() {
     select({ elementId: null, segmentId: null });
   };
 
+  const nodeMenu = (index) => {
+    const key = S.project.camera?.path?.[index];
+    if (!key) return [];
+    const items = [
+      { label: `跳到 ${key.t.toFixed(2)}s`, run: () => setTime(key.t) },
+      { label: '删除这个关键点', danger: true, run: () => { gizmo.sel = -1; op({ op: 'cameraRemove', t: key.t }); } },
+    ];
+    if (key.in || key.out) {
+      items.push({
+        label: '重置曲线手柄',
+        run: () => { key.in = null; key.out = null; commitCameraPath(); gizmo.draw(); },
+      });
+    }
+    items.push({ sep: true });
+    items.push({ label: '选中相机', run: () => select({ camera: true }) });
+    items.push({ label: '切换到移动相机 (Alt)', run: () => setViewMode('move') });
+    return items;
+  };
+  const canvasMenu = () => [
+    { label: '选中相机', run: () => select({ camera: true }) },
+    {
+      label: '在当前时间打点',
+      run: () => {
+        const c = evalCamera(S.project, S.time);
+        op({ op: 'cameraKey', t: S.time, pos: c.pos.map((v) => Math.round(v * 100) / 100) });
+      },
+    },
+    { sep: true },
+    { label: '切换到移动相机 (Alt)', run: () => setViewMode('move') },
+  ];
+
   canvas.addEventListener('contextmenu', (e) => {
-    if (S.editMode || S.selection.camera) e.preventDefault();
+    e.preventDefault();
+    if (!S.editMode || S.viewMode !== 'select') return;
+    const { sx, sy } = stageXY(e);
+    const hit = gizmo?.hit(sx, sy);
+    if (hit) {
+      gizmo.sel = hit.index;
+      const key = S.project.camera?.path?.[hit.index];
+      if (key) { setTime(key.t); select({ camera: true }); }
+      gizmo.draw();
+      showContextMenu(e.clientX, e.clientY, nodeMenu(hit.index));
+    } else {
+      showContextMenu(e.clientX, e.clientY, canvasMenu());
+    }
   });
 
   canvas.addEventListener('pointerdown', (e) => {
     if (e.button !== 0 && e.button !== 2) return;
+    hideContextMenu();
     const { sx, sy, cx, cy } = stageXY(e);
-    if (S.editMode && S.lookMode) {
-      drag = { kind: 'look', button: e.button, x: cx, y: cy };
+    if (!S.editMode) {
+      if (e.button === 0) selectAt(sx, sy);
+      return;
+    }
+    if (S.viewMode === 'move') {
+      drag = { kind: e.button === 2 ? 'look' : 'orbit', button: e.button, x: cx, y: cy, moved: false };
       try { canvas.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
       e.preventDefault();
       return;
     }
-    const canEditPath = S.editMode || !!S.selection.camera;
-    const hit = canEditPath ? gizmo?.hit(sx, sy) : null;
+    if (e.button === 2) return; // context menu
+    const hit = gizmo?.hit(sx, sy);
     if (hit) {
       gizmo.sel = hit.index;
       const key = S.project.camera?.path?.[hit.index];
@@ -554,21 +645,22 @@ async function boot() {
       e.preventDefault();
       return;
     }
-    if (S.editMode) {
-      drag = { kind: 'orbit', x: cx, y: cy, moved: false };
-      try { canvas.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
-      e.preventDefault();
-      return;
-    }
-    selectAt(sx, sy);
+    drag = { kind: 'click', x: cx, y: cy };
+    try { canvas.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
+    e.preventDefault();
   });
 
   canvas.addEventListener('pointermove', (e) => {
     const { sx, sy, cx, cy } = stageXY(e);
     if (!drag) {
-      const canEditPath = S.editMode || !!S.selection.camera;
-      const hit = canEditPath ? gizmo?.hit(sx, sy) : null;
-      canvas.style.cursor = hit ? 'pointer' : (S.editMode ? 'grab' : 'default');
+      if (S.editMode) {
+        if (S.viewMode === 'move') { canvas.style.cursor = 'grab'; return; }
+        const hit = gizmo?.hit(sx, sy);
+        canvas.style.cursor = hit ? 'pointer' : 'default';
+        return;
+      }
+      const hit = S.selection.camera ? gizmo?.hit(sx, sy) : null;
+      canvas.style.cursor = hit ? 'pointer' : 'default';
       return;
     }
     if (drag.kind === 'look') {
@@ -591,6 +683,10 @@ async function boot() {
       gizmo.draw();
       return;
     }
+    if (drag.kind === 'click') {
+      if (Math.abs(cx - drag.x) + Math.abs(cy - drag.y) > 3) drag.moved = true;
+      return;
+    }
     const key = S.project.camera?.path?.[drag.index];
     if (!key) return;
     const w = preview.scene3d.planeHit(sx, sy, key.pos, drag.normal);
@@ -610,8 +706,10 @@ async function boot() {
     if (d.kind === 'node' || d.kind === 'out' || d.kind === 'in') {
       if (d.moved) commitCameraPath();
       gizmo.draw();
-    } else if (d.kind === 'orbit' && !d.moved) {
+    } else if (d.kind === 'click' && !d.moved) {
       const { sx, sy } = stageXY(e);
+      gizmo.sel = -1;
+      gizmo.draw();
       selectAt(sx, sy);
     }
   };
@@ -620,8 +718,7 @@ async function boot() {
 
   // double-click a handle to drop it back to the automatic Catmull tangent
   canvas.addEventListener('dblclick', (e) => {
-    const canEditPath = S.editMode || !!S.selection.camera;
-    if (!canEditPath) return;
+    if (!S.editMode || S.viewMode !== 'select') return;
     const { sx, sy } = stageXY(e);
     const hit = gizmo?.hit(sx, sy);
     if (!hit || (hit.kind !== 'out' && hit.kind !== 'in')) return;
@@ -633,7 +730,7 @@ async function boot() {
   });
 
   canvas.addEventListener('wheel', (e) => {
-    if (!S.editMode) return;
+    if (!S.editMode || S.viewMode !== 'move') return;
     e.preventDefault();
     dollyEdit(Math.exp(e.deltaY * 0.0012));
     preview.render(S.time);
@@ -645,9 +742,16 @@ async function boot() {
     if (/INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
     S.keys.add(e.code);
     if (e.key === 'Tab') { e.preventDefault(); setEditMode(!S.editMode); return; }
-    if (e.key === 'Alt' && !e.repeat) { e.preventDefault(); toggleLookMode(); return; }
+    if (e.key === 'Alt' && !e.repeat) {
+      e.preventDefault();
+      if (!S.editMode) { toast('先按 Tab 进编辑视口'); return; }
+      setViewMode(S.viewMode === 'select' ? 'move' : 'select');
+      return;
+    }
     if (e.key === 'Escape') {
-      if (S.lookMode) { toggleLookMode(false); return; }
+      const menu = $('#ctxMenu');
+      if (menu && !menu.hidden) { hideContextMenu(); return; }
+      if (S.editMode && S.viewMode === 'move') { setViewMode('select'); return; }
       if (S.editMode) { setEditMode(false); return; }
     }
     if (e.key.toLowerCase() === 'g' && !e.ctrlKey && !e.metaKey) { S.grid = !S.grid; gizmo?.draw(); return; }
