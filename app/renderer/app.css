@@ -417,6 +417,54 @@ body.look-mode #stageBox { box-shadow: 0 0 0 2px rgba(255,209,102,.65), 0 0 30px
 }
 .tl-camkey:hover { background: #fff27a; }
 
+/* ---------------- camera element (timeline) ---------------- */
+.tl-camhead .tl-objkind {
+  margin-left: auto; background: #241a33; border-color: #4b3a6b; color: #d6b8ff;
+}
+.tl-camdot { width: 7px; height: 7px; border-radius: 50%; background: #c9a6ff; flex: 0 0 7px; }
+.tl-camprop { height: 27px; }
+.tl-camprop .tl-gutter {
+  display: grid; grid-template-columns: 104px 110px minmax(0, 1fr);
+  gap: 6px; padding: 0 9px; align-items: center;
+}
+.tl-camnum { width: 110px; }
+.tl-camselect { width: 110px; height: 22px; padding: 0 4px; font-size: 10.5px; }
+.tl-camfish {
+  justify-self: start; font-size: 9px; color: #ffd166; border: 1px solid #5d4a1f;
+  background: #1c1710; border-radius: 8px; padding: 0 6px;
+}
+.tl-camhint { height: auto; min-height: 20px; }
+.tl-camhint .tl-gutter {
+  display: block; padding: 4px 9px; white-space: normal;
+  line-height: 1.4; font-size: 10px; color: #6f8296;
+}
+.tl-camhint-text { display: block; }
+.tl-camkeyrow { height: 28px; }
+.tl-camkeyrow .tl-gutter {
+  display: grid; grid-template-columns: 34px repeat(3, minmax(0, 1fr)) 54px 22px 20px;
+  gap: 4px; padding: 0 9px;
+}
+.tl-camtime {
+  padding: 0; border: 0; background: transparent; text-align: left;
+  color: var(--accent); font: 10px var(--mono); cursor: pointer;
+}
+.tl-camtime:hover { color: #fff; }
+.tl-camkeyrow .tl-kf { width: 100%; }
+.tl-cam-ease { height: 22px; min-width: 0; padding: 0 1px; font-size: 9px; }
+.tl-kf.danger:hover { color: var(--err); border-color: #4a2026; }
+.tl-camspeedrow { height: auto; }
+.tl-camspeedrow .tl-gutter {
+  display: block; height: auto; padding: 4px 9px; white-space: normal;
+}
+.tl-camspeedrow .speed-wrap { margin: 0; }
+.tl-camaddrow { height: 30px; }
+.tl-camaddrow .tl-gutter { display: block; padding: 4px 9px; }
+.tl-camadd {
+  width: 100%; height: 22px; border: 1px solid #1d4a5c; border-radius: 4px;
+  background: #0d2029; color: #9fe9ff; font-size: 10.5px; cursor: pointer;
+}
+.tl-camadd:hover { background: #12303a; }
+
 /* ---------------- project picker ---------------- */
 .modal {
   position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center;

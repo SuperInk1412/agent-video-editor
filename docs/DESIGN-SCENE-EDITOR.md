@@ -224,6 +224,9 @@ M = T(pivot) · R(dir, roll) · T(position) · S(scale) · G
 P2/P5 开了第一刀——米制盒子元素在视口与 Blender 同源（`objectPose` 逐帧烘焙）；
 时间轴是元素/相机的主编辑面：元素行可就地展开（内容/变换，中心点/位置/缩放各 3 维，
 `◆` 打帧），属性行的右轨道直接显示该通道关键帧，拖播放头时数值按关键帧实时同步。
+相机行也展开成同一套行：`相机参数`（FOV / 看向 / 侧倾 / 手动 roll）、`抖动`、
+`景深 / 模糊` 和 `轨道关键点 (N)`（t / x / y / z / ease / ∿ / ×）；FOV ≥ 180° 自动切
+等距鱼眼，Blender 这一档用 Cycles + `FISHEYE_EQUIDISTANT`。
 
 ## 11. 参考程序（Alight Motion）对照
 

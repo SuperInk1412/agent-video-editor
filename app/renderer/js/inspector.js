@@ -1,6 +1,5 @@
 // Inspector: edit the selected element down to the details (or project fx when nothing is selected).
 import { evalElement } from '/core/evaluate.js';
-import { evalCamera } from '/core/camera.js';
 import { objectPose } from '/core/scene.js';
 import { RotBall } from './rotball.js';
 import { SpeedCurve, SPEED_PRESETS } from './speedcurve.js';
@@ -328,91 +327,15 @@ export class Inspector {
 
   _renderCamera(project, time) {
     const cam = project.camera;
-    const st = evalCamera(project, time);
     this.root.appendChild(h('div', { class: 'insp-head' },
       h('div', { class: 'insp-kind' }, '镜头'),
-      h('div', { class: 'insp-id' }, `${cam.path.length} 关键点`),
+      h('div', { class: 'insp-id' }, `${cam.path.length} 关键点 · FOV ${round(cam.fov, 0)}°`),
       h('div', { class: 'insp-actions' },
-        h('button', { class: 'mini', onclick: () => this.opts.onOp({ op: 'cameraKey', t: round(time), pos: st.pos.map(round) }) }, '在此打点'),
         h('button', { class: 'mini', onclick: () => this.opts.onRenderAll?.() }, '渲染'),
       ),
     ));
-
-    const setCam = (patch) => this._commit('cam', { op: 'cameraSet', patch });
-    this.root.appendChild(this._section('相机',
-      this._field({ label: '视场角 FOV', value: cam.fov, step: 1, min: 1, max: 360, onChange: (v) => setCam({ fov: v }) }),
-      h('div', { class: 'hint' }, '≥180° 自动切等距鱼眼（可到 360°）；Blender 侧用 Cycles 渲这一档。'),
-      this._field({ label: '看向前方 (m)', value: cam.lookAhead, step: 5, min: 2, max: 500, onChange: (v) => setCam({ lookAhead: v }) }),
-      this._field({ label: '转弯侧倾', value: cam.bankGain, step: 0.1, min: 0, max: 4, onChange: (v) => setCam({ bankGain: v }) }),
-      this._field({ label: '最大侧倾°', value: cam.maxRoll, step: 1, min: 0, max: 60, onChange: (v) => setCam({ maxRoll: v }) }),
-      this._field({ label: '手动 roll°', value: cam.roll || 0, step: 1, min: -60, max: 60, onChange: (v) => setCam({ roll: v }) }),
-    ));
-
-    this.root.appendChild(this._section('抖动 / 景深 / 模糊',
-      this._field({ label: '抖动幅度', value: cam.shake.amp, step: 0.05, min: 0, max: 5, onChange: (v) => setCam({ shake: { ...cam.shake, amp: v } }) }),
-      this._field({ label: '抖动频率', value: cam.shake.freq, step: 0.1, min: 0.1, max: 8, onChange: (v) => setCam({ shake: { ...cam.shake, freq: v } }) }),
-      this._field({ label: '随速度增强', value: cam.shake.speedGain, step: 0.1, min: 0, max: 2, onChange: (v) => setCam({ shake: { ...cam.shake, speedGain: v } }) }),
-      this._field({ label: '随机种子', value: cam.shake.seed, step: 1, onChange: (v) => setCam({ shake: { ...cam.shake, seed: v } }) }),
-      this._field({ label: '景深', type: 'select', value: String(!!cam.dof.enabled), options: [{ value: 'false', label: '关' }, { value: 'true', label: '开' }], onChange: (v) => setCam({ dof: { ...cam.dof, enabled: v === 'true' } }) }),
-      this._field({ label: '光圈 f', value: cam.dof.fstop, step: 0.2, min: 0.5, max: 32, onChange: (v) => setCam({ dof: { ...cam.dof, fstop: v } }) }),
-      this._field({ label: '运动模糊', type: 'select', value: String(!!cam.motionBlur.enabled), options: [{ value: 'true', label: '开' }, { value: 'false', label: '关' }], onChange: (v) => setCam({ motionBlur: { ...cam.motionBlur, enabled: v === 'true' } }) }),
-      this._field({ label: '快门角', value: cam.motionBlur.shutter, step: 0.05, min: 0, max: 1, onChange: (v) => setCam({ motionBlur: { ...cam.motionBlur, shutter: v } }) }),
-    ));
-
-    const keys = [...cam.path].sort((a, b) => a.t - b.t);
-    const rows = h('div', { class: 'kf-list' });
-    for (const k of keys) {
-      const open = this._speedOpen && this._speedOpen.id === 'camera'
-        && this._speedOpen.path === 'pos' && Math.abs(this._speedOpen.t - k.t) < 1e-3;
-      const withSpeed = (pts) => keys.map((x) => (x === k ? { ...x, speed: pts } : x));
-      const row = h('div', { class: `kf-row ${Math.abs(k.t - time) < 0.08 ? 'at' : ''}`, style: 'grid-template-columns: 46px 1fr 1fr 1fr 58px 26px 22px' },
-        h('button', {
-          class: 'kf-t', title: '跳到这个关键点', style: 'background:none;border:0;color:inherit;cursor:pointer;padding:0;text-align:left',
-          onclick: () => this.opts.onSeek?.(k.t),
-        }, k.t.toFixed(2)),
-        h('input', { class: 'kf-ease', type: 'number', step: 1, value: round(k.pos[0]) }),
-        h('input', { class: 'kf-ease', type: 'number', step: 1, value: round(k.pos[1]) }),
-        h('input', { class: 'kf-ease', type: 'number', step: 1, value: round(k.pos[2]) }),
-        h('select', {
-          class: 'kf-ease', title: '这一段到下一关键点的 ease 预设（有速度曲线时被忽略）',
-          onchange: (e) => this.opts.onOp({ op: 'cameraPath', path: keys.map((x) => (x === k ? { ...x, ease: e.target.value } : x)) }),
-        }, ...EASES.map((x) => h('option', { value: x, selected: (k.ease || 'easeInOut') === x }, x))),
-        h('button', {
-          class: `mini ${open ? 'on' : ''}`, title: '编辑这一段的速度曲线',
-          onclick: () => { this._speedOpen = open ? null : { id: 'camera', path: 'pos', t: k.t }; this._refresh(); },
-        }, '∿'),
-        h('button', { class: 'mini danger', onclick: () => this.opts.onOp({ op: 'cameraRemove', t: k.t }) }, '×'),
-      );
-      const inputs = row.querySelectorAll('input');
-      inputs.forEach((inp, axis) => {
-        inp.addEventListener('change', () => {
-          const pos = k.pos.slice();
-          pos[axis] = Number(inp.value) || 0;
-          this.opts.onOp({ op: 'cameraKey', t: k.t, pos, look: k.look || null, fov: k.fov ?? null });
-        });
-      });
-      rows.appendChild(row);
-      if (open) {
-        const wrap = h('div', { class: 'speed-wrap' });
-        new SpeedCurve(wrap, {
-          points: k.speed,
-          onStart: () => { this._speedDragging = true; },
-          onEnd: () => { this._speedDragging = false; },
-          onChange: (pts) => this._commit(`cam:speed:${k.t}`, { op: 'cameraPath', path: withSpeed(pts) }, 90),
-        });
-        const preset = (pts) => this.opts.onOp({ op: 'cameraPath', path: withSpeed(pts) });
-        wrap.appendChild(h('div', { class: 'row-btns' },
-          h('button', { class: 'mini', onclick: () => preset(SPEED_PRESETS.linear) }, '匀速'),
-          h('button', { class: 'mini', onclick: () => preset(SPEED_PRESETS.easeIn) }, '慢入'),
-          h('button', { class: 'mini', onclick: () => preset(SPEED_PRESETS.easeOut) }, '慢出'),
-          h('button', { class: 'mini', onclick: () => preset(SPEED_PRESETS.punch) }, '冲击'),
-          h('button', { class: 'mini', onclick: () => this.opts.onOp({ op: 'cameraPath', path: withSpeed(null) }) }, '清除'),
-        ));
-        rows.appendChild(wrap);
-      }
-    }
-    this.root.appendChild(this._section(`轨道关键点 (${keys.length})`, rows,
-      h('div', { class: 'hint' }, '每行是 x / y / z（米）；下拉框是该段到下一关键点的速度曲线。')));
+    this.root.appendChild(h('div', { class: 'hint pad' },
+      '相机属性在时间轴左侧的相机行：FOV / 看向 / 侧倾 / 抖动 / 景深 / 模糊和轨道关键点都在那里。'));
 
     const w = project.world;
     const setW = (patch) => this._commit('world', { op: 'worldSet', patch });

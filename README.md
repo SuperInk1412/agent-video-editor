@@ -76,6 +76,11 @@ node ../../cli/vdm.js render --from 0 --to 6 --scale 0.5
 城市 seed、街区尺寸、楼高分布、亮窗、霓虹、雾。`world.corridor`（默认开、半径 16m）沿航线
 清掉镜头会穿过的楼，换 `seed` 也不会撞楼；关掉用 `world set corridor.enabled false`。
 
+相机也能像 3D 元素一样就地展开：点相机行首的 **▾**，FOV（≥180° 自动切等距鱼眼，Blender
+这一档走 Cycles）/ 看向前方 / 转弯侧倾 / 最大侧倾 / 手动 roll / 抖动 / 景深 / 运动模糊，
+以及 `轨道关键点 (N)`（每行 `t / x / y / z / ease / ∿ / ×`）都在时间轴里编辑，改完即时影响
+预览。右侧检查器保留世界参数和渲染按钮。
+
 ### 3D 元素
 
 点工具栏 **＋元素** 会在编辑视口前方放一个米制盒子（`project.scene.objects`），同时在时间轴
