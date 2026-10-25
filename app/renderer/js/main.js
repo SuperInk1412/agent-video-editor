@@ -421,6 +421,7 @@ async function boot() {
     grid: () => S.grid,
     visible: () => S.editMode || !!S.selection.camera,
     projectPoint: (p) => preview.scene3d.projectPoint(p),
+    viewCam: () => preview.scene3d.lastCam,
     stage: () => canvas,
   });
   gizmo.resize();

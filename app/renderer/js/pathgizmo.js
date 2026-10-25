@@ -8,6 +8,12 @@ const YELLOW = '#ffd166';
 const ORANGE = '#ff9f43';
 const GREEN = '#4ade80';
 
+const add3 = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+const sub3 = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const mul3 = (a, s) => [a[0] * s, a[1] * s, a[2] * s];
+const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const norm3 = (a) => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
+
 export class PathGizmo {
   constructor(canvas, opts) {
     this.canvas = canvas;
@@ -63,6 +69,105 @@ export class PathGizmo {
     ];
   }
 
+  /** Project copy with shake disabled, so the gizmo never jitters. */
+  clean(project) {
+    const cam = project?.camera;
+    if (!cam) return project;
+    return { ...project, camera: { ...cam, shake: { ...(cam.shake || {}), amp: 0 } } };
+  }
+
+  basis(st) {
+    const f = norm3(sub3(st.look, st.pos));
+    let r = norm3(cross3(f, [0, 1, 0]));
+    let u = cross3(r, f);
+    const roll = ((st.roll || 0) * Math.PI) / 180;
+    if (roll) {
+      const c = Math.cos(roll), s = Math.sin(roll);
+      const r2 = [r[0] * c + u[0] * s, r[1] * c + u[1] * s, r[2] * c + u[2] * s];
+      const u2 = [u[0] * c - r[0] * s, u[1] * c - r[1] * s, u[2] * c - r[2] * s];
+      r = norm3(r2);
+      u = norm3(u2);
+    }
+    return { f, r, u };
+  }
+
+  /** Camera glyph: full frustum for the live camera, FOV wedge for path keys. */
+  glyph(ctx, project, t, { main = false, selected = false } = {}) {
+    const st = evalCamera(project, t);
+    if (!st) return;
+    const { f, r, u } = this.basis(st);
+    const aspect = this.canvas.width / Math.max(1, this.canvas.height);
+    const fov = Math.min(179, Math.max(1, st.fov));
+    const depth = main ? 14 : 5.5;
+    const halfW = Math.tan((fov * Math.PI) / 360) * depth;
+    const halfH = halfW / aspect;
+    const apex = this.project(st.pos);
+    if (!apex) return;
+    const center = add3(st.pos, mul3(f, depth));
+    const color = main ? 'rgba(255,255,255,.9)' : selected ? 'rgba(255,209,102,.95)' : 'rgba(23,217,255,.55)';
+    const k = this.scale;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = main ? 1.5 : 1;
+
+    if (main) {
+      const corners = [
+        add3(add3(center, mul3(r, halfW)), mul3(u, halfH)),
+        add3(add3(center, mul3(r, -halfW)), mul3(u, halfH)),
+        add3(add3(center, mul3(r, -halfW)), mul3(u, -halfH)),
+        add3(add3(center, mul3(r, halfW)), mul3(u, -halfH)),
+      ].map((p) => this.project(p));
+
+      // small camera body behind the apex
+      const b1 = this.project(add3(st.pos, add3(mul3(f, -2.2), mul3(r, 1.1))));
+      const b2 = this.project(add3(st.pos, add3(mul3(f, -2.2), mul3(r, -1.1))));
+      if (b1 && b2) {
+        ctx.beginPath();
+        ctx.moveTo(apex[0], apex[1]);
+        ctx.lineTo(b1[0], b1[1]);
+        ctx.lineTo(b2[0], b2[1]);
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(255,255,255,.16)';
+        ctx.fill();
+        ctx.stroke();
+      }
+      for (const c of corners) {
+        if (!c) continue;
+        ctx.beginPath(); ctx.moveTo(apex[0], apex[1]); ctx.lineTo(c[0], c[1]); ctx.stroke();
+      }
+      if (corners.every(Boolean)) {
+        ctx.beginPath();
+        corners.forEach((c, i) => (i ? ctx.lineTo(c[0], c[1]) : ctx.moveTo(c[0], c[1])));
+        ctx.closePath();
+        ctx.stroke();
+      }
+      const upEnd = this.project(add3(st.pos, add3(mul3(f, 3), mul3(u, 2.6))));
+      if (upEnd) { ctx.beginPath(); ctx.moveTo(apex[0], apex[1]); ctx.lineTo(upEnd[0], upEnd[1]); ctx.stroke(); }
+      const labelAt = this.project(add3(center, mul3(u, halfH + 2)));
+      if (labelAt) {
+        ctx.fillStyle = 'rgba(255,255,255,.92)';
+        ctx.font = `${11 * k}px ui-monospace, monospace`;
+        const txt = st.fov >= 180 ? 'FOV 360° · 鱼眼' : `FOV ${Math.round(st.fov)}°`;
+        ctx.fillText(txt, labelAt[0] + 6 * k, labelAt[1] - 5 * k);
+      }
+      return;
+    }
+
+    // node glyph: aim line + horizontal FOV wedge
+    const c = this.project(center);
+    if (!c) return;
+    ctx.beginPath(); ctx.moveTo(apex[0], apex[1]); ctx.lineTo(c[0], c[1]); ctx.stroke();
+    for (const side of [-1, 1]) {
+      const edge = this.project(add3(center, mul3(r, halfW * side)));
+      if (!edge) continue;
+      ctx.beginPath(); ctx.moveTo(apex[0], apex[1]); ctx.lineTo(edge[0], edge[1]); ctx.stroke();
+    }
+    if (selected) {
+      ctx.fillStyle = 'rgba(255,209,102,.95)';
+      ctx.font = `${10 * k}px ui-monospace, monospace`;
+      ctx.fillText(`${t.toFixed(1)}s · ${Math.round(st.fov)}°`, c[0] + 5 * k, c[1] - 4 * k);
+    }
+  }
+
   draw() {
     this.clear();
     const ctx = this.ctx;
@@ -98,6 +203,17 @@ export class PathGizmo {
         ctx.strokeStyle = 'rgba(255,255,255,.55)'; ctx.lineWidth = 1;
         ctx.beginPath(); ctx.arc(now[0], now[1], 6, 0, Math.PI * 2); ctx.stroke();
       }
+    }
+
+    // camera orientation + fov at each key; the live frustum only once the
+    // editor camera has moved away from the lens (otherwise we are inside it)
+    const clean = this.clean(project);
+    keys.forEach((key, i) => this.glyph(ctx, clean, key.t, { selected: i === this.sel }));
+    if (this.opts.editMode()) {
+      const st = evalCamera(clean, time);
+      const vc = this.opts.viewCam?.();
+      const away = st && vc ? Math.hypot(st.pos[0] - vc.pos[0], st.pos[1] - vc.pos[1], st.pos[2] - vc.pos[2]) : Infinity;
+      if (away > 2.5) this.glyph(ctx, clean, time, { main: true });
     }
 
     // handles of the selected node
