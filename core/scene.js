@@ -119,8 +119,9 @@ export function sampleChannel(keys, t, fallback = 0) {
   return fallback;
 }
 
-/** vec3 channel: Catmull-Rom through the keys, re-timed by each segment's curve. */
-export function sampleVec3(keys, t, fallback = [0, 0, 0]) {  const k = sortKeys(keys);
+/** vec3 channel: cubic bezier through the keys (auto handles = Catmull-Rom). */
+export function sampleVec3(keys, t, fallback = [0, 0, 0]) {
+  const k = sortKeys(keys);
   const fb = vec3(fallback);
   if (!k.length) return fb;
   if (t <= k[0].t) return vec3(k[0].v, fb);
@@ -136,7 +137,20 @@ export function sampleVec3(keys, t, fallback = [0, 0, 0]) {  const k = sortKeys(
       const p2 = vec3(b.v, fb);
       const p0 = vec3(k[i - 1]?.v, p1);
       const p3 = vec3(k[i + 2]?.v, p2);
-      return catmull(p0, p1, p2, p3, u);
+      // Explicit handles shape the curve; auto handles are the Catmull tangents.
+      const out = Array.isArray(a.out) && a.out.length === 3
+        ? a.out.map(Number)
+        : [(p2[0] - p0[0]) / 6, (p2[1] - p0[1]) / 6, (p2[2] - p0[2]) / 6];
+      const inn = Array.isArray(b.in) && b.in.length === 3
+        ? b.in.map(Number)
+        : [-(p3[0] - p1[0]) / 6, -(p3[1] - p1[1]) / 6, -(p3[2] - p1[2]) / 6];
+      return cubic(
+        p1,
+        [p1[0] + out[0], p1[1] + out[1], p1[2] + out[2]],
+        [p2[0] + inn[0], p2[1] + inn[1], p2[2] + inn[2]],
+        p2,
+        u,
+      );
     }
   }
   return fb;

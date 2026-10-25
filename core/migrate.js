@@ -178,7 +178,13 @@ function migrateCamera(cam, meta) {
     const t = tAt(i);
     const st = evalCamera(project, t);
     const k = keySource[i];
-    pivotKeys.push({ t, v: st.pos.map(r6), ...(k.ease ? { ease: k.ease } : {}) });
+    pivotKeys.push({
+      t,
+      v: st.pos.map(r6),
+      ...(k.ease ? { ease: k.ease } : {}),
+      ...(Array.isArray(k.out) && k.out.length === 3 ? { out: k.out.map(Number) } : {}),
+      ...(Array.isArray(k.in) && k.in.length === 3 ? { in: k.in.map(Number) } : {}),
+    });
     dirKeys.push({ t, v: dirOf(st) });
     rollKeys.push({ t, v: r6(st.roll) });
     if (k.fov != null) fovKeys.push({ t, v: r6(st.fov) });

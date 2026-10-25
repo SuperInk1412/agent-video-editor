@@ -122,6 +122,16 @@ test('normalizeObject: defaults, type guard, sorted tracks', () => {
   assert.deepEqual(o.tracks.opacity.map((k) => k.t), [0, 2]);
 });
 
+test('sampleVec3: explicit handles bend the path, keys stay exact', () => {
+  const auto = [{ t: 0, v: [0, 0, 0] }, { t: 1, v: [10, 0, 0] }, { t: 2, v: [20, 0, 0] }];
+  near(sampleVec3(auto, 0.5, [0, 0, 0])[0], 4.375, 1e-6); // Catmull with auto handles
+  const bent = [{ t: 0, v: [0, 0, 0], out: [0, 0, -9] }, { t: 1, v: [10, 0, 0] }, { t: 2, v: [20, 0, 0] }];
+  const mid = sampleVec3(bent, 0.5, [0, 0, 0]);
+  assert.ok(Math.abs(mid[2]) > 1, 'pulled off the straight line by the out handle');
+  nearVec(sampleVec3(bent, 0, [0, 0, 0]), [0, 0, 0]);
+  nearVec(sampleVec3(bent, 1, [0, 0, 0]), [10, 0, 0]);
+});
+
 test('sampleAxes: per-axis tracks are exact, a vec3 track wins', () => {
   const tracks = {
     'pivot.x': [{ t: 0, v: 0, ease: 'linear' }, { t: 1, v: 10 }],
