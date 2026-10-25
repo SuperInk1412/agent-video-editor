@@ -173,13 +173,6 @@ body.look-mode #stageBox { box-shadow: 0 0 0 2px rgba(255,209,102,.65), 0 0 30px
   border-color: #4b3a6b;
 }
 .blk.cam.sel { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(23,217,255,.3); }
-.cam-key {
-  position: absolute; top: 50%; width: 8px; height: 8px; margin-left: -4px; margin-top: -4px;
-  background: var(--yellow); border: 1px solid #6b5700;
-  transform: rotate(45deg); cursor: pointer; z-index: 4;
-}
-.cam-key:hover { background: #fff27a; }
-.cam-key.at { background: #fff; border-color: #fff; box-shadow: 0 0 7px rgba(255,255,255,.75); }
 .blk {
   position: absolute; top: 4px; bottom: 4px; border-radius: 4px;
   background: #1b2432; border: 1px solid #2b3a4d;
@@ -440,34 +433,15 @@ body.look-mode #stageBox { box-shadow: 0 0 0 2px rgba(255,209,102,.65), 0 0 30px
   line-height: 1.4; font-size: 10px; color: #6f8296;
 }
 .tl-camhint-text { display: block; }
-.tl-camkeyrow { height: 28px; }
-.tl-camkeyrow.at { background: #1c1a0e; }
-.tl-camkeyrow.at .tl-gutter { background: #1d1a0d; }
-.tl-camkeyrow.at .tl-track { background: #14120a; }
-.tl-camkeyrow .tl-gutter {
-  display: grid; grid-template-columns: 34px repeat(3, minmax(0, 1fr)) 54px 22px 20px;
-  gap: 4px; padding: 0 9px;
+/* One camera-position property: the flight keys are this row's lane diamonds. */
+.tl-camposrow .tl-gutter {
+  grid-template-columns: 96px repeat(3, minmax(0, 1fr)) 24px;
+  gap: 4px;
 }
-.tl-camtime {
-  padding: 0; border: 0; background: transparent; text-align: left;
-  color: var(--accent); font: 10px var(--mono); cursor: pointer;
-}
-.tl-camtime:hover { color: #fff; }
-.tl-camkeyrow .tl-kf { width: 100%; }
-.tl-cam-ease { height: 22px; min-width: 0; padding: 0 1px; font-size: 9px; }
-.tl-kf.danger:hover { color: var(--err); border-color: #4a2026; }
-.tl-camspeedrow { height: auto; }
-.tl-camspeedrow .tl-gutter {
-  display: block; height: auto; padding: 4px 9px; white-space: normal;
-}
-.tl-camspeedrow .speed-wrap { margin: 0; }
-.tl-camaddrow { height: 30px; }
-.tl-camaddrow .tl-gutter { display: block; padding: 4px 9px; }
-.tl-camadd {
-  width: 100%; height: 22px; border: 1px solid #1d4a5c; border-radius: 4px;
-  background: #0d2029; color: #9fe9ff; font-size: 10.5px; cursor: pointer;
-}
-.tl-camadd:hover { background: #12303a; }
+.tl-camposrow .tl-kf { width: 100%; }
+.tl-camposrow.sel { background: #0d151c; }
+.tl-camposrow.sel .tl-gutter { background: #0e1720; color: var(--text); }
+.tl-camposrow.sel .tl-track { background: #0c1319; }
 
 /* ---------------- project picker ---------------- */
 .modal {

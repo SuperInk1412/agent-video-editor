@@ -335,7 +335,7 @@ export class Inspector {
       ),
     ));
     this.root.appendChild(h('div', { class: 'hint pad' },
-      '相机属性在时间轴左侧的相机行：FOV / 看向 / 侧倾 / 抖动 / 景深 / 模糊和轨道关键点都在那里。'));
+      '相机属性折叠在时间轴相机行里：点行首 ▾ 展开；飞行轨道是「摄像机位置」属性上的关键帧。'));
 
     const w = project.world;
     const setW = (patch) => this._commit('world', { op: 'worldSet', patch });

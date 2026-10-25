@@ -1,12 +1,12 @@
 // Timeline: ruler + segment lane + camera element + 3D element rows.
 // Element rows expand in place: the left column edits the element's properties
 // and the right lanes show per-property keyframes, all on the same row grid.
-// The camera is an element too: FOV / bank / shake / DOF / path keys live in
-// its own expandable row instead of the right inspector.
-import { timecode, EASE_NAMES } from '/core/time.js';
+// The camera is an element too: its attributes are folded inside the camera
+// row, and the flight path is one "摄像机位置" property whose keyframes are
+// the diamonds on that row's lane.
+import { timecode } from '/core/time.js';
 import { objectPose } from '/core/scene.js';
 import { pathPos } from '/core/camera.js';
-import { SpeedCurve, SPEED_PRESETS } from './speedcurve.js';
 
 const el = (tag, cls, html) => {
   const n = document.createElement(tag);
@@ -34,12 +34,11 @@ export class Timeline {
     this.objectId = null;
     this.cameraSel = false;
     this.camOpen = false;
-    this.camSpeed = null;
-    this._camSpeedDragging = false;
+    this._camPos = null;
     this.zoom = 1;
     this.pps = 60;
     this.expanded = new Set();
-    this.sections = { content: true, transform: true, camMain: true, camShake: true, camDof: true, camKeys: true };
+    this.sections = { content: true, transform: true, camPos: true, camMain: true, camShake: true, camDof: true };
     this.propSel = null;
     this._autoObj = null;
     this._scrollTo = null;
@@ -136,13 +135,6 @@ export class Timeline {
     const id = this.objectId;
     if (!id) this._autoObj = null;
     let force = false;
-    // Selecting the camera unfolds its element block (properties + path keys),
-    // just like selecting a 3D object unfolds its row.
-    if (this.cameraSel && this.project?.camera && !this.camOpen) {
-      this.camOpen = true;
-      this._scrollTo = 'camera';
-      force = true;
-    }
     if (id && id !== this._autoObj && !this.expanded.has(id)) {
       this.expanded.add(id);
       this._autoObj = id;
@@ -172,12 +164,6 @@ export class Timeline {
     const x = this._trackX(t);
     this.playhead.style.transform = `translateX(${x}px)`;
     if (this.scroll.scrollLeft > x - 20) this.scroll.scrollLeft = Math.max(0, x - 80);
-    for (const key of this.camTrack?.querySelectorAll('.cam-key') || []) {
-      key.classList.toggle('at', Math.abs(Number(key.dataset.t) - t) < 5e-4);
-    }
-    for (const row of this.camPropsWrap?.querySelectorAll('.tl-camkeyrow') || []) {
-      row.classList.toggle('at', Math.abs(Number(row.dataset.t) - t) < 0.05);
-    }
     this._syncProps(true);
   }
 
@@ -231,8 +217,6 @@ export class Timeline {
     const p = this.project;
     if (!p) return;
     if (!this.pps) { this._layout(); return; }
-    // Do not rebuild the speed-curve canvas while its point is being dragged.
-    if (this._camSpeedDragging) return;
     const active = document.activeElement;
     const typing = !force && this.root.contains(active)
       && /INPUT|SELECT|TEXTAREA/.test(active?.tagName || '');
@@ -286,10 +270,11 @@ export class Timeline {
       this.segTrack.appendChild(b);
     }
 
-    // camera element: header row (block + path keys) + inline properties
+    // camera element: folded header row, attributes live inside
     this.camTrack.innerHTML = '';
     this.camGutter.innerHTML = '';
     this.camPropsWrap.innerHTML = '';
+    this._camPos = null;
     const cam = p.camera;
     this.camGutter.classList.toggle('dim', !cam);
     this.camRow.classList.toggle('dim', !cam);
@@ -309,13 +294,6 @@ export class Timeline {
       b.style.width = `${Math.max(8, p.meta.duration * this.pps)}px`;
       b.innerHTML = `<span class="blk-name">镜头</span><span class="blk-meta">${cam.path.length} 关键点</span>`;
       this.camTrack.appendChild(b);
-      for (const k of cam.path) {
-        const tag = el('div', 'cam-key');
-        tag.style.left = `${k.t * this.pps}px`;
-        tag.dataset.t = String(k.t);
-        tag.title = `相机关键点 ${k.t.toFixed(2)}s（双击跳转）`;
-        this.camTrack.appendChild(tag);
-      }
       if (this.camOpen) this._cameraRows(cam);
     } else {
       this.camGutter.append(el('span', '', '相机 · 无'));
@@ -377,6 +355,11 @@ export class Timeline {
 
   _cameraRows(cam) {
     const set = (patch) => this.onOp?.({ op: 'cameraSet', patch });
+
+    // One "摄像机位置" property. Its lane diamonds are the flight keys.
+    this.camPropsWrap.appendChild(this._sectionRow('变换', 'camPos'));
+    if (this.sections.camPos) this.camPropsWrap.appendChild(this._camPosRow());
+
     this.camPropsWrap.appendChild(this._sectionRow('相机参数', 'camMain'));
     if (this.sections.camMain) {
       this.camPropsWrap.appendChild(this._camNumRow('视场角 FOV', cam.fov, {
@@ -428,24 +411,80 @@ export class Timeline {
         step: 0.05, min: 0, max: 1, apply: (v) => set({ motionBlur: { ...cam.motionBlur, shutter: v } }),
       }));
     }
+  }
 
-    const keys = [...cam.path].sort((a, b) => a.t - b.t);
-    this.camPropsWrap.appendChild(this._sectionRow(`轨道关键点 (${keys.length})`, 'camKeys'));
-    if (this.sections.camKeys) {
-      const addRow = el('div', 'tl-row tl-camprop tl-camaddrow');
-      const g = el('div', 'tl-gutter');
-      const add = el('button', 'tl-camadd', '◆ 在当前时间打点');
-      add.title = '把当前相机位置记成一个轨道关键点';
-      add.addEventListener('click', (e) => { e.stopPropagation(); this._addCamKey(); });
-      g.appendChild(add);
-      addRow.append(g, el('div', 'tl-track'));
-      this.camPropsWrap.appendChild(addRow);
-      for (const k of keys) {
-        this.camPropsWrap.appendChild(this._camKeyRow(k));
-        if (this.camSpeed === k.t) this.camPropsWrap.appendChild(this._camSpeedRow(k));
-      }
-      this.camPropsWrap.appendChild(this._camHintRow('每行是 x / y / z（米）；下拉框是该段到下一关键点的速度曲线。'));
+  _camPosRow() {
+    const row = el('div', 'tl-row tl-camprop tl-camposrow');
+    const g = el('div', 'tl-gutter');
+    g.appendChild(el('span', 'tl-plabel', '摄像机位置'));
+    const inputs = [];
+    for (const ax of AX) {
+      const { box, inp } = this._numBox(ax, ax.toUpperCase());
+      inp.addEventListener('focus', () => this.onPause?.());
+      inp.addEventListener('input', () => {
+        this._editTimes.set('camera:position', round3(this.time));
+        this._schedule('camera:position', () => this._commitCamPos());
+      });
+      inp.addEventListener('blur', () => { this._flush('camera:position'); this._syncProps(); });
+      inputs.push(inp);
+      g.appendChild(box);
     }
+    const kf = el('button', 'tl-kf', '◆');
+    kf.title = '在当前时间打点 / 删点';
+    kf.addEventListener('click', (e) => { e.stopPropagation(); this._toggleCamKey(); });
+    g.appendChild(kf);
+    const lane = el('div', 'tl-track');
+    row.append(g, lane);
+    this._camPos = { inputs, kf, lane, sig: '', keys: [] };
+    this._refreshCamLane();
+    return row;
+  }
+
+  _commitCamPos() {
+    const cam = this.project?.camera;
+    const posRow = this._camPos;
+    if (!cam || !posRow) return;
+    const v = posRow.inputs.map((i) => Number(i.value));
+    if (v.some((n) => !Number.isFinite(n))) return;
+    const t = this._editTimes.get('camera:position') ?? round3(this.time);
+    const old = cam.path.find((k) => Math.abs(k.t - t) <= 1e-4);
+    this.onOp?.({ op: 'cameraKey', t, pos: v, look: old?.look ?? null, fov: old?.fov ?? null });
+  }
+
+  _toggleCamKey() {
+    const cam = this.project?.camera;
+    if (!cam) return;
+    this.onPause?.();
+    const t = round3(this.time);
+    const key = cam.path.find((k) => Math.abs(k.t - t) < 1e-3);
+    if (key) {
+      this.onOp?.({ op: 'cameraRemove', t: key.t });
+      return;
+    }
+    const pos = pathPos(cam, this.time).map(round3);
+    this.onOp?.({ op: 'cameraKey', t, pos });
+  }
+
+  _refreshCamLane() {
+    const posRow = this._camPos;
+    const cam = this.project?.camera;
+    if (!posRow || !cam) return;
+    const keys = cam.path.map((k) => round3(k.t)).sort((a, b) => a - b);
+    const sig = keys.join(',');
+    if (sig !== posRow.sig) {
+      posRow.sig = sig;
+      posRow.lane.innerHTML = '';
+      posRow.keys = keys.map((t) => {
+        const d = el('div', 'tl-key');
+        d.dataset.cam = '1';
+        d.dataset.t = String(t);
+        d.style.left = `${t * this.pps}px`;
+        d.title = `摄像机位置 · ${t.toFixed(2)}s`;
+        posRow.lane.appendChild(d);
+        return { t, node: d };
+      });
+    }
+    for (const k of posRow.keys) k.node.classList.toggle('at', Math.abs(k.t - this.time) < 5e-4);
   }
 
   _camNumRow(label, value, { step = 0.1, min, max, apply, badge = '' } = {}) {
@@ -499,111 +538,6 @@ export class Timeline {
     g.appendChild(span);
     row.append(g, el('div', 'tl-track'));
     return row;
-  }
-
-  _camKeyRow(k) {
-    const row = el('div', 'tl-row tl-camprop tl-camkeyrow');
-    row.dataset.t = String(k.t);
-    const g = el('div', 'tl-gutter');
-    const tBtn = el('button', 'tl-camtime', k.t.toFixed(2));
-    tBtn.title = '跳到这个关键点';
-    tBtn.addEventListener('click', (e) => { e.stopPropagation(); this.onSeek?.(k.t); });
-    const boxes = [];
-    ['x', 'y', 'z'].forEach((ax, i) => {
-      const { box, inp } = this._numBox(ax, ax.toUpperCase());
-      inp.step = '1';
-      inp.value = String(round2(k.pos[i]));
-      inp.addEventListener('focus', () => this.onPause?.());
-      inp.addEventListener('change', () => {
-        const pos = k.pos.slice();
-        pos[i] = Number(inp.value) || 0;
-        this.onOp?.({ op: 'cameraKey', t: k.t, pos, look: k.look ?? null, fov: k.fov ?? null });
-      });
-      boxes.push(box);
-    });
-    const ease = document.createElement('select');
-    ease.className = 'tl-cam-ease';
-    ease.title = '这一段到下一关键点的 ease 预设（有速度曲线时被忽略）';
-    for (const name of EASE_NAMES) {
-      const o = document.createElement('option');
-      o.value = name;
-      o.textContent = name;
-      o.selected = (k.ease || 'easeInOut') === name;
-      ease.appendChild(o);
-    }
-    ease.addEventListener('change', () => {
-      this.onOp?.({ op: 'cameraPath', path: this._camPathWith(k.t, { ease: ease.value }) });
-    });
-    const curve = el('button', 'tl-kf', '∿');
-    curve.title = '编辑这一段的速度曲线';
-    if (k.speed) curve.classList.add('has');
-    if (this.camSpeed === k.t) curve.classList.add('on');
-    curve.addEventListener('click', (e) => {
-      e.stopPropagation();
-      this.camSpeed = this.camSpeed === k.t ? null : k.t;
-      this.render(true);
-      if (this.camSpeed != null) requestAnimationFrame(() => this._scrollCamSpeed());
-    });
-    const del = el('button', 'tl-kf danger', '×');
-    del.title = '删除这个关键点';
-    del.addEventListener('click', (e) => { e.stopPropagation(); this.onOp?.({ op: 'cameraRemove', t: k.t }); });
-    g.append(tBtn, ...boxes, ease, curve, del);
-    row.append(g, el('div', 'tl-track'));
-    return row;
-  }
-
-  _camSpeedRow(k) {
-    const row = el('div', 'tl-row tl-camprop tl-camspeedrow');
-    const g = el('div', 'tl-gutter');
-    const wrap = el('div', 'speed-wrap');
-    new SpeedCurve(wrap, {
-      points: k.speed,
-      onStart: () => { this._camSpeedDragging = true; },
-      onEnd: () => {
-        this._camSpeedDragging = false;
-        this._flush(`cam:speed:${k.t}`);
-      },
-      onChange: (pts) => this._schedule(`cam:speed:${k.t}`, () => {
-        this.onOp?.({ op: 'cameraPath', path: this._camPathWith(k.t, { speed: pts }) });
-      }),
-    });
-    const btns = el('div', 'row-btns');
-    const mk = (label, pts, danger = false) => {
-      const b = el('button', `mini${danger ? ' danger' : ''}`, label);
-      b.addEventListener('click', (e) => {
-        e.stopPropagation();
-        this.onOp?.({ op: 'cameraPath', path: this._camPathWith(k.t, { speed: pts }) });
-      });
-      btns.appendChild(b);
-    };
-    mk('匀速', SPEED_PRESETS.linear);
-    mk('慢入', SPEED_PRESETS.easeIn);
-    mk('慢出', SPEED_PRESETS.easeOut);
-    mk('冲击', SPEED_PRESETS.punch);
-    mk('清除', null, true);
-    wrap.appendChild(btns);
-    g.appendChild(wrap);
-    row.append(g, el('div', 'tl-track'));
-    return row;
-  }
-
-  _camPathWith(t, patch) {
-    const cam = this.project?.camera;
-    if (!cam) return [];
-    return cam.path.map((k) => (Math.abs(k.t - t) < 1e-6 ? { ...k, ...patch } : k));
-  }
-
-  _addCamKey() {
-    const cam = this.project?.camera;
-    if (!cam) return;
-    const t = round3(this.time);
-    if (cam.path.some((k) => Math.abs(k.t - t) < 1e-3)) {
-      this.onSeek?.(t);
-      return;
-    }
-    this.onPause?.();
-    const pos = pathPos(cam, this.time).map(round3);
-    this.onOp?.({ op: 'cameraKey', t, pos });
   }
 
   _objectGroup(o) {
@@ -878,6 +812,17 @@ export class Timeline {
       }
       if (pr.kind !== 'geom' && pr.kind !== 'color') this._refreshLane(pr, o);
     }
+    const cam = this.project?.camera;
+    if (this._camPos && cam) {
+      const pos = pathPos(cam, t);
+      this._camPos.inputs.forEach((inp, i) => set(inp, pos[i]));
+      const at = cam.path.some((k) => Math.abs(k.t - t) < 1e-3);
+      const has = cam.path.length > 0;
+      this._camPos.kf.classList.toggle('on', at);
+      this._camPos.kf.classList.toggle('has', !at && has);
+      this._camPos.kf.title = at ? '删除这一帧' : has ? `在当前时间打点（已有 ${cam.path.length} 帧）` : '在当前时间打点';
+      this._refreshCamLane();
+    }
     for (const [id, h] of this._objHeads) {
       const o = this._obj(id);
       if (!o) continue;
@@ -1020,19 +965,10 @@ export class Timeline {
     else if (r.bottom > sr.bottom) this.scroll.scrollTop += (r.bottom - sr.bottom) + 8;
   }
 
-  _scrollCamSpeed() {
-    const row = this.inner.querySelector('.tl-camspeedrow');
-    if (!row) return;
-    const r = row.getBoundingClientRect();
-    const sr = this.scroll.getBoundingClientRect();
-    if (r.bottom > sr.bottom) this.scroll.scrollTop += (r.bottom - sr.bottom) + 8;
-    else if (r.top < sr.top) this.scroll.scrollTop -= (sr.top - r.top) + 4;
-  }
-
   // ------------------------------------------------------------ selection / input
   _paintSelection() {
     this.inner.querySelectorAll('.blk.sel').forEach((n) => n.classList.remove('sel'));
-    this.inner.querySelectorAll('.tl-objhead.sel, .tl-prop.sel').forEach((n) => n.classList.remove('sel'));
+    this.inner.querySelectorAll('.tl-objhead.sel, .tl-prop.sel, .tl-camposrow.sel').forEach((n) => n.classList.remove('sel'));
     if (this.objectId) {
       this.inner.querySelector(`.blk.ob[data-obj="${this.objectId}"]`)?.classList.add('sel');
       this.inner.querySelector(`.tl-objhead[data-obj="${this.objectId}"]`)?.classList.add('sel');
@@ -1049,6 +985,7 @@ export class Timeline {
     if (this.cameraSel) {
       this.inner.querySelector('.blk.cam')?.classList.add('sel');
       this.inner.querySelector('.tl-camhead')?.classList.add('sel');
+      this.inner.querySelector('.tl-camposrow')?.classList.add('sel');
     }
   }
 
@@ -1057,14 +994,21 @@ export class Timeline {
     // controls / fields handle themselves (focus, clicks)
     if (/INPUT|TEXTAREA|SELECT/.test(target.tagName || '') || target.closest('button')) return;
     if (target.closest('.tl-sect')) return;
-    // The speed-curve canvas captures its own pointer drag.
-    if (target.closest('.speedcurve')) return;
     ev.preventDefault();
     this._noSnap = ev.altKey;
     const blk = target.closest?.('.blk');
     const gutterEl = target.closest?.('.tl-gutter[data-id]');
 
     // ---- 3D elements ----
+    const camKeyEl = target.closest?.('.tl-key[data-cam="1"]');
+    if (camKeyEl) {
+      this.cameraSel = true;
+      this.elementId = null; this.segmentId = null; this.objectId = null;
+      this.onSelect?.({ camera: true });
+      this.onSeek?.(Number(camKeyEl.dataset.t));
+      this._paintSelection();
+      return;
+    }
     const key = target.closest?.('.tl-key');
     if (key) {
       this.objectId = key.dataset.obj;
@@ -1141,15 +1085,6 @@ export class Timeline {
     }
 
     // ---- camera / segments / v2 ----
-    const camKey = target.closest?.('.cam-key');
-    if (camKey) {
-      this.cameraSel = true;
-      this.elementId = null; this.segmentId = null; this.objectId = null;
-      this.onSelect?.({ camera: true });
-      this.onSeek?.(Number(camKey.dataset.t));
-      this._paintSelection();
-      return;
-    }
     if (blk?.classList.contains('cam')) {
       this.cameraSel = true;
       this.elementId = null; this.segmentId = null; this.objectId = null;
@@ -1157,8 +1092,10 @@ export class Timeline {
       this._paintSelection();
       return;
     }
-    // camera header / expanded property area (fields above already returned)
-    if (target.closest?.('.tl-camhead') || target.closest?.('.tl-camprop, .tl-camhint')) {
+    // camera header / property labels (the lane itself still scrubs)
+    if (target.closest?.('.tl-camhead')
+      || target.closest?.('.tl-camprop .tl-gutter')
+      || target.closest?.('.tl-camhint .tl-gutter')) {
       this.cameraSel = true;
       this.elementId = null; this.segmentId = null; this.objectId = null;
       this.onSelect?.({ camera: true });
