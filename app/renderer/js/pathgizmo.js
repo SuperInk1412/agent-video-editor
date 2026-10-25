@@ -104,10 +104,10 @@ export class PathGizmo {
     const apex = this.project(st.pos);
     if (!apex) return;
     const center = add3(st.pos, mul3(f, depth));
-    const color = main ? 'rgba(255,255,255,.9)' : selected ? 'rgba(255,209,102,.95)' : 'rgba(23,217,255,.55)';
+    const color = main ? 'rgba(255,255,255,.9)' : selected ? 'rgba(255,209,102,.95)' : 'rgba(23,217,255,.42)';
     const k = this.scale;
     ctx.strokeStyle = color;
-    ctx.lineWidth = main ? 1.5 : 1;
+    ctx.lineWidth = main ? 1.5 : selected ? 1.2 : 1;
 
     if (main) {
       const corners = [
@@ -152,19 +152,51 @@ export class PathGizmo {
       return;
     }
 
-    // node glyph: aim line + horizontal FOV wedge
-    const c = this.project(center);
-    if (!c) return;
-    ctx.beginPath(); ctx.moveTo(apex[0], apex[1]); ctx.lineTo(c[0], c[1]); ctx.stroke();
-    for (const side of [-1, 1]) {
-      const edge = this.project(add3(center, mul3(r, halfW * side)));
-      if (!edge) continue;
-      ctx.beginPath(); ctx.moveTo(apex[0], apex[1]); ctx.lineTo(edge[0], edge[1]); ctx.stroke();
+    // node glyph: a small, semi-transparent camera with its own frustum.
+    // Size follows the view distance so it stays readable at any zoom.
+    const vc = this.opts.viewCam?.();
+    const dist = vc ? Math.hypot(st.pos[0] - vc.pos[0], st.pos[1] - vc.pos[1], st.pos[2] - vc.pos[2]) : 120;
+    const nDepth = Math.min(45, Math.max(0.6, dist * 0.028));
+    const nHalfW = Math.tan((fov * Math.PI) / 360) * nDepth;
+    const nHalfH = nHalfW / aspect;
+    const nCenter = add3(st.pos, mul3(f, nDepth));
+    const nCorners = [
+      add3(add3(nCenter, mul3(r, nHalfW)), mul3(u, nHalfH)),
+      add3(add3(nCenter, mul3(r, -nHalfW)), mul3(u, nHalfH)),
+      add3(add3(nCenter, mul3(r, -nHalfW)), mul3(u, -nHalfH)),
+      add3(add3(nCenter, mul3(r, nHalfW)), mul3(u, -nHalfH)),
+    ].map((p) => this.project(p));
+
+    const bw = nDepth * 0.16;
+    const b1 = this.project(add3(st.pos, add3(mul3(f, -nDepth * 0.28), mul3(r, bw))));
+    const b2 = this.project(add3(st.pos, add3(mul3(f, -nDepth * 0.28), mul3(r, -bw))));
+    if (b1 && b2) {
+      ctx.beginPath();
+      ctx.moveTo(apex[0], apex[1]);
+      ctx.lineTo(b1[0], b1[1]);
+      ctx.lineTo(b2[0], b2[1]);
+      ctx.closePath();
+      ctx.fillStyle = selected ? 'rgba(255,209,102,.20)' : 'rgba(23,217,255,.08)';
+      ctx.fill();
+      ctx.stroke();
+    }
+    for (const c of nCorners) {
+      if (!c) continue;
+      ctx.beginPath(); ctx.moveTo(apex[0], apex[1]); ctx.lineTo(c[0], c[1]); ctx.stroke();
+    }
+    if (nCorners.every(Boolean)) {
+      ctx.beginPath();
+      nCorners.forEach((c, i) => (i ? ctx.lineTo(c[0], c[1]) : ctx.moveTo(c[0], c[1])));
+      ctx.closePath();
+      ctx.stroke();
     }
     if (selected) {
-      ctx.fillStyle = 'rgba(255,209,102,.95)';
-      ctx.font = `${10 * k}px ui-monospace, monospace`;
-      ctx.fillText(`${t.toFixed(1)}s · ${Math.round(st.fov)}°`, c[0] + 5 * k, c[1] - 4 * k);
+      const label = this.project(add3(nCenter, mul3(u, nHalfH + nDepth * 0.25)));
+      if (label) {
+        ctx.fillStyle = 'rgba(255,209,102,.95)';
+        ctx.font = `${10 * k}px ui-monospace, monospace`;
+        ctx.fillText(`${t.toFixed(1)}s · ${Math.round(st.fov)}°`, label[0] + 5 * k, label[1] - 4 * k);
+      }
     }
   }
 
@@ -225,25 +257,18 @@ export class PathGizmo {
       this._handle(ctx, key, prev, next, 'in', GREEN, k);
     }
 
-    // nodes
+    // nodes: the mini cameras are the markers; only selected/hovered gets a ring
     keys.forEach((key, i) => {
-      const s = this.project(key.pos);
-      if (!s) return;
       const active = i === this.sel;
       const hot = this.hover?.kind === 'node' && this.hover.index === i;
-      const r = (active || hot ? 5.4 : 4.2);
+      if (!active && !hot) return;
+      const s = this.project(key.pos);
+      if (!s) return;
       ctx.beginPath();
-      ctx.arc(s[0], s[1], r, 0, Math.PI * 2);
-      ctx.fillStyle = active ? YELLOW : '#071018';
-      ctx.fill();
-      ctx.lineWidth = 1.6;
-      ctx.strokeStyle = active ? YELLOW : CYAN;
+      ctx.arc(s[0], s[1], 6, 0, Math.PI * 2);
+      ctx.lineWidth = 1.4;
+      ctx.strokeStyle = active ? YELLOW : 'rgba(23,217,255,.7)';
       ctx.stroke();
-      if (active || hot) {
-        ctx.fillStyle = 'rgba(207,226,242,.9)';
-        ctx.font = `${10 * k}px ui-monospace, monospace`;
-        ctx.fillText(`${key.t.toFixed(2)}s`, s[0] + 8 * k, s[1] - 7 * k);
-      }
     });
   }
 
