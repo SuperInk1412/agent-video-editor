@@ -4,6 +4,7 @@ import { Timeline, escapeHtml } from './timeline.js';
 import { Inspector } from './inspector.js';
 import { AgentPanel } from './ai.js';
 import { PipelinePanel } from './pipeline.js';
+import { LogPanel } from './logs.js';
 
 const $ = (s) => document.querySelector(s);
 const S = {
@@ -20,7 +21,24 @@ const S = {
   dpr: Math.min(2, window.devicePixelRatio || 1),
 };
 
-let preview, timeline, inspector, agentPanel, pipelinePanel;
+let preview, timeline, inspector, agentPanel, pipelinePanel, logPanel;
+
+// ---- error reporting: everything lands in .vdm/logs and the 日志 panel ----
+const reportedErrors = new Set();
+function reportError(where, err) {
+  const msg = String(err?.message || err || 'unknown error');
+  const stack = err?.stack ? String(err.stack).slice(0, 2000) : '';
+  fetch('/api/log', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ level: 'error', source: 'renderer', msg: `${where}: ${msg}`, stack, url: location.href }),
+  }).catch(() => {});
+  if (!reportedErrors.has(msg)) {
+    reportedErrors.add(msg);
+    toast(`${where}: ${msg.slice(0, 140)}`, 'error');
+  }
+}
+window.addEventListener('error', (e) => reportError('window.onerror', e.error || e.message));
+window.addEventListener('unhandledrejection', (e) => reportError('unhandledrejection', e.reason));
 
 // ---------------------------------------------------------------- helpers
 async function post(url, body) {
@@ -247,6 +265,8 @@ function switchRightTab(name) {
   $('#panelInsp').hidden = name !== 'insp';
   $('#panelAI').hidden = name !== 'ai';
   $('#panelPipe').hidden = name !== 'pipe';
+  $('#panelLogs').hidden = name !== 'logs';
+  if (name === 'logs') logPanel?.refresh(true);
 }
 function switchLeftTab(name) {
   document.querySelectorAll('[data-tabs="left"] button').forEach((b) => b.classList.toggle('on', b.dataset.tab === name));
@@ -314,6 +334,8 @@ async function boot() {
     toast,
   });
   agentPanel.setState({ available: S.agentAvailable, running: false });
+
+  logPanel = new LogPanel($('#panelLogs'), { toast });
 
   pipelinePanel = new PipelinePanel($('#panelPipe'), {
     getProject: () => S.project,
@@ -394,6 +416,7 @@ async function boot() {
   es.addEventListener('pipeline', (e) => { S.pipeline = JSON.parse(e.data); pipelinePanel.set({ pipeline: S.pipeline, render: S.render }); });
   es.addEventListener('toast', (e) => { const d = JSON.parse(e.data); toast(d.message, d.level); });
   es.addEventListener('beats', () => toast('节拍已更新', 'success'));
+  es.addEventListener('log', (e) => { try { logPanel.append(JSON.parse(e.data)); } catch { /* ignore */ } });
 
   // resize
   const ro = new ResizeObserver(() => fitStage());

@@ -18,6 +18,7 @@ import { renderStill, renderVideo, blenderVersion, findBlender } from './blender
 import { analyzeBeats } from './beats.js';
 import { autoStoryboard, summarizeProject, STYLE_PRESETS } from './storyboard.js';
 import { AgentRunner, findDsh, CLI_PATH } from './agent.js';
+import { createLogger } from './log.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const APP_DIR = path.resolve(HERE, '..');
@@ -88,6 +89,8 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
     throw new Error(`no ${PROJECT_FILE} in ${projectRoot}`);
   }
   const p = await ensureProjectDirs(projectRoot);
+  const log = createLogger({ dir: projectRoot });
+  log.info('engine starting', { root: projectRoot, pid: process.pid, version: '0.1.0' });
   let project = await loadProject(projectRoot);
   let lastRev = project.rev;
 
@@ -99,6 +102,7 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
     }
   };
   const toast = (message, level = 'info') => broadcast('toast', { message, level, at: Date.now() });
+  log.onLine((rec) => { if (rec.level !== 'debug') broadcast('log', rec); });
 
   // ---- undo/redo (in-memory, per session) ----
   const history = { undo: [], redo: [], max: 80 };
@@ -176,16 +180,18 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
           const { changed } = applyOps(next, ev.proposal.ops);
           pushUndo(project);
           const saved = await saveAndBroadcast(next, 'ai');
+          log.info('agent applied', { ops: ev.proposal.ops.length, changed, rev: saved.rev, note: ev.proposal.note });
           broadcast('agent', { ...ev, applied: { changed, note: ev.proposal.note, rev: saved.rev } });
           addArtifact({ kind: 'ai', label: `AI 改了 ${changed.length} 项`, detail: ev.proposal.note });
           toast(`AI 已应用 ${changed.length} 处修改`, 'success');
         } catch (e) {
+          log.error('agent proposal rejected', { error: e.message, ops: ev.proposal.ops });
           broadcast('agent', { ...ev, error: e.message });
           toast(`AI 提议应用失败: ${e.message}`, 'error');
         }
         return;
       }
-      if (ev.type === 'exit') console.log('[vdm] agent exit', ev.code, `${ev.seconds?.toFixed?.(1)}s`);
+      if (ev.type === 'exit') log.info('agent exit', { code: ev.code, sec: ev.seconds, stderr: ev.stderr || undefined });
       broadcast('agent', ev);
     },
   });
@@ -241,6 +247,24 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
         return;
       }
 
+      // ---------------- logs ----------------
+      if (pathname === '/api/logs' && req.method === 'GET') {
+        const n = Math.min(2000, Math.max(10, Number(url.searchParams.get('lines') || 300)));
+        const lines = await log.tail(n);
+        const records = [];
+        for (const line of lines) {
+          try { records.push(JSON.parse(line)); } catch { records.push({ ts: new Date().toISOString(), level: 'info', msg: line }); }
+        }
+        return json(res, 200, { file: log.fileFor(), records });
+      }
+
+      if (pathname === '/api/log' && req.method === 'POST') {
+        const body = await readBody(req);
+        const level = ['info', 'warn', 'error', 'debug'].includes(body.level) ? body.level : 'info';
+        log[level](String(body.msg || 'renderer report').slice(0, 4000), { source: body.source || 'renderer', stack: body.stack ? String(body.stack).slice(0, 2000) : undefined, url: body.url });
+        return json(res, 200, { ok: true });
+      }
+
       // ---------------- state ----------------
       if (pathname === '/api/state') {
         let blender = null;
@@ -273,6 +297,7 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
           ({ changed } = applyOps(next, ops));
         } catch (e) {
           history.undo.pop();
+          log.warn('ops rejected', { error: e.message, ops: ops.map((o) => o.op).join(',') });
           return json(res, 400, { error: e.message, code: e.code || 'OP_FAILED' });
         }
         const saved = await saveAndBroadcast(next, body.by || 'ui');
@@ -472,6 +497,7 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
           total: Math.max(1, Math.round((to - from) * project.meta.fps)), startedAt: Date.now(), out, error: null,
         });
         renderAbort = new AbortController();
+        log.info('render start', { kind: renderState.kind, from, to, scale, total: renderState.total, out });
         broadcast('render', renderState);
         setStep(full ? 'master' : 'render', { status: 'running', detail: `${from.toFixed(1)}s → ${to.toFixed(1)}s` });
 
@@ -494,10 +520,12 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
             const name = path.basename(res2.out);
             setStep(full ? 'master' : 'render', { status: 'done', detail: `${(to - from).toFixed(1)}s · ${name}` });
             addArtifact({ kind: 'render', label: `${full ? '成片' : '片段'} ${from.toFixed(1)}–${to.toFixed(1)}s`, path: res2.out, url: `/renders/${name}` });
+            log.info('render done', { out: res2.out, frames: res2.frames, sec: (Date.now() - renderState.startedAt) / 1000 });
             broadcast('render', { ...renderState, done: true, url: `/renders/${name}` });
             toast(`渲染完成: ${name}`, 'success');
           } catch (e) {
             Object.assign(renderState, { running: false, error: e.message });
+            log.error('render failed', { error: e.message, log: e.log ? String(e.log).slice(-3000) : undefined });
             setStep(full ? 'master' : 'render', { status: 'error', detail: e.message.slice(0, 120) });
             broadcast('render', { ...renderState, error: e.message });
             toast(`渲染失败: ${e.message}`, 'error');
@@ -588,7 +616,7 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
 
       return json(res, 404, { error: 'not found' });
     } catch (e) {
-      console.error('[vdm] request failed', req.method, pathname, e);
+      log.error('request failed', { method: req.method, path: pathname, error: e.message, stack: String(e.stack || '').slice(0, 1200) });
       if (!res.headersSent) json(res, 500, { error: e.message });
       else res.end();
     }
@@ -625,6 +653,7 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
     server, info, port: actualPort,
     get project() { return project; },
     async close() {
+      log.info('engine shutting down');
       agent.cancel();
       unwatch();
       for (const c of clients) { try { c.end(); } catch { /* ignore */ } }

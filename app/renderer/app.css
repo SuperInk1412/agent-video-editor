@@ -268,3 +268,19 @@ main { display: grid; grid-template-columns: 272px minmax(0, 1fr) 356px; min-hei
 .toast.warn { border-left-color: var(--warn); }
 .toast.out { opacity: 0; transform: translateY(6px); transition: all .25s; }
 @keyframes slideIn { from { opacity: 0; transform: translateY(8px); } }
+
+/* ---------------- logs ---------------- */
+.log-list {
+  margin-top: 8px; border: 1px solid var(--line); border-radius: 6px;
+  background: #07090d; overflow: auto; height: calc(100% - 96px); min-height: 200px;
+  font-family: var(--mono); font-size: 11px;
+}
+.log-entry { display: grid; grid-template-columns: 52px 40px 1fr; gap: 6px; padding: 4px 7px; border-bottom: 1px solid #10151d; }
+.log-entry.lv-warn { background: #19140a; }
+.log-entry.lv-error { background: #1c0d10; }
+.le-time { color: var(--dim2); }
+.le-level { font-size: 9px; text-transform: uppercase; color: var(--dim2); padding-top: 1px; }
+.le-level.warn { color: var(--warn); }
+.le-level.error { color: var(--err); }
+.le-msg { color: #c7d3e3; white-space: pre-wrap; word-break: break-word; }
+.le-meta { grid-column: 3; color: var(--dim2); font-size: 10px; white-space: pre-wrap; word-break: break-all; }

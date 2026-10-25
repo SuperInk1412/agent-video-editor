@@ -76,6 +76,19 @@ Electron 路径可用 `VDM_ELECTRON` 覆盖；Blender 用 `VDM_BLENDER` 覆盖�
 | `projects/` | 项目（示例见 `projects/demo/`） |
 | `docs/` | 架构、项目格式、CLI、路线图 |
 
+## 排错 / 日志
+
+所有运行日志（引擎、渲染失败、AI 会话、渲染器异常）都进同一个文件：
+
+```
+projects/<name>/.vdm/logs/vdm-YYYY-MM-DD.log     # JSONL：ts/level/msg/meta
+```
+
+- 界面：右侧 **日志** 标签页，可按「警告+ / 只看错误」过滤、自动跟随；
+- 终端：`npm run logs`（或 `node scripts/logs.mjs --project projects/demo --follow`）；
+- 渲染失败会把 Blender 最后几 KB 的 stderr 一并写进日志；
+- 渲染器里的 `window.onerror` / `unhandledrejection` 会自动上报，不再只躺在 devtools。
+
 ## 状态
 
 v0.1（可跑通的 demo）：时间线编辑、实时预览、元素/细节检查器、关键帧、

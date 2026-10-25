@@ -15,7 +15,8 @@
     "test": "node --test \"tests/*.test.mjs\"",
     "demo": "node scripts/demo.mjs",
     "still": "node cli/vdm.js still",
-    "blender:check": "node scripts/blender-check.mjs"
+    "blender:check": "node scripts/blender-check.mjs",
+    "logs": "node scripts/logs.mjs --project projects/demo --lines 120 --follow"
   },
   "keywords": [
     "video",
