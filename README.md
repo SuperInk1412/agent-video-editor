@@ -25,11 +25,13 @@ VedioMaker 是一个本地的视频作曲台：时间线由你自己定义，画
 ## 快速开始
 
 ```bash
-# 打开示例项目（Electron 复用本机已装的 dist，不下载任何依赖）
+# 在仓库根启动：先弹项目选择器（不再默认死开 demo）
 npm start
 
-# 在项目目录里启动就打开那个项目（npm start 会把 cwd 换成包根，脚本读 INIT_CWD）
+# 在项目目录里启动就直接打开那个项目（npm start 的 cwd 是包根，脚本读 INIT_CWD）
 cd projects/nightcity && npm start
+
+# 应用内：顶栏「项目」或 Ctrl+O 换项目（会带新项目重启），「重启」或 Ctrl+Shift+R 快速重启
 
 # 或者纯浏览器形态
 npm run web

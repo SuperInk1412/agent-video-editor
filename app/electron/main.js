@@ -1,6 +1,6 @@
 // Electron shell: boots the engine server in-process, then opens the editor window.
 // The engine is a plain Node server, so the same UI also runs in a browser (`npm run web`).
-import { app, BrowserWindow, Menu, dialog, shell } from 'electron';
+import { app, BrowserWindow, Menu, dialog, shell, ipcMain } from 'electron';
 import path from 'node:path';
 import fsp from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -21,10 +21,39 @@ const argOf = (name, dflt = null) => {
 };
 const captureTo = argOf('capture');
 
+const requestedProject = process.argv.find((a) => a.startsWith('--project='))?.split('=')[1] || process.env.VDM_PROJECT || null;
+
 function resolveRoot() {
-  const arg = process.argv.find((a) => a.startsWith('--project='))?.split('=')[1];
-  return arg || process.env.VDM_PROJECT || path.join(REPO, 'projects', 'demo');
+  return requestedProject || path.join(REPO, 'projects', 'demo');
 }
+
+/** Restart the whole app (engine included) with another project directory. */
+async function relaunchWith(dir) {
+  const drop = ['--project=', '--capture=', '--at=', '--delay=', '--hold=', '--eval='];
+  const args = process.argv.slice(1).filter((a) => !drop.some((p) => a.startsWith(p)));
+  if (dir) args.push(`--project=${dir}`);
+  try { await engine?.close(); } catch { /* ignore */ }
+  app.relaunch({ args });
+  app.exit(0);
+}
+
+ipcMain.handle('vdm:current', () => ({ root: engine?.info?.root || null, url: engine?.info?.url || null }));
+ipcMain.handle('vdm:restart', (_e, dir) => relaunchWith(dir || engine?.info?.root));
+ipcMain.handle('vdm:open-project', async (_e, dir) => {
+  if (!dir) throw new Error('没有选择项目目录');
+  const root = (await findProjectRoot(dir)) || null;
+  if (!root) throw new Error('这个目录里没有 project.vdm.json');
+  return relaunchWith(root);
+});
+ipcMain.handle('vdm:pick-folder', async () => {
+  const res = await dialog.showOpenDialog(win, {
+    properties: ['openDirectory'],
+    defaultPath: path.join(REPO, 'projects'),
+    title: '选择项目目录（含 project.vdm.json）',
+  });
+  if (res.canceled || !res.filePaths?.length) return null;
+  return (await findProjectRoot(res.filePaths[0])) || res.filePaths[0];
+});
 
 async function boot() {
   const wanted = path.resolve(resolveRoot());
@@ -48,6 +77,7 @@ async function boot() {
     autoHideMenuBar: false,
     show: !captureTo,
     webPreferences: {
+      preload: path.join(HERE, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -56,7 +86,7 @@ async function boot() {
     },
   });
 
-  win.loadURL(engine.info.url);
+  win.loadURL(engine.info.url + (requestedProject ? '' : '?picker=1'));
   win.on('closed', () => { win = null; });
   win.webContents.setWindowOpenHandler(({ url }) => {
     // local renders/frames open in the OS, never in a browser download manager
@@ -117,6 +147,17 @@ function buildMenu() {
     {
       label: '文件',
       submenu: [
+        {
+          label: '打开项目…',
+          accelerator: 'CmdOrCtrl+O',
+          click: () => win?.webContents.send('vdm:open-picker'),
+        },
+        {
+          label: '快速重启',
+          accelerator: 'CmdOrCtrl+Shift+R',
+          click: () => relaunchWith(engine?.info.root),
+        },
+        { type: 'separator' },
         {
           label: '打开项目文件夹',
           click: () => { if (engine) shell.openPath(engine.info.root); },

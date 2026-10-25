@@ -6,6 +6,7 @@ import { Inspector } from './inspector.js';
 import { AgentPanel } from './ai.js';
 import { PipelinePanel } from './pipeline.js';
 import { LogPanel } from './logs.js';
+import { ProjectsPanel } from './projects.js';
 import { evalCamera } from '/core/camera.js';
 
 const $ = (s) => document.querySelector(s);
@@ -28,7 +29,7 @@ const S = {
   keys: new Set(),
 };
 
-let preview, timeline, inspector, agentPanel, pipelinePanel, logPanel, gizmo;
+let preview, timeline, inspector, agentPanel, pipelinePanel, logPanel, gizmo, projects;
 
 // ---- error reporting: everything lands in .vdm/logs and the 日志 panel ----
 const reportedErrors = new Set();
@@ -504,6 +505,10 @@ async function boot() {
   $('#renderScale').onchange = (e) => { S.renderScale = Number(e.target.value); };
   $('#btnEditMode').onclick = () => setEditMode(!S.editMode);
 
+  projects = new ProjectsPanel({ toast });
+  $('#btnProject').onclick = () => projects.open();
+  $('#btnRestart').onclick = () => projects.restart();
+
   // ---------- 3D viewport: path nodes, handles, orbit, look ----------
   const stageXY = (e) => {
     const r = canvas.getBoundingClientRect();
@@ -692,6 +697,9 @@ async function boot() {
   applyProject(S.project, 'boot');
   fitStage();
   setTime(0);
+  if (new URLSearchParams(location.search).get('picker') === '1') {
+    setTimeout(() => projects?.open(), 350);
+  }
 
   // playback loop
   let last = performance.now();
@@ -713,7 +721,7 @@ async function boot() {
   };
   requestAnimationFrame(loop);
   window.__vdm = {
-    S, preview, timeline, inspector, gizmo, op, toast,
+    S, preview, timeline, inspector, gizmo, projects, op, toast,
     setTime: (t) => setTime(t),
     select: (s) => select(s),
     setEditMode: (on) => setEditMode(on),

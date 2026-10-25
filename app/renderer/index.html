@@ -23,6 +23,8 @@
       </div>
       <div class="actions">
         <span id="renderBadge" class="badge" hidden></span>
+        <button id="btnProject" title="打开项目 (Ctrl+O)">项目</button>
+        <button id="btnRestart" title="快速重启 (Ctrl+Shift+R)">重启</button>
         <select id="renderScale" title="渲染分辨率">
           <option value="0.5">50%</option>
           <option value="1">100%</option>
@@ -73,6 +75,24 @@
 
     <footer id="timeline"></footer>
     <div id="toasts"></div>
+
+    <div id="projectModal" class="modal" hidden>
+      <div class="modal-card">
+        <div class="modal-head">
+          <div>
+            <strong>打开项目</strong>
+            <span id="projCurrent" class="hint"></span>
+          </div>
+          <button id="projClose" class="mini" title="关闭">×</button>
+        </div>
+        <div id="projList" class="proj-list"></div>
+        <div class="modal-foot">
+          <button id="projBrowse">打开文件夹…</button>
+          <span class="spacer"></span>
+          <button id="projRestart">重启当前项目</button>
+        </div>
+      </div>
+    </div>
   </div>
   <script type="module" src="/app/renderer/js/main.js"></script>
 </body>

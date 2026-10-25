@@ -293,6 +293,43 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
         });
       }
 
+      // ---------------- project picker ----------------
+      if (pathname === '/api/projects' && req.method === 'GET') {
+        const list = [];
+        const seen = new Set();
+        const add = async (dir) => {
+          const abs = path.resolve(dir);
+          if (seen.has(abs)) return;
+          seen.add(abs);
+          try {
+            const raw = await fsp.readFile(path.join(abs, PROJECT_FILE), 'utf8');
+            const p = JSON.parse(raw);
+            list.push({
+              dir: abs,
+              id: path.basename(abs),
+              title: p.meta?.title || path.basename(abs),
+              rev: p.rev | 0,
+              width: p.meta?.width || 1920,
+              height: p.meta?.height || 1080,
+              fps: p.meta?.fps || 24,
+              duration: p.meta?.duration || 0,
+              camera: !!p.camera,
+              savedAt: p.meta?.savedAt || null,
+              current: abs === projectRoot,
+            });
+          } catch { /* not a project folder */ }
+        };
+        const base = path.join(APP_DIR, 'projects');
+        try {
+          for (const d of await fsp.readdir(base, { withFileTypes: true })) {
+            if (d.isDirectory()) await add(path.join(base, d.name));
+          }
+        } catch { /* no projects dir */ }
+        await add(projectRoot);
+        list.sort((a, b) => (b.current ? 1 : 0) - (a.current ? 1 : 0) || String(b.savedAt || '').localeCompare(String(a.savedAt || '')));
+        return json(res, 200, { root: projectRoot, projects: list });
+      }
+
       // ---------------- project mutations ----------------
       if (pathname === '/api/ops' && req.method === 'POST') {
         const body = await readBody(req);

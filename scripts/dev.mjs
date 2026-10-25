@@ -26,19 +26,20 @@ function findElectron() {
   return null;
 }
 
-// --project > where you stood when launching > projects/demo
+// --project > where you stood when launching > pick a project in the app
 // `npm start` runs the script from the package root, so cwd is the repo even
 // when you launched from projects/<name> — INIT_CWD keeps the real directory.
-const project = await (async () => {
+const explicitProject = await (async () => {
   const i = argv.indexOf('--project');
   if (i >= 0 && argv[i + 1]) return path.resolve(argv[i + 1]);
   for (const start of [process.cwd(), process.env.INIT_CWD]) {
     const found = start ? await findProjectRoot(start) : null;
     if (found) return found;
   }
-  return path.join(REPO, 'projects', 'demo');
+  return null;
 })();
-console.log(`[vdm] opening ${project}`);
+const project = explicitProject || path.join(REPO, 'projects', 'demo');
+console.log(`[vdm] opening ${project}${explicitProject ? '' : '（应用里选择项目）'}`);
 
 if (webMode) {
   const port = Number(process.env.VDM_PORT || 47100);
@@ -58,11 +59,13 @@ if (webMode) {
     if (argv[i].startsWith('--project=')) continue;
     passthrough.push(argv[i]);
   }
-  const args = [REPO, `--project=${project}`, ...passthrough];
+  const args = [REPO, ...(explicitProject ? [`--project=${project}`] : []), ...passthrough];
+  const env = { ...process.env, ELECTRON_ENABLE_LOGGING: '1' };
+  if (explicitProject) env.VDM_PROJECT = project;
   const child = spawn(exe, args, {
     cwd: REPO,
     stdio: 'inherit',
-    env: { ...process.env, VDM_PROJECT: project, ELECTRON_ENABLE_LOGGING: '1' },
+    env,
   });
   child.on('exit', (code) => process.exit(code ?? 0));
 }
