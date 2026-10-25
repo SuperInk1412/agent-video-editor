@@ -1,6 +1,6 @@
 {
   "schema": "vdm.project/1",
-  "rev": 4,
+  "rev": 5,
   "meta": {
     "title": "锈梦 · Demo",
     "fps": 24,
@@ -76,7 +76,7 @@
       "shake": 0
     },
     "style": "neon",
-    "savedAt": "2026-10-25T05:44:37.746Z"
+    "savedAt": "2026-10-25T05:53:02.442Z"
   },
   "segments": [
     {
@@ -357,7 +357,7 @@
         "fit": "cover",
         "text": "把梦焊进骨头",
         "font": "SimHei",
-        "size": 54,
+        "size": 64,
         "weight": 400,
         "color": "#00f0ff",
         "align": "center",
@@ -378,7 +378,32 @@
         "amount": 0,
         "dir": "in"
       },
-      "keyframes": [],
+      "keyframes": [
+        {
+          "t": 4.051,
+          "path": "transform.y",
+          "value": 360,
+          "ease": "outExpo"
+        },
+        {
+          "t": 4.051,
+          "path": "transform.opacity",
+          "value": 0,
+          "ease": "easeOut"
+        },
+        {
+          "t": 4.389,
+          "path": "transform.y",
+          "value": 300,
+          "ease": "linear"
+        },
+        {
+          "t": 4.389,
+          "path": "transform.opacity",
+          "value": 1,
+          "ease": "linear"
+        }
+      ],
       "visible": true,
       "meta": {}
     },

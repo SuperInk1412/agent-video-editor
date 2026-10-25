@@ -25,19 +25,33 @@ VedioMaker 是一个本地的视频作曲台：时间线由你自己定义，画
 ## 快速开始
 
 ```bash
-# 1) 建一个项目
-node cli/vdm.js init projects/demo --title "锈梦 demo" --duration 12
-
-# 2) 浏览器里编辑（无需安装任何东西）
-npm run web
-
-# 3) 或者用 Electron 打开
+# 打开示例项目（Electron 复用本机已装的 dist，不下载任何依赖）
 npm start
 
-# 4) 出一帧 / 出片
-node cli/vdm.js still 3.2 --out .vdm/frames/a.png
-node cli/vdm.js render --from 0 --to 6 --out .vdm/renders/part.mp4
+# 或者纯浏览器形态
+npm run web
+
+# 命令行走一遍：新建 → 分析节拍 → 自动分镜 → 出帧 → 出片
+node cli/vdm.js init projects/myfilm --title "我的片子" --duration 20 --audio bgm.m4a
+cd projects/myfilm
+node ../../cli/vdm.js import shot01.png shot02.png bgm.m4a
+node ../../cli/vdm.js beats --set-duration
+node ../../cli/vdm.js plan --style neon --brief $'第一句
+第二句'
+node ../../cli/vdm.js still 3.2 --out .vdm/frames/a.png
+node ../../cli/vdm.js render --from 0 --to 8 --out .vdm/renders/part.mp4
 ```
+
+Electron 路径可用 `VDM_ELECTRON` 覆盖；Blender 用 `VDM_BLENDER` 覆盖（默认自动找
+`E:/mvtools/blender/*` 和 `C:/Program Files/Blender Foundation/*`）。
+
+## 已验证
+
+- `npm test`：14 个单元测试全绿（ops / 求值 / 存储锁 / 节拍 / agent 解析）
+- Blender 5.0.1 无头 EEVEE：1080p 单帧约 3–5s（含启动），24s@50% 成片约 70s
+- 示例项目 `projects/demo`：24s / 6 分镜 / 13 元素，成片在
+  `projects/demo/.vdm/renders/master-*.mp4`（含音轨）
+- AI 闭环：在 UI 里选中分镜 → 描述改动 → agent 返回 ops → 引擎落盘 → 预览/时间线即时刷新（可撤销）
 
 ## 三条设计原则
 

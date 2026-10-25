@@ -92,7 +92,8 @@ async function boot() {
         await new Promise((r) => setTimeout(r, delay));
         if (at > 0) await win.webContents.executeJavaScript(`window.__vdm && window.__vdm.setTime(${at})`);
         if (script) await win.webContents.executeJavaScript(script);
-        await new Promise((r) => setTimeout(r, 700));
+        const hold = Number(argOf('hold', 700));
+        await new Promise((r) => setTimeout(r, hold));
         const img = await win.webContents.capturePage();
         await fsp.mkdir(path.dirname(captureTo), { recursive: true });
         await fsp.writeFile(captureTo, img.toPNG());
@@ -100,8 +101,8 @@ async function boot() {
         if (typeof probe === 'string' && probe.startsWith('data:image/png;base64,')) {
           await fsp.writeFile(captureTo.replace(/\.png$/, '.probe.png'), Buffer.from(probe.split(',')[1], 'base64'));
         }
-        const info = await win.webContents.executeJavaScript(`({ booted: !!window.__vdm, t: window.__vdm?.S?.time, sel: window.__vdm?.S?.selection, title: document.title, dbg: window.__dbg || null })`);
-        console.log('[capture]', captureTo, JSON.stringify(info));
+        const info = await win.webContents.executeJavaScript(`({ booted: !!window.__vdm, t: window.__vdm?.S?.time, sel: window.__vdm?.S?.selection, title: document.title, view: [window.innerWidth, window.innerHeight, window.devicePixelRatio], dbg: window.__dbg || null })`);
+        console.log('[capture]', captureTo, JSON.stringify(info), 'content', JSON.stringify(win.getContentSize()), 'image', JSON.stringify(img.getSize()));
       } catch (e) {
         console.error('[capture] failed', e);
       } finally {

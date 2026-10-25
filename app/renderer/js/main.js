@@ -109,7 +109,6 @@ function select(sel) {
   inspector.render(S.project, S.selection, S.time);
   renderShots();
   updateOverlay();
-  if (S.selection.elementId) switchRightTab('insp');
 }
 
 function updateOverlay() {

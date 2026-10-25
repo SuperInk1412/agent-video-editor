@@ -110,6 +110,15 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
   };
 
   // ---- pipeline state ----
+  const pipelineFile = path.join(p.vdm, 'pipeline.json');
+  let pipelineTimer = null;
+  const persistPipeline = () => {
+    clearTimeout(pipelineTimer);
+    pipelineTimer = setTimeout(() => {
+      fsp.writeFile(pipelineFile, JSON.stringify(pipeline, null, 2)).catch(() => {});
+    }, 120);
+  };
+  const savedPipeline = await fsp.readFile(pipelineFile, 'utf8').then((t) => JSON.parse(t)).catch(() => null);
   const pipeline = {
     steps: [
       { id: 'storyboard', label: '分镜', status: 'todo', detail: '还没有分镜' },
@@ -120,16 +129,36 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
     artifacts: [],
     updatedAt: Date.now(),
   };
-  const setStep = (id, patch) => {
+  if (savedPipeline) {
+    for (const st of savedPipeline.steps || []) {
+      const target = pipeline.steps.find((x) => x.id === st.id);
+      if (target) Object.assign(target, st);
+    }
+    pipeline.artifacts = (savedPipeline.artifacts || []).slice(0, 40);
+  } else {
+    // first run with an existing .vdm: rebuild the artifacts shelf from disk
+    const listDir = async (d) => fsp.readdir(d).catch(() => []);
+    const stills = (await listDir(p.frames)).filter((f) => f.endsWith('.png')).sort().slice(-8);
+    const clips = (await listDir(p.renders)).filter((f) => f.endsWith('.mp4')).sort().slice(-6);
+    pipeline.artifacts = [
+      ...clips.reverse().map((f) => ({ kind: 'render', label: f, url: `/renders/${f}`, path: path.join(p.renders, f), at: Date.now() })),
+      ...stills.reverse().map((f) => ({ kind: 'still', label: f, url: `/frames/${f}`, path: path.join(p.frames, f), at: Date.now() })),
+    ];
+    if (stills.length) setStep('stills', { status: 'done', detail: `${stills.length} 张预览帧` });
+    if (clips.some((f) => f.startsWith('master'))) setStep('master', { status: 'done', detail: clips.find((f) => f.startsWith('master')) });
+  }
+  function setStep(id, patch) {
     const s = pipeline.steps.find((x) => x.id === id);
     if (!s) return;
     Object.assign(s, patch);
     pipeline.updatedAt = Date.now();
+    persistPipeline();
     broadcast('pipeline', pipeline);
-  };
+  }
   const addArtifact = (a) => {
     pipeline.artifacts.unshift({ ...a, at: Date.now() });
     if (pipeline.artifacts.length > 40) pipeline.artifacts.pop();
+    persistPipeline();
     broadcast('pipeline', pipeline);
   };
 
