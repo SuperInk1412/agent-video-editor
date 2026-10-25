@@ -220,7 +220,10 @@ M = T(pivot) · R(dir, roll) · T(position) · S(scale) · G
 ## 11. 参考程序（Alight Motion）对照
 
 参考程序是 Alight Motion 系（APK 加固，实现不可读；工程 XML / 资源文案可读）。详细逆向见
-`.scratch/ref/ALIGHT-REPORT.md`。结论：
+`.scratch/ref/ALIGHT-REPORT.md`。采购/使用前要知道的来源事实：这是**第三方重打包**
+（包名 `com.taffy.microlight`、签名 TaffyStudio 北京、版本 `5.0.249.1002172 MIX3`、
+域名 `alemon.video`，界面名仍是 Alight Motion），并做了 **360 加固 + 网易易盾**双重保护，
+带 AppLovin/Facebook/Firebase/Bugly 等广告与统计 SDK。只当 UI/格式参考，不当运行时依赖。结论：
 
 | 参考做法 | 我们的取舍 |
 | --- | --- |
