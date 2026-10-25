@@ -6,6 +6,7 @@ export const OP_KINDS = [
   'addElement', 'updateElement', 'set', 'removeElement', 'moveElement',
   'splitElement', 'duplicateElement', 'reorder', 'addSegment', 'updateSegment',
   'removeSegment', 'setMeta', 'setFx', 'keySet', 'keyRemove', 'batch',
+  'cameraKey', 'cameraRemove', 'cameraSet', 'worldSet',
 ];
 
 const isObj = (o) => o && typeof o === 'object' && !Array.isArray(o);
@@ -254,6 +255,43 @@ export function applyOp(p, op) {
       const el = findEl(p, op.id);
       el.keyframes = (el.keyframes || []).filter((k) => k.path !== op.path);
       return { changed: [el.id] };
+    }
+
+    case 'cameraKey': {
+      if (!Array.isArray(op.pos) || op.pos.length !== 3) fail('cameraKey needs pos:[x,y,z]');
+      const t = Math.round(Number(op.t) * 1000) / 1000;
+      if (!Number.isFinite(t)) fail('cameraKey needs t');
+      const cam = p.camera || (p.camera = { path: [] });
+      cam.path = (cam.path || []).filter((k) => Math.abs(k.t - t) > 1e-4);
+      cam.path.push({
+        t,
+        pos: op.pos.map(Number),
+        look: Array.isArray(op.look) && op.look.length === 3 ? op.look.map(Number) : null,
+        fov: op.fov != null ? Number(op.fov) : null,
+      });
+      cam.path.sort((a, b) => a.t - b.t);
+      return { changed: ['camera'] };
+    }
+
+    case 'cameraRemove': {
+      if (!p.camera) fail('no camera');
+      const t = Math.round(Number(op.t) * 1000) / 1000;
+      p.camera.path = (p.camera.path || []).filter((k) => Math.abs(k.t - t) > 1e-4);
+      return { changed: ['camera'] };
+    }
+
+    case 'cameraSet': {
+      const cam = p.camera || (p.camera = { path: [] });
+      const patch = op.patch || {};
+      const next = deepMerge(cam, patch);
+      Object.keys(next).forEach((k) => { cam[k] = next[k]; });
+      if (Array.isArray(cam.path)) cam.path.sort((a, b) => a.t - b.t);
+      return { changed: ['camera'] };
+    }
+
+    case 'worldSet': {
+      p.world = deepMerge(p.world || {}, op.patch || {});
+      return { changed: ['world'] };
     }
 
     case 'batch': {

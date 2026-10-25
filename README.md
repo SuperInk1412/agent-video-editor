@@ -53,6 +53,23 @@ Electron 路径可用 `VDM_ELECTRON` 覆盖；Blender 用 `VDM_BLENDER` 覆盖�
   `projects/demo/.vdm/renders/master-*.mp4`（含音轨）
 - AI 闭环：在 UI 里选中分镜 → 描述改动 → agent 返回 ops → 引擎落盘 → 预览/时间线即时刷新（可撤销）
 
+## 3D 镜头（v0.2）
+
+带相机的项目会把预览切成 **3D 视口**：程序化霓虹城市 + 无人机轨道，实时拖动播放头就是在飞。
+成片由 Blender 消费**同一份烘焙包**（城市几何 + 逐帧机位），所以视口里看到的构图就是要渲的。
+
+```bash
+cd projects/nightcity
+node ../../cli/vdm.js cam ls
+node ../../cli/vdm.js cam set fov 72
+node ../../cli/vdm.js cam add 7.6 0 34 -40 --look 90,34,-2
+node ../../cli/vdm.js world set seed 4242
+node ../../cli/vdm.js render --from 0 --to 6 --scale 0.5
+```
+
+参数设计见 `docs/SPEC-CAMERA.md`：轨道关键点 / 朝向 / 侧倾 / 抖动 / FOV / 景深 / 运动模糊 +
+城市 seed、街区尺寸、楼高分布、亮窗、霓虹、雾。
+
 ## 三条设计原则
 
 1. **项目文件是唯一真相源。** `projects/<name>/project.vdm.json` 是纯 JSON，

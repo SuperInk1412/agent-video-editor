@@ -19,6 +19,7 @@ import { analyzeBeats } from './beats.js';
 import { autoStoryboard, summarizeProject, STYLE_PRESETS } from './storyboard.js';
 import { AgentRunner, findDsh, CLI_PATH } from './agent.js';
 import { createLogger } from './log.js';
+import { cachedCity } from './shot.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const APP_DIR = path.resolve(HERE, '..');
@@ -245,6 +246,12 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
         const ping = setInterval(() => { try { res.write(': ping\n\n'); } catch { /* ignore */ } }, 20000);
         req.on('close', () => { clearInterval(ping); clients.delete(res); });
         return;
+      }
+
+      // ---------------- 3D world (shared by viewport + blender) ----------------
+      if (pathname === '/api/world' && req.method === 'GET') {
+        const city = cachedCity(project.world);
+        return json(res, 200, { hash: city.hash, city });
       }
 
       // ---------------- logs ----------------

@@ -139,6 +139,17 @@ export class Timeline {
       tick.appendChild(lab);
       this.rulerTrack.appendChild(tick);
     }
+    // camera path keys live on the ruler so 3D shots are scrubbable
+    if (p.camera) {
+      for (const k of p.camera.path) {
+        const tag = el('div', 'tl-camkey');
+        tag.style.left = `${k.t * this.pps}px`;
+        tag.title = `相机关键点 ${k.t.toFixed(2)}s`;
+        tag.dataset.t = String(k.t);
+        tag.addEventListener('dblclick', (ev) => { ev.stopPropagation(); this.onSeek?.(k.t); });
+        this.rulerTrack.appendChild(tag);
+      }
+    }
     for (const b of (p.meta.beats || [])) {
       const bt = el('div', 'tl-beat');
       bt.style.left = `${b * this.pps}px`;

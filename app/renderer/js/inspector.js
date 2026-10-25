@@ -1,5 +1,6 @@
 // Inspector: edit the selected element down to the details (or project fx when nothing is selected).
 import { evalElement } from '/core/evaluate.js';
+import { evalCamera } from '/core/camera.js';
 import { escapeHtml } from './timeline.js';
 
 const MOTIONS = ['none', 'in', 'out', 'left', 'right', 'up', 'down', 'drift', 'shake'];
@@ -56,6 +57,7 @@ export class Inspector {
     this.root.innerHTML = '';
     const element = project.elements.find((e) => e.id === sel?.elementId);
     if (element) this._renderElement(project, element, time);
+    else if (project.camera) this._renderCamera(project, time);
     else if (sel?.segmentId) this._renderSegment(project, sel.segmentId);
     else this._renderProject(project);
   }
@@ -221,6 +223,79 @@ export class Inspector {
       ));
     }
     this.root.appendChild(this._section(`关键帧 (${kfs.length})`, list));
+  }
+
+  _renderCamera(project, time) {
+    const cam = project.camera;
+    const st = evalCamera(project, time);
+    this.root.appendChild(h('div', { class: 'insp-head' },
+      h('div', { class: 'insp-kind' }, '镜头'),
+      h('div', { class: 'insp-id' }, `${cam.path.length} 关键点`),
+      h('div', { class: 'insp-actions' },
+        h('button', { class: 'mini', onclick: () => this.opts.onOp({ op: 'cameraKey', t: round(time), pos: st.pos.map(round) }) }, '在此打点'),
+        h('button', { class: 'mini', onclick: () => this.opts.onRenderAll?.() }, '渲染'),
+      ),
+    ));
+
+    const setCam = (patch) => this._commit('cam', { op: 'cameraSet', patch });
+    this.root.appendChild(this._section('相机',
+      this._field({ label: '视场角 FOV', value: cam.fov, step: 1, min: 20, max: 120, onChange: (v) => setCam({ fov: v }) }),
+      this._field({ label: '看向前方 (m)', value: cam.lookAhead, step: 5, min: 2, max: 500, onChange: (v) => setCam({ lookAhead: v }) }),
+      this._field({ label: '转弯侧倾', value: cam.bankGain, step: 0.1, min: 0, max: 4, onChange: (v) => setCam({ bankGain: v }) }),
+      this._field({ label: '最大侧倾°', value: cam.maxRoll, step: 1, min: 0, max: 60, onChange: (v) => setCam({ maxRoll: v }) }),
+      this._field({ label: '手动 roll°', value: cam.roll || 0, step: 1, min: -60, max: 60, onChange: (v) => setCam({ roll: v }) }),
+    ));
+
+    this.root.appendChild(this._section('抖动 / 景深 / 模糊',
+      this._field({ label: '抖动幅度', value: cam.shake.amp, step: 0.05, min: 0, max: 5, onChange: (v) => setCam({ shake: { ...cam.shake, amp: v } }) }),
+      this._field({ label: '抖动频率', value: cam.shake.freq, step: 0.1, min: 0.1, max: 8, onChange: (v) => setCam({ shake: { ...cam.shake, freq: v } }) }),
+      this._field({ label: '随速度增强', value: cam.shake.speedGain, step: 0.1, min: 0, max: 2, onChange: (v) => setCam({ shake: { ...cam.shake, speedGain: v } }) }),
+      this._field({ label: '随机种子', value: cam.shake.seed, step: 1, onChange: (v) => setCam({ shake: { ...cam.shake, seed: v } }) }),
+      this._field({ label: '景深', type: 'select', value: String(!!cam.dof.enabled), options: [{ value: 'false', label: '关' }, { value: 'true', label: '开' }], onChange: (v) => setCam({ dof: { ...cam.dof, enabled: v === 'true' } }) }),
+      this._field({ label: '光圈 f', value: cam.dof.fstop, step: 0.2, min: 0.5, max: 32, onChange: (v) => setCam({ dof: { ...cam.dof, fstop: v } }) }),
+      this._field({ label: '运动模糊', type: 'select', value: String(!!cam.motionBlur.enabled), options: [{ value: 'true', label: '开' }, { value: 'false', label: '关' }], onChange: (v) => setCam({ motionBlur: { ...cam.motionBlur, enabled: v === 'true' } }) }),
+      this._field({ label: '快门角', value: cam.motionBlur.shutter, step: 0.05, min: 0, max: 1, onChange: (v) => setCam({ motionBlur: { ...cam.motionBlur, shutter: v } }) }),
+    ));
+
+    const keys = [...cam.path].sort((a, b) => a.t - b.t);
+    const rows = h('div', { class: 'kf-list' });
+    for (const k of keys) {
+      const row = h('div', { class: `kf-row ${Math.abs(k.t - time) < 0.08 ? 'at' : ''}`, style: 'grid-template-columns: 44px 1fr 1fr 1fr 22px' },
+        h('span', { class: 'kf-t' }, k.t.toFixed(2)),
+        h('input', { class: 'kf-ease', type: 'number', step: 1, value: round(k.pos[0]) }),
+        h('input', { class: 'kf-ease', type: 'number', step: 1, value: round(k.pos[1]) }),
+        h('input', { class: 'kf-ease', type: 'number', step: 1, value: round(k.pos[2]) }),
+        h('button', { class: 'mini danger', onclick: () => this.opts.onOp({ op: 'cameraRemove', t: k.t }) }, '×'),
+      );
+      const inputs = row.querySelectorAll('input');
+      inputs.forEach((inp, axis) => {
+        inp.addEventListener('change', () => {
+          const pos = k.pos.slice();
+          pos[axis] = Number(inp.value) || 0;
+          this.opts.onOp({ op: 'cameraKey', t: k.t, pos, look: k.look || null, fov: k.fov ?? null });
+        });
+      });
+      rows.appendChild(row);
+    }
+    this.root.appendChild(this._section(`轨道关键点 (${keys.length})`, rows,
+      h('div', { class: 'hint' }, '时间轴上的播放头决定“在此打点”的时刻；每行是 x / y / z（米）。')));
+
+    const w = project.world;
+    const setW = (patch) => this._commit('world', { op: 'worldSet', patch });
+    this.root.appendChild(this._section('世界',
+      this._field({ label: 'seed', value: w.seed, step: 1, onChange: (v) => setW({ seed: v }) }),
+      h('div', { class: 'row-btns' }, h('button', { class: 'mini', onclick: () => setW({ seed: Math.floor(Math.random() * 9999) }) }, '换一座城')),
+      this._field({ label: '街区 (m)', value: w.grid.block, step: 2, onChange: (v) => setW({ grid: { ...w.grid, block: v } }) }),
+      this._field({ label: '街道 (m)', value: w.grid.street, step: 2, onChange: (v) => setW({ grid: { ...w.grid, street: v } }) }),
+      this._field({ label: '密度', value: w.density, step: 0.02, min: 0, max: 1, onChange: (v) => setW({ density: v }) }),
+      this._field({ label: '最低楼高', value: w.height.min, step: 2, onChange: (v) => setW({ height: { ...w.height, min: v } }) }),
+      this._field({ label: '最高楼高', value: w.height.max, step: 5, onChange: (v) => setW({ height: { ...w.height, max: v } }) }),
+      this._field({ label: '亮窗比例', value: w.window.density, step: 0.02, min: 0, max: 1, onChange: (v) => setW({ window: { ...w.window, density: v } }) }),
+      this._field({ label: '窗光强度', value: w.window.glow, step: 0.1, onChange: (v) => setW({ window: { ...w.window, glow: v } }) }),
+      this._field({ label: '霓虹强度', value: w.neon.glow, step: 0.1, onChange: (v) => setW({ neon: { ...w.neon, glow: v } }) }),
+      this._field({ label: '雾浓度', value: w.fog.density, step: 0.0005, onChange: (v) => setW({ fog: { ...w.fog, density: v } }) }),
+      this._field({ label: '雾强度', value: w.fog.strength ?? 0.9, step: 0.05, onChange: (v) => setW({ fog: { ...w.fog, strength: v } }) }),
+    ));
   }
 
   _renderSegment(project, id) {

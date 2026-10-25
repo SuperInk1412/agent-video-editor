@@ -284,3 +284,11 @@ main { display: grid; grid-template-columns: 272px minmax(0, 1fr) 356px; min-hei
 .le-level.error { color: var(--err); }
 .le-msg { color: #c7d3e3; white-space: pre-wrap; word-break: break-word; }
 .le-meta { grid-column: 3; color: var(--dim2); font-size: 10px; white-space: pre-wrap; word-break: break-all; }
+
+/* camera path keys on the ruler */
+.tl-camkey {
+  position: absolute; top: 2px; width: 9px; height: 9px; margin-left: -4px;
+  background: var(--yellow); border: 1px solid #6b5700;
+  transform: rotate(45deg); cursor: pointer; z-index: 3;
+}
+.tl-camkey:hover { background: #fff27a; }

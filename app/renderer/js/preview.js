@@ -2,6 +2,7 @@
 // Layers -> scene FBO -> bloom chain -> composite (CA, grain, scanlines, vignette, grade).
 import { evalElement } from '/core/evaluate.js';
 import { clamp } from '/core/time.js';
+import { Scene3D } from './preview3d.js';
 
 const VERT = `#version 300 es
 in vec2 a_pos;
@@ -264,6 +265,7 @@ export class Preview {
     this.time = 0;
     this.layers = [];
     this.audioEl = null;
+    this.scene3d = new Scene3D(this.gl);
     this._initGL();
   }
 
@@ -288,6 +290,10 @@ export class Preview {
     gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 16, 8);
     gl.bindVertexArray(null);
     this.vao = vao;
+  }
+
+  setCity(city) {
+    this.scene3d?.setCity(city);
   }
 
   setProject(p) {
@@ -382,11 +388,16 @@ export class Preview {
       const fb = gl.createFramebuffer();
       gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
       gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
-      return { fb, tex, w: tw, h: th };
+      const depth = gl.createRenderbuffer();
+      gl.bindRenderbuffer(gl.RENDERBUFFER, depth);
+      gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, tw, th);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth);
+      return { fb, tex, depth, w: tw, h: th };
     };
     for (const f of [this.sceneFBO, ...(this.bloomFBO || [])]) {
       if (!f) continue;
       gl.deleteFramebuffer(f.fb); gl.deleteTexture(f.tex);
+      if (f.depth) gl.deleteRenderbuffer(f.depth);
     }
     this.sceneFBO = mk(w, h);
     const hw = Math.max(2, Math.round(w / 2)), hh = Math.max(2, Math.round(h / 2));
@@ -530,15 +541,26 @@ export class Preview {
       }
     }
 
-    const layers = this.computeLayers(t);
+    const is3d = !!(p.camera && this.scene3d.city);
+    if (is3d) {
+      this.layers = [];
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.sceneFBO.fb);
+      gl.viewport(0, 0, W, H);
+      gl.clearDepth(1);
+      this.scene3d.draw(p, t, W, H);
+    }
+
+    const layers = is3d ? [] : this.computeLayers(t);
     this.layers = layers;
 
     // ---- scene pass ----
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.sceneFBO.fb);
     gl.viewport(0, 0, W, H);
     const bg = hexRgb(p.meta.background || '#000000');
-    gl.clearColor(bg[0], bg[1], bg[2], 1);
-    gl.clear(gl.COLOR_BUFFER_BIT);
+    if (!is3d) {
+      gl.clearColor(bg[0], bg[1], bg[2], 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+    }
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.bindVertexArray(this.vao);

@@ -72,7 +72,23 @@ base(transform/style) → 关键帧覆盖 → motion 预设增量 → 淡入淡�
 
 **扩展点**：`blender/ops/` 里放任意 bpy 片段，按项目里的 `meta.extensions` 调用（v0.2）。
 
-## 4. AI 集成（DSH-TUI）
+## 4. 3D 镜头：一份烘焙包，两个视口
+
+`project.camera` 存在时，镜头不再是 2D 图层，而是**相机在空间中的运动**：
+
+```
+core/camera.js   轨道求值（Catmull-Rom → look → bank → shake → fov）  ← 视口 & 引擎共用
+engine/city.js   程序化城市（seed + 参数 → 建筑/霓虹/雾）             ← 视口 & Blender 共用
+engine/shot.js   烘焙：{ city, camera:[逐帧机位], fx } → .vdm/cache/shot-*.json
+```
+
+- **视口**：`app/renderer/js/preview3d.js` 读 `/api/world` 拿同一份城市 JSON，实例化盒体、
+  深度缓冲、雾与窗格发光，再走原有的合成链（bloom/颗粒/扫描线）；
+- **成片**：`blender/vdm_city.py` 读同一份烘焙包，合并网格 + 程序化窗格材质 + Mist 雾 +
+  逐帧相机（track_quat + roll），EEVEE 渲染；
+- 因为几何与机位都来自同一份数据，"预览构图 = 成片构图"是结构保证，不靠调参对齐。
+
+## 5. AI 集成（DSH-TUI）
 
 真实的约束：headless agent **能读文件、不能执行 shell**（沙箱拦截）。
 
@@ -91,7 +107,7 @@ base(transform/style) → 关键帧覆盖 → motion 预设增量 → 淡入淡�
 - op 校验失败时不会落盘，错误回到 AI 面板；
 - 因为 ops 是结构化数据，未来可以接任意模型/任意 agent，只要它会吐这个 JSON。
 
-## 5. 可见、可打断、可重写的流水线
+## 6. 可见、可打断、可重写的流水线
 
 `分镜 → 预览帧 → 片段 → 成片` 四步都落在 `pipeline` 状态里（SSE 实时推）：
 
@@ -100,7 +116,7 @@ base(transform/style) → 关键帧覆盖 → motion 预设增量 → 淡入淡�
 - 渲染是单任务队列，带进度与取消（`AbortController` → 杀 blender 进程树）；
 - 撤销栈让"重写"成本极低。
 
-## 6. 为什么是这些技术选择
+## 7. 为什么是这些技术选择
 
 | 选择 | 原因 |
 | --- | --- |

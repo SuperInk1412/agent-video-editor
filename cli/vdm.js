@@ -440,6 +440,71 @@ async function cmdRender(root, flags) {
   else console.log(`${C.gr('✓')} ${res.out}  ${C.dim(`${res.frames} 帧 · ${((Date.now() - t0) / 1000).toFixed(1)}s`)}`);
 }
 
+function patchOf(path, value) {
+  const parts = String(path).split('.');
+  const out = {};
+  let cur = out;
+  for (let i = 0; i < parts.length - 1; i++) { cur[parts[i]] = cur[parts[i]] || {}; cur = cur[parts[i]]; }
+  cur[parts[parts.length - 1]] = value;
+  return out;
+}
+
+async function cmdCam(root, argv, flags) {
+  const sub = argv[0] || 'ls';
+  const p = await loadProject(root);
+  const cam = p.camera;
+  if (sub === 'ls') {
+    if (!cam) { console.log(C.dim('（这个项目没有相机）')); return; }
+    console.log(`${C.b('camera')} fov ${cam.fov}  lookAhead ${cam.lookAhead}  bank ${cam.bankGain}/${cam.maxRoll}°  shake ${cam.shake.amp}@${cam.shake.freq}Hz`);
+    for (const k of cam.path) {
+      console.log(`  ${C.cy(k.t.toFixed(2))}s  pos ${k.pos.map((v) => v.toFixed(1)).join(', ')}${k.look ? `  look ${k.look.map((v) => v.toFixed(1)).join(', ')}` : ''}`);
+    }
+    return;
+  }
+  if (sub === 'set') {
+    const [propPath, ...rest] = argv.slice(1);
+    if (!propPath) throw new Error('usage: vdm cam set <path> <value>   (ex: fov 68 / shake.amp 0.6)');
+    const patch = patchOf(propPath, coerceValue(rest.join(' ')));
+    const { project } = await mutateProject(root, (proj) => applyOp(proj, { op: 'cameraSet', patch }), { by: 'cli' });
+    console.log(`${C.gr('✓')} camera.${propPath} 已更新  ${C.dim(`rev ${project.rev}`)}`);
+    return;
+  }
+  if (sub === 'add') {
+    const [t, x, y, z] = argv.slice(1).map(Number);
+    if (![t, x, y, z].every(Number.isFinite)) throw new Error('usage: vdm cam add <t> <x> <y> <z> [--look x,y,z] [--fov n]');
+    const op = { op: 'cameraKey', t, pos: [x, y, z], fov: flags.fov != null ? num(flags.fov) : null };
+    if (flags.look) op.look = String(flags.look).split(',').map(Number);
+    const { project } = await mutateProject(root, (proj) => applyOp(proj, op), { by: 'cli' });
+    console.log(`${C.gr('✓')} 关键点 @${t}s  ${C.dim(`rev ${project.rev}`)}`);
+    return;
+  }
+  if (sub === 'rm') {
+    const t = num(argv[1]);
+    const { project } = await mutateProject(root, (proj) => applyOp(proj, { op: 'cameraRemove', t }), { by: 'cli' });
+    console.log(`${C.gr('✓')} 删除关键点 @${t}s  ${C.dim(`rev ${project.rev}`)}`);
+    return;
+  }
+  throw new Error(`unknown cam subcommand ${sub}`);
+}
+
+async function cmdWorld(root, argv, flags) {
+  const sub = argv[0] || 'ls';
+  const p = await loadProject(root);
+  if (sub === 'ls') {
+    console.log(JSON.stringify(p.world, null, 2));
+    return;
+  }
+  if (sub === 'set') {
+    const [propPath, ...rest] = argv.slice(1);
+    if (!propPath) throw new Error('usage: vdm world set <path> <value>');
+    const patch = patchOf(propPath, coerceValue(rest.join(' ')));
+    const { project } = await mutateProject(root, (proj) => applyOp(proj, { op: 'worldSet', patch }), { by: 'cli' });
+    console.log(`${C.gr('✓')} world.${propPath} 已更新  ${C.dim(`rev ${project.rev}`)}`);
+    return;
+  }
+  throw new Error(`unknown world subcommand ${sub}`);
+}
+
 async function cmdEval(root, argv, flags) {
   const [id] = argv;
   const t = num(flags.t, 0);
@@ -475,6 +540,10 @@ ${C.b('素材 / 分镜')}
   vdm import <file...>
   vdm beats [--src f] [--set-duration]
   vdm plan [--style neon|clean|film] [--brief "第一句\\n第二句"] [--seed 7]
+
+${C.b('3D 镜头')}
+  vdm cam ls | set <path> <value> | add <t> <x> <y> <z> [--look x,y,z] | rm <t>
+  vdm world ls | set <path> <value>     例: world set seed 2077 / world set fog.density 0.004
 
 ${C.b('渲染')}
   vdm still <t> [--out a.png] [--scale 1] [--samples 16]
@@ -519,6 +588,8 @@ async function main() {
     case 'still': return cmdStill(root, rest, flags);
     case 'render': return cmdRender(root, flags);
     case 'eval': return cmdEval(root, rest, flags);
+    case 'cam': return cmdCam(root, rest, flags);
+    case 'world': return cmdWorld(root, rest, flags);
     default:
       console.error(C.re(`unknown command: ${cmd}`));
       usage();

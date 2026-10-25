@@ -1,0 +1,226 @@
+{
+  "schema": "vdm.project/1",
+  "rev": 12,
+  "meta": {
+    "title": "夜之城 · 无人机穿城",
+    "fps": 24,
+    "width": 1920,
+    "height": 1080,
+    "duration": 15,
+    "background": "#03060d",
+    "audio": null,
+    "beats": [],
+    "tempo": 0,
+    "fx": {
+      "bloom": 0.9,
+      "ca": 0.3,
+      "grain": 0.1,
+      "vignette": 0.52,
+      "scanline": 0.06,
+      "grade": -0.1,
+      "contrast": 0.15,
+      "saturation": 1.22,
+      "shake": 0
+    },
+    "style": "default",
+    "savedAt": "2026-10-25T07:07:25.027Z"
+  },
+  "segments": [],
+  "elements": [],
+  "camera": {
+    "fov": 68,
+    "near": 0.5,
+    "far": 5000,
+    "lookAhead": 90,
+    "bankGain": 1.25,
+    "maxRoll": 30,
+    "roll": 0,
+    "shake": {
+      "amp": 0.55,
+      "freq": 1.5,
+      "octaves": 3,
+      "speedGain": 1,
+      "seed": 11
+    },
+    "dof": {
+      "enabled": true,
+      "fstop": 4,
+      "focusOffset": 0
+    },
+    "motionBlur": {
+      "enabled": true,
+      "shutter": 0.5
+    },
+    "path": [
+      {
+        "t": 0,
+        "pos": [
+          0,
+          150,
+          -600
+        ],
+        "look": null,
+        "fov": null
+      },
+      {
+        "t": 2.5,
+        "pos": [
+          0,
+          100,
+          -470
+        ],
+        "look": null,
+        "fov": null
+      },
+      {
+        "t": 5,
+        "pos": [
+          0,
+          48,
+          -330
+        ],
+        "look": null,
+        "fov": null
+      },
+      {
+        "t": 6.5,
+        "pos": [
+          0,
+          38,
+          -180
+        ],
+        "look": null,
+        "fov": null
+      },
+      {
+        "t": 7.6,
+        "pos": [
+          0,
+          34,
+          -40
+        ],
+        "look": [
+          90,
+          34,
+          -2
+        ],
+        "fov": null
+      },
+      {
+        "t": 8.6,
+        "pos": [
+          8,
+          26,
+          -6
+        ],
+        "look": null,
+        "fov": null
+      },
+      {
+        "t": 9.8,
+        "pos": [
+          60,
+          36,
+          4
+        ],
+        "look": [
+          210,
+          38,
+          2
+        ],
+        "fov": null
+      },
+      {
+        "t": 11.4,
+        "pos": [
+          150,
+          44,
+          6
+        ],
+        "look": [
+          320,
+          50,
+          4
+        ],
+        "fov": null
+      },
+      {
+        "t": 13,
+        "pos": [
+          270,
+          70,
+          2
+        ],
+        "look": null,
+        "fov": null
+      },
+      {
+        "t": 15,
+        "pos": [
+          390,
+          150,
+          -4
+        ],
+        "look": null,
+        "fov": null
+      }
+    ]
+  },
+  "world": {
+    "source": "procedural",
+    "seed": 2077,
+    "grid": {
+      "nx": 14,
+      "nz": 20,
+      "block": 54,
+      "street": 46
+    },
+    "density": 0.9,
+    "height": {
+      "min": 22,
+      "max": 190,
+      "power": 2.2
+    },
+    "palette": [
+      "#25334a",
+      "#1c2839",
+      "#2f4058",
+      "#17202e"
+    ],
+    "window": {
+      "density": 0.3,
+      "glow": 1,
+      "color": "#8fe0ff"
+    },
+    "neon": {
+      "count": 420,
+      "glow": 5.5,
+      "colors": [
+        "#ff2a6d",
+        "#05d9e8",
+        "#f9c80e",
+        "#b967ff"
+      ]
+    },
+    "fog": {
+      "color": "#0d2338",
+      "density": 0.005,
+      "glow": 0.8,
+      "strength": 0.9,
+      "start": 30,
+      "depth": 700
+    },
+    "ground": {
+      "color": "#04070c",
+      "wet": 0.65
+    },
+    "sky": "#03060d",
+    "ambient": 0.3,
+    "neonColors": [
+      "#ff2a6d",
+      "#05d9e8",
+      "#f9c80e",
+      "#b967ff"
+    ]
+  }
+}

@@ -69,8 +69,24 @@ function toast(msg, level = 'info') {
   if (toastTimer.length > 8) toastTimer.shift();
 }
 
+let worldTimer = null;
+let worldKey = '';
+function syncWorld(p) {
+  if (!p.camera) return;
+  const key = JSON.stringify(p.world || {});
+  if (key === worldKey) return;
+  clearTimeout(worldTimer);
+  worldTimer = setTimeout(async () => {
+    try {
+      const j = await fetch('/api/world').then((r) => r.json());
+      if (j.city) { worldKey = key; preview.setCity(j.city); }
+    } catch (e) { /* logged by the server when it fails */ }
+  }, 250);
+}
+
 function applyProject(p, source) {
   S.project = p;
+  syncWorld(p);
   if (S.selection.elementId && !p.elements.find((e) => e.id === S.selection.elementId)) S.selection.elementId = null;
   if (S.selection.segmentId && !p.segments.find((s) => s.id === S.selection.segmentId)) S.selection.segmentId = null;
   preview.setProject(p);
@@ -313,6 +329,9 @@ async function boot() {
     analyzeBeats: async () => {
       toast('分析节拍中…');
       try { const j = await post('/api/beats', {}); toast(`${j.tempo} bpm · ${j.beats.length} 拍`, 'success'); } catch (e) { toast(e.message, 'error'); }
+    },
+    onRenderAll: async () => {
+      try { await post('/api/render', { from: 0, to: S.project.meta.duration, scale: S.renderScale }); toast('开始渲染镜头'); } catch (e) { toast(e.message, 'error'); }
     },
     onRenderSegment: (id) => {
       const s = S.project.segments.find((x) => x.id === id);

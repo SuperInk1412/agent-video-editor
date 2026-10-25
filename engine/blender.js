@@ -8,6 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { paths } from '../core/store.js';
 import { encodeSequence, extractSequence, fileExists, hashOf } from './media.js';
+import { is3D, writeShot } from './shot.js';
 
 const execFileP = promisify(execFile);
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -103,6 +104,11 @@ export async function runJob(dir, job, { onProgress, onLog, signal } = {}) {
   await fs.writeFile(projFile, JSON.stringify(seqProject, null, 2));
   const payload = { ...job, project: projFile, root: p.root };
   delete payload.projectData;
+  // 3D shot: bake city + per-frame camera once, let Blender consume the same package
+  if (is3D(job.project)) {
+    const { file } = await writeShot(dir, job.project, { fps: job.project.meta.fps });
+    payload.shot = file;
+  }
   await fs.writeFile(jobFile, JSON.stringify(payload, null, 2));
 
   const args = [

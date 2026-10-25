@@ -370,7 +370,7 @@ def _val(ng, v):
     return n.outputs[0]
 
 
-def build_compositor(scene, meta, cache_dir):
+def build_compositor(scene, meta, cache_dir, fog=None):
     fx = meta.get('fx') or {}
     w, h = scene.render.resolution_x, scene.render.resolution_y
     os.makedirs(cache_dir, exist_ok=True)
@@ -380,7 +380,36 @@ def build_compositor(scene, meta, cache_dir):
     scene.render.use_compositing = True
 
     rl = ng.nodes.new('CompositorNodeRLayers')
+    try:
+        rl.scene = scene
+        rl.layer = scene.view_layers[0].name
+    except Exception:
+        pass
     chain = rl.outputs['Image']
+
+    # distance fog for 3D shots: use the Mist pass (EEVEE supports it natively)
+    if fog:
+        try:
+            scene.view_layers[0].use_pass_mist = True
+            scene.world.mist_settings.start = float(fog.get('start') or 30.0)
+            scene.world.mist_settings.depth = float(fog.get('depth') or 700.0)
+        except Exception:
+            pass
+        fogc = fog.get('color') or [0.03, 0.06, 0.1]
+        strength = float(fog.get('strength') or 1.0)
+        mul = ng.nodes.new('ShaderNodeMath')
+        mul.operation = 'MULTIPLY'
+        mul.inputs[1].default_value = max(0.05, min(3.0, strength))
+        ng.links.new(rl.outputs['Mist'], mul.inputs[0])
+        rgb = ng.nodes.new('CompositorNodeRGB')
+        rgb.outputs[0].default_value = (fogc[0], fogc[1], fogc[2], 1.0)
+        mixf = ng.nodes.new('ShaderNodeMix')
+        mixf.data_type = 'RGBA'
+        mixf.blend_type = 'MIX'
+        ng.links.new(chain, mixf.inputs[6])
+        ng.links.new(rgb.outputs[0], mixf.inputs[7])
+        ng.links.new(mul.outputs[0], mixf.inputs[0])
+        chain = mixf.outputs[2]
 
     # grade ---------------------------------------------------------------
     cb = ng.nodes.new('CompositorNodeColorBalance')
@@ -425,7 +454,7 @@ def build_compositor(scene, meta, cache_dir):
         gl = ng.nodes.new('CompositorNodeGlare')
         set_menu(gl.inputs['Type'], 'Fog Glow', 'FOG_GLOW')
         set_menu(gl.inputs['Quality'], 'High', 'HIGH')
-        gl.inputs['Threshold'].default_value = 0.62
+        gl.inputs['Threshold'].default_value = 0.45
         gl.inputs['Strength'].default_value = bloom * 1.4
         gl.inputs['Size'].default_value = 0.65
         ng.links.new(chain, gl.inputs['Image'])

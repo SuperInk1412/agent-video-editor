@@ -18,6 +18,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 from vdm_build import build_scene  # noqa: E402
+from vdm_city import build_shot_scene  # noqa: E402
 
 
 def emit(obj):
@@ -42,7 +43,12 @@ def main():
     with open(job['project'], 'r', encoding='utf-8') as f:
         project = json.load(f)
 
-    scene = build_scene(project, job)
+    if job.get('shot'):
+        with open(job['shot'], 'r', encoding='utf-8') as f:
+            shot = json.load(f)
+        scene = build_shot_scene(shot, job)
+    else:
+        scene = build_scene(project, job)
     emit({'stage': 'built', 'sec': round(time.time() - t0, 2)})
 
     mode = job.get('mode', 'still')

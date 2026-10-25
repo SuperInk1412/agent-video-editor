@@ -1,4 +1,6 @@
 // Project schema: defaults, normalisation, ids.
+import { normalizeCamera } from './camera.js';
+import { normalizeWorld } from './world.js';
 // A "project" is the single source of truth on disk: <project>/project.vdm.json
 
 export const SCHEMA = 'vdm.project/1';
@@ -81,6 +83,8 @@ export function createProject(opts = {}) {
     },
     segments: [],
     elements: [],
+    camera: null,
+    world: normalizeWorld(),
   };
 }
 
@@ -134,6 +138,9 @@ export function normalizeProject(p) {
   });
   elIds.clear();
   p.elements.forEach((e) => elIds.add(e.id));
+
+  p.camera = p.camera ? normalizeCamera(p.camera) : null;
+  p.world = normalizeWorld(p.world);
   return p;
 }
 
