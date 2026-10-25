@@ -224,104 +224,14 @@ export class Inspector {
     const pose = objectPose(obj, time);
     const tNow = () => Math.round(this.opts.getTime() * 1000) / 1000;
     const key = (path, v) => this.opts.onOp({ op: 'objectKey', id, path, t: tNow(), v });
-    const patch = (tag, p) => this._commit(`${id}:${tag}`, { op: 'objectPatch', id, patch: p });
 
     this.root.appendChild(h('div', { class: 'insp-head' },
       h('div', { class: 'insp-kind' }, '3D 元素'),
       h('div', { class: 'insp-id' }, id),
-      h('div', { class: 'insp-actions' },
-        h('button', {
-          class: 'mini', title: '在当前时间记录位置关键帧',
-          onclick: () => this.opts.onOp({ op: 'objectKey', id, path: 'pivot', t: tNow(), v: pose.pivot.map(round) }),
-        }, '打点'),
-        h('button', {
-          class: 'mini', title: '复制这个元素（含关键帧）',
-          onclick: async () => {
-            const copy = JSON.parse(JSON.stringify(obj));
-            copy.id = `ob_${Date.now().toString(36)}`;
-            copy.name = `${obj.name || '元素'} 副本`;
-            copy.pivot = [copy.pivot[0] + 10, copy.pivot[1], copy.pivot[2]];
-            const res = await this.opts.onOp({ op: 'objectAdd', object: copy });
-            if (res) this.opts.onSelect?.({ objectId: copy.id });
-          },
-        }, '复制'),
-        h('button', {
-          class: 'mini danger',
-          onclick: () => { if (confirm(`删除 ${obj.name || id}?`)) this.opts.onOp({ op: 'objectRemove', id }); },
-        }, '删除'),
-      ),
     ));
-
-    this.root.appendChild(this._section('基础',
-      this._field({ label: '名称', type: 'text', value: obj.name, onChange: (v) => patch('name', { name: v }) }),
-      this._field({
-        label: '颜色', type: 'color', value: obj.style?.color || '#17d9ff',
-        onChange: (v) => patch('color', { style: { ...(obj.style || {}), color: v } }),
-      }),
-      this._field({ label: '起点 (s)', value: round(obj.start), step: 0.01, min: 0, onChange: (v) => patch('start', { start: v }) }),
-      this._field({ label: '时长 (s)', value: round(obj.duration), step: 0.01, min: 0.05, onChange: (v) => patch('dur', { duration: v }) }),
-    ));
-
-    const vec = (label, arr, path) => {
-      const cur = arr.map((v) => Math.round(v * 1000) / 1000);
-      const inputs = cur.map((v, i) => {
-        const inp = h('input', { type: 'number', step: 0.1 });
-        inp.value = v;
-        inp.addEventListener('input', () => { cur[i] = Number(inp.value) || 0; key(path, cur); });
-        inp.addEventListener('blur', () => this._flush());
-        return inp;
-      });
-      return h('div', { class: 'fld span2' }, h('label', {}, label), ...inputs,
-        h('button', {
-          class: 'kf-btn', title: `在当前时间记录${label}（Shift+点击删除）`,
-          onclick: (e) => {
-            if (e.shiftKey) this.opts.onOp({ op: 'objectUnkey', id, path, t: tNow() });
-            else key(path, cur);
-          },
-        }, '◆'));
-    };
-
-    this.root.appendChild(this._section('变换（m）',
-      vec('中心点', pose.pivot, 'pivot'),
-      vec('位置', pose.position, 'position'),
-      vec('缩放', pose.scale, 'scale'),
-      this._field({
-        label: '不透明度', value: Math.round(pose.opacity * 1000) / 1000, step: 0.01, min: 0, max: 1,
-        onChange: (v) => key('opacity', v),
-      }),
-      this._field({
-        label: '绕轴自转°', value: Math.round(pose.roll * 10) / 10, step: 1,
-        onChange: (v) => key('roll', v),
-      }),
-      h('div', { class: 'row-btns' },
-        h('button', {
-          class: 'mini', title: '让元素正面朝向当前镜头（在当前时间写方向关键帧）',
-          onclick: () => {
-            const cam = this.opts.getViewCam?.();
-            if (!cam) return;
-            const d = [cam.pos[0] - pose.worldPos[0], cam.pos[1] - pose.worldPos[1], cam.pos[2] - pose.worldPos[2]];
-            const l = Math.hypot(d[0], d[1], d[2]) || 1;
-            key('dir', d.map((v) => v / l));
-          },
-        }, '面向镜头'),
-        h('button', {
-          class: 'mini', title: '把盒子底面放到 y=0（在当前时间写位置关键帧）',
-          onclick: () => key('pivot', [pose.pivot[0], (Number(obj.geom?.h) || 2) / 2, pose.pivot[2]]),
-        }, '落地'),
-        h('button', {
-          class: 'mini', title: '删除播放头这一帧的位置关键帧',
-          onclick: () => this.opts.onOp({ op: 'objectUnkey', id, path: 'pivot', t: tNow() }),
-        }, '删本帧'),
-      ),
-      h('div', { class: 'hint' }, '在视口里拖动元素会自动在播放头打位置关键帧；◆ 记录当前值。'),
-    ));
-
-    const g = obj.geom || {};
-    this.root.appendChild(this._section('几何（m）',
-      this._field({ label: '宽', value: g.w ?? 2, step: 0.1, min: 0.01, onChange: (v) => patch('gw', { geom: { ...g, w: v } }) }),
-      this._field({ label: '高', value: g.h ?? 2, step: 0.1, min: 0.01, onChange: (v) => patch('gh', { geom: { ...g, h: v } }) }),
-      this._field({ label: '厚', value: g.d ?? 2, step: 0.1, min: 0.01, onChange: (v) => patch('gd', { geom: { ...g, d: v } }) }),
-    ));
+    this.root.appendChild(h('div', { class: 'hint pad' },
+      '内容、中心点、位置、缩放、不透明度已移到时间轴左侧：选中元素后点元素行的 ▾ 展开编辑。',
+      '复制 / 删除 / 面向镜头 / 落地在元素行的 ⋯ 菜单里。'));
 
     const dirKeys = (obj.tracks?.dir || []).filter((k) => Array.isArray(k.v));
     const ballHost = h('div', { class: 'rotball-wrap' });
@@ -335,7 +245,11 @@ export class Inspector {
     });
     this.root.appendChild(this._section('朝向（球面）',
       ballHost,
-      h('div', { class: 'hint' }, '拖动球面上的点改朝向；小菱形是已有的方向关键帧。'),
+      this._field({
+        label: '绕轴自转°', value: Math.round(pose.roll * 10) / 10, step: 1,
+        onChange: (v) => key('roll', v),
+      }),
+      h('div', { class: 'hint' }, '拖球面上的点改朝向（写 dir 关键帧）；旋转球和速度曲线留在检查器，其余基础属性在时间轴左侧。'),
     ));
 
     const rows = [];

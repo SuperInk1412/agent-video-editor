@@ -2,7 +2,6 @@
 import { Preview } from './preview.js';
 import { PathGizmo } from './pathgizmo.js';
 import { Timeline, escapeHtml } from './timeline.js';
-import { TimelineProps } from './tlprops.js';
 import { Inspector } from './inspector.js';
 import { AgentPanel } from './ai.js';
 import { PipelinePanel } from './pipeline.js';
@@ -31,7 +30,7 @@ const S = {
   keys: new Set(),
 };
 
-let preview, timeline, tlProps, inspector, agentPanel, pipelinePanel, logPanel, gizmo, projects;
+let preview, timeline, inspector, agentPanel, pipelinePanel, logPanel, gizmo, projects;
 
 // ---- error reporting: everything lands in .vdm/logs and the 日志 panel ----
 const reportedErrors = new Set();
@@ -140,10 +139,6 @@ function applyProject(p, source) {
   preview.setProject(p);
   timeline.setProject(p);
   timeline.setSelection(S.selection);
-  if (tlProps) {
-    tlProps.setProject(p);
-    tlProps.setSelection(S.selection);
-  }
   inspector.render(p, S.selection, S.time);
   renderShots();
   $('#projTitle').textContent = p.meta.title;
@@ -151,7 +146,7 @@ function applyProject(p, source) {
   const editBtn = $('#btnEditMode');
   if (editBtn) editBtn.hidden = !p.camera;
   const addBtn = $('#btnAddElement');
-  if (addBtn) addBtn.hidden = !p.world;
+  if (addBtn) addBtn.hidden = !p.world || !p.camera;
   if (!p.camera && S.editMode) setEditMode(false);
   updateOverlay();
 }
@@ -161,7 +156,6 @@ function setTime(t, { seekAudio = true } = {}) {
   const dur = S.project?.meta.duration || 12;
   S.time = Math.max(0, Math.min(dur, t));
   timeline?.setTime(S.time);
-  tlProps?.setTime(S.time);
   $('#timecode').textContent = `${S.time.toFixed(2)}s`;
   $('#stageTime').textContent = `${S.time.toFixed(2)} / ${dur.toFixed(2)}s`;
   if (seekAudio && S.playing) preview.setAudioTime(S.time);
@@ -215,8 +209,6 @@ function select(sel) {
     gizmo.draw();
   }
   timeline.setSelection(S.selection);
-  tlProps?.setSelection(S.selection);
-  tlProps?.setTime(S.time);
   inspector.render(S.project, S.selection, S.time);
   renderShots();
   updateOverlay();
@@ -505,24 +497,67 @@ async function boot() {
   });
   gizmo.resize();
 
-  timeline = new Timeline($('#tlTracks'), {
+  // Element actions live on the timeline header (⋯) now that the basics moved left.
+  const duplicateObject = (o) => {
+    const copy = JSON.parse(JSON.stringify(o));
+    copy.id = `ob_${Date.now().toString(36)}`;
+    copy.name = `${o.name || '元素'} 副本`;
+    copy.pivot = [copy.pivot[0] + 10, copy.pivot[1], copy.pivot[2]];
+    return op({ op: 'objectAdd', object: copy }).then((j) => {
+      if (j) select({ objectId: copy.id });
+      return copy.id;
+    });
+  };
+  const elementMenu = (id, x, y) => {
+    const o = (S.project.scene?.objects || []).find((ob) => ob.id === id);
+    if (!o) return;
+    const at = Math.round(S.time * 1000) / 1000;
+    const pose = objectPose(o, S.time);
+    const cam = (S.editMode && S.editCam) ? S.editCam : evalCamera(S.project, S.time);
+    showContextMenu(x, y, [
+      { label: '选中元素', run: () => select({ objectId: id }) },
+      {
+        label: '面向镜头（在播放头打方向键）',
+        run: () => {
+          const d = [cam.pos[0] - pose.worldPos[0], cam.pos[1] - pose.worldPos[1], cam.pos[2] - pose.worldPos[2]];
+          const l = Math.hypot(d[0], d[1], d[2]) || 1;
+          op({ op: 'objectKey', id, path: 'dir', t: at, v: d.map((v) => v / l) });
+        },
+      },
+      {
+        label: '落地（在播放头打位置键）',
+        run: () => {
+          const h = Number(o.geom?.h) || 2;
+          op({ op: 'objectKey', id, path: 'pivot', t: at, v: [pose.pivot[0], h / 2, pose.pivot[2]] });
+        },
+      },
+      { label: '复制（含关键帧）', run: () => { duplicateObject(o); } },
+      { sep: true },
+      {
+        label: '删除元素', danger: true,
+        run: () => { if (confirm(`删除 ${o.name || o.id}?`)) op({ op: 'objectRemove', id }); },
+      },
+    ]);
+  };
+
+  timeline = new Timeline($('#timeline'), {
     onSeek: (t) => { setTime(t); if (S.playing) { S.playFrom = t; S.playWall = performance.now(); preview.setAudioTime(t); } },
     onSelect: (sel) => select(sel),
-    onSegment: (id) => { S.selection = { segmentId: id, elementId: null, objectId: null }; tlProps?.setSelection(S.selection); renderShots(); inspector.render(S.project, S.selection, S.time); },
+    onSegment: (id) => {
+      S.selection = { segmentId: id, elementId: null, objectId: null };
+      timeline.setSelection(S.selection);
+      renderShots();
+      inspector.render(S.project, S.selection, S.time);
+    },
     onOp: (o) => op(o),
+    onPause: () => pause(),
+    onElementMenu: (id, x, y) => elementMenu(id, x, y),
   });
   timeline.setProject(S.project);
-
-  tlProps = new TimelineProps($('#tlProps'), {
-    onOp: (o) => op(o),
-    getTime: () => S.time,
-    onPause: () => pause(),
-  });
 
   inspector = new Inspector($('#panelInsp'), {
     onOp: (o) => op(o),
     getTime: () => S.time,
-    getViewCam: () => (S.editMode && S.editCam) ? S.editCam : evalCamera(S.project, S.time),
     getTimeValue: (path) => {
       const el = S.project.elements.find((e) => e.id === S.selection.elementId);
       if (!el) return 0;
@@ -962,7 +997,7 @@ async function boot() {
       drag.moved = true;
       preview.render(S.time);
       gizmo.draw();
-      tlProps?.setTime(S.time);
+      timeline?.setTime(S.time);
       return;
     }
     if (drag.kind === 'objaxis') {
@@ -980,7 +1015,7 @@ async function boot() {
       drag.moved = true;
       preview.render(S.time);
       gizmo.draw();
-      tlProps?.setTime(S.time);
+      timeline?.setTime(S.time);
       return;
     }
     if (drag.kind === 'object') {
@@ -997,7 +1032,7 @@ async function boot() {
       drag.moved = true;
       preview.render(S.time);
       gizmo.draw();
-      tlProps?.setTime(S.time);
+      timeline?.setTime(S.time);
       return;
     }
     const key = S.project.camera?.path?.[drag.index];
@@ -1181,7 +1216,6 @@ async function boot() {
       else {
         S.time = t;
         timeline.setTime(t);
-        tlProps?.setTime(t);
         $('#timecode').textContent = `${t.toFixed(2)}s`;
         $('#stageTime').textContent = `${t.toFixed(2)} / ${S.project.meta.duration.toFixed(2)}s`;
       }
@@ -1196,7 +1230,7 @@ async function boot() {
   };
   requestAnimationFrame(loop);
   window.__vdm = {
-    S, preview, timeline, tlProps, inspector, gizmo, projects, op, toast,
+    S, preview, timeline, inspector, gizmo, projects, op, toast,
     setTime: (t) => setTime(t),
     select: (s) => select(s),
     setEditMode: (on) => setEditMode(on),
