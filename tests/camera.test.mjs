@@ -4,6 +4,7 @@ import { normalizeCamera, pathPos, pathFov, evalCamera, bakeCameraTrack, v3 } fr
 import { ease } from '../core/time.js';
 import { generateCity, cityHash, DEFAULT_WORLD } from '../engine/city.js';
 import { normalizeProject } from '../core/schema.js';
+import { applyOp } from '../core/ops.js';
 
 const project = () => normalizeProject({
   schema: 'vdm.project/1', rev: 1,
@@ -159,4 +160,19 @@ test('city generation is deterministic and bounded', () => {
 test('cityHash ignores derived defaults but tracks params', () => {
   assert.equal(cityHash({ seed: 7 }), cityHash({ seed: 7 }));
   assert.notEqual(cityHash({ seed: 7 }), cityHash({ seed: 8 }));
+});
+
+test('cameraKey keeps ease and bezier handles when only the position changes', () => {
+  const p = project();
+  const t = p.camera.path[0].t;
+  applyOp(p, {
+    op: 'cameraKey', t, pos: [1, 2, 3], ease: 'linear',
+    out: [4, 0, 0], in: [-4, 0, 0],
+  });
+  applyOp(p, { op: 'cameraKey', t, pos: [9, 8, 7] });
+  const k = p.camera.path.find((x) => Math.abs(x.t - t) < 1e-6);
+  assert.deepEqual(k.pos, [9, 8, 7]);
+  assert.equal(k.ease, 'linear');
+  assert.deepEqual(k.out, [4, 0, 0]);
+  assert.deepEqual(k.in, [-4, 0, 0]);
 });

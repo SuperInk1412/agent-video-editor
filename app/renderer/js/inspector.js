@@ -321,10 +321,17 @@ export class Inspector {
     const kfList = h('div', { class: 'kf-list' });
     if (!rows.length) kfList.appendChild(h('div', { class: 'hint' }, '还没有关键帧：拖动元素或点 ◆。'));
     for (const { path, k } of rows) {
-      kfList.appendChild(h('div', { class: `kf-row ${Math.abs(k.t - time) < 0.05 ? 'at' : ''}` },
-        h('span', { class: 'kf-t' }, k.t.toFixed(2) + 's'),
+      kfList.appendChild(h('div', { class: `kf-row ${Math.abs(k.t - time) < 0.05 ? 'at' : ''}`, style: 'grid-template-columns: 46px 1fr 1fr 64px 22px' },
+        h('button', {
+          class: 'kf-t', title: '跳到这个关键帧', style: 'background:none;border:0;color:inherit;cursor:pointer;padding:0;text-align:left',
+          onclick: () => this.opts.onSeek?.(k.t),
+        }, k.t.toFixed(2)),
         h('span', { class: 'kf-p' }, path),
         h('span', { class: 'kf-v' }, Array.isArray(k.v) ? k.v.map((n) => round(n, 2)).join(', ') : String(k.v)),
+        h('select', {
+          class: 'kf-ease', title: '到下一关键帧的速度曲线',
+          onchange: (e) => this.opts.onOp({ op: 'objectKey', id, path, t: k.t, v: k.v, ease: e.target.value }),
+        }, ...EASES.map((x) => h('option', { value: x, selected: (k.ease || 'easeInOut') === x }, x))),
         h('button', { class: 'mini danger', onclick: () => this.opts.onOp({ op: 'objectUnkey', id, path, t: k.t }) }, '×'),
       ));
     }
@@ -387,11 +394,21 @@ export class Inspector {
     const keys = [...cam.path].sort((a, b) => a.t - b.t);
     const rows = h('div', { class: 'kf-list' });
     for (const k of keys) {
-      const row = h('div', { class: `kf-row ${Math.abs(k.t - time) < 0.08 ? 'at' : ''}`, style: 'grid-template-columns: 44px 1fr 1fr 1fr 22px' },
-        h('span', { class: 'kf-t' }, k.t.toFixed(2)),
+      const row = h('div', { class: `kf-row ${Math.abs(k.t - time) < 0.08 ? 'at' : ''}`, style: 'grid-template-columns: 46px 1fr 1fr 1fr 58px 22px' },
+        h('button', {
+          class: 'kf-t', title: '跳到这个关键点', style: 'background:none;border:0;color:inherit;cursor:pointer;padding:0;text-align:left',
+          onclick: () => this.opts.onSeek?.(k.t),
+        }, k.t.toFixed(2)),
         h('input', { class: 'kf-ease', type: 'number', step: 1, value: round(k.pos[0]) }),
         h('input', { class: 'kf-ease', type: 'number', step: 1, value: round(k.pos[1]) }),
         h('input', { class: 'kf-ease', type: 'number', step: 1, value: round(k.pos[2]) }),
+        h('select', {
+          class: 'kf-ease', title: '这一段的速度曲线（ease 预设）',
+          onchange: (e) => {
+            const next = keys.map((x) => (x === k ? { ...x, ease: e.target.value } : x));
+            this.opts.onOp({ op: 'cameraPath', path: next });
+          },
+        }, ...EASES.map((x) => h('option', { value: x, selected: (k.ease || 'easeInOut') === x }, x))),
         h('button', { class: 'mini danger', onclick: () => this.opts.onOp({ op: 'cameraRemove', t: k.t }) }, '×'),
       );
       const inputs = row.querySelectorAll('input');
@@ -405,7 +422,7 @@ export class Inspector {
       rows.appendChild(row);
     }
     this.root.appendChild(this._section(`轨道关键点 (${keys.length})`, rows,
-      h('div', { class: 'hint' }, '时间轴上的播放头决定“在此打点”的时刻；每行是 x / y / z（米）。')));
+      h('div', { class: 'hint' }, '每行是 x / y / z（米）；下拉框是该段到下一关键点的速度曲线。')));
 
     const w = project.world;
     const setW = (patch) => this._commit('world', { op: 'worldSet', patch });

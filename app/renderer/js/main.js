@@ -504,6 +504,7 @@ async function boot() {
       return 0;
     },
     onSelect: (sel) => select(sel),
+    onSeek: (t) => { pause(); setTime(t); },
     analyzeBeats: async () => {
       toast('分析节拍中…');
       try { const j = await post('/api/beats', {}); toast(`${j.tempo} bpm · ${j.beats.length} 拍`, 'success'); } catch (e) { toast(e.message, 'error'); }

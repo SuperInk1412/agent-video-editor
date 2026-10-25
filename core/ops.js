@@ -309,13 +309,21 @@ export function applyOp(p, op) {
       const t = Math.round(Number(op.t) * 1000) / 1000;
       if (!Number.isFinite(t)) fail('cameraKey needs t');
       const cam = p.camera || (p.camera = { path: [] });
+      // Keep the existing curve shape when only the position is being edited.
+      const old = (cam.path || []).find((k) => Math.abs(k.t - t) <= 1e-4);
       cam.path = (cam.path || []).filter((k) => Math.abs(k.t - t) > 1e-4);
-      cam.path.push({
+      const entry = {
         t,
         pos: op.pos.map(Number),
         look: Array.isArray(op.look) && op.look.length === 3 ? op.look.map(Number) : null,
         fov: op.fov != null ? Number(op.fov) : null,
-      });
+        ease: op.ease != null ? String(op.ease) : (old?.ease ?? null),
+      };
+      const out = Array.isArray(op.out) ? op.out.map(Number) : (Array.isArray(old?.out) ? old.out : null);
+      const inn = Array.isArray(op.in) ? op.in.map(Number) : (Array.isArray(old?.in) ? old.in : null);
+      if (out) entry.out = out;
+      if (inn) entry.in = inn;
+      cam.path.push(entry);
       cam.path.sort((a, b) => a.t - b.t);
       return { changed: ['camera'] };
     }
@@ -409,10 +417,22 @@ export function applyOp(p, op) {
       const t = Math.round(Number(op.t) * 1000) / 1000;
       if (!Number.isFinite(t) || t < 0) fail('objectKey needs t >= 0');
       const key = { t, v: trackValue(path, op.v !== undefined ? op.v : op.value) };
+      const old = (obj.tracks?.[path] || []).find((k) => Math.abs(k.t - t) <= 1e-4);
       if (op.ease) key.ease = String(op.ease);
+      else if (old?.ease) key.ease = old.ease;
       if (VEC_TRACKS.has(path) || DIR_TRACKS.has(path)) {
-        if (Array.isArray(op.out) && op.out.length === 3) key.out = op.out.map(Number);
-        if (Array.isArray(op.in) && op.in.length === 3) key.in = op.in.map(Number);
+        for (const h of ['out', 'in']) {
+          if (Array.isArray(op[h]) && op[h].length === 3) key[h] = op[h].map(Number);
+          else if (Array.isArray(old?.[h]) && old[h].length === 3) key[h] = old[h].slice();
+        }
+      }
+      if (Array.isArray(op.speed)) {
+        const pts = op.speed
+          .filter((pt) => Array.isArray(pt) && pt.length >= 2 && Number.isFinite(Number(pt[0])) && Number.isFinite(Number(pt[1])))
+          .map((pt) => [Math.max(0, Math.min(1, Number(pt[0]))), Math.max(0, Number(pt[1]))]);
+        if (pts.length >= 2) key.speed = pts;
+      } else if (Array.isArray(old?.speed)) {
+        key.speed = old.speed.map((pt) => pt.slice());
       }
       const tracks = obj.tracks || (obj.tracks = {});
       tracks[path] = (tracks[path] || [])

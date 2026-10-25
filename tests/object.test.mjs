@@ -85,6 +85,22 @@ test('objectKey: accepts .x sub-tracks and rejects unknown paths', () => {
   assert.throws(() => applyOp(p, { op: 'objectKey', id: o.id, path: 'pivot', t: 1, v: [1, 2] }), /needs \[x,y,z\]/);
 });
 
+test('objectKey: updating a key keeps its ease, handles and speed curve', () => {
+  const p = project();
+  const o = add(p, { type: 'solid' });
+  applyOp(p, {
+    op: 'objectKey', id: o.id, path: 'pivot', t: 2, v: [0, 0, 0],
+    ease: 'linear', out: [1, 0, 0], in: [-1, 0, 0], speed: [[0, 1], [1, 2]],
+  });
+  applyOp(p, { op: 'objectKey', id: o.id, path: 'pivot', t: 2, v: [5, 6, 7] });
+  const k = o.tracks.pivot[0];
+  assert.deepEqual(k.v, [5, 6, 7]);
+  assert.equal(k.ease, 'linear');
+  assert.deepEqual(k.out, [1, 0, 0]);
+  assert.deepEqual(k.in, [-1, 0, 0]);
+  assert.deepEqual(k.speed, [[0, 1], [1, 2]]);
+});
+
 test('objectUnkey: drops one key, then the whole track, missing ids fail', () => {
   const p = project();
   const o = add(p, { type: 'solid' });
