@@ -110,8 +110,10 @@ M = T(pivot) · R(dir, roll) · T(position) · S(scale) · G
 - 父子 = **按属性继承**：位置 / 旋转 / 缩放三个开关；绑定瞬间把相对偏移记下来
   - 摄像机挂到空元素下 → 转空元素 = 摇移/俯仰；空元素放场景某点 = 摇臂
   - 只勾"位置" = 跟着走但不跟着转
-- 变换按矩阵组合：`childWorld = parentWorld · inherit(childLocal)`
-- 框选两个元素 → 右键"绑定父子（B→A）"；大纲里也能拖
+  - **继承强度**（借 Alight Motion 的 `Parenting Helper`）：旋转、缩放各有一个 0–1 的权重，
+    比如"跟一半旋转"或"只吃 30% 缩放"，比纯开关更好用
+- 变换按矩阵组合：`childWorld = parentWorld · inherit(childLocal, strength)`
+- 框选两个元素 → 右键"绑定父子（B→A）"；大纲里能看到整棵树
 - 非变换属性的跟随（透明度/字号跟着谁）留作 v2 的 `links`
 
 ## 4. 时间轴
@@ -214,3 +216,23 @@ M = T(pivot) · R(dir, roll) · T(position) · S(scale) · G
 | P10 | lint / 文档 / 回归 | 2d |
 
 约 40 个工作日。先 P0→P3 打通"米制元素能摆、能打帧、能预览"，再上父子与容器。
+
+## 11. 参考程序（Alight Motion）对照
+
+参考程序是 Alight Motion 系（APK 加固，实现不可读；工程 XML / 资源文案可读）。详细逆向见
+`.scratch/ref/ALIGHT-REPORT.md`。结论：
+
+| 参考做法 | 我们的取舍 |
+| --- | --- |
+| 效果 = 有序栈，参数统一 `(name, type, value｜kf[])`，局部/合成两级作用域 | **采纳为 v0.3 元素模型**：元素挂效果栈，参数 schema 驱动 UI |
+| 参数化形状资产：`<params>` + `<handle>` + `getPath(params)` JS | **采纳**：零依赖 JS 天然能跑，形状从 rect/ellipse 扩成资产库 |
+| 组 = `embedScene` 内嵌完整 scene | **已超出**：我们的子场景还带 world / lights / cameraId |
+| 父子关系不可见 + `Parenting Helper` 调继承强度 | **采纳强度**，保留可见的父子树 |
+| 相机：viewAngle / near / far / projection(parallel｜perspective) / Active Camera View | **采纳命名与正交切换**；FOV 不叫 zoom |
+| 段级 `cubicBezier x1 y1 x2 y2` 缓动 | **兼容导入**；我们保留更强的每段速度曲线 |
+| 毫秒整数时间、kf 归一化 t、无显式 z | **不采纳**：秒浮点 + 绝对 t + 显式 z，更好校验与撤销 |
+| 3D = 给 2D 栅格叠伪 3D 效果 | **不采纳实现**，只借参数词汇表（quat 朝向/厚度/倒角/光照/每面模式） |
+| 预设库按代际分文件 + thumb 当索引 | **采纳**：版本化预设 + 缩略图浏览器 |
+
+两条后续项（不进本轮分期）：效果栈、参数化形状资产。
+
