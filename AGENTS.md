@@ -21,6 +21,7 @@
 
 ```bash
 npm test                          # 14 个单元测试（core + beats + agent 解析）
+npm run check:preview             # 预览朝向回归检查（红顶/蓝底标记图，读像素断言）
 node cli/vdm.js still 1.5 --out /tmp/a.png    # 真渲一帧（需要 Blender）
 node scripts/dev.mjs --project projects/demo --capture=/tmp/ui.png --at=1.8
 ```
@@ -28,6 +29,8 @@ node scripts/dev.mjs --project projects/demo --capture=/tmp/ui.png --at=1.8
 - 截图自检走 Electron 的 `--capture`（`show:false` + offscreen），**不要用无头 Chrome**：
   浏览器会请求 `/media/*.mp4|m4a`，可能触发本机 IDM 之类的下载嗅探弹窗。
 - 渲染真帧是最快的"看起来对不对"检查；UI 改动至少截一张图。
+- 动 `preview.js` 的纹理/矩阵/合成器时，**必须**跑 `npm run check:preview`：
+  上下翻转这类 bug 不会改变包围盒，肉眼很容易漏。
 
 ## 提交
 

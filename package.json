@@ -16,7 +16,8 @@
     "demo": "node scripts/demo.mjs",
     "still": "node cli/vdm.js still",
     "blender:check": "node scripts/blender-check.mjs",
-    "logs": "node scripts/logs.mjs --project projects/demo --lines 120 --follow"
+    "logs": "node scripts/logs.mjs --project projects/demo --lines 120 --follow",
+    "check:preview": "node scripts/check-preview.mjs"
   },
   "keywords": [
     "video",
