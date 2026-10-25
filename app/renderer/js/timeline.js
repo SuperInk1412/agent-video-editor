@@ -811,19 +811,21 @@ export class Timeline {
         : target.classList.contains('handle-r') ? 'r' : 'move';
       const t0 = this._timeAt(ev.clientX);
       const orig = { start: item.start, duration: item.duration };
+      const total = this.project.meta.duration;
       const move = (e) => {
         this._noSnap = e.altKey;
         const t = this._timeAt(e.clientX);
         const dt = t - t0;
         let ns = orig.start, nd = orig.duration;
         if (mode === 'move') {
-          ns = Math.max(0, this._snap(orig.start + dt));
+          ns = Math.max(0, Math.min(Math.max(0, total - orig.duration), this._snap(orig.start + dt)));
         } else if (mode === 'r') {
           const end = this._snap(orig.start + orig.duration + dt);
-          nd = Math.max(0.08, end - orig.start);
+          nd = Math.max(0.08, Math.min(Math.max(0.08, total - orig.start), end - orig.start));
         } else {
-          const s = Math.min(orig.start + orig.duration - 0.08, Math.max(0, this._snap(orig.start + dt)));
-          nd = Math.max(0.08, orig.start + orig.duration - s);
+          const end = Math.min(total, orig.start + orig.duration);
+          const s = Math.min(end - 0.08, Math.max(0, this._snap(orig.start + dt)));
+          nd = Math.max(0.08, end - s);
           ns = s;
         }
         objBlk.style.left = `${ns * this.pps}px`;
