@@ -391,7 +391,83 @@ export class PathGizmo {
     const active = objs.find((o) => o.id === this.objSel && live(o));
     const hover = objs.find((o) => o.id === this.objHover && live(o));
     if (hover && hover !== active) this._objectBox(ctx, hover, time, 'rgba(23,217,255,.55)', null);
-    if (active) this._objectBox(ctx, active, time, 'rgba(255,209,102,.95)', active.name || active.id);
+    if (active) {
+      this._objectMotion(ctx, active, time);
+      this._objectBox(ctx, active, time, 'rgba(255,209,102,.95)', active.name || active.id);
+    }
+  }
+
+  /** Sampled world path + pivot key nodes of the selected element. */
+  objectMotion(obj, time) {
+    const start = Number(obj.start) || 0;
+    const end = start + (Number(obj.duration) || 0);
+    const pts = [];
+    const n = 96;
+    for (let i = 0; i <= n; i++) {
+      const t = start + (end - start) * (i / n);
+      const pose = objectPose(obj, t);
+      pts.push({ t, world: pose.worldPos, s: this.project(pose.worldPos) });
+    }
+    const keys = (obj.tracks?.pivot || [])
+      .map((k, i) => {
+        if (!Array.isArray(k.v)) return null;
+        const pose = objectPose(obj, k.t);
+        return { index: i, t: k.t, v: k.v, world: pose.worldPos, s: this.project(pose.worldPos) };
+      })
+      .filter(Boolean);
+    return { pts, keys };
+  }
+
+  _objectMotion(ctx, obj, time) {
+    const m = this.objectMotion(obj, time);
+    ctx.strokeStyle = 'rgba(74,222,128,.55)';
+    ctx.lineWidth = 1.3;
+    ctx.beginPath();
+    let pen = false;
+    for (const pt of m.pts) {
+      if (!pt.s) { pen = false; continue; }
+      if (pen) ctx.lineTo(pt.s[0], pt.s[1]);
+      else { ctx.moveTo(pt.s[0], pt.s[1]); pen = true; }
+    }
+    ctx.stroke();
+    for (const k of m.keys) {
+      if (!k.s) continue;
+      ctx.save();
+      ctx.translate(k.s[0], k.s[1]);
+      ctx.rotate(Math.PI / 4);
+      ctx.fillStyle = Math.abs(k.t - time) < 0.05 ? '#ffd166' : 'rgba(74,222,128,.95)';
+      ctx.fillRect(-3.4, -3.4, 6.8, 6.8);
+      ctx.strokeStyle = '#071018';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(-3.4, -3.4, 6.8, 6.8);
+      ctx.restore();
+    }
+    const pose = objectPose(obj, time);
+    const s = this.project(pose.worldPos);
+    if (s) {
+      ctx.fillStyle = '#fff';
+      ctx.beginPath(); ctx.arc(s[0], s[1], 2.2, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  /** Hit test a pivot key node of the selected element. Only the key under the
+   *  playhead is grabbable, so dragging the box elsewhere still makes a new key. */
+  hitObjectKey(sx, sy) {
+    const project = this.opts.project();
+    const obj = (project?.scene?.objects || []).find((o) => o.id === this.objSel);
+    if (!obj) return null;
+    const k = this.scale;
+    const time = this.opts.time();
+    let best = null;
+    for (const [i, key] of (obj.tracks?.pivot || []).entries()) {
+      if (!Array.isArray(key.v) || Math.abs(key.t - time) > 0.05) continue;
+      const pose = objectPose(obj, key.t);
+      const p = this.project(pose.worldPos);
+      if (!p) continue;
+      const d = Math.hypot(p[0] - sx / k, p[1] - sy / k);
+      if (d <= 11 && (!best || d < best.d)) best = { index: i, t: key.t, world: pose.worldPos, d };
+    }
+    return best;
   }
 
   _grid(ctx, k) {
