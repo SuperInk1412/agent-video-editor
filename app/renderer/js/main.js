@@ -57,15 +57,24 @@ async function post(url, body) {
   return j;
 }
 
-async function op(...ops) {
-  try {
-    const j = await post('/api/ops', { ops });
-    if (j.project) applyProject(j.project, 'local');
-    return j;
-  } catch (e) {
-    toast(`操作失败: ${e.message}`, 'error');
-    return null;
-  }
+// Ops are serialized: two quick edits (e.g. a camera dropdown and a field
+// blur) must not race the atomic save. Concurrent POSTs otherwise clone the
+// same base project and can lose one edit (or hit a Windows rename EPERM).
+let opChain = Promise.resolve();
+function op(...ops) {
+  const run = async () => {
+    try {
+      const j = await post('/api/ops', { ops });
+      if (j.project) applyProject(j.project, 'local');
+      return j;
+    } catch (e) {
+      toast(`操作失败: ${e.message}`, 'error');
+      return null;
+    }
+  };
+  const p = opChain.then(run, run);
+  opChain = p.catch(() => {});
+  return p;
 }
 
 let toastTimer = [];
