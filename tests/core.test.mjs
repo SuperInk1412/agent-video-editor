@@ -7,7 +7,7 @@ import { createProject, normalizeProject, validateProject, elementsAt } from '..
 import { applyOp, applyOps, getPath, setPath, coerceValue } from '../core/ops.js';
 import { evalElement, motionDelta } from '../core/evaluate.js';
 import { sampleTrack, ease, kick, timecode } from '../core/time.js';
-import { saveProject, loadProject, mutateProject } from '../core/store.js';
+import { saveProject, loadProject, mutateProject, watchProject } from '../core/store.js';
 import { extractProposal } from '../engine/agent.js';
 
 const fresh = () => normalizeProject(createProject({ title: 't', duration: 10 }));
@@ -149,6 +149,23 @@ test('store roundtrip bumps rev and locks safely', async () => {
   })));
   assert.equal((await loadProject(dir)).elements.length, 4);
   await fsp.rm(dir, { recursive: true, force: true });
+});
+
+test('watchProject notices writes from another process', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'vdm-'));
+  await saveProject(dir, fresh());
+  let hits = 0;
+  const stop = watchProject(dir, () => { hits++; });
+  try {
+    await new Promise((r) => setTimeout(r, 300));
+    await mutateProject(dir, (proj) => { proj.meta.title = 'changed elsewhere'; });
+    const t0 = Date.now();
+    while (!hits && Date.now() - t0 < 3000) await new Promise((r) => setTimeout(r, 50));
+    assert.ok(hits > 0, 'the watcher fired');
+  } finally {
+    stop();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('timecode formatting', () => {
