@@ -77,7 +77,8 @@ function groupKeys(keyframes) {
 
 function scalarTrack(keys, map) {
   return keys
-    .map((k) => ({ t: N(k.t), v: map(k.value), ...(k.ease ? { ease: k.ease } : {}) }))
+    .map((k) => ({ t: N(k.t), v: map(k.value), ...(k.ease ? { ease: k.ease } : {}),
+      ...(k.curve ? { curve: JSON.parse(JSON.stringify(k.curve)) } : {}) }))
     .sort((a, b) => a.t - b.t);
 }
 

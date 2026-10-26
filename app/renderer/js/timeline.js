@@ -1,4 +1,5 @@
-// Timeline: ruler + segment lane + camera element + 3D element rows.
+// Timeline: ruler + camera stack + 3D element rows. Segments still live in the
+// project (AI / pipeline use them) but no longer get a lane here.
 // Element rows expand in place: the left column edits the element's properties
 // and the right lanes show per-property keyframes, all on the same row grid.
 // The camera is an element too: its attributes are folded inside the camera
@@ -12,6 +13,7 @@ import {
   emptySelection, normalizeSelection, selectOne, addSelection, toggleSelection,
   cameraRef, objectRef, elementRef, propertyRef, keyframeRef, splitRef,
 } from '/core/selection.js';
+import { attachNumberField, readNumber, writeNumber } from './numfield.js';
 
 const el = (tag, cls, html) => {
   const n = document.createElement(tag);
@@ -24,12 +26,11 @@ const TYPE_COLOR = { image: '#3b6ea5', video: '#2f8f6b', text: '#a06a2b', shape:
 const AX = ['x', 'y', 'z'];
 
 export class Timeline {
-  constructor(root, { onSeek, onSelect, onOp, onSegment, onPause, onElementMenu, onCameraMenu } = {}) {
+  constructor(root, { onSeek, onSelect, onOp, onPause, onElementMenu, onCameraMenu } = {}) {
     this.root = root;
     this.onSeek = onSeek;
     this.onSelect = onSelect;
     this.onOp = onOp;
-    this.onSegment = onSegment;
     this.onPause = onPause;
     this.onElementMenu = onElementMenu;
     this.onCameraMenu = onCameraMenu;
@@ -91,11 +92,6 @@ export class Timeline {
     this.rulerTrack = el('div', 'tl-track');
     this.rulerRow.append(this.rulerGutter, this.rulerTrack);
 
-    this.segRow = el('div', 'tl-row tl-segrow');
-    this.segGutter = el('div', 'tl-gutter', '<span>分镜</span>');
-    this.segTrack = el('div', 'tl-track');
-    this.segRow.append(this.segGutter, this.segTrack);
-
     this.camHead = el('div', 'tl-row tl-sechead tl-camsec');
     this.camHeadGutter = el('div', 'tl-gutter', '<span>相机</span>');
     this.camHeadTrack = el('div', 'tl-track');
@@ -104,25 +100,48 @@ export class Timeline {
     this.camsWrap = el('div', 'tl-cams');
     this.elsWrap = el('div', 'tl-els');
     this.playhead = el('div', 'tl-playhead');
-    this.inner.append(this.rulerRow, this.segRow, this.camHead, this.camsWrap, this.elsWrap, this.playhead);
+    this.inner.append(this.rulerRow, this.camHead, this.camsWrap, this.elsWrap, this.playhead);
 
     const hint = el('div', 'tl-hint');
     hint.innerHTML = '<span>▾ 元素 / 相机展开</span><span class="tl-hint-sep">|</span>'
       + '<span>U 只看带键属性</span><span class="tl-hint-sep">|</span>'
       + '<span>组标题三态 ▾ 全部 / ▾• 带键 / ▸ 收起</span><span class="tl-hint-sep">|</span>'
       + '<span><b>◆</b> 打帧 / 删帧</span>';
+
+    // timeline zoom: buttons + Ctrl+wheel + double-click the ruler to fit
+    const zoomBar = el('div', 'tl-zoom');
+    const zOut = el('button', 'tl-zoomb', '−');
+    zOut.title = '缩小时间轴（Ctrl + 滚轮）';
+    const zIn = el('button', 'tl-zoomb', '+');
+    zIn.title = '放大时间轴（Ctrl + 滚轮）';
+    this._zoomLabel = el('span', 'tl-zoomval', '100%');
+    const zFit = el('button', 'tl-zoomb', '适应');
+    zFit.title = '缩放到整段时长（双击标尺）';
+    zOut.onclick = () => this.zoomBy(0.8);
+    zIn.onclick = () => this.zoomBy(1.25);
+    zFit.onclick = () => this.fit();
+    zoomBar.append(zOut, this._zoomLabel, zIn, zFit);
+    hint.appendChild(zoomBar);
     this.root.appendChild(hint);
 
     this.inner.addEventListener('pointerdown', (e) => this._down(e));
+    this.scroll.addEventListener('scroll', () => this.onViewChange?.());
     this.scroll.addEventListener('wheel', (e) => {
       if (e.ctrlKey) {
         e.preventDefault();
-        const dir = e.deltaY > 0 ? 0.9 : 1.1;
-        this.zoom = Math.max(0.15, Math.min(8, this.zoom * dir));
-        this._layout();
+        this.zoomBy(e.deltaY > 0 ? 0.9 : 1.1, e.clientX);
       }
     }, { passive: false });
     this.rulerTrack.addEventListener('dblclick', () => this.fit());
+    // A rebuild that was deferred while typing runs as soon as the field is left.
+    this.root.addEventListener('focusout', () => {
+      setTimeout(() => {
+        if (!this._renderPending) return;
+        if (this.root.contains(document.activeElement)) return;
+        this._renderPending = false;
+        this.render(true);
+      }, 0);
+    }, true);
   }
 
   // ------------------------------------------------------------ state
@@ -189,6 +208,26 @@ export class Timeline {
     const w = this.scroll.clientWidth - this._gutter() - 24;
     this.zoom = Math.max(0.15, Math.min(8, w / Math.max(1, this.project?.meta.duration || 12) / 60));
     this._layout();
+    this.onViewChange?.();
+  }
+
+  /** Zoom around `clientX` (defaults to the playhead) and keep that time in place. */
+  setZoom(z, clientX = null) {
+    const next = Math.max(0.15, Math.min(8, Number(z) || this.zoom));
+    if (Math.abs(next - this.zoom) < 1e-6) return;
+    const rect = this.scroll.getBoundingClientRect();
+    const anchorX = clientX != null
+      ? Math.max(0, Math.min(this.scroll.clientWidth, clientX - rect.left))
+      : Math.max(8, Math.min(this.scroll.clientWidth - 8, this._trackX(this.time) - this.scroll.scrollLeft));
+    const anchorTime = (anchorX + this.scroll.scrollLeft - this._gutter()) / Math.max(1, this.pps);
+    this.zoom = next;
+    this._layout();
+    this.scroll.scrollLeft = Math.max(0, this._gutter() + anchorTime * this.pps - anchorX);
+    this.onViewChange?.();
+  }
+
+  zoomBy(factor, clientX = null) {
+    this.setZoom(this.zoom * factor, clientX);
   }
 
   _gutter() { return 360; }
@@ -203,11 +242,14 @@ export class Timeline {
     if (!this.project) return;
     if (this._fitOnce) {
       this.pps = Math.max(8, ((this.scroll.clientWidth - this._gutter() - 24) / Math.max(1, this.project.meta.duration)));
+      this.zoom = Math.max(0.15, Math.min(8, this.pps / 60));
       this._fitOnce = false;
     } else {
       this.pps = 60 * this.zoom;
     }
+    if (this._zoomLabel) this._zoomLabel.textContent = `${Math.round(this.zoom * 100)}%`;
     this.render(true);
+    this.onViewChange?.();
   }
 
   _updateHeight() {
@@ -221,7 +263,6 @@ export class Timeline {
     const p = this.project;
     const tol = 7 / this.pps;
     const cands = [0, p.meta.duration, ...(p.meta.beats || [])];
-    for (const s of p.segments) { cands.push(s.start, s.start + s.duration); }
     let best = t, bd = tol;
     for (const c of cands) {
       const d = Math.abs(c - t);
@@ -236,9 +277,16 @@ export class Timeline {
     if (!p) return;
     if (!this.pps) { this._layout(); return; }
     const active = document.activeElement;
-    const typing = !force && this.root.contains(active)
+    const focusedHere = this.root.contains(active)
       && /INPUT|SELECT|TEXTAREA/.test(active?.tagName || '');
-    if (typing) { this._syncProps(); return; }
+    if (focusedHere) {
+      // Rebuilding the rows would throw away the focused input (and the caret)
+      // in the middle of typing. Sync values instead, remember that a rebuild
+      // is owed, and run it when the field is left.
+      this._syncProps();
+      if (force) this._renderPending = true;
+      return;
+    }
 
     const dur = p.meta.duration;
     this.inner.style.width = `${this._gutter() + dur * this.pps + 60}px`;
@@ -274,19 +322,7 @@ export class Timeline {
       this.rulerTrack.appendChild(bt);
     }
 
-    // segments
-    this.segTrack.innerHTML = '';
-    this.segTrack.style.height = '34px';
-    this.segGutter.innerHTML = `<span>分镜</span><span class="tl-sub">${p.segments.length} 个</span>`;
-    for (const s of p.segments) {
-      const b = el('div', 'blk seg');
-      b.dataset.id = s.id;
-      b.style.left = `${s.start * this.pps}px`;
-      b.style.width = `${Math.max(6, s.duration * this.pps)}px`;
-      b.innerHTML = `<span class="blk-name">${escapeHtml(s.name || s.id)}</span><span class="blk-meta">${s.duration.toFixed(2)}s</span>`;
-      b.appendChild(el('div', 'handle handle-r'));
-      this.segTrack.appendChild(b);
-    }
+    // camera / element rows follow; segments live in the data only
 
     // camera stack: a section header + one row per camera (top of the stack
     // first). The expanded camera is always the active one.
@@ -387,8 +423,13 @@ export class Timeline {
   }
 
   setSoloCameras(ids) {
-    this.soloCameras = new Set(ids || []);
-    this.render(true);
+    const next = new Set(ids || []);
+    const same = next.size === this.soloCameras.size
+      && [...this.soloCameras].every((id) => next.has(id));
+    this.soloCameras = next;
+    // applyProject calls this after every op: do not rebuild the whole
+    // timeline (and destroy focused inputs) when the solo set did not change.
+    if (!same) this.render(true);
   }
 
   _startCameraDrag(id, startY, row) {
@@ -488,7 +529,7 @@ export class Timeline {
       }
       if (show('pictureOffset')) {
         host.appendChild(this._camVecRow(cam, 'pictureOffset', '画面位置', 2, tr.pictureOffset, {
-          step: 0.01, unit: '0..1',
+          step: 0.01, min: -1, max: 1, unit: '-1..1',
         }));
       }
       if (show('opacity')) host.appendChild(this._camOpacityRow(cam, tr.opacity));
@@ -625,7 +666,7 @@ export class Timeline {
     const cam = this.project?.camera;
     const posRow = this._camPos;
     if (!cam || !posRow) return;
-    const v = posRow.inputs.map((i) => Number(i.value));
+    const v = posRow.inputs.map((i) => readNumber(i));
     if (v.some((n) => !Number.isFinite(n))) return;
     const t = this._editTimes.get('camera:position') ?? round3(this.time);
     const old = cam.path.find((k) => Math.abs(k.t - t) <= 1e-4);
@@ -684,7 +725,9 @@ export class Timeline {
       inp.step = String(step);
       if (min != null) inp.min = String(min);
       if (max != null) inp.max = String(max);
-      inp.value = String(round2(values[i]));
+      // opacity keeps 0..1 in the project but reads as a percentage here
+      if (path === 'opacity') { inp.dataset.scale = '100'; inp.dataset.unit = '%'; }
+      writeNumber(inp, values[i], { force: true });
       const editKey = `cam:${cam.id}:${path}`;
       inp.addEventListener('focus', () => this.onPause?.());
       inp.addEventListener('input', () => {
@@ -735,7 +778,7 @@ export class Timeline {
     const cam = this._camById(camId);
     const pr = this._camPropRows.find((x) => x.camId === camId && x.path === path);
     if (!cam || !pr) return;
-    const values = pr.inputs.map((i) => Number(i.value));
+    const values = pr.inputs.map((i) => readNumber(i));
     if (!values.every(Number.isFinite)) return;
     const v = pr.dims === 1 ? values[0] : values;
     const t = this._editTimes.get(`cam:${camId}:${path}`) ?? round3(this.time);
@@ -811,7 +854,7 @@ export class Timeline {
     inp.step = String(step);
     if (min != null) inp.min = String(min);
     if (max != null) inp.max = String(max);
-    inp.value = String(round2(value));
+    writeNumber(inp, value, { force: true });
     const editKey = `cam:${cam.id}:${path}`;
     inp.addEventListener('focus', () => this.onPause?.());
     inp.addEventListener('input', () => {
@@ -819,7 +862,7 @@ export class Timeline {
       this._schedule(editKey, () => {
         if (keyable) this._commitCamParam(cam.id, path);
         else {
-          const v = Number(inp.value);
+          const v = readNumber(inp);
           if (Number.isFinite(v)) this._commitCamShotValue(cam.id, path, v);
         }
       });
@@ -1043,8 +1086,9 @@ export class Timeline {
     const box = el('span', 'tl-num');
     if (letter) box.appendChild(el('i', axis ? `axis-${axis}` : 'axis-d', letter));
     const inp = document.createElement('input');
-    inp.type = 'number';
+    inp.type = 'text';
     inp.step = '0.1';
+    attachNumberField(inp);
     box.appendChild(inp);
     return { box, inp };
   }
@@ -1146,6 +1190,8 @@ export class Timeline {
     box.classList.add('tl-scalar');
     inp.min = '0';
     inp.max = '1';
+    inp.dataset.scale = '100';
+    inp.dataset.unit = '%';
     inp.addEventListener('focus', () => this.onPause?.());
     inp.addEventListener('input', () => {
       this._editTimes.set(`${o.id}:opacity`, round3(this.time));
@@ -1203,12 +1249,9 @@ export class Timeline {
 
   _syncProps(force = false) {
     const t = this.time;
-    const set = (inp, v) => {
-      if (!inp) return;
-      if (!force && document.activeElement === inp) return;
-      const n = Math.round(Number(v) * 100) / 100;
-      if (inp.value !== String(n)) inp.value = String(n);
-    };
+    // Never write into the field the user is typing in (force included): that
+    // is what used to swallow the "." right after "0" on every re-render.
+    const set = (inp, v) => writeNumber(inp, v);
     for (const pr of this._propRows) {
       const o = this._obj(pr.objId);
       if (!o) continue;
@@ -1298,7 +1341,7 @@ export class Timeline {
     const pr = this._propRows.find((x) => x.objId === objId && x.path === path);
     const o = this._obj(objId);
     if (!pr || !o) return;
-    const v = pr.inputs.map((i) => Number(i.value));
+    const v = pr.inputs.map((i) => readNumber(i));
     if (v.some((n) => !Number.isFinite(n))) return;
     const t = this._editTimes.get(`${objId}:${path}`) ?? round3(this.time);
     if (this._hasTrack(o, path)) this.onOp?.({ op: 'objectKey', id: objId, path, t, v });
@@ -1309,7 +1352,7 @@ export class Timeline {
     const pr = this._propRows.find((x) => x.objId === objId && x.path === 'opacity');
     const o = this._obj(objId);
     if (!pr || !o) return;
-    const v = Number(pr.inputs[0].value);
+    const v = readNumber(pr.inputs[0]);
     if (!Number.isFinite(v)) return;
     const t = this._editTimes.get(`${objId}:opacity`) ?? round3(this.time);
     if (this._hasTrack(o, 'opacity')) this.onOp?.({ op: 'objectKey', id: objId, path: 'opacity', t, v });
@@ -1320,7 +1363,7 @@ export class Timeline {
     const pr = this._propRows.find((x) => x.objId === objId && x.path === 'geom');
     const o = this._obj(objId);
     if (!pr || !o) return;
-    const [w, h, d] = pr.inputs.map((i) => Number(i.value));
+    const [w, h, d] = pr.inputs.map((i) => readNumber(i));
     if (![w, h, d].every(Number.isFinite)) return;
     this.onOp?.({
       op: 'objectPatch', id: objId,
@@ -1445,9 +1488,6 @@ export class Timeline {
     }
     if (this.elementId) {
       this.inner.querySelector(`.blk.el[data-id="${this.elementId}"]`)?.classList.add('sel');
-    }
-    if (this.segmentId) {
-      this.inner.querySelector(`.blk.seg[data-id="${this.segmentId}"]`)?.classList.add('sel');
     }
     if (this.cameraSel) {
       const camId = this._activeCameraId();
@@ -1610,20 +1650,13 @@ export class Timeline {
 
     if (blk) {
       const id = blk.dataset.id;
-      const isSeg = blk.classList.contains('seg');
-      if (isSeg) {
-        this.segmentId = id;
-        this.pool = emptySelection();
-        this.onSegment?.(id);
-      } else {
-        this.elementId = id;
-        this._pickPool('element', elementRef(id), ev);
-        this.onSelect?.({ elementId: id, segmentId: this.project.elements.find((e) => e.id === id)?.segment || null, pool: this.pool });
-      }
+      this.elementId = id;
+      this._pickPool('element', elementRef(id), ev);
+      this.onSelect?.({ elementId: id, segmentId: this.project.elements.find((e) => e.id === id)?.segment || null, pool: this.pool });
       this._paintSelection();
 
       const p = this.project;
-      const item = isSeg ? p.segments.find((s) => s.id === id) : p.elements.find((e) => e.id === id);
+      const item = p.elements.find((e) => e.id === id);
       if (!item) return;
       const mode = target.classList.contains('handle-l') ? 'l'
         : target.classList.contains('handle-r') ? 'r' : 'move';
@@ -1654,8 +1687,7 @@ export class Timeline {
         window.removeEventListener('pointerup', up);
         const ns = blk._ns, nd = blk._nd;
         if (ns == null || (Math.abs(ns - orig.start) < 1e-4 && Math.abs(nd - orig.duration) < 1e-4)) return;
-        if (isSeg) this.onOp?.({ op: 'updateSegment', id, patch: { start: round3(ns), duration: round3(nd) } });
-        else this.onOp?.({ op: 'moveElement', id, start: round3(ns), duration: round3(nd) });
+        this.onOp?.({ op: 'moveElement', id, start: round3(ns), duration: round3(nd) });
       };
       window.addEventListener('pointermove', move);
       window.addEventListener('pointerup', up);

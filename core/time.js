@@ -1,5 +1,7 @@
 // Time / easing / keyframe math. Pure ESM, shared by engine, CLI and renderer.
 import { compiledTrack, segmentIndex } from './tracks.js';
+import { sampleCurve } from './curves.js';
+
 export const EPS = 1e-6;
 export const clamp = (v, a = 0, b = 1) => (v < a ? a : v > b ? b : v);
 export const lerp = (a, b, t) => a + (b - a) * t;
@@ -104,7 +106,8 @@ export function sampleTrack(keys, path, t, base = null) {
     if (t >= a.t && t < b.t) {
       const p = (t - a.t) / Math.max(EPS, b.t - a.t);
       if (typeof a.value === 'number' && typeof b.value === 'number') {
-        return lerp(a.value, b.value, ease(a.ease || 'easeInOut', p));
+        const progress = a.curve ? sampleCurve(a.curve, p) : ease(a.ease || 'easeInOut', p);
+        return lerp(a.value, b.value, progress);
       }
       return a.value;
     }

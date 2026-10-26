@@ -4,6 +4,7 @@ import { objectPose } from '/core/scene.js';
 import { RotBall } from './rotball.js';
 import { SpeedCurve, SPEED_PRESETS } from './speedcurve.js';
 import { escapeHtml } from './timeline.js';
+import { attachNumberField, readNumber, writeNumber } from './numfield.js';
 
 const MOTIONS = ['none', 'in', 'out', 'left', 'right', 'up', 'down', 'drift', 'shake'];
 const FONTS = ['SimHei', 'Microsoft YaHei', 'Arial', 'Impact', 'Bahnschrift', 'Consolas'];
@@ -79,7 +80,7 @@ export class Inspector {
     return s;
   }
 
-  _field({ label, value, type = 'number', step = 0.01, min, max, path, kf, options, onChange, placeholder, span = 2 }) {
+  _field({ label, value, type = 'number', step = 0.01, min, max, path, kf, options, onChange, placeholder, span = 2, percent = false }) {
     let input;
     if (type === 'select') {
       input = h('select', {}, ...options.map((o) => {
@@ -93,15 +94,21 @@ export class Inspector {
       input = h('input', { type: 'color', value: value || '#ffffff' });
     } else if (type === 'checkbox') {
       input = h('input', { type: 'checkbox', checked: !!value });
-    } else {
-      input = h('input', { type: type === 'text' ? 'text' : 'number', step: type === 'text' ? null : step, min, max, placeholder: placeholder || '' });
+    } else if (type === 'text') {
+      input = h('input', { type: 'text', placeholder: placeholder || '' });
       input.value = value ?? '';
+    } else {
+      // numeric fields: text input + shared scrub/spinner behaviour (numfield.js)
+      input = h('input', { type: 'text', step, min, max, placeholder: placeholder || '' });
+      if (percent) { input.dataset.scale = '100'; input.dataset.unit = '%'; }
+      attachNumberField(input);
+      writeNumber(input, value, { force: true });
     }
     const emit = () => {
       const v = type === 'checkbox' ? input.checked
-        : type === 'number' ? (input.value === '' ? null : Number(input.value))
+        : type === 'number' ? readNumber(input)
           : input.value;
-      if (v == null || (type === 'number' && Number.isNaN(v))) return;
+      if (v == null || (type === 'number' && !Number.isFinite(v))) return;
       onChange(v);
     };
     if (type === 'select') input.addEventListener('change', emit);
@@ -189,7 +196,7 @@ export class Inspector {
       this._field({ label: 'Y', value: round(kv('transform.y', el.transform.y)), kf: true, path: 'transform.y', onChange: edit('transform.y', (v) => ({ transform: { y: v } })) }),
       this._field({ label: '缩放', value: round(kv('transform.scale', el.transform.scale), 3), step: 0.01, kf: true, path: 'transform.scale', onChange: edit('transform.scale', (v) => ({ transform: { scale: v } })) }),
       this._field({ label: '旋转°', value: round(kv('transform.rotation', el.transform.rotation), 2), step: 0.5, kf: true, path: 'transform.rotation', onChange: edit('transform.rotation', (v) => ({ transform: { rotation: v } })) }),
-      this._field({ label: '不透明度', value: round(kv('transform.opacity', el.transform.opacity), 3), step: 0.01, min: 0, max: 1, kf: true, path: 'transform.opacity', onChange: edit('transform.opacity', (v) => ({ transform: { opacity: v } })) }),
+      this._field({ label: '不透明度', value: round(kv('transform.opacity', el.transform.opacity), 3), step: 0.01, min: 0, max: 1, percent: true, kf: true, path: 'transform.opacity', onChange: edit('transform.opacity', (v) => ({ transform: { opacity: v } })) }),
       this._field({ label: '跟随节拍', value: el.punch || 0, step: 0.05, min: 0, max: 2, onChange: (v) => set('punch', { punch: v }) }),
     ));
 

@@ -22,6 +22,8 @@ const definitions = {
   setFx: [{ fx: object }, ['fx']],
   keySet: [{ id: string, path: property, t: time, value: {}, ease: string }, ['id', 'path', 't', 'value']],
   keyRemove: [{ id: string, path: property, t: time }, ['id', 'path']],
+  keyCurve: [{ host: { enum: ['element', 'object', 'camera'] }, id: string, path: property,
+    from: time, to: time, curve: { type: ['object', 'null'] } }, ['id', 'path', 'from', 'to', 'curve']],
   batch: [{ ops: { type: 'array', minItems: 1, maxItems: 1000, items: { $ref: '#/$defs/op' } } }, ['ops']],
   cameraKey: [{ id: string, t: time, pos: vector(3), look: { anyOf: [vector(3), { type: 'null' }] }, fov: { type: ['number', 'null'] }, ease: string, out: vector(3), in: vector(3), speed: {} }, ['t', 'pos']],
   cameraRemove: [{ id: string, t: time }, ['t']],

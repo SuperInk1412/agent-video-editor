@@ -5,16 +5,20 @@ import { SCENE_VERSION, normalizeObject } from './scene.js';
 import { normalizeCamera } from './camera.js';
 import { assertSafeData, pathParts } from './json.js';
 import { clearCompiledTracks } from './tracks.js';
+import { normalizeCurve } from './curves.js';
+import { EXT_OP_KINDS, applyExtOp } from './ops-ext.js';
 
 export const OP_KINDS = [
   'addElement', 'updateElement', 'set', 'removeElement', 'moveElement',
   'splitElement', 'duplicateElement', 'reorder', 'addSegment', 'updateSegment',
-  'removeSegment', 'setMeta', 'setFx', 'keySet', 'keyRemove', 'batch',
+  'removeSegment', 'setMeta', 'setFx', 'keySet', 'keyRemove', 'keyCurve', 'batch',
   'cameraKey', 'cameraRemove', 'cameraSet', 'cameraPath', 'cameraPatch',
   'cameraParamKey', 'cameraParamUnkey', 'worldSet',
   'addCamera', 'removeCamera', 'reorderCamera', 'activateCamera',
   'objectAdd', 'objectRemove', 'objectPatch', 'objectKey', 'objectUnkey',
   'replaceTimeline', 'restoreProject',
+  // ops added by feature modules through core/ops-ext.js
+  ...EXT_OP_KINDS,
 ];
 
 const isObj = (o) => o && typeof o === 'object' && !Array.isArray(o);
@@ -128,6 +132,12 @@ function cameraTrackValue(path, v) {
     out[0] = Math.max(0, Math.min(1, out[0]));
     out[1] = Math.max(0, Math.min(1, out[1]));
   }
+  if (path === 'pictureOffset') {
+    // normalized screen offsets; values far outside would push the whole shot
+    // off-screen and the preview would look black for no visible reason
+    out[0] = Math.max(-1, Math.min(1, out[0]));
+    out[1] = Math.max(-1, Math.min(1, out[1]));
+  }
   return out;
 }
 
@@ -136,6 +146,19 @@ function cameraById(p, id) {
   if (!id) return p.camera || null;
   const cam = p.cameras.find((c) => c.id === String(id));
   if (!cam) fail(`no camera ${id}`);
+  return cam;
+}
+
+/** Normalized picture-space fields: keep base values inside their meaning. */
+function clampCameraPicture(cam) {
+  if (!cam) return cam;
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, Number(v)));
+  if (Array.isArray(cam.picturePivot) && cam.picturePivot.length >= 2) {
+    cam.picturePivot = [clamp(cam.picturePivot[0], 0, 1), clamp(cam.picturePivot[1], 0, 1)];
+  }
+  if (Array.isArray(cam.pictureOffset) && cam.pictureOffset.length >= 2) {
+    cam.pictureOffset = [clamp(cam.pictureOffset[0], -1, 1), clamp(cam.pictureOffset[1], -1, 1)];
+  }
   return cam;
 }
 
@@ -484,6 +507,7 @@ export function applyOp(p, op) {
       if (!Number.isFinite(t)) fail('keySet needs t');
       const old = (el.keyframes || []).find((k) => k.path === op.path && Math.abs(k.t - t) < 1e-4);
       const kf = { t, path: op.path, value: coerceValue(op.value), ease: op.ease || old?.ease || 'easeInOut' };
+      if (old?.curve) kf.curve = old.curve;
       el.keyframes = (el.keyframes || []).filter((k) => !(k.path === kf.path && Math.abs(k.t - t) < 1e-4));
       el.keyframes.push(kf);
       el.keyframes.sort((a, b) => a.t - b.t);
@@ -500,6 +524,44 @@ export function applyOp(p, op) {
       el.keyframes = (el.keyframes || []).filter((k) => k.path !== op.path
         || (t != null && Math.abs(k.t - t) > 1e-4));
       return { changed: [el.id] };
+    }
+
+    case 'keyCurve': {
+      // Attach (or clear, with curve=null) a value curve to the keyframe that
+      // starts the segment [from, to). Stored on the left key.
+      const host = String(op.host || 'element');
+      const path = String(op.path || '');
+      if (!path) fail('keyCurve needs path');
+      const from = Math.round(Number(op.from) * 1000) / 1000;
+      const to = Math.round(Number(op.to) * 1000) / 1000;
+      if (!Number.isFinite(from) || !Number.isFinite(to) || !(to > from)) fail('keyCurve needs from < to');
+      let keys;
+      let changedId;
+      if (host === 'element') {
+        const el = findEl(p, op.id);
+        keys = el.keyframes || (el.keyframes = []);
+        changedId = el.id;
+      } else if (host === 'object') {
+        const o = findObj(p, op.id);
+        const tracks = o.tracks || (o.tracks = {});
+        keys = tracks[path] || (tracks[path] = []);
+        changedId = o.id;
+      } else if (host === 'camera') {
+        const cam = cameraById(p, op.id);
+        const tracks = cam.tracks || (cam.tracks = {});
+        keys = tracks[path] || (tracks[path] = []);
+        changedId = cam.id;
+      } else {
+        fail(`keyCurve host ${host} is not supported`);
+      }
+      const key = keys.find((k) => Math.abs(Number(k.t) - from) <= 1e-4);
+      if (!key) fail(`keyCurve: no keyframe at ${from}`);
+      const hasNext = keys.some((k) => Number(k.t) > from && Math.abs(Number(k.t) - to) <= 1e-4);
+      if (!hasNext) fail(`keyCurve: no keyframe at ${to}`);
+      const curve = normalizeCurve(op.curve);
+      if (curve) key.curve = curve;
+      else delete key.curve;
+      return { changed: [changedId] };
     }
 
     case 'cameraKey': {
@@ -546,6 +608,7 @@ export function applyOp(p, op) {
       const patch = op.patch || {};
       const next = deepMerge(cam, patch);
       Object.keys(next).forEach((k) => { cam[k] = next[k]; });
+      clampCameraPicture(cam);
       if (Array.isArray(cam.path)) cam.path.sort((a, b) => a.t - b.t);
       return { changed: ['camera', cam.id] };
     }
@@ -576,6 +639,7 @@ export function applyOp(p, op) {
       if (!cam) fail(`no camera ${op.id}`);
       const next = deepMerge(cam, op.patch || {});
       Object.keys(next).forEach((k) => { cam[k] = next[k]; });
+      clampCameraPicture(cam);
       if (cam.id === p.activeCameraId) p.camera = cam;
       return { changed: ['camera', cam.id] };
     }
@@ -767,8 +831,23 @@ export function applyOp(p, op) {
       return { changed: results.flatMap((r) => r.changed), results };
     }
 
-    default:
+    default: {
+      // Feature modules register their ops through core/ops-ext.js instead of
+      // editing this switch. They get the same validation helpers core ops use.
+      const ext = applyExtOp(p, op, {
+        fail,
+        deepMerge,
+        getPath,
+        setPath,
+        newId,
+        coerceValue,
+        findElement: (id) => findEl(p, id),
+        findObject: (id) => findObj(p, id),
+        findCamera: (id) => cameraById(p, id),
+      });
+      if (ext) return ext;
       fail(`unknown op ${kind}`);
+    }
   }
 }
 

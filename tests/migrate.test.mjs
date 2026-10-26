@@ -8,8 +8,10 @@ import { evalElement, motionDelta, fadeMul } from '../core/evaluate.js';
 import { applyLegacy } from '../core/legacy.js';
 import { createProject, normalizeProject } from '../core/schema.js';
 import { applyOp } from '../core/ops.js';
+import { presetCurve } from '../core/curves.js';
 
 const load = (name) => JSON.parse(fs.readFileSync(new URL(`./fixtures/${name}.json`, import.meta.url), 'utf8'));
+const loadLegacyNight = () => load('nightcity');
 const near = (a, b, eps = 1e-6) => assert.ok(Math.abs(a - b) <= eps, `${a} != ${b}`);
 const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const norm = (v) => { const l = Math.hypot(v[0], v[1], v[2]) || 1; return v.map((x) => x / l); };
@@ -88,7 +90,7 @@ test('migrate + legacy: demo matches the v2 evaluator pixel for pixel', () => {
 });
 
 test('migrate: the 3D camera keeps its exact flight path', () => {
-  const v2 = load('nightcity');
+  const v2 = loadLegacyNight();
   const v3 = migrateProject(v2);
   const scene = v3.scenes.root;
   const cam = scene.objects.find((o) => o.type === 'camera');
@@ -120,7 +122,7 @@ test('migrate: the 3D camera keeps its exact flight path', () => {
 });
 
 test('migrate: is idempotent', () => {
-  const v3 = migrateProject(load('nightcity'));
+  const v3 = migrateProject(loadLegacyNight());
   assert.equal(migrateProject(v3), v3);
 });
 
@@ -157,4 +159,19 @@ test('hybrid migration preserves every camera, object and exact animated camera 
     }
   }
   assert.equal(JSON.stringify(p), before, 'migration does not mutate the source project');
+});
+
+test('migration preserves upstream value curves on scalar element tracks', () => {
+  const p = createProject({ duration: 4 });
+  applyOp(p, { op: 'addElement', element: { type: 'solid', duration: 4, keyframes: [
+    { t: 0, path: 'transform.x', value: 0, curve: presetCurve('easeIn') },
+    { t: 4, path: 'transform.x', value: 100 },
+  ] } });
+  const migrated = migrateProject(p).scenes.root.objects.find((o) => o.id === 'el_1');
+  assert.deepEqual(migrated.tracks['pivot.x'][0].curve, presetCurve('easeIn'));
+  for (const time of [0, 0.5, 1, 2, 3, 4]) {
+    const before = evalElement(p.elements[0], time, p.meta);
+    const after = evaluateMigratedObject(migrated, time, p.meta);
+    near(after.pivot[0] * 100, before.x);
+  }
 });

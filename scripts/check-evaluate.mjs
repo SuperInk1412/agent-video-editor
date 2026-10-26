@@ -37,6 +37,15 @@ try {
     { t: 0, path: 'transform.x', value: 0, ease: 'outExpo' },
     { t: 4, path: 'transform.x', value: 128 },
   ] }, [0, 2, 4]);
+  for (const curve of [
+    { type: 'bezier', p1: [0.42, 0], p2: [1, 1] },
+    { type: 'bezier', p1: [0, 0], p2: [0.58, 1] },
+    { type: 'bezier', p1: [0.42, 0], p2: [0.58, 1] },
+    { type: 'bezier', p1: [0.2, 0], p2: [0.4, 1.6] },
+  ]) add({ keyframes: [
+    { t: 0, path: 'transform.x', value: 0, curve },
+    { t: 4, path: 'transform.x', value: 128 },
+  ] });
   const input = path.join(temporary, 'cases.json');
   const output = path.join(temporary, 'results.json');
   const script = path.join(temporary, 'check.py');
