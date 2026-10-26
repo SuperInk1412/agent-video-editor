@@ -8,6 +8,10 @@
 import { timecode } from '/core/time.js';
 import { objectPose } from '/core/scene.js';
 import { pathPos, cameraTransform, cameraParamValue } from '/core/camera.js';
+import {
+  emptySelection, normalizeSelection, selectOne, addSelection, toggleSelection,
+  cameraRef, objectRef, elementRef, propertyRef, keyframeRef, splitRef,
+} from '/core/selection.js';
 
 const el = (tag, cls, html) => {
   const n = document.createElement(tag);
@@ -31,6 +35,7 @@ export class Timeline {
     this.onCameraMenu = onCameraMenu;
     this.project = null;
     this.time = 0;
+    this.pool = emptySelection();
     this.segmentId = null;
     this.elementId = null;
     this.objectId = null;
@@ -43,7 +48,10 @@ export class Timeline {
     this.zoom = 1;
     this.pps = 60;
     this.expanded = new Set();
-    this.sections = { content: true, transform: true, camPos: true, camMain: false, camShake: false, camDof: false };
+    this.sections = {
+      content: 'full', transform: 'full', camPos: 'full',
+      camMain: 'collapsed', camShake: 'collapsed', camDof: 'collapsed',
+    };
     this.propSel = null;
     this._autoObj = null;
     this._scrollTo = null;
@@ -100,8 +108,8 @@ export class Timeline {
 
     const hint = el('div', 'tl-hint');
     hint.innerHTML = '<span>▾ 元素 / 相机展开</span><span class="tl-hint-sep">|</span>'
-      + '<span>中心点 / 位置 / 缩放 3 维，画面 2 维</span><span class="tl-hint-sep">|</span>'
-      + '<span>拖播放头，数值按关键帧实时同步</span><span class="tl-hint-sep">|</span>'
+      + '<span>U 只看带键属性</span><span class="tl-hint-sep">|</span>'
+      + '<span>组标题三态 ▾ 全部 / ▾• 带键 / ▸ 收起</span><span class="tl-hint-sep">|</span>'
       + '<span><b>◆</b> 打帧 / 删帧</span>';
     this.root.appendChild(hint);
 
@@ -132,6 +140,12 @@ export class Timeline {
 
   setSelection(sel) {
     const prev = this.objectId;
+    this.pool = normalizeSelection(sel?.pool || (
+      sel?.camera && this._activeCameraId() ? selectOne('element', cameraRef(this._activeCameraId()))
+        : sel?.objectId ? selectOne('element', objectRef(sel.objectId))
+          : sel?.elementId ? selectOne('element', elementRef(sel.elementId))
+            : emptySelection()
+    ));
     this.segmentId = sel?.segmentId || null;
     this.elementId = sel?.elementId || null;
     this.objectId = sel?.objectId || null;
@@ -344,7 +358,8 @@ export class Timeline {
     if (!id) return;
     if (this._activeCameraId() !== id) this.camOpenId = null;
     this.cameraSel = true;
-    this.onSelect?.({ camera: true });
+    this.pool = selectOne('element', cameraRef(id));
+    this.onSelect?.({ camera: true, pool: this.pool });
     this._paintSelection();
     if (this._activeCameraId() === id) return;
     const r = this.onOp?.({ op: 'activateCamera', id });
@@ -360,7 +375,8 @@ export class Timeline {
     }
     this.camOpenId = id;
     this.cameraSel = true;
-    this.onSelect?.({ camera: true });
+    this.pool = selectOne('element', cameraRef(id));
+    this.onSelect?.({ camera: true, pool: this.pool });
     if (this._activeCameraId() !== id) {
       const r = this.onOp?.({ op: 'activateCamera', id });
       if (r?.then) r.then(() => this.render(true)).catch(() => {});
@@ -377,7 +393,7 @@ export class Timeline {
 
   _startCameraDrag(id, startY, row) {
     const rows = [...this.camsWrap.querySelectorAll('.tl-camhead[data-cam]')];
-    if (rows.length < 2) return;
+    if (rows.length < 2) { this._activateCamera(id); return; }
     const from = rows.findIndex((r) => r.dataset.cam === id);
     if (from < 0) return;
     let target = from;
@@ -457,18 +473,26 @@ export class Timeline {
     // The camera transform group stays open by default: it is what users edit
     // most, while lens/shake/DOF stay folded with summaries.
     host.appendChild(this._sectionRow('变换', 'camPos'));
-    if (this.sections.camPos) {
+    const xformMode = this.sections.camPos;
+    if (xformMode !== 'collapsed') {
       const tr = cameraTransform(cam, this.time);
-      host.appendChild(this._camVecRow(cam, 'center', '中心点', 3, tr.center, { step: 0.1, unit: 'm' }));
-      host.appendChild(this._camPosRow(cam));
-      host.appendChild(this._camVecRow(cam, 'picturePivot', '画面中心', 2, tr.picturePivot, {
-        step: 0.01, min: 0, max: 1, unit: '0..1',
-      }));
-      host.appendChild(this._camVecRow(cam, 'pictureOffset', '画面位置', 2, tr.pictureOffset, {
-        step: 0.01, unit: '0..1',
-      }));
-      host.appendChild(this._camOpacityRow(cam, tr.opacity));
-      host.appendChild(this._camVecRow(cam, 'scale', '缩放', 3, tr.scale, { step: 0.05, unit: '倍' }));
+      const show = (path) => xformMode === 'full' || this._camTracked(cam, path);
+      if (show('center')) {
+        host.appendChild(this._camVecRow(cam, 'center', '中心点', 3, tr.center, { step: 0.1, unit: 'm' }));
+      }
+      if (xformMode === 'full' || (cam.path || []).length > 0) host.appendChild(this._camPosRow(cam));
+      if (show('picturePivot')) {
+        host.appendChild(this._camVecRow(cam, 'picturePivot', '画面中心', 2, tr.picturePivot, {
+          step: 0.01, min: 0, max: 1, unit: '0..1',
+        }));
+      }
+      if (show('pictureOffset')) {
+        host.appendChild(this._camVecRow(cam, 'pictureOffset', '画面位置', 2, tr.pictureOffset, {
+          step: 0.01, unit: '0..1',
+        }));
+      }
+      if (show('opacity')) host.appendChild(this._camOpacityRow(cam, tr.opacity));
+      if (show('scale')) host.appendChild(this._camVecRow(cam, 'scale', '缩放', 3, tr.scale, { step: 0.05, unit: '倍' }));
     }
 
     const fov = this._camValue(cam, 'fov');
@@ -485,53 +509,85 @@ export class Timeline {
     const shakeSummary = `${round2(shakeAmp)}m · ${round2(shakeFreq)}Hz`;
     const dofSummary = `f/${round2(fstop)} · 模糊 ${Math.round((cam.motionBlur.shutter || 0) * 360)}°`;
     host.appendChild(this._sectionRow('镜头 / 构图', 'camMain', lensSummary));
-    if (this.sections.camMain) {
-      host.appendChild(this._camParamNumRow(cam, 'fov', '视场角 FOV', fov, {
-        step: 1, min: 1, max: 360, badge: fov >= 180 ? '鱼眼' : '',
-      }));
-      host.appendChild(this._camHintRow('≥180° 自动切等距鱼眼（可到 360°）；Blender 侧用 Cycles 渲这一档。'));
-      host.appendChild(this._camParamNumRow(cam, 'lookAhead', '看向前方 (m)', lookAhead, {
-        step: 5, min: 2, max: 500,
-      }));
-      host.appendChild(this._camParamNumRow(cam, 'bankGain', '转弯侧倾', bankGain, {
-        step: 0.1, min: 0, max: 4,
-      }));
-      host.appendChild(this._camParamNumRow(cam, 'maxRoll', '最大侧倾°', maxRoll, {
-        step: 1, min: 0, max: 60,
-      }));
-      host.appendChild(this._camParamNumRow(cam, 'roll', '手动 roll°', roll, {
-        step: 1, min: -60, max: 60,
-      }));
+    const lensMode = this.sections.camMain;
+    if (lensMode !== 'collapsed') {
+      const show = (path) => lensMode === 'full' || this._camTracked(cam, path);
+      if (show('fov')) {
+        host.appendChild(this._camParamNumRow(cam, 'fov', '视场角 FOV', fov, {
+          step: 1, min: 1, max: 360, badge: fov >= 180 ? '鱼眼' : '',
+        }));
+      }
+      if (lensMode === 'full') {
+        host.appendChild(this._camHintRow('≥180° 自动切等距鱼眼（可到 360°）；Blender 侧用 Cycles 渲这一档。'));
+      }
+      if (show('lookAhead')) {
+        host.appendChild(this._camParamNumRow(cam, 'lookAhead', '看向前方 (m)', lookAhead, {
+          step: 5, min: 2, max: 500,
+        }));
+      }
+      if (show('bankGain')) {
+        host.appendChild(this._camParamNumRow(cam, 'bankGain', '转弯侧倾', bankGain, {
+          step: 0.1, min: 0, max: 4,
+        }));
+      }
+      if (show('maxRoll')) {
+        host.appendChild(this._camParamNumRow(cam, 'maxRoll', '最大侧倾°', maxRoll, {
+          step: 1, min: 0, max: 60,
+        }));
+      }
+      if (show('roll')) {
+        host.appendChild(this._camParamNumRow(cam, 'roll', '手动 roll°', roll, {
+          step: 1, min: -60, max: 60,
+        }));
+      }
     }
 
     host.appendChild(this._sectionRow('抖动', 'camShake', shakeSummary));
-    if (this.sections.camShake) {
-      host.appendChild(this._camParamNumRow(cam, 'shake.amp', '抖动幅度', shakeAmp, {
-        step: 0.05, min: 0, max: 5,
-      }));
-      host.appendChild(this._camParamNumRow(cam, 'shake.freq', '抖动频率', shakeFreq, {
-        step: 0.1, min: 0.1, max: 8,
-      }));
-      host.appendChild(this._camParamNumRow(cam, 'shake.speedGain', '随速度增强', shakeGain, {
-        step: 0.1, min: 0, max: 2,
-      }));
-      host.appendChild(this._camParamNumRow(cam, 'shake.seed', '随机种子', cam.shake.seed, {
-        step: 1, keyable: false, badge: '整段',
-      }));
+    const shakeMode = this.sections.camShake;
+    if (shakeMode !== 'collapsed') {
+      const show = (path) => shakeMode === 'full' || this._camTracked(cam, path);
+      if (show('shake.amp')) {
+        host.appendChild(this._camParamNumRow(cam, 'shake.amp', '抖动幅度', shakeAmp, {
+          step: 0.05, min: 0, max: 5,
+        }));
+      }
+      if (show('shake.freq')) {
+        host.appendChild(this._camParamNumRow(cam, 'shake.freq', '抖动频率', shakeFreq, {
+          step: 0.1, min: 0.1, max: 8,
+        }));
+      }
+      if (show('shake.speedGain')) {
+        host.appendChild(this._camParamNumRow(cam, 'shake.speedGain', '随速度增强', shakeGain, {
+          step: 0.1, min: 0, max: 2,
+        }));
+      }
+      if (shakeMode === 'full') {
+        host.appendChild(this._camParamNumRow(cam, 'shake.seed', '随机种子', cam.shake.seed, {
+          step: 1, keyable: false, badge: '整段',
+        }));
+      }
     }
 
     host.appendChild(this._sectionRow('景深 / 模糊', 'camDof', dofSummary));
-    if (this.sections.camDof) {
-      host.appendChild(this._camParamSelectRow(cam, 'dof.enabled', '景深', dofOn,
-        [['false', '关'], ['true', '开']]));
-      host.appendChild(this._camParamNumRow(cam, 'dof.fstop', '光圈 f', fstop, {
-        step: 0.2, min: 0.5, max: 32,
-      }));
-      host.appendChild(this._camParamSelectRow(cam, 'motionBlur.enabled', '运动模糊', cam.motionBlur.enabled,
-        [['true', '开'], ['false', '关']], { keyable: false, badge: '整段' }));
-      host.appendChild(this._camParamNumRow(cam, 'motionBlur.shutter', '快门角', cam.motionBlur.shutter, {
-        step: 0.05, min: 0, max: 1, keyable: false, badge: '整段',
-      }));
+    const dofMode = this.sections.camDof;
+    if (dofMode !== 'collapsed') {
+      const show = (path) => dofMode === 'full' || this._camTracked(cam, path);
+      if (show('dof.enabled')) {
+        host.appendChild(this._camParamSelectRow(cam, 'dof.enabled', '景深', dofOn,
+          [['false', '关'], ['true', '开']]));
+      }
+      if (show('dof.fstop')) {
+        host.appendChild(this._camParamNumRow(cam, 'dof.fstop', '光圈 f', fstop, {
+          step: 0.2, min: 0.5, max: 32,
+        }));
+      }
+      if (dofMode === 'full') {
+        host.appendChild(this._camParamSelectRow(cam, 'motionBlur.enabled', '运动模糊', cam.motionBlur.enabled,
+          [['true', '开'], ['false', '关']], { keyable: false, badge: '整段' }));
+        host.appendChild(this._camParamNumRow(cam, 'motionBlur.shutter', '快门角', cam.motionBlur.shutter, {
+          step: 0.05, min: 0, max: 1, keyable: false, badge: '整段',
+        }));
+      }
     }
   }
 
@@ -882,28 +938,102 @@ export class Timeline {
     this._objHeads.set(o.id, { row, g, eye, name, dot, block });
 
     if (!open) return;
-    if (this.sections.content) {
-      this.elsWrap.appendChild(this._sectionRow('内容', 'content'));
+    this.elsWrap.appendChild(this._sectionRow('内容', 'content'));
+    if (this.sections.content === 'full') {
       this.elsWrap.appendChild(this._geomRow(o));
       this.elsWrap.appendChild(this._colorRow(o));
     }
-    if (this.sections.transform) {
-      this.elsWrap.appendChild(this._sectionRow('变换', 'transform', 'm / 倍'));
-      for (const [path, label] of [['pivot', '中心点'], ['position', '位置'], ['scale', '缩放']]) {
-        this.elsWrap.appendChild(this._vecRow(o, path, label));
-      }
-      this.elsWrap.appendChild(this._opacityRow(o));
+    this.elsWrap.appendChild(this._sectionRow('变换', 'transform', 'm / 倍'));
+    if (this.sections.transform !== 'collapsed') {
+      const mode = this.sections.transform;
+      const show = (path) => mode === 'full' || this._propKeys(o, path).length > 0;
+      if (show('pivot')) this.elsWrap.appendChild(this._vecRow(o, 'pivot', '中心点'));
+      if (show('position')) this.elsWrap.appendChild(this._vecRow(o, 'position', '位置'));
+      if (show('scale')) this.elsWrap.appendChild(this._vecRow(o, 'scale', '缩放'));
+      if (show('opacity')) this.elsWrap.appendChild(this._opacityRow(o));
     }
+  }
+
+  _groupOpen(key) {
+    return this.sections[key] !== 'collapsed';
+  }
+
+  _groupCaret(key) {
+    const m = this.sections[key];
+    return m === 'keyed' ? '▾•' : m === 'full' ? '▾' : '▸';
+  }
+
+  _camTracked(cam, path) {
+    return (cam?.tracks?.[path] || []).length > 0;
+  }
+
+  _camGroupKeyed(cam, group) {
+    if (!cam) return false;
+    if (group === 'transform') {
+      return (cam.path || []).length > 0
+        || ['center', 'opacity', 'scale', 'picturePivot', 'pictureOffset']
+          .some((p) => this._camTracked(cam, p));
+    }
+    if (group === 'lens') {
+      return ['fov', 'lookAhead', 'bankGain', 'maxRoll', 'roll'].some((p) => this._camTracked(cam, p));
+    }
+    if (group === 'shake') {
+      return ['shake.amp', 'shake.freq', 'shake.speedGain'].some((p) => this._camTracked(cam, p));
+    }
+    if (group === 'dofMb') {
+      return ['dof.enabled', 'dof.fstop'].some((p) => this._camTracked(cam, p));
+    }
+    return false;
+  }
+
+  _objGroupKeyed(o, group) {
+    if (!o) return false;
+    if (group === 'transform') {
+      return ['pivot', 'position', 'scale', 'opacity'].some((p) => this._propKeys(o, p).length > 0);
+    }
+    return false; // content (primitive / geom / color) is not keyable
+  }
+
+  /** U: show only the properties carrying keys for the selected element. */
+  applyKeyedFilter() {
+    const pool = this.pool;
+    if (pool.kind !== 'element') return false;
+    const refs = pool.ids.map(splitRef).filter(Boolean);
+    const objects = refs.filter((r) => r.type === 'ob');
+    if (objects.length) {
+      for (const r of objects) this.expanded.add(r.id);
+      this.sections.content = 'collapsed';
+      this.sections.transform = objects.some((r) => this._objGroupKeyed(this._obj(r.id), 'transform'))
+        ? 'keyed' : 'collapsed';
+      this.render(true);
+      return true;
+    }
+    const cams = refs.filter((r) => r.type === 'cam');
+    if (cams.length) {
+      const primary = splitRef(pool.primary);
+      const id = (primary?.type === 'cam' && cams.some((r) => r.id === primary.id)) ? primary.id : cams[0].id;
+      const cam = this._camById(id);
+      if (!cam) return false;
+      this.camOpenId = id;
+      for (const g of ['transform', 'lens', 'shake', 'dofMb']) {
+        const key = g === 'transform' ? 'camPos' : g === 'lens' ? 'camMain' : g === 'shake' ? 'camShake' : 'camDof';
+        this.sections[key] = this._camGroupKeyed(cam, g) ? 'keyed' : 'collapsed';
+      }
+      this.render(true);
+      return true;
+    }
+    return false;
   }
 
   _sectionRow(title, key, hint = '') {
     const row = el('div', 'tl-row tl-sect');
     const g = el('div', 'tl-gutter');
-    g.append(el('span', 'tl-seccaret', this.sections[key] ? '▾' : '▸'), el('span', '', title));
+    g.append(el('span', 'tl-seccaret', this._groupCaret(key)), el('span', '', title));
     if (hint) g.append(el('span', 'tl-sub', hint));
     row.append(g, el('div', 'tl-track'));
     row.addEventListener('click', () => {
-      this.sections[key] = !this.sections[key];
+      const m = this.sections[key];
+      this.sections[key] = m === 'full' ? 'collapsed' : m === 'collapsed' ? 'full' : 'collapsed';
       this.render(true);
     });
     return row;
@@ -1282,6 +1412,27 @@ export class Timeline {
   }
 
   // ------------------------------------------------------------ selection / input
+  _paintPool() {
+    this.inner.querySelectorAll('.poolsel').forEach((n) => n.classList.remove('poolsel'));
+    const pool = this.pool;
+    if (!pool.kind || !pool.ids.length) return;
+    const ids = new Set(pool.ids);
+    const mark = (node, ref) => { if (ids.has(ref)) node.classList.add('poolsel'); };
+    if (pool.kind === 'element') {
+      this.inner.querySelectorAll('.tl-camhead[data-cam], .blk.cam[data-cam]').forEach((n) => mark(n, cameraRef(n.dataset.cam)));
+      this.inner.querySelectorAll('.tl-objhead[data-obj], .blk.ob[data-obj]').forEach((n) => mark(n, objectRef(n.dataset.obj)));
+      this.inner.querySelectorAll('.blk.el[data-id]').forEach((n) => mark(n, elementRef(n.dataset.id)));
+    } else if (pool.kind === 'property') {
+      this.inner.querySelectorAll('.tl-prop[data-obj][data-path]').forEach((n) => mark(n, propertyRef(objectRef(n.dataset.obj), n.dataset.path)));
+      this.inner.querySelectorAll('.tl-camprop[data-cam][data-path]').forEach((n) => mark(n, propertyRef(cameraRef(n.dataset.cam), n.dataset.path)));
+    } else if (pool.kind === 'keyframe') {
+      this.inner.querySelectorAll('.tl-key[data-t]').forEach((n) => {
+        if (n.dataset.cam) mark(n, keyframeRef(cameraRef(n.dataset.cam), n.dataset.path || 'path', n.dataset.t));
+        else if (n.dataset.obj) mark(n, keyframeRef(objectRef(n.dataset.obj), n.dataset.path, n.dataset.t));
+      });
+    }
+  }
+
   _paintSelection() {
     this.inner.querySelectorAll('.blk.sel').forEach((n) => n.classList.remove('sel'));
     this.inner.querySelectorAll('.tl-objhead.sel, .tl-prop.sel, .tl-camposrow.sel').forEach((n) => n.classList.remove('sel'));
@@ -1306,6 +1457,16 @@ export class Timeline {
       }
       this.inner.querySelector('.tl-camposrow')?.classList.add('sel');
     }
+    this._paintPool();
+  }
+
+  _pickPool(kind, ref, ev) {
+    const additive = !!(ev?.ctrlKey || ev?.metaKey || ev?.shiftKey);
+    // Keyframes cannot mix into an element/property pool: Ctrl-clicking one is
+    // ignored until the pool is cleared and keyframes are selected on their own.
+    if (kind === 'keyframe' && additive && this.pool.kind !== 'keyframe') return false;
+    this.pool = additive ? addSelection(this.pool, kind, ref) : selectOne(kind, ref);
+    return true;
   }
 
   _down(ev) {
@@ -1322,20 +1483,26 @@ export class Timeline {
     // ---- 3D elements ----
     const camKeyEl = target.closest?.('.tl-key[data-cam]');
     if (camKeyEl) {
+      const t = Number(camKeyEl.dataset.t);
+      const ref = keyframeRef(cameraRef(camKeyEl.dataset.cam), camKeyEl.dataset.path || 'path', t);
+      if (!this._pickPool('keyframe', ref, ev)) return;
       this.cameraSel = true;
       this.elementId = null; this.segmentId = null; this.objectId = null;
-      this.onSelect?.({ camera: true });
-      this.onSeek?.(Number(camKeyEl.dataset.t));
+      this.onSelect?.({ camera: true, pool: this.pool });
+      this.onSeek?.(t);
       this._paintSelection();
       return;
     }
     const key = target.closest?.('.tl-key');
     if (key) {
+      const t = Number(key.dataset.t);
+      const ref = keyframeRef(objectRef(key.dataset.obj), key.dataset.path, t);
+      if (!this._pickPool('keyframe', ref, ev)) return;
       this.objectId = key.dataset.obj;
       this.elementId = null; this.segmentId = null; this.cameraSel = false;
       this.propSel = { objId: key.dataset.obj, path: key.dataset.path };
-      this.onSelect?.({ objectId: this.objectId });
-      this.onSeek?.(Number(key.dataset.t));
+      this.onSelect?.({ objectId: this.objectId, pool: this.pool });
+      this.onSeek?.(t);
       this._paintSelection();
       return;
     }
@@ -1343,10 +1510,12 @@ export class Timeline {
     if (propGutter) {
       const pr = propGutter.closest('.tl-prop');
       const id = pr.dataset.obj;
+      const ref = propertyRef(objectRef(id), pr.dataset.path);
+      if (!this._pickPool('property', ref, ev)) return;
       this.objectId = id;
       this.elementId = null; this.segmentId = null; this.cameraSel = false;
       this.propSel = { objId: id, path: pr.dataset.path };
-      this.onSelect?.({ objectId: id });
+      this.onSelect?.({ objectId: id, pool: this.pool });
       this._paintSelection();
       return;
     }
@@ -1359,8 +1528,9 @@ export class Timeline {
     const objHead = target.closest?.('.tl-objhead');
     if (objHead && !target.closest?.('.blk.ob')) {
       this.objectId = objHead.dataset.obj;
+      this._pickPool('element', objectRef(this.objectId), ev);
       this.elementId = null; this.segmentId = null; this.cameraSel = false;
-      this.onSelect?.({ objectId: this.objectId });
+      this.onSelect?.({ objectId: this.objectId, pool: this.pool });
       this._paintSelection();
       return;
     }
@@ -1368,8 +1538,9 @@ export class Timeline {
     if (objBlk) {
       const id = objBlk.dataset.obj;
       this.objectId = id;
+      this._pickPool('element', objectRef(id), ev);
       this.elementId = null; this.segmentId = null; this.cameraSel = false;
-      this.onSelect?.({ objectId: id });
+      this.onSelect?.({ objectId: id, pool: this.pool });
       this._paintSelection();
       const item = this._obj(id);
       if (!item) return;
@@ -1416,7 +1587,23 @@ export class Timeline {
       return;
     }
     // camera property labels (the lane itself still scrubs)
-    if (target.closest?.('.tl-camprop .tl-gutter') || target.closest?.('.tl-camhint .tl-gutter')) {
+    if (target.closest?.('.tl-camprop .tl-gutter')) {
+      const row = target.closest('.tl-camprop');
+      const camId = row.dataset.cam || this._activeCameraId();
+      const path = row.dataset.path;
+      if (path) {
+        const ref = propertyRef(cameraRef(camId), path);
+        if (!this._pickPool('property', ref, ev)) return;
+      } else {
+        this.pool = selectOne('element', cameraRef(camId));
+      }
+      this.cameraSel = true;
+      this.elementId = null; this.segmentId = null; this.objectId = null;
+      this.onSelect?.({ camera: true, pool: this.pool });
+      this._paintSelection();
+      return;
+    }
+    if (target.closest?.('.tl-camhint .tl-gutter')) {
       this._activateCamera(this._activeCameraId());
       return;
     }
@@ -1426,10 +1613,12 @@ export class Timeline {
       const isSeg = blk.classList.contains('seg');
       if (isSeg) {
         this.segmentId = id;
+        this.pool = emptySelection();
         this.onSegment?.(id);
       } else {
         this.elementId = id;
-        this.onSelect?.({ elementId: id, segmentId: this.project.elements.find((e) => e.id === id)?.segment || null });
+        this._pickPool('element', elementRef(id), ev);
+        this.onSelect?.({ elementId: id, segmentId: this.project.elements.find((e) => e.id === id)?.segment || null, pool: this.pool });
       }
       this._paintSelection();
 
@@ -1474,10 +1663,23 @@ export class Timeline {
     }
 
     if (gutterEl) {
-      this.onSelect?.({ elementId: gutterEl.dataset.id });
+      this._pickPool('element', elementRef(gutterEl.dataset.id), ev);
+      this.onSelect?.({ elementId: gutterEl.dataset.id, pool: this.pool });
       this.elementId = gutterEl.dataset.id;
       this._paintSelection();
       return;
+    }
+
+    // Clicking empty track space clears the pool, then scrubs. This is the
+    // required reset before a keyframe-only marquee (B) can start.
+    if (this.pool.kind) {
+      this.pool = emptySelection();
+      this.cameraSel = false;
+      this.objectId = null;
+      this.elementId = null;
+      this.propSel = null;
+      this.onSelect?.({ elementId: null, segmentId: null, pool: this.pool });
+      this._paintSelection();
     }
 
     // scrub anywhere on the tracks

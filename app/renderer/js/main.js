@@ -9,13 +9,16 @@ import { LogPanel } from './logs.js';
 import { ProjectsPanel } from './projects.js';
 import { evalCamera, pathPos, cameraTransform } from '/core/camera.js';
 import { objectPose } from '/core/scene.js';
+import {
+  emptySelection, normalizeSelection, selectOne, cameraRef, objectRef, elementRef, splitRef,
+} from '/core/selection.js';
 
 const $ = (s) => document.querySelector(s);
 const S = {
   project: null,
   time: 0,
   playing: false,
-  selection: { segmentId: null, elementId: null, objectId: null },
+  selection: { segmentId: null, elementId: null, objectId: null, camera: false, pool: emptySelection() },
   media: [],
   blender: null,
   agentAvailable: false,
@@ -148,6 +151,19 @@ function applyProject(p, source) {
   if (S.selection.elementId && !p.elements.find((e) => e.id === S.selection.elementId)) S.selection.elementId = null;
   if (S.selection.segmentId && !p.segments.find((s) => s.id === S.selection.segmentId)) S.selection.segmentId = null;
   if (S.selection.objectId && !(p.scene?.objects || []).some((o) => o.id === S.selection.objectId)) S.selection.objectId = null;
+  if (S.selection.pool) {
+    const camIds = new Set((p.cameras || []).map((c) => c.id));
+    const objIds = new Set((p.scene?.objects || []).map((o) => o.id));
+    const elIds = new Set((p.elements || []).map((e) => e.id));
+    const ids = S.selection.pool.ids.filter((ref) => {
+      const s = splitRef(ref);
+      if (!s) return false;
+      if (s.type === 'cam') return camIds.has(s.id);
+      if (s.type === 'ob') return objIds.has(s.id);
+      return elIds.has(s.id);
+    });
+    S.selection.pool = normalizeSelection({ ...S.selection.pool, ids });
+  }
   if (gizmo) gizmo.objSel = S.selection.objectId || null;
   preview.setProject(p);
   if (S.soloCameras) {
@@ -204,13 +220,14 @@ function pause() {
 function togglePlay() { S.playing ? pause() : play(); }
 
 // ---------------------------------------------------------------- selection
-function select(sel) {
+function select(sel = {}) {
+  let next;
   if (sel.camera) {
-    S.selection = { segmentId: null, elementId: null, objectId: null, camera: true };
+    next = { segmentId: null, elementId: null, objectId: null, camera: true };
   } else if (sel.objectId) {
-    S.selection = { segmentId: null, elementId: null, objectId: sel.objectId, camera: false };
+    next = { segmentId: null, elementId: null, objectId: sel.objectId, camera: false };
   } else {
-    S.selection = {
+    next = {
       segmentId: sel.segmentId ?? S.selection.segmentId,
       elementId: sel.elementId ?? null,
       objectId: sel.objectId ?? null,
@@ -218,9 +235,16 @@ function select(sel) {
     };
     if (sel.elementId) {
       const el = S.project.elements.find((e) => e.id === sel.elementId);
-      if (el?.segment) S.selection.segmentId = el.segment;
+      if (el?.segment) next.segmentId = el.segment;
     }
   }
+  let pool;
+  if (sel.pool) pool = normalizeSelection(sel.pool);
+  else if (sel.camera && S.project?.camera) pool = selectOne('element', cameraRef(S.project.camera.id));
+  else if (sel.objectId) pool = selectOne('element', objectRef(sel.objectId));
+  else if (sel.elementId) pool = selectOne('element', elementRef(sel.elementId));
+  else pool = emptySelection();
+  S.selection = { ...next, pool };
   if (gizmo) {
     gizmo.objSel = S.selection.objectId || null;
     gizmo.objHover = null;
@@ -407,7 +431,7 @@ function renderShots() {
       <div class="seg-top"><span class="seg-name">${escapeHtml(s.name)}</span><span class="seg-status st-${s.status}">${s.status}</span></div>
       <div class="seg-sub"><span>${s.start.toFixed(2)}–${(s.start + s.duration).toFixed(2)}s</span><span>${n} 元素</span></div>
       <div class="seg-intent">${escapeHtml(s.intent || '')}</div>`;
-    row.onclick = () => { S.selection = { segmentId: s.id, elementId: null }; timeline.setSelection(S.selection); setTime(s.start); inspector.render(S.project, S.selection, S.time); renderShots(); updateOverlay(); };
+    row.onclick = () => { S.selection = { segmentId: s.id, elementId: null, objectId: null, camera: false, pool: emptySelection() }; timeline.setSelection(S.selection); setTime(s.start); inspector.render(S.project, S.selection, S.time); renderShots(); updateOverlay(); };
     const btns = document.createElement('div');
     btns.className = 'seg-btns';
     const b1 = document.createElement('button'); b1.className = 'mini'; b1.textContent = '预览帧';
@@ -587,7 +611,7 @@ async function boot() {
     onSeek: (t) => { setTime(t); if (S.playing) { S.playFrom = t; S.playWall = performance.now(); preview.setAudioTime(t); } },
     onSelect: (sel) => select(sel),
     onSegment: (id) => {
-      S.selection = { segmentId: id, elementId: null, objectId: null };
+      S.selection = { segmentId: id, elementId: null, objectId: null, camera: false, pool: emptySelection() };
       timeline.setSelection(S.selection);
       renderShots();
       inspector.render(S.project, S.selection, S.time);
@@ -625,7 +649,7 @@ async function boot() {
       if (s) post('/api/render', { from: s.start, to: s.start + s.duration, scale: S.renderScale }).then(() => toast('开始渲染')).catch((e) => toast(e.message, 'error'));
     },
     onAskAI: (id) => {
-      S.selection = { segmentId: id, elementId: null };
+      S.selection = { segmentId: id, elementId: null, objectId: null, camera: false, pool: emptySelection() };
       switchRightTab('ai');
       switchLeftTab('shots');
       toast('在右侧写下让 AI 改什么');
@@ -1229,6 +1253,9 @@ async function boot() {
       if (S.editMode) { setEditMode(false); return; }
     }
     if (e.key.toLowerCase() === 'g' && !e.ctrlKey && !e.metaKey) { S.grid = !S.grid; gizmo?.draw(); return; }
+    if (e.key.toLowerCase() === 'u' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      if (timeline?.applyKeyedFilter()) { e.preventDefault(); return; }
+    }
     const dur = S.project?.meta.duration || 12;
     const frame = 1 / (S.project?.meta.fps || 24);
     if (e.code === 'Space') { e.preventDefault(); togglePlay(); }

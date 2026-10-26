@@ -480,6 +480,10 @@ body.look-mode #stageBox { box-shadow: 0 0 0 2px rgba(255,209,102,.65), 0 0 30px
 .tl-camposrow.sel { background: #0d151c; }
 .tl-camposrow.sel .tl-gutter { background: #0e1720; color: var(--text); }
 .tl-camposrow.sel .tl-track { background: #0c1319; }
+/* Homogeneous selection pool: extra refs beyond the primary. */
+.tl-camhead.poolsel, .tl-objhead.poolsel, .tl-prop.poolsel, .tl-camprop.poolsel,
+.blk.poolsel { background: rgba(23,217,255,.10); box-shadow: inset 0 0 0 1px rgba(23,217,255,.25); }
+.tl-key.poolsel { background: #ffd166; border-color: #6b5700; box-shadow: 0 0 7px rgba(255,212,0,.45); }
 
 /* ---------------- project picker ---------------- */
 .modal {
