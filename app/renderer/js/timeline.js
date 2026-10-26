@@ -38,7 +38,7 @@ export class Timeline {
     this.zoom = 1;
     this.pps = 60;
     this.expanded = new Set();
-    this.sections = { content: true, transform: true, camPos: true, camMain: true, camShake: true, camDof: true };
+    this.sections = { content: true, transform: true, camPos: true, camMain: false, camShake: false, camDof: false };
     this.propSel = null;
     this._autoObj = null;
     this._scrollTo = null;
@@ -360,7 +360,10 @@ export class Timeline {
     this.camPropsWrap.appendChild(this._sectionRow('变换', 'camPos'));
     if (this.sections.camPos) this.camPropsWrap.appendChild(this._camPosRow());
 
-    this.camPropsWrap.appendChild(this._sectionRow('相机参数', 'camMain'));
+    const lensSummary = `FOV ${Math.round(cam.fov)}°${cam.fov >= 180 ? ' · 鱼眼' : ''}`;
+    const shakeSummary = `${round2(cam.shake.amp)}m · ${cam.shake.freq}Hz`;
+    const dofSummary = `f/${cam.dof.fstop} · 模糊 ${Math.round((cam.motionBlur.shutter || 0) * 360)}°`;
+    this.camPropsWrap.appendChild(this._sectionRow('镜头 / 构图', 'camMain', lensSummary));
     if (this.sections.camMain) {
       this.camPropsWrap.appendChild(this._camNumRow('视场角 FOV', cam.fov, {
         step: 1, min: 1, max: 360,
@@ -382,7 +385,7 @@ export class Timeline {
       }));
     }
 
-    this.camPropsWrap.appendChild(this._sectionRow('抖动', 'camShake'));
+    this.camPropsWrap.appendChild(this._sectionRow('抖动', 'camShake', shakeSummary));
     if (this.sections.camShake) {
       this.camPropsWrap.appendChild(this._camNumRow('抖动幅度', cam.shake.amp, {
         step: 0.05, min: 0, max: 5, apply: (v) => set({ shake: { ...cam.shake, amp: v } }),
@@ -398,7 +401,7 @@ export class Timeline {
       }));
     }
 
-    this.camPropsWrap.appendChild(this._sectionRow('景深 / 模糊', 'camDof'));
+    this.camPropsWrap.appendChild(this._sectionRow('景深 / 模糊', 'camDof', dofSummary));
     if (this.sections.camDof) {
       this.camPropsWrap.appendChild(this._camSelectRow('景深', String(!!cam.dof.enabled), [['false', '关'], ['true', '开']],
         (v) => set({ dof: { ...cam.dof, enabled: v === 'true' } })));
