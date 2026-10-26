@@ -1,6 +1,6 @@
 {
   "schema": "vdm.project/1",
-  "rev": 14,
+  "rev": 50,
   "meta": {
     "title": "夜之城 · 无人机穿城",
     "fps": 24,
@@ -23,12 +23,12 @@
       "shake": 0
     },
     "style": "default",
-    "savedAt": "2026-10-25T07:15:59.433Z"
+    "savedAt": "2026-10-25T14:50:24.059Z"
   },
   "segments": [],
   "elements": [],
   "camera": {
-    "fov": 78,
+    "fov": 110,
     "near": 0.5,
     "far": 5000,
     "lookAhead": 90,
@@ -55,12 +55,16 @@
       {
         "t": 0,
         "pos": [
-          0,
-          150,
-          -600
+          -60.54500654311572,
+          143.12894749506768,
+          -569.1974783035087
         ],
         "look": null,
-        "fov": null
+        "fov": null,
+        "ease": null,
+        "out": null,
+        "in": null,
+        "speed": null
       },
       {
         "t": 2.5,
@@ -70,17 +74,75 @@
           -470
         ],
         "look": null,
-        "fov": null
+        "fov": null,
+        "ease": null,
+        "out": null,
+        "in": null,
+        "speed": null
+      },
+      {
+        "t": 3.461,
+        "pos": [
+          2.41,
+          76.39,
+          -394.62
+        ],
+        "look": null,
+        "fov": null,
+        "ease": "easeInOut",
+        "out": null,
+        "in": null,
+        "speed": null
+      },
+      {
+        "t": 4.353,
+        "pos": [
+          2.5,
+          53.52,
+          -346.25
+        ],
+        "look": null,
+        "fov": null,
+        "ease": "easeInOut",
+        "out": null,
+        "in": null,
+        "speed": null
       },
       {
         "t": 5,
         "pos": [
-          0,
-          48,
-          -330
+          8.49,
+          50.97,
+          -325.33
         ],
         "look": null,
-        "fov": null
+        "fov": null,
+        "ease": null,
+        "out": [
+          0.19,
+          -0.5,
+          5.58
+        ],
+        "in": [
+          -0.21,
+          0.53,
+          -5.93
+        ],
+        "speed": null
+      },
+      {
+        "t": 6.016,
+        "pos": [
+          3.4,
+          43.21,
+          -210.9
+        ],
+        "look": null,
+        "fov": null,
+        "ease": "easeInOut",
+        "out": null,
+        "in": null,
+        "speed": null
       },
       {
         "t": 6.5,
@@ -90,7 +152,25 @@
           -180
         ],
         "look": null,
-        "fov": null
+        "fov": null,
+        "ease": null,
+        "out": null,
+        "in": null,
+        "speed": null
+      },
+      {
+        "t": 6.638,
+        "pos": [
+          2.01,
+          41.65,
+          -163.08
+        ],
+        "look": null,
+        "fov": null,
+        "ease": "easeInOut",
+        "out": null,
+        "in": null,
+        "speed": null
       },
       {
         "t": 7.6,
@@ -104,7 +184,11 @@
           34,
           -2
         ],
-        "fov": null
+        "fov": null,
+        "ease": null,
+        "out": null,
+        "in": null,
+        "speed": null
       },
       {
         "t": 8.6,
@@ -114,7 +198,11 @@
           -6
         ],
         "look": null,
-        "fov": null
+        "fov": null,
+        "ease": null,
+        "out": null,
+        "in": null,
+        "speed": null
       },
       {
         "t": 9.8,
@@ -128,7 +216,11 @@
           38,
           2
         ],
-        "fov": null
+        "fov": null,
+        "ease": null,
+        "out": null,
+        "in": null,
+        "speed": null
       },
       {
         "t": 11.4,
@@ -142,7 +234,11 @@
           50,
           4
         ],
-        "fov": null
+        "fov": null,
+        "ease": null,
+        "out": null,
+        "in": null,
+        "speed": null
       },
       {
         "t": 13,
@@ -152,23 +248,31 @@
           2
         ],
         "look": null,
-        "fov": null
+        "fov": null,
+        "ease": null,
+        "out": null,
+        "in": null,
+        "speed": null
       },
       {
         "t": 15,
         "pos": [
-          390,
-          150,
-          -4
+          390.17548307755715,
+          149.98829386340557,
+          -4.124534765546843
         ],
         "look": null,
-        "fov": null
+        "fov": null,
+        "ease": null,
+        "out": null,
+        "in": null,
+        "speed": null
       }
     ]
   },
   "world": {
     "source": "procedural",
-    "seed": 4242,
+    "seed": 2913,
     "grid": {
       "nx": 14,
       "nz": 20,
@@ -206,9 +310,9 @@
       "color": "#0d2338",
       "density": 0.005,
       "glow": 0.8,
-      "strength": 0.9,
       "start": 30,
-      "depth": 700
+      "depth": 700,
+      "strength": 0.9
     },
     "ground": {
       "color": "#04070c",
@@ -216,6 +320,10 @@
     },
     "sky": "#03060d",
     "ambient": 0.3,
+    "corridor": {
+      "enabled": true,
+      "radius": 16
+    },
     "neonColors": [
       "#ff2a6d",
       "#05d9e8",
