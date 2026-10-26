@@ -362,9 +362,216 @@ def _build_camera(scene, shot, width, height):
     return cam
 
 
+# ---------------------------------------------------------------- multi-camera
+
+def _copy_render_settings(src, dst):
+    r, s = src.render, dst.render
+    for attr in ('engine', 'resolution_x', 'resolution_y', 'resolution_percentage',
+                 'fps', 'fps_base', 'film_transparent', 'filter_size',
+                 'use_motion_blur', 'motion_blur_shutter', 'use_compositing'):
+        try:
+            setattr(s, attr, getattr(r, attr))
+        except Exception:
+            pass
+    for attr in ('file_format', 'color_mode', 'compression'):
+        try:
+            setattr(s.image_settings, attr, getattr(r.image_settings, attr))
+        except Exception:
+            pass
+    for attr in ('view_transform', 'look'):
+        try:
+            setattr(dst.view_settings, attr, getattr(src.view_settings, attr))
+        except Exception:
+            pass
+    try:
+        dst.render.engine = r.engine
+    except Exception:
+        pass
+    try:
+        dst.cycles.samples = src.cycles.samples
+        dst.cycles.use_denoising = src.cycles.use_denoising
+        dst.cycles.max_bounces = src.cycles.max_bounces
+    except Exception:
+        pass
+    try:
+        dst.eevee.taa_render_samples = src.eevee.taa_render_samples
+        dst.eevee.use_raytracing = src.eevee.use_raytracing
+    except Exception:
+        pass
+    dst.frame_start = src.frame_start
+    dst.frame_end = src.frame_end
+
+
+def _force_engine(scene, engine, opts):
+    scene.render.engine = engine
+    try:
+        if engine == 'CYCLES':
+            scene.cycles.samples = max(16, int(opts.get('samples', 32)))
+            scene.cycles.use_denoising = True
+            scene.cycles.max_bounces = 4
+        else:
+            scene.eevee.taa_render_samples = int(opts.get('samples', 32))
+            scene.eevee.use_raytracing = True
+            scene.eevee.ray_tracing_options.resolution_scale = '2'
+    except Exception:
+        pass
+
+
+def _apply_motion_blur(scene, cfg):
+    mb = (cfg or {}).get('motionBlur') or {}
+    try:
+        scene.render.use_motion_blur = bool(mb.get('enabled', True))
+        scene.render.motion_blur_shutter = float(mb.get('shutter', 0.5))
+    except Exception:
+        pass
+    try:
+        if scene.render.engine != 'CYCLES' and mb.get('enabled', True):
+            scene.eevee.use_motion_blur = True
+            scene.eevee.motion_blur_steps = 2
+    except Exception:
+        pass
+
+
+def _layer_picture_default(layer):
+    frames = layer.get('frames') or []
+    for f in frames:
+        op = float(f.get('opacity', 1.0))
+        sx, sy = (f.get('scale') or [1, 1])[:2]
+        px, py = (f.get('picturePivot') or [0.5, 0.5])[:2]
+        ox, oy = (f.get('pictureOffset') or [0, 0])[:2]
+        if abs(op - 1) > 1e-4 or abs(sx - 1) > 1e-4 or abs(sy - 1) > 1e-4:
+            return False
+        if abs(px - 0.5) > 1e-4 or abs(py - 0.5) > 1e-4:
+            return False
+        if abs(ox) > 1e-4 or abs(oy) > 1e-4:
+            return False
+    return True
+
+
+def _make_camera_scene(base, layer, shot, opts, engine):
+    """A full city scene sharing the base geometry, with its own camera."""
+    sid = str(layer.get('id') or len(bpy.data.scenes))
+    s = bpy.data.scenes.new('VDM_Cam_' + sid)
+    _copy_render_settings(base, s)
+    _force_engine(s, engine, opts)
+    s.world = base.world
+    s.frame_start = base.frame_start
+    s.frame_end = base.frame_end
+    s.render.film_transparent = False
+    for ob in list(base.objects):
+        if ob.type in {'MESH', 'LIGHT'}:
+            try:
+                # Copy the object (sharing mesh/light data) rather than linking
+                # one datablock into several scenes: each scene strip gets a
+                # stable, independent object graph.
+                dup = ob.copy()
+                dup.data = ob.data
+                s.collection.objects.link(dup)
+            except Exception:
+                pass
+    sub = dict(shot)
+    sub['camera'] = layer.get('camera') or []
+    sub['cameraCfg'] = layer.get('cameraCfg') or shot.get('cameraCfg') or {}
+    _build_camera(s, sub, s.render.resolution_x, s.render.resolution_y)
+    _apply_motion_blur(s, sub['cameraCfg'])
+    return s
+
+
+def _build_master(base, scenes, layers, shot, opts):
+    """VSE master: scene strips bottom -> top with alpha-over and picture transform.
+
+    Blender 5's compositor Alpha Over is unreliable when a transformed image is
+    used as the background of a second Alpha Over, so the VSE scene strips do
+    the actual layering. Each strip has its own scene (and camera), transform
+    and per-frame blend_alpha.
+    """
+    m = bpy.data.scenes.new('VDM_Master')
+    _copy_render_settings(base, m)
+    m.render.use_sequencer = True
+    m.render.use_compositing = False
+    m.render.film_transparent = False
+    m.frame_start = base.frame_start
+    m.frame_end = base.frame_end
+    # The master scene needs a camera to render; the strips come from the
+    # camera scenes and this camera only satisfies the render operator.
+    mcd = bpy.data.cameras.new('VDM_MasterCam')
+    mco = bpy.data.objects.new('VDM_MasterCam', mcd)
+    m.collection.objects.link(mco)
+    m.camera = mco
+
+    m.sequence_editor_create()
+    seq = m.sequence_editor.strips
+    W = m.render.resolution_x
+    H = m.render.resolution_y
+    pairs = list(zip(layers, scenes))
+    for i, (layer, scene) in enumerate(reversed(pairs)):
+        st = seq.new_scene('cam_' + str(layer.get('id') or i), scene, i + 1, base.frame_start)
+        st.blend_type = 'ALPHA_OVER'
+        st.blend_alpha = 1.0
+        frames = layer.get('frames') or []
+        for f in frames:
+            fr = int(f.get('f') or 1)
+            sx, sy = (f.get('scale') or [1, 1])[:2]
+            px, py = (f.get('picturePivot') or [0.5, 0.5])[:2]
+            ox, oy = (f.get('pictureOffset') or [0, 0])[:2]
+            # VSE transform scales about the image centre; offset so the
+            # requested picture pivot stays put. y is bottom-up in the VSE,
+            # while the UI stores normalized y down.
+            st.transform.scale_x = sx
+            st.transform.scale_y = sy
+            st.transform.offset_x = (px - 0.5) * (1.0 - sx) * W + ox * W
+            st.transform.offset_y = -((py - 0.5) * (1.0 - sy) * H + oy * H)
+            st.transform.keyframe_insert('scale_x', frame=fr)
+            st.transform.keyframe_insert('scale_y', frame=fr)
+            st.transform.keyframe_insert('offset_x', frame=fr)
+            st.transform.keyframe_insert('offset_y', frame=fr)
+            st.blend_alpha = float(f.get('opacity', 1.0))
+            st.keyframe_insert('blend_alpha', frame=fr)
+    # In background mode the render operator targets the active window scene.
+    try:
+        bpy.context.window.scene = m
+    except Exception:
+        pass
+    return m
+
+
+def _build_multi_camera_scene(shot, opts):
+    layers = shot.get('cameraLayers') or []
+    base_shot = dict(shot)
+    base_shot.pop('cameraLayers', None)
+    base_shot['camera'] = layers[0].get('camera') or shot.get('camera') or []
+    base_shot['cameraCfg'] = layers[0].get('cameraCfg') or shot.get('cameraCfg') or {}
+    base = build_shot_scene(base_shot, opts)
+    fisheye = any(
+        any(float(e.get('fov', 62.0)) >= 180.0 for e in (layer.get('camera') or []))
+        for layer in layers
+    )
+    engine = 'CYCLES' if fisheye else 'BLENDER_EEVEE'
+    _force_engine(base, engine, opts)
+    _apply_motion_blur(base, base_shot['cameraCfg'])
+    # Use standalone camera scenes for every layer so each VSE strip has its
+    # own camera, engine and render settings.
+    scenes = [_make_camera_scene(base, layer, shot, opts, engine) for layer in layers]
+    return _build_master(base, scenes, layers, shot, opts)
+
+
 # ---------------------------------------------------------------- scene
 
 def build_shot_scene(shot, opts):
+    layers = shot.get('cameraLayers') or []
+    # A single camera with the default picture transform uses the direct scene
+    # path, preserving the project's fog/bloom/grade compositor exactly.
+    if len(layers) == 1 and _layer_picture_default(layers[0]):
+        single = dict(shot)
+        single.pop('cameraLayers', None)
+        single['camera'] = layers[0].get('camera') or shot.get('camera') or []
+        single['cameraCfg'] = layers[0].get('cameraCfg') or shot.get('cameraCfg') or {}
+        return build_shot_scene(single, opts)
+    # Multiple cameras (or a transformed single picture) go through the VSE
+    # master where every layer's transform and opacity are applied.
+    if len(layers) >= 1:
+        return _build_multi_camera_scene(shot, opts)
+
     city = shot['city']
     scene = reset_scene()
     W = int(round(shot.get('width', 1920) * opts.get('scale', 1.0)))
@@ -383,6 +590,7 @@ def build_shot_scene(shot, opts):
     scene.render.image_settings.color_mode = 'RGB'
     scene.render.image_settings.compression = 15
     scene.render.film_transparent = False
+    scene.render.use_sequencer = False
     scene.view_settings.view_transform = 'Standard'
     scene.view_settings.look = 'None'
     scene.render.filter_size = 1.2

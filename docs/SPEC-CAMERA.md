@@ -48,7 +48,9 @@ Blender 侧这一档用 **Cycles** 渲 `FISHEYE_EQUIDISTANT`（EEVEE 不支持�
 多相机预览：`cameraOrder` 从上到下，预览从最下层开始渲染到 `layerFBO`，逐层 alpha-over
 到 `sceneFBO`；每层先做上面的 2D 画面变换。eye 关掉的相机不进堆栈；右键“单独查看”只
 限制预览（`preview.soloCameras`），不写项目、不影响成片。编辑视口仍用编辑相机单层，
-退出编辑后的预览帧才显示完整相机堆栈；Blender 多相机合成属于 P5。
+退出编辑后的预览帧才显示完整相机堆栈。Blender 用同一套语义：每台相机一个 scene，
+master scene 用 VSE scene strip 逐层 `ALPHA_OVER`，画面变换/透明度写进 strip 关键帧；
+单相机且画面变换为默认值时走直接场景路径，保留项目原有合成器。
 
 C-b 逐帧参数：`视场角 FOV`、`看向前方`、`转弯侧倾`、`最大侧倾`、`手动 roll`、抖动幅度/
 频率/随速增强、`景深开/关`、`光圈 f` 都可以在各自属性行上打关键帧（`cameraParamKey`）。

@@ -2,7 +2,7 @@
 //   { fps, frames, world, city, camera:[{f,t,pos,look,roll,fov}], fx, cameraCfg }
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { bakeCameraTrack } from '../core/camera.js';
+import { bakeCameraTrack, cameraLayers, cameraTransform } from '../core/camera.js';
 import { objectPose } from '../core/scene.js';
 import { generateCity, cityHash } from './city.js';
 import { paths } from '../core/store.js';
@@ -58,15 +58,57 @@ export function bakeObjects(project, { fps = 24, from = 0, to = null } = {}) {
   return out;
 }
 
-export const is3D = (project) => !!(project.camera && Array.isArray(project.camera.path) && project.camera.path.length > 0);
+export const is3D = (project) => cameraLayers(project).length > 0;
+
+/** Bake one camera layer, including its per-frame picture transform. */
+function bakeCameraLayer(project, cam, { fps, from, to }) {
+  const sub = {
+    ...project,
+    camera: cam,
+    cameras: [],
+    cameraOrder: [],
+    activeCameraId: null,
+  };
+  const track = bakeCameraTrack(sub, { fps, from, to });
+  const frames = track.map((e) => {
+    const tr = cameraTransform(cam, e.t);
+    return {
+      f: e.f,
+      t: e.t,
+      opacity: Math.round(tr.opacity * 1000) / 1000,
+      scale: [tr.scale[0], tr.scale[1]].map((v) => Math.round(v * 1000) / 1000),
+      picturePivot: tr.picturePivot.map((v) => Math.round(v * 1000) / 1000),
+      pictureOffset: tr.pictureOffset.map((v) => Math.round(v * 1000) / 1000),
+    };
+  });
+  return {
+    id: cam.id,
+    name: cam.name || cam.id,
+    camera: track,
+    frames,
+    cameraCfg: {
+      near: Number(cam.near) || 0.5,
+      far: Number(cam.far) || 5000,
+      dof: cam.dof || { enabled: false },
+      motionBlur: cam.motionBlur || { enabled: true, shutter: 0.5 },
+    },
+  };
+}
 
 export function buildShot(project, { from = 0, to = null, fps = null } = {}) {
   const frameRate = fps || project.meta.fps || 24;
   const end = to ?? project.meta.duration;
-  // Bake the camera first: the corridor is cut from the path the camera
-  // actually flies, not from the raw keyframes.
+  const layers = cameraLayers(project).map((cam) => bakeCameraLayer(project, cam, {
+    fps: frameRate, from, to: end,
+  }));
+  // Bake the active camera as the legacy single-camera field. Blender keeps
+  // this path for one-camera projects and switches to cameraLayers when there
+  // is more than one visible layer.
   const camera = bakeCameraTrack(project, { fps: frameRate, from, to: end });
-  const city = generateCity(project.world, { path: camera.map((c) => c.pos) });
+  const flight = layers.length
+    ? layers.flatMap((l) => l.camera.map((c) => c.pos))
+    : camera.map((c) => c.pos);
+  const city = generateCity(project.world, { path: flight });
   const cam = project.camera || {};
   return {
     version: 1,
@@ -78,6 +120,7 @@ export function buildShot(project, { from = 0, to = null, fps = null } = {}) {
     height: project.meta.height,
     city,
     camera,
+    cameraLayers: layers,
     objects: bakeObjects(project, { fps: frameRate, from, to: end }),
     fx: project.meta.fx,
     cameraCfg: {

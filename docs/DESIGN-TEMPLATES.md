@@ -211,8 +211,11 @@ project.activeCameraId = 'cam_a';
 - **右键相机 → 单独查看该相机（们）**：其他相机在视口自动隐藏、行变暗；这是**视口预览**
   状态，不影响最终成片；成片仍用所有 eye 开着的相机；
 - 新建入口只在顶部工具栏；拖拽相机行排序；
-- Blender：每台相机一个 render layer / 一台相机 + 合成节点，最后 alpha-over；DOF 逐帧，
-  运动模糊整段；基础背景黑。**多相机 Blender 合成尚未落地（P5）**，当前离线渲染仍用激活相机。
+- Blender：每台相机一个 scene，复制城市几何；master scene 用 VSE scene strip 从下到上
+  叠层（`ALPHA_OVER`），每帧写 strip 的 scale/offset/opacity 关键帧；单相机且画面变换为
+  默认值时仍走直接场景路径，保留项目原有 fog/bloom/grade 合成器。多相机 VSE 叠层目前
+  输出 clean layer；项目级 bloom/vignette 等还在单相机直接路径上，后续需要一层 master
+  FX 才能完全等价。
 
 顶部工具栏固定在应用标题栏左侧（logo 右边）：
 
