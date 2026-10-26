@@ -11,6 +11,7 @@ import { paths } from './storage.js';
 import { encodeSequence, extractSequence, fileExists, hashOf, hashFile } from './media.js';
 import { is3D, writeShot } from './shot.js';
 import { which } from './which.js';
+import { runProcess } from './process.js';
 
 const execFileP = promisify(execFile);
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -53,7 +54,7 @@ export async function blenderVersion() {
 }
 
 /** Extract every video element to a PNG sequence (cached by content hash). */
-export async function prepareSequences(dir, project, { onLog } = {}) {
+export async function prepareSequences(dir, project, { onLog, signal } = {}) {
   const p = paths(dir);
   const { width, height, fps } = project.meta;
   const out = JSON.parse(JSON.stringify(project));
@@ -64,7 +65,7 @@ export async function prepareSequences(dir, project, { onLog } = {}) {
     const src = path.isAbsolute(el.src) ? el.src : path.join(p.root, el.src);
     if (!(await fileExists(src))) continue;
     const before = await fs.stat(src);
-    const digest = await hashFile(src);
+    const digest = await hashFile(src, { signal });
     const key = hashOf({ version: 2, digest, in: el.srcIn || 0, d: el.duration, fps, w: width, h: height, fit: el.style?.fit || 'cover' });
     const seqDir = path.join(seqRoot, key);
     const marker = path.join(seqDir, '.ok');
@@ -74,7 +75,7 @@ export async function prepareSequences(dir, project, { onLog } = {}) {
       try {
         const result = await extractSequence({
           src, outDir: temporary, srcIn: el.srcIn || 0, duration: el.duration,
-          fps, width, height, fit: el.style?.fit || 'cover', onLog,
+          fps, width, height, fit: el.style?.fit || 'cover', onLog, signal,
         });
         if (!result.count) throw new Error(`no video frames extracted for ${el.id}`);
         const after = await fs.stat(src);
@@ -92,26 +93,17 @@ export async function prepareSequences(dir, project, { onLog } = {}) {
   return out;
 }
 
-function killTree(child) {
-  if (!child || child.killed) return;
-  try {
-    if (process.platform === 'win32') {
-      spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
-    } else {
-      child.kill('SIGKILL');
-    }
-  } catch { /* ignore */ }
-}
-
 /** Run one blender job. Returns {code, log, progress, seconds}. */
 export async function runJob(dir, job, { onProgress, onLog, signal } = {}) {
+  signal?.throwIfAborted();
+  onProgress?.({ stage: 'preparing' });
   const exe = await findBlender();
   const p = await (async () => { const x = paths(dir); await fs.mkdir(path.join(x.cache, 'jobs'), { recursive: true }); return x; })();
   const jobId = `${job.mode}-${randomUUID()}`;
   const jobFile = path.join(p.cache, 'jobs', `${jobId}.json`);
   const projFile = path.join(p.cache, 'jobs', `${jobId}-project.json`);
 
-  const seqProject = await prepareSequences(dir, job.project, { onLog });
+  const seqProject = await prepareSequences(dir, job.project, { onLog, signal });
   await fs.writeFile(projFile, JSON.stringify(seqProject, null, 2));
   const payload = { ...job, project: projFile, root: p.root };
   delete payload.projectData;
@@ -126,58 +118,31 @@ export async function runJob(dir, job, { onProgress, onLog, signal } = {}) {
     '-b', '--factory-startup', '-noaudio', '--python-exit-code', '1',
     '-P', ENTRY, '--', '--job', jobFile,
   ];
-  const t0 = Date.now();
-  return new Promise((resolve, reject) => {
-    const child = spawn(exe, args, { windowsHide: true, cwd: p.root });
-    let log = '';
-    let buf = '';
-    const onAbort = () => { killTree(child); reject(new Error('cancelled')); };
-    if (signal) {
-      if (signal.aborted) return onAbort();
-      signal.addEventListener('abort', onAbort, { once: true });
-    }
-    const handleLine = (line) => {
-      if (line.startsWith('VDM_PROGRESS ')) {
-        try {
-          const ev = JSON.parse(line.slice('VDM_PROGRESS '.length));
-          onProgress?.(ev);
-        } catch { /* ignore */ }
-      } else if (line.trim()) {
-        onLog?.(line);
+  onProgress?.({ stage: 'rendering' });
+  let buffer = '';
+  const result = await runProcess(exe, args, { cwd: p.root, signal, onLog,
+    onStdout(chunk) {
+      buffer += String(chunk);
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop();
+      for (const line of lines) {
+        if (line.startsWith('VDM_PROGRESS ')) {
+          let event;
+          try { event = JSON.parse(line.slice(13)); } catch { continue; }
+          onProgress?.(event);
+        } else onLog?.(line);
       }
-      log += line + '\n';
-      if (log.length > 400000) log = log.slice(-200000);
-    };
-    child.stdout.on('data', (d) => {
-      buf += String(d);
-      const parts = buf.split(/\r?\n/);
-      buf = parts.pop();
-      parts.forEach(handleLine);
-    });
-    child.stderr.on('data', (d) => {
-      const s = String(d);
-      log += s;
-      onLog?.(s.trim());
-    });
-    child.on('error', reject);
-    child.on('close', (code) => {
-      if (buf) handleLine(buf);
-      if (code === 0) resolve({ code, log, seconds: (Date.now() - t0) / 1000 });
-      else {
-        const err = new Error(`blender exited ${code}`);
-        err.log = log.slice(-4000);
-        reject(err);
-      }
-    });
+    },
   });
+  return result;
 }
 
-export async function renderStill({ dir, project, time = 0, out, scale = 1, samples = 16, onLog }) {
+export async function renderStill({ dir, project, time = 0, out, scale = 1, samples = 16, onLog, onProgress, signal }) {
   const p = paths(dir);
   const outPath = out ? path.resolve(out) : path.join(p.frames, `still-${Date.now()}.png`);
   await runJob(dir, {
     mode: 'still', time, out: outPath, scale, samples, project,
-  }, { onLog });
+  }, { onLog, onProgress, signal });
   return outPath;
 }
 
@@ -211,6 +176,8 @@ export async function renderVideo({
     ? (path.isAbsolute(project.meta.audio.src) ? project.meta.audio.src : path.join(p.root, project.meta.audio.src))
     : null;
   const hasAudio = audio && (await fileExists(audio));
+  signal?.throwIfAborted();
+  onProgress?.({ stage: 'encoding' });
   await encodeSequence({
     framesDir,
     pattern: 'f_%04d.png',
@@ -221,7 +188,7 @@ export async function renderVideo({
     audioOffset: -from + (hasAudio ? (project.meta.audio.offset || 0) : 0),
     gain: project.meta.audio?.gain || 0,
     crf,
-    onLog,
+    onLog, signal,
   });
   return { out: outPath, frames: count, seconds: count / fps };
 }

@@ -9,12 +9,12 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   paths, findProjectRoot, watchProject,
-  ensureProjectDirs, projectExists, PROJECT_FILE,
+  ensureProjectDirs, projectExists, PROJECT_FILE, atomicJson,
 } from './storage.js';
 import { projectService } from './projects.js';
 import { errorData } from '../application/errors.js';
 import { probeMedia, mimeOf, fileExists } from './media.js';
-import { renderStill, renderVideo, blenderVersion, findBlender } from './blender.js';
+import { blenderVersion, findBlender } from './blender.js';
 import { analyzeBeats } from './beats.js';
 import { summarizeProject, STYLE_PRESETS } from './storyboard.js';
 import { AgentRunner, findDsh, CLI_PATH } from './agent.js';
@@ -24,6 +24,11 @@ import { readPath, writePath, isWithin, pathDenied } from './path-policy.js';
 import { pipeline as streamPipeline } from 'node:stream/promises';
 import { Transform } from 'node:stream';
 import { randomUUID } from 'node:crypto';
+import { claimRuntime, connectRuntime } from './runtime.js';
+import { createJobService } from './jobs.js';
+import { readSelection, contextAt } from '../application/queries.js';
+import { OP_KINDS } from '../core/ops.js';
+import { mediaService } from './media-service.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const APP_DIR = path.resolve(HERE, '..');
@@ -112,7 +117,7 @@ function openInBrowser(url, log) {
   }
 }
 
-export async function startServer({ root, port = 47100, open = false, onReady, importRoots = [], uploadLimit = 1024 * 1024 * 1024 } = {}) {
+async function startOwnedServer({ root, port = 47100, open = false, onReady, importRoots = [], uploadLimit = 1024 * 1024 * 1024, releaseOwnership } = {}) {
   const projectRoot = path.resolve(root);
   if (!(await projectExists(projectRoot))) {
     throw new Error(`no ${PROJECT_FILE} in ${projectRoot}`);
@@ -121,6 +126,7 @@ export async function startServer({ root, port = 47100, open = false, onReady, i
   const log = createLogger({ dir: projectRoot });
   log.info('engine starting', { root: projectRoot, pid: process.pid, version: '0.1.0' });
   const projects = projectService(projectRoot);
+  const media = mediaService(projectRoot, importRoots);
   let project = await projects.read();
   let lastRev = project.rev;
 
@@ -211,7 +217,23 @@ export async function startServer({ root, port = 47100, open = false, onReady, i
 
   // ---- render queue (one job at a time) ----
   const renderState = { running: false, kind: null, from: 0, to: 0, progress: 0, total: 0, startedAt: 0, out: null, error: null };
-  let renderAbort = null;
+  const finishedJobs = new Set();
+  const jobs = await createJobService(projectRoot, projects, (job) => {
+    broadcast('job', job);
+    const running = !['succeeded', 'failed', 'cancelled', 'interrupted'].includes(job.status);
+    Object.assign(renderState, { running, jobId: job.id, sourceRev: job.sourceRev,
+      kind: job.kind, from: job.options.from, to: job.options.to,
+      progress: job.progress, total: job.total, out: job.artifact?.path || null,
+      status: job.status, error: job.error?.message || null });
+    broadcast('render', { ...renderState, done: job.status === 'succeeded', cancelled: job.status === 'cancelled', url: job.artifact?.url });
+    if (!running && !finishedJobs.has(job.id)) {
+      finishedJobs.add(job.id);
+      if (job.artifact) {
+        addArtifact({ ...job.artifact, label: `${job.kind === 'still' ? '预览帧' : '成片'} · rev ${job.sourceRev}` });
+        setStep(job.kind === 'still' ? 'stills' : 'render', { status: 'done', detail: `rev ${job.sourceRev}` });
+      }
+    }
+  });
 
   const agent = new AgentRunner({
     root: projectRoot,
@@ -253,6 +275,7 @@ export async function startServer({ root, port = 47100, open = false, onReady, i
   }
   updateStoryboardStep(project);
 
+  const instanceId = randomUUID(), token = randomUUID();
   const server = http.createServer(async (req, res) => {
     let pathname = req.url;
     try {
@@ -262,6 +285,36 @@ export async function startServer({ root, port = 47100, open = false, onReady, i
       if (req.headers.origin && ![origin, `http://localhost:${server.address().port}`].includes(req.headers.origin)) return json(res, 403, { error: 'invalid origin', code: 'ACCESS_DENIED' });
       const url = new URL(req.url, origin);
       try { pathname = decodeURIComponent(url.pathname); } catch { return json(res, 400, { error: 'invalid URL encoding', code: 'INVALID_ARGUMENT' }); }
+      if (pathname === '/api/runtime' && req.method === 'GET') return json(res, 200, { root: projectRoot, instanceId, version: 1 });
+      if (pathname === '/api/rpc' && req.method === 'POST') {
+        if (req.headers.authorization !== `Bearer ${token}`) return json(res, 403, { error: 'runtime credential required', code: 'ACCESS_DENIED' });
+        const { method, params = {} } = await readBody(req);
+        let result;
+        switch (method) {
+          case 'project.read': result = await projects.read(); break;
+          case 'project.query': result = readSelection(await projects.read(), params); break;
+          case 'project.context': result = contextAt(await projects.read(), params); break;
+          case 'project.transact': result = await transact(params, 'local'); break;
+          case 'project.history': result = await projects.history(); break;
+          case 'job.submit': result = await jobs.submit(params); break;
+          case 'job.get': result = await jobs.get(params.id); break;
+          case 'job.list': result = await jobs.list(); break;
+          case 'job.cancel': result = await jobs.cancel(params.id); break;
+          case 'job.wait': result = await jobs.wait(params.id); break;
+          case 'artifact.read': result = await jobs.artifact(params.id, params); break;
+          case 'media.list': result = await media.list(params); break;
+          case 'media.probe': result = await media.probe(params); break;
+          case 'media.import': result = await media.import(params); break;
+          case 'capabilities': result = { projectSchema: 'vdm.project/1', semanticsVersion: 1, renderPlanVersion: 1,
+            ops: OP_KINDS.filter((op) => !['restoreProject', 'replaceTimeline'].includes(op)),
+            models: ['elements', 'cameras', 'scene.objects'], sceneTree: 'experimental, read-only',
+            rendering: { concurrency: 1, backend: 'Blender', textLayout: 'approximate preview parity' },
+            blender: await blenderVersion().catch(() => null), revision: project.rev }; break;
+          case 'runtime.stop': result = { ok: true }; setImmediate(() => { void closeRuntime(); }); break;
+          default: return json(res, 400, { error: 'unknown runtime method', code: 'INVALID_ARGUMENT' });
+        }
+        return json(res, 200, result);
+      }
       // ---------------- SSE ----------------
       if (pathname === '/api/events') {
         res.writeHead(200, {
@@ -378,49 +431,10 @@ export async function startServer({ root, port = 47100, open = false, onReady, i
 
       // ---------------- media ----------------
       if (pathname === '/api/media' && req.method === 'GET') {
-        const mediaDir = path.join(projectRoot, 'media');
-        const out = [];
-        const walk = async (dir, prefix = '') => {
-          let entries = [];
-          try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; }
-          for (const e of entries) {
-            const rel = prefix ? `${prefix}/${e.name}` : e.name;
-            if (e.isDirectory()) await walk(path.join(dir, e.name), rel);
-            else out.push({ name: e.name, path: `media/${rel}`, size: 0 });
-          }
-        };
-        await walk(mediaDir);
-        for (const m of out) {
-          try { m.size = (await fsp.stat(path.join(projectRoot, m.path))).size; } catch { /* ignore */ }
-        }
-        return json(res, 200, { media: out });
+        const result = await media.list({ limit: 500 });
+        return json(res, 200, { ...result, media: result.items });
       }
-
-      if (pathname === '/api/import' && req.method === 'POST') {
-        const body = await readBody(req);
-        const files = Array.isArray(body.files) ? body.files : [];
-        await fsp.mkdir(path.join(projectRoot, 'media'), { recursive: true });
-        const mediaDir = await readPath(projectRoot, 'media');
-        const imported = [];
-        for (const f of files) {
-          const absolute = path.isAbsolute(f) ? f : path.resolve(projectRoot, f);
-          const allowed = [projectRoot, ...importRoots].find((base) => isWithin(base, absolute));
-          if (!allowed) throw pathDenied();
-          const src = await readPath(allowed, path.relative(allowed, absolute));
-          if (!(await fileExists(src))) continue;
-          const temporary = path.join(mediaDir, `.import-${randomUUID()}`);
-          let name;
-          try {
-            await fsp.copyFile(src, temporary, fs.constants.COPYFILE_EXCL);
-            name = await publishMedia(temporary, mediaDir, path.basename(src));
-          } finally { await fsp.rm(temporary, { force: true }); }
-          const dest = path.join(mediaDir, name);
-          let info = null;
-          try { info = await probeMedia(dest); } catch { /* not media */ }
-          imported.push({ path: `media/${name}`, name, info });
-        }
-        return json(res, 200, { imported });
-      }
+      if (pathname === '/api/import' && req.method === 'POST') return json(res, 200, await media.import(await readBody(req)));
 
       if (pathname === '/api/upload' && req.method === 'POST') {
         const rawName = String(url.searchParams.get('name') || `upload-${Date.now()}.bin`);
@@ -516,83 +530,24 @@ export async function startServer({ root, port = 47100, open = false, onReady, i
 
       if (pathname === '/api/still' && req.method === 'POST') {
         const body = await readBody(req);
-        const time = Number(body.time ?? 0);
-        toast(`Blender 渲染第 ${time.toFixed(2)}s 预览帧…`);
-        const out = path.join(p.frames, `blender-${Date.now()}.png`);
-        const file = await renderStill({
-          dir: projectRoot, project, time, out,
-          scale: body.scale ?? 0.5, samples: body.samples ?? 8,
-          onLog: () => {},
-        });
-        const name = path.basename(file);
-        const art = { kind: 'still', label: `Blender 帧 @${time.toFixed(2)}s`, time, path: file, url: `/frames/${name}` };
-        addArtifact(art);
-        setStep('stills', { status: 'done', detail: `最新 Blender 帧 @${time.toFixed(2)}s` });
-        return json(res, 200, art);
+        const submitted = await jobs.submit({ kind: 'still', time: body.time ?? 0, scale: body.scale ?? 0.5,
+          samples: body.samples ?? 8, expectedRev: body.expectedRev, requestId: body.requestId });
+        const completed = await jobs.wait(submitted.id);
+        if (completed.status !== 'succeeded') throw Object.assign(new Error(completed.error?.message || completed.status), completed.error || {});
+        return json(res, 200, completed.artifact);
       }
-
-      // ---------------- render ----------------
       if (pathname === '/api/render' && req.method === 'POST') {
-        if (renderState.running) return json(res, 409, { error: 'render already running' });
         const body = await readBody(req);
-        const from = Number(body.from ?? 0);
-        const to = Number(body.to ?? project.meta.duration);
-        const scale = Number(body.scale ?? 1);
-        const crf = Number(body.crf ?? 18);
-        const full = from <= 0.001 && to >= project.meta.duration - 0.05;
-        const out = body.out
-          ? await writePath(p.renders, body.out)
-          : path.join(p.renders, `${full ? 'master' : 'part'}-${Date.now()}.mp4`);
-        Object.assign(renderState, {
-          running: true, kind: full ? 'master' : 'part', from, to, progress: 0,
-          total: Math.max(1, Math.round((to - from) * project.meta.fps)), startedAt: Date.now(), out, error: null,
-        });
-        renderAbort = new AbortController();
-        log.info('render start', { kind: renderState.kind, from, to, scale, total: renderState.total, out });
-        broadcast('render', renderState);
-        setStep(full ? 'master' : 'render', { status: 'running', detail: `${from.toFixed(1)}s → ${to.toFixed(1)}s` });
-
-        (async () => {
-          try {
-            const res2 = await renderVideo({
-              dir: projectRoot, project, from, to, out, scale, crf, signal: renderAbort.signal,
-              onLog: () => {},
-              onProgress: (ev) => {
-                if (ev.stage === 'frame') {
-                  renderState.progress = ev.frame;
-                  renderState.total = ev.total;
-                  broadcast('render', renderState);
-                } else if (ev.stage === 'built') {
-                  broadcast('render', { ...renderState, built: ev.sec });
-                }
-              },
-            });
-            Object.assign(renderState, { running: false, out: res2.out });
-            const name = path.basename(res2.out);
-            setStep(full ? 'master' : 'render', { status: 'done', detail: `${(to - from).toFixed(1)}s · ${name}` });
-            addArtifact({ kind: 'render', label: `${full ? '成片' : '片段'} ${from.toFixed(1)}–${to.toFixed(1)}s`, path: res2.out, url: `/renders/${name}` });
-            log.info('render done', { out: res2.out, frames: res2.frames, sec: (Date.now() - renderState.startedAt) / 1000 });
-            broadcast('render', { ...renderState, done: true, url: `/renders/${name}` });
-            toast(`渲染完成: ${name}`, 'success');
-          } catch (e) {
-            Object.assign(renderState, { running: false, error: e.message });
-            log.error('render failed', { error: e.message, log: e.log ? String(e.log).slice(-3000) : undefined });
-            setStep(full ? 'master' : 'render', { status: 'error', detail: e.message.slice(0, 120) });
-            broadcast('render', { ...renderState, error: e.message });
-            toast(`渲染失败: ${e.message}`, 'error');
-          } finally {
-            renderAbort = null;
-          }
-        })();
-        return json(res, 200, { ok: true, out, state: renderState });
+        const submitted = await jobs.submit({ kind: 'video', from: body.from ?? 0, to: body.to ?? project.meta.duration,
+          scale: body.scale ?? 1, crf: body.crf ?? 18, expectedRev: body.expectedRev, requestId: body.requestId });
+        return json(res, 200, { ok: true, jobId: submitted.id, state: renderState });
       }
-
       if (pathname === '/api/render/cancel' && req.method === 'POST') {
-        if (renderAbort) renderAbort.abort();
-        renderState.running = false;
-        broadcast('render', { ...renderState, cancelled: true });
-        return json(res, 200, { ok: true });
+        const body = await readBody(req);
+        const id = body.id || renderState.jobId;
+        return json(res, 200, { ok: true, ...(id ? { job: await jobs.cancel(id) } : {}) });
       }
+      if (pathname === '/api/jobs' && req.method === 'GET') return json(res, 200, { jobs: await jobs.list() });
 
       // ---------------- agent ----------------
       if (pathname === '/api/agent' && req.method === 'POST') {
@@ -614,8 +569,9 @@ export async function startServer({ root, port = 47100, open = false, onReady, i
         if (body.stillFrames) {
           for (const t of body.stillFrames) {
             const file = path.join(p.frames, `agent-${Date.now()}-${Math.round(t * 100)}.png`);
-            await renderStill({ dir: projectRoot, project, time: t, out: file, scale: 0.5, samples: 6, onLog: () => {} });
-            frames.push(file);
+            const submitted = await jobs.submit({ kind: 'still', time: t, scale: 0.5, samples: 6 });
+            const completed = await jobs.wait(submitted.id);
+            if (completed.artifact) frames.push(completed.artifact.path);
           }
         }
         const summary = summarizeProject(project, { segmentId: selection.segmentId, time: body.time ?? 0 });
@@ -696,26 +652,44 @@ export async function startServer({ root, port = 47100, open = false, onReady, i
   }
 
   const actualPort = server.address().port;
-  const info = { port: actualPort, pid: process.pid, url: `http://127.0.0.1:${actualPort}/`, root: projectRoot, startedAt: Date.now() };
-  await fsp.writeFile(path.join(p.vdm, 'app.json'), JSON.stringify(info, null, 2));
+  const info = { instanceId, token, version: 1, port: actualPort, pid: process.pid, url: `http://127.0.0.1:${actualPort}/`, root: projectRoot, startedAt: Date.now() };
+  await atomicJson(p.app, info);
 
   if (open) openInBrowser(info.url, log);
   onReady?.(info);
 
-  return {
-    server, info, port: actualPort,
-    get project() { return project; },
-    async close() {
+  let closing;
+  function closeRuntime() {
+    return closing ||= (async () => {
       log.info('engine shutting down');
       await agent.close();
+      await jobs.close();
+      await writeChain;
       clearTimeout(pipelineTimer);
       unwatch();
-      for (const c of clients) { try { c.end(); } catch { /* ignore */ } }
+      for (const c of clients) { try { c.end(); } catch {} }
       clients.clear();
       await new Promise((r) => server.close(r));
-      await fsp.rm(path.join(p.vdm, 'app.json'), { force: true }).catch(() => {});
-    },
-  };
+      const record = await fsp.readFile(p.app, 'utf8').then(JSON.parse).catch(() => null);
+      if (record?.instanceId === instanceId) await fsp.rm(p.app, { force: true });
+      await releaseOwnership();
+    })();
+  }
+  return { server, info, port: actualPort, jobs, projects,
+    get project() { return project; }, close: closeRuntime };
+}
+
+export async function startServer(options = {}) {
+  const root = await fsp.realpath(options.root);
+  let releaseOwnership;
+  try { releaseOwnership = await claimRuntime(root); }
+  catch (e) {
+    if (options.attach === false) throw e;
+    const client = await connectRuntime(root, { start: false });
+    return { info: client.info, port: client.info.port, remote: true, close: async () => {} };
+  }
+  try { return await startOwnedServer({ ...options, root, releaseOwnership }); }
+  catch (e) { await releaseOwnership(); throw e; }
 }
 
 // direct run: node engine/server.js [--project <dir>] [--port N] [--open]

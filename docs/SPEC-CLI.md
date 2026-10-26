@@ -12,6 +12,10 @@ node cli/vdm.js <command> [args] [--project <dir>] [--json]
 `{"ops":[...],"expectedRev":N,"requestId":"...","dryRun":true}`；预检不写入，重试同一请求
 返回相同事务结果。`vdm history` / `undo` / `redo` 使用持久化的项目全局历史。
 
+CLI 自动连接或启动项目专属运行时，与 UI 共用一个渲染队列。`vdm jobs` 列出任务，
+`vdm cancel <jobId>` 请求取消，`vdm engine stop` 关闭运行时并等待工作进程退出。
+退出 CLI 不取消已接收的任务。`still` / `render` 保持同步等待输出，任务本身可从其他客户端查询。
+
 ## 项目
 
 | 命令 | 说明 |

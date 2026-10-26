@@ -8,7 +8,8 @@ import { fileURLToPath } from 'node:url';
 import {
   paths, findProjectRoot, projectExists,
 } from '../engine/storage.js';
-import { projectService } from '../engine/projects.js';
+import { projectService as localProjectService } from '../engine/projects.js';
+import { connectRuntime } from '../engine/runtime.js';
 import { errorData } from '../application/errors.js';
 import { coerceValue } from '../core/ops.js';
 import { evalElement } from '../core/evaluate.js';
@@ -66,6 +67,18 @@ async function resolveRoot(flags) {
   const root = await findProjectRoot(target);
   if (!root) throw new Error(`not a VedioMaker project (no project.vdm.json in ${target} or parents). Run: vdm init <dir>`);
   return root;
+}
+
+const connections = new Map();
+function client(root) {
+  if (!connections.has(root)) connections.set(root, connectRuntime(root));
+  return connections.get(root);
+}
+function projectService(root) {
+  const call = async (method, params) => (await client(root)).call(method, params);
+  return { read: () => call('project.read'), history: () => call('project.history'),
+    transact: (input) => input.command?.type === 'initialize'
+      ? localProjectService(root).transact(input, { actorId: 'local' }) : call('project.transact', input) };
 }
 
 const txOptions = (flags) => ({
@@ -369,7 +382,7 @@ async function cmdBeats(root, flags) {
   if (!rel) throw new Error('no audio in project; pass --src <file> or add meta.audio first');
   const file = path.isAbsolute(rel) ? rel : path.join(root, rel);
   const { analyzeBeats } = await import('../engine/beats.js');
-  console.log(C.dim(`分析 ${rel} …`));
+  if (!flags.json) console.error(`分析 ${rel} …`);
   const r = await analyzeBeats(file, { duration: flags.duration ? num(flags.duration) : null, fps: p.meta.fps });
 
     const ops = [
@@ -379,7 +392,7 @@ async function cmdBeats(root, flags) {
     if (!p.meta.audio) ops.push({ op: 'setMeta', path: 'audio', value: { src: rel, offset: 0, gain: 0 } });
     if (flags['set-duration'] || !p.meta.duration) ops.push({ op: 'setMeta', path: 'duration', value: Math.round(r.duration * 1000) / 1000 });
   const { project } = await edit(root, ops, flags);
-  console.log(`${C.gr('✓')} ${r.tempo} bpm · ${r.beats.length} beats · ${r.duration.toFixed(1)}s  ${C.dim(`rev ${project.rev}`)}`);
+  if (!flags.json) console.log(`${C.gr('✓')} ${r.tempo} bpm · ${r.beats.length} beats · ${r.duration.toFixed(1)}s  ${C.dim(`rev ${project.rev}`)}`);
   if (flags.json) console.log(JSON.stringify(r, null, 2));
 }
 
@@ -400,43 +413,26 @@ async function cmdPlan(root, flags) {
 }
 
 async function cmdStill(root, argv, flags) {
-  const time = num(argv[0] ?? flags.time ?? 0);
-  const project = await projectService(root).read();
-  const { renderStill } = await import('../engine/blender.js');
-  const out = flags.out ? path.resolve(flags.out) : path.join(paths(root).frames, `still-${Date.now()}.png`);
-  console.log(C.dim(`Blender 渲染 ${time.toFixed(2)}s …`));
-  const file = await renderStill({
-    dir: root, project, time, out,
-    scale: num(flags.scale, 1), samples: num(flags.samples, 16),
-  });
-  if (flags.json) console.log(JSON.stringify({ ok: true, time, out: file }));
-  else console.log(`${C.gr('✓')} ${file}`);
+  return renderCommand(root, { kind: 'still', time: num(argv[0] ?? flags.time ?? 0) }, flags);
 }
-
 async function cmdRender(root, flags) {
-  const project = await projectService(root).read();
-  const { renderVideo } = await import('../engine/blender.js');
-  const from = num(flags.from, 0);
-  const to = num(flags.to, project.meta.duration);
-  const out = flags.out ? path.resolve(flags.out) : path.join(paths(root).renders, `render-${Date.now()}.mp4`);
-  console.log(C.dim(`渲染 ${from.toFixed(2)}–${to.toFixed(2)}s → ${out}`));
-  const t0 = Date.now();
-  const res = await renderVideo({
-    dir: root, project, from, to, out,
-    scale: num(flags.scale, 1), crf: num(flags.crf, 18),
-    onProgress: (ev) => {
-      if (ev.stage === 'frame' && (ev.frame % 12 === 0 || ev.frame === ev.total)) {
-        process.stdout.write(`\r  ${C.dim(`${ev.frame}/${ev.total} 帧`)}`);
-      }
-    },
-  });
-  process.stdout.write('\r' + ' '.repeat(40) + '\r');
-  if (flags.json) console.log(JSON.stringify({ ok: true, ...res }));
-  else console.log(`${C.gr('✓')} ${res.out}  ${C.dim(`${res.frames} 帧 · ${((Date.now() - t0) / 1000).toFixed(1)}s`)}`);
+  return renderCommand(root, { kind: 'video', from: num(flags.from, 0), ...(flags.to !== undefined ? { to: num(flags.to) } : {}) }, flags);
+}
+async function renderCommand(root, input, flags) {
+  const runtime = await client(root);
+  const submitted = await runtime.call('job.submit', { ...input, ...txOptions(flags),
+    scale: num(flags.scale, 1), samples: num(flags.samples, 16), crf: num(flags.crf, 18) });
+  if (!flags.json) console.error(`渲染任务 ${submitted.id} · rev ${submitted.sourceRev}`);
+  const job = await runtime.call('job.wait', { id: submitted.id });
+  if (job.status !== 'succeeded') throw Object.assign(new Error(job.error?.message || job.status), job.error || {});
+  let out = job.artifact.path;
+  if (flags.out) { out = path.resolve(flags.out); await fsp.mkdir(path.dirname(out), { recursive: true }); await fsp.copyFile(job.artifact.path, out); }
+  console.log(flags.json ? JSON.stringify({ ok: true, jobId: job.id, sourceRev: job.sourceRev, out, artifact: job.artifact }) : `${C.gr('✓')} ${out}`);
 }
 
 function patchOf(path, value) {
   const parts = String(path).split('.');
+  if (parts.some((key) => ['__proto__', 'constructor', 'prototype'].includes(key))) throw new Error('unsafe property path');
   const out = {};
   let cur = out;
   for (let i = 0; i < parts.length - 1; i++) { cur[parts[i]] = cur[parts[i]] || {}; cur = cur[parts[i]]; }
@@ -621,6 +617,9 @@ async function main() {
   const root = await resolveRoot(flags);
 
   switch (cmd) {
+    case 'engine': { const runtime = await client(root); console.log(JSON.stringify(rest[0] === 'stop' ? await runtime.call('runtime.stop') : { root: runtime.info.root, pid: runtime.info.pid, url: runtime.info.url })); return; }
+    case 'jobs': console.log(JSON.stringify(await (await client(root)).call('job.list'))); return;
+    case 'cancel': console.log(JSON.stringify(await (await client(root)).call('job.cancel', { id: rest[0] }))); return;
     case 'history': console.log(JSON.stringify(await projectService(root).history(), null, 2)); return;
     case 'undo': case 'redo': { const { project, ...result } = await projectService(root).transact({ ...txOptions(flags), command: { type: cmd } }, { actorId: 'cli' }); console.log(JSON.stringify(result)); return; }
     case 'info': return cmdInfo(root, flags);
