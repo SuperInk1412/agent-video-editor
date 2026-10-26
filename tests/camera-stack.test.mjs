@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createProject, normalizeProject, validateProject } from '../core/schema.js';
 import { applyOp } from '../core/ops.js';
+import { cameraLayers } from '../core/camera.js';
 
 const base = (extra = {}) => normalizeProject({
   schema: 'vdm.project/1', rev: 1,
@@ -177,6 +178,24 @@ test('camera stack ops: reorderCamera and activateCamera', () => {
   assert.equal(p.activeCameraId, 'cam_b');
   assert.equal(p.camera.id, 'cam_b');
   assert.throws(() => applyOp(p, { op: 'activateCamera', id: 'nope' }), /no camera/);
+});
+
+test('camera stack: layer order is top->bottom and solo is viewport-only', () => {
+  const p = base({
+    cameras: [
+      { id: 'cam_a', visible: true, path: [{ t: 0, pos: [0, 1, 0] }] },
+      { id: 'cam_b', visible: true, path: [{ t: 0, pos: [0, 2, 0] }] },
+      { id: 'cam_c', visible: false, path: [{ t: 0, pos: [0, 3, 0] }] },
+      { id: 'cam_d', visible: true, path: [] },
+    ],
+    cameraOrder: ['cam_a', 'cam_b', 'cam_c', 'cam_d'],
+    activeCameraId: 'cam_a',
+  });
+  assert.deepEqual(cameraLayers(p).map((c) => c.id), ['cam_a', 'cam_b']);
+  assert.deepEqual(cameraLayers(p, new Set(['cam_b'])).map((c) => c.id), ['cam_b']);
+  // The data is unchanged: a final render still uses every visible camera.
+  assert.equal(p.cameras.length, 4);
+  assert.equal(p.cameras.find((c) => c.id === 'cam_c').visible, false);
 });
 
 test('camera stack ops: cameraPatch targets one camera by id', () => {

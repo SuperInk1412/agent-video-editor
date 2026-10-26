@@ -45,6 +45,11 @@ Blender 侧这一档用 **Cycles** 渲 `FISHEYE_EQUIDISTANT`（EEVEE 不支持�
 画面 2D 变换用归一化坐标（0.5 是画面中心）：缩放绕 `画面中心`，再平移到 `画面位置`，
 最后用 `透明度` 做 alpha-over。画布变换不改变相机世界位置。
 
+多相机预览：`cameraOrder` 从上到下，预览从最下层开始渲染到 `layerFBO`，逐层 alpha-over
+到 `sceneFBO`；每层先做上面的 2D 画面变换。eye 关掉的相机不进堆栈；右键“单独查看”只
+限制预览（`preview.soloCameras`），不写项目、不影响成片。编辑视口仍用编辑相机单层，
+退出编辑后的预览帧才显示完整相机堆栈；Blender 多相机合成属于 P5。
+
 轨道求值顺序（`core/camera.js`，Blender 用**同一份烘焙结果**）：
 
 ```

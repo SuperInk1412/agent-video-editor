@@ -2,6 +2,7 @@
 // Layers -> scene FBO -> bloom chain -> composite (CA, grain, scanlines, vignette, grade).
 import { evalElement } from '/core/evaluate.js';
 import { clamp } from '/core/time.js';
+import { cameraTransform, evalCamera, cameraLayers } from '/core/camera.js';
 import { Scene3D } from './preview3d.js';
 
 const VERT = `#version 300 es
@@ -65,6 +66,19 @@ uniform sampler2D u_tex;
 uniform float u_flip;
 void main(){
   outColor = texture(u_tex, vec2(v_uv.x, mix(v_uv.y, 1.0 - v_uv.y, u_flip)));
+}`;
+
+const FRAG_LAYER = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 outColor;
+uniform sampler2D u_tex;
+uniform float u_opacity;
+void main(){
+  // Scene FBOs are bottom-up; flip y once here, then the final composite flips
+  // the accumulated scene back for the screen.
+  vec4 c = texture(u_tex, vec2(v_uv.x, 1.0 - v_uv.y));
+  outColor = vec4(c.rgb, c.a * u_opacity);
 }`;
 
 const FRAG_BRIGHT = `#version 300 es
@@ -261,9 +275,11 @@ export class Preview {
     this.assets = new Map(); // id -> {kind, img/video, tex, key}
     this.textCache = new Map();
     this.sceneFBO = null;
+    this.layerFBO = null;
     this.bloomFBO = [null, null];
     this.time = 0;
     this.layers = [];
+    this.soloCameras = new Set();
     this.audioEl = null;
     this.scene3d = new Scene3D(this.gl);
     this.editMode = false;
@@ -275,6 +291,7 @@ export class Preview {
     const gl = this.gl;
     this.prog = {
       tex: compile(gl, VERT, FRAG_TEX),
+      layer: compile(gl, VERT, FRAG_LAYER),
       shape: compile(gl, VERT, FRAG_SHAPE),
       full: compile(gl, VERT, FRAG_FULL),
       bright: compile(gl, VERT, FRAG_BRIGHT),
@@ -303,6 +320,11 @@ export class Preview {
     this.project = p;
     if (changedAudio || !this.audioEl) this._setupAudio();
     for (const el of p.elements) this._ensureAsset(el);
+  }
+
+  /** Viewport-only camera solo; final renders still use every visible camera. */
+  setSoloCameras(ids) {
+    this.soloCameras = ids instanceof Set ? ids : new Set(ids || []);
   }
 
   _setupAudio() {
@@ -396,12 +418,13 @@ export class Preview {
       gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth);
       return { fb, tex, depth, w: tw, h: th };
     };
-    for (const f of [this.sceneFBO, ...(this.bloomFBO || [])]) {
+    for (const f of [this.sceneFBO, this.layerFBO, ...(this.bloomFBO || [])]) {
       if (!f) continue;
       gl.deleteFramebuffer(f.fb); gl.deleteTexture(f.tex);
       if (f.depth) gl.deleteRenderbuffer(f.depth);
     }
     this.sceneFBO = mk(w, h);
+    this.layerFBO = mk(w, h);
     const hw = Math.max(2, Math.round(w / 2)), hh = Math.max(2, Math.round(h / 2));
     this.bloomFBO = [mk(hw, hh), mk(hw, hh)];
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -462,6 +485,86 @@ export class Preview {
     entry = { key, tex, w: cv.width, h: cv.height, canvas: cv };
     this.textCache.set(el.id, entry);
     return entry;
+  }
+
+  /** Cameras that contribute to the viewport, in timeline order (top -> bottom). */
+  _cameraLayers() {
+    return cameraLayers(this.project, this.soloCameras);
+  }
+
+  /** Full-frame picture transform: scale around pivot, then offset. */
+  _cameraLayerMatrix(tr, W, H) {
+    const pivot = tr.picturePivot || [0.5, 0.5];
+    const offset = tr.pictureOffset || [0, 0];
+    const px = Number(pivot[0]) * W;
+    const py = Number(pivot[1]) * H;
+    const sx = Number(tr.scale?.[0]);
+    const sy = Number(tr.scale?.[1]);
+    return M3.mul(
+      M3.T(Number(offset[0]) * W, Number(offset[1]) * H),
+      M3.mul(
+        M3.T(px, py),
+        M3.mul(M3.S(sx, sy), M3.mul(M3.T(-px, -py), M3.S(W, H))),
+      ),
+    );
+  }
+
+  /**
+   * Render every visible camera into a layer FBO and alpha-over them from the
+   * bottom of the timeline stack to the top. `cameraOrder` is top -> bottom, so
+   * the loop is reversed; the top camera is drawn last and covers the rest.
+   */
+  _drawCameraStack(p, t, W, H, cams) {
+    const gl = this.gl;
+    const layer = this.layerFBO;
+    if (!layer) return;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.sceneFBO.fb);
+    gl.viewport(0, 0, W, H);
+    gl.clearColor(0, 0, 0, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    let active = null;
+    for (const cam of cams.slice().reverse()) {
+      const tr = cameraTransform(cam, t);
+      const sx = Number(tr.scale?.[0]);
+      const sy = Number(tr.scale?.[1]);
+      if (!(tr.opacity > 0.002) || Math.abs(sx) < 1e-4 || Math.abs(sy) < 1e-4) continue;
+      const state = evalCamera({ camera: cam }, t);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, layer.fb);
+      gl.viewport(0, 0, layer.w, layer.h);
+      this.scene3d.draw(p, t, layer.w, layer.h, state);
+      if (cam.id === p.activeCameraId) {
+        active = {
+          cam: this.scene3d.lastCam,
+          vp: this.scene3d.lastVP,
+          w: this.scene3d.lastW,
+          h: this.scene3d.lastH,
+        };
+      }
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.sceneFBO.fb);
+      gl.viewport(0, 0, W, H);
+      const pr = this.prog.layer;
+      gl.useProgram(pr.program);
+      gl.uniformMatrix3fv(pr.u.u_mat, false, this._cameraLayerMatrix(tr, W, H));
+      gl.uniform2f(pr.u.u_res, W, H);
+      gl.uniform1f(pr.u.u_opacity, tr.opacity);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, layer.tex);
+      gl.uniform1i(pr.u.u_tex, 0);
+      gl.enable(gl.BLEND);
+      gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+      gl.bindVertexArray(this.vao);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      gl.bindVertexArray(null);
+    }
+    gl.disable(gl.BLEND);
+    // Keep the active camera's matrices for picking / gizmo projection even
+    // when it is not the last layer drawn.
+    if (active) {
+      this.scene3d.lastCam = active.cam;
+      this.scene3d.lastVP = active.vp;
+      this.scene3d.lastW = active.w;
+      this.scene3d.lastH = active.h;
+    }
   }
 
   /** compute draw list for time t (also used for hit testing) */
@@ -543,58 +646,62 @@ export class Preview {
       }
     }
 
-    const is3d = !!(p.camera && this.scene3d.city);
+    // ---- scene pass ----
+    const cams = this._cameraLayers();
+    const is3d = !!(this.scene3d.city && cams.length);
+    const layers = [];
+    this.layers = layers;
     if (is3d) {
-      this.layers = [];
+      if (this.editMode) {
+        // Editing keeps the free editor camera; the camera stack is a shot
+        // preview feature. The path gizmo projects with this same camera.
+        gl.bindFramebuffer(gl.FRAMEBUFFER, this.sceneFBO.fb);
+        gl.viewport(0, 0, W, H);
+        gl.clearDepth(1);
+        this.scene3d.draw(p, t, W, H, this.editCam);
+      } else {
+        this._drawCameraStack(p, t, W, H, cams);
+      }
+    } else {
+      layers.push(...this.computeLayers(t));
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.sceneFBO.fb);
       gl.viewport(0, 0, W, H);
-      gl.clearDepth(1);
-      this.scene3d.draw(p, t, W, H, this.editMode ? this.editCam : null);
-    }
-
-    const layers = is3d ? [] : this.computeLayers(t);
-    this.layers = layers;
-
-    // ---- scene pass ----
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.sceneFBO.fb);
-    gl.viewport(0, 0, W, H);
-    const bg = hexRgb(p.meta.background || '#000000');
-    if (!is3d) {
+      const bg = hexRgb(p.meta.background || '#000000');
       gl.clearColor(bg[0], bg[1], bg[2], 1);
       gl.clear(gl.COLOR_BUFFER_BIT);
-    }
-    gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-    gl.bindVertexArray(this.vao);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.bindVertexArray(this.vao);
 
-    for (const layer of layers) {
-      const b = BLEND[layer.blend] || BLEND.normal;
-      b(gl);
-      if (layer.kind === 'tex') {
-        const pr = this.prog.tex;
-        gl.useProgram(pr.program);
-        gl.uniformMatrix3fv(pr.u.u_mat, false, layer.M);
-        gl.uniform2f(pr.u.u_res, W, H);
-        gl.uniform4fv(pr.u.u_uv, new Float32Array(layer.uv));
-        gl.uniform1f(pr.u.u_opacity, layer.st.opacity);
-        gl.uniform1f(pr.u.u_glow, layer.st.glow || layer.el.fx?.glow || 0);
-        gl.activeTexture(gl.TEXTURE0);
-        gl.bindTexture(gl.TEXTURE_2D, layer.tex);
-        gl.uniform1i(pr.u.u_tex, 0);
-        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-      } else {
-        const pr = this.prog.shape;
-        gl.useProgram(pr.program);
-        gl.uniformMatrix3fv(pr.u.u_mat, false, layer.M);
-        gl.uniform2f(pr.u.u_res, W, H);
-        gl.uniform4fv(pr.u.u_color, new Float32Array(layer.color));
-        gl.uniform2f(pr.u.u_size, layer.w, layer.h);
-        gl.uniform1f(pr.u.u_radius, layer.radius);
-        gl.uniform1f(pr.u.u_kind, layer.shape);
-        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      for (const layer of layers) {
+        const b = BLEND[layer.blend] || BLEND.normal;
+        b(gl);
+        if (layer.kind === 'tex') {
+          const pr = this.prog.tex;
+          gl.useProgram(pr.program);
+          gl.uniformMatrix3fv(pr.u.u_mat, false, layer.M);
+          gl.uniform2f(pr.u.u_res, W, H);
+          gl.uniform4fv(pr.u.u_uv, new Float32Array(layer.uv));
+          gl.uniform1f(pr.u.u_opacity, layer.st.opacity);
+          gl.uniform1f(pr.u.u_glow, layer.st.glow || layer.el.fx?.glow || 0);
+          gl.activeTexture(gl.TEXTURE0);
+          gl.bindTexture(gl.TEXTURE_2D, layer.tex);
+          gl.uniform1i(pr.u.u_tex, 0);
+          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        } else {
+          const pr = this.prog.shape;
+          gl.useProgram(pr.program);
+          gl.uniformMatrix3fv(pr.u.u_mat, false, layer.M);
+          gl.uniform2f(pr.u.u_res, W, H);
+          gl.uniform4fv(pr.u.u_color, new Float32Array(layer.color));
+          gl.uniform2f(pr.u.u_size, layer.w, layer.h);
+          gl.uniform1f(pr.u.u_radius, layer.radius);
+          gl.uniform1f(pr.u.u_kind, layer.shape);
+          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        }
       }
+      gl.bindVertexArray(null);
     }
-    gl.bindVertexArray(null);
 
     const fx = p.meta.fx || {};
     const bloom = clamp(Number(fx.bloom) || 0, 0, 3);

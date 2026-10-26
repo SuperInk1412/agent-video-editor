@@ -150,7 +150,13 @@ function applyProject(p, source) {
   if (S.selection.objectId && !(p.scene?.objects || []).some((o) => o.id === S.selection.objectId)) S.selection.objectId = null;
   if (gizmo) gizmo.objSel = S.selection.objectId || null;
   preview.setProject(p);
+  if (S.soloCameras) {
+    const ids = new Set((p.cameras || []).map((c) => c.id));
+    for (const id of [...S.soloCameras]) if (!ids.has(id)) S.soloCameras.delete(id);
+    preview.setSoloCameras(S.soloCameras);
+  }
   timeline.setProject(p);
+  timeline.setSoloCameras(S.soloCameras || new Set());
   timeline.setSelection(S.selection);
   inspector.render(p, S.selection, S.time);
   renderShots();
@@ -564,6 +570,8 @@ async function boot() {
         run: () => {
           if (checked) solo.delete(id); else solo.add(id);
           timeline.setSoloCameras(solo);
+          preview.setSoloCameras(solo);
+          preview.render(S.time);
         },
       },
       { label: '激活相机', run: () => { op({ op: 'activateCamera', id }); select({ camera: true }); } },

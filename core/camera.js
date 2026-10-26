@@ -167,6 +167,29 @@ export function activeCameraOf(project) {
 }
 
 /**
+ * Cameras that contribute to the viewport / render, in timeline order
+ * (top of the stack first). Hidden cameras and cameras without a path are
+ * skipped; `solo` is a viewport-only set of camera ids.
+ */
+export function cameraLayers(project, solo = null) {
+  const cams = Array.isArray(project?.cameras) && project.cameras.length
+    ? project.cameras
+    : (project?.camera ? [project.camera] : []);
+  if (!cams.length) return [];
+  const byId = new Map(cams.map((c) => [c.id, c]));
+  const order = Array.isArray(project.cameraOrder) && project.cameraOrder.length
+    ? project.cameraOrder
+    : cams.map((c) => c.id);
+  const only = solo instanceof Set ? solo : new Set(solo || []);
+  return order
+    .map((id) => byId.get(id))
+    .filter((cam) => cam
+      && cam.visible !== false
+      && Array.isArray(cam.path) && cam.path.length > 0
+      && (!only.size || only.has(cam.id)));
+}
+
+/**
  * Keyframed camera transform at time t.
  *
  * `center` is a world point; `position` is the path offset relative to it.
