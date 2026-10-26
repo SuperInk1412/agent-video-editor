@@ -24,6 +24,9 @@ VedioMaker 是一个本地的视频作曲台：时间线由你自己定义，画
 
 ## 快速开始
 
+外部 agent 可通过 MCP stdio 操作项目：`node mcp/server.js --project <项目目录>`。
+配置与编辑 / 出帧闭环见 [MCP 接口](docs/SPEC-MCP.md)。
+
 ```bash
 # 在仓库根启动：先弹项目选择器（不再默认死开 demo）
 npm start

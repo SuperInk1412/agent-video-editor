@@ -504,7 +504,7 @@ export function applyOp(p, op) {
       if (!Array.isArray(op.pos) || op.pos.length !== 3) fail('cameraKey needs pos:[x,y,z]');
       const t = Math.round(Number(op.t) * 1000) / 1000;
       if (!Number.isFinite(t)) fail('cameraKey needs t');
-      const cam = activeCamera(p, true);
+      const cam = op.id ? cameraById(p, op.id) : activeCamera(p, true);
       // Keep the existing curve shape when only the position is being edited.
       const old = (cam.path || []).find((k) => Math.abs(k.t - t) <= 1e-4);
       cam.path = (cam.path || []).filter((k) => Math.abs(k.t - t) > 1e-4);
@@ -540,7 +540,7 @@ export function applyOp(p, op) {
     }
 
     case 'cameraSet': {
-      const cam = activeCamera(p, true);
+      const cam = op.id ? cameraById(p, op.id) : activeCamera(p, true);
       const patch = op.patch || {};
       const next = deepMerge(cam, patch);
       Object.keys(next).forEach((k) => { cam[k] = next[k]; });
@@ -551,7 +551,7 @@ export function applyOp(p, op) {
     case 'cameraPath': {
       // Whole-path write used by the 3D viewport (drag a node / pull a handle).
       if (!Array.isArray(op.path)) fail('cameraPath needs path[]');
-      const cam = activeCamera(p, true);
+      const cam = op.id ? cameraById(p, op.id) : activeCamera(p, true);
       cam.path = op.path
         .filter((k) => k && Array.isArray(k.pos) && k.pos.length === 3 && Number.isFinite(Number(k.t)))
         .map((k) => ({

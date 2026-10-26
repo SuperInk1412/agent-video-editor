@@ -2,6 +2,8 @@ import { applyOps } from '../core/ops.js';
 import { createProject, assertValidProject, normalizeProject, cloneProject } from '../core/schema.js';
 import { assertSafeData, isRecord } from '../core/json.js';
 import { fault } from './errors.js';
+import { EDIT_SCHEMA } from '../core/contracts.js';
+import { validateContract } from './validate-contract.js';
 
 export const content = (project) => {
   if (!project) return null;
@@ -40,6 +42,7 @@ export class ProjectService {
         case 'ops':
           ops = command.ops;
           if (!Array.isArray(ops) || !ops.length) throw fault('INVALID_ARGUMENT', 'ops must be a nonempty array');
+          validateContract({ ops }, { ...EDIT_SCHEMA, required: ['ops'] });
           { const check = (list) => {
             for (const op of list) {
               if (op?.op === 'restoreProject' || op?.op === 'replaceTimeline') throw fault('OP_INVALID', 'snapshot operations require an explicit project command');

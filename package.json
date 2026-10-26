@@ -12,6 +12,7 @@
     "web": "node engine/server.js --open",
     "dev": "node scripts/dev.mjs --web",
     "cli": "node cli/vdm.js",
+    "mcp": "node mcp/server.js",
     "test": "node --test \"tests/*.test.mjs\"",
     "demo": "node scripts/demo.mjs",
     "still": "node cli/vdm.js still",
