@@ -158,12 +158,12 @@ def eval_element(el, t, meta):
     st = {
         'x': float(g('transform.x', tr.get('x', 0)) or 0),
         'y': float(g('transform.y', tr.get('y', 0)) or 0),
-        'scale': float(g('transform.scale', tr.get('scale', 1)) or 1),
+        'scale': float(g('transform.scale', tr.get('scale', 1)) or 0),
         'rotation': float(g('transform.rotation', tr.get('rotation', 0)) or 0),
         'opacity': float(g('transform.opacity', tr.get('opacity', 1)) or 0),
         'glow': float(g('fx.glow', (el.get('fx') or {}).get('glow', 0)) or 0),
         'text': g('style.text', (el.get('style') or {}).get('text', '')),
-        'size': float(g('style.size', (el.get('style') or {}).get('size', 96)) or 96),
+        'size': float(g('style.size', (el.get('style') or {}).get('size', 96)) or 0),
         'color': g('style.color', (el.get('style') or {}).get('color', '#ffffff')),
     }
     md = motion_delta(el, t, meta)
