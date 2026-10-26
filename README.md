@@ -126,9 +126,9 @@ alpha-over，画面变换和透明度逐帧写进 strip，所以预览和最终�
 
 | 路径 | 作用 |
 | --- | --- |
-| `core/` | 纯 JS 模型：时间、求值、ops、schema、存储（零依赖，浏览器/Node 共用） |
+| `core/` | 纯 JS 模型：时间、求值、ops、schema、输入边界（零依赖，浏览器/Node 共用） |
 | `cli/vdm.js` | `vdm` 命令：人用，也**是 AI 的工具面** |
-| `engine/` | Node 服务：静态/媒体服务、REST+SSE、Blender 调度、agent 调度、节拍分析 |
+| `engine/` | Node 服务：项目存储与锁、静态/媒体服务、REST+SSE、Blender 调度、agent 调度、节拍分析 |
 | `app/renderer/` | 无构建步骤的 UI（原生 ESM + WebGL2） |
 | `app/electron/` | Electron 壳（启动引擎 + 开窗） |
 | `blender/` | bpy 场景构建与渲染（图层、文字、合成器、ffmpeg 封装） |

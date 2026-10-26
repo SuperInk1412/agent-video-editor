@@ -31,6 +31,12 @@ export async function findBin(name) {
 
 export const hashOf = (obj) => crypto.createHash('sha1').update(JSON.stringify(obj)).digest('hex').slice(0, 12);
 
+export async function hashFile(file, { signal } = {}) {
+  const hash = crypto.createHash('sha256');
+  for await (const chunk of fss.createReadStream(file, { signal })) hash.update(chunk);
+  return hash.digest('hex');
+}
+
 export async function probeMedia(file) {
   const ffprobe = await findBin('ffprobe');
   const { stdout } = await execFileP(ffprobe, [
@@ -57,13 +63,14 @@ export async function probeMedia(file) {
 }
 
 /** Extract a video element's source range to a PNG sequence at project fps/size (cover-cropped). */
-export async function extractSequence({ src, outDir, srcIn = 0, duration, fps, width, height, onLog }) {
+export async function extractSequence({ src, outDir, srcIn = 0, duration, fps, width, height, fit = 'cover', onLog }) {
   const ffmpeg = await findBin('ffmpeg');
   await fs.mkdir(outDir, { recursive: true });
   const args = [
     '-y', '-hide_banner', '-loglevel', 'error',
     '-ss', String(Math.max(0, srcIn)), '-t', String(duration), '-i', src,
-    '-vf', `fps=${fps},scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}`,
+    '-vf', fit === 'stretch' ? `fps=${fps},scale=${width}:${height}`
+      : `fps=${fps},scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}`,
     '-start_number', '0', path.join(outDir, 'f_%05d.png'),
   ];
   await new Promise((resolve, reject) => {

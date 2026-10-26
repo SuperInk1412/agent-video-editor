@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { normalizeProject } from '../core/schema.js';
-import { buildShot } from '../engine/shot.js';
+import { buildShot, bakeObjects, worldSnapshot } from '../engine/shot.js';
+import { applyOp } from '../core/ops.js';
 
 const project = () => normalizeProject({
   schema: 'vdm.project/1', rev: 1,
@@ -44,4 +45,26 @@ test('buildShot exposes one baked layer per visible camera, top first', () => {
   // legacy camera remains the active camera's bake
   assert.equal(shot.camera.length, 25);
   assert.deepEqual(shot.camera[0].pos, shot.cameraLayers[0].camera[0].pos);
+});
+
+test('hidden 3D objects do not appear in the render package', () => {
+  const p = project();
+  applyOp(p, { op: 'objectAdd', object: { id: 'hidden', type: 'solid', visible: false, duration: 1 } });
+  applyOp(p, { op: 'objectAdd', object: { id: 'shown', type: 'solid', duration: 1 } });
+  const baked = bakeObjects(p);
+  assert.deepEqual(baked.map((obj) => obj.id), ['shown']);
+  assert.equal(baked[0].frames[0].opacity, 1);
+  assert.equal(baked[0].frames.at(-1).opacity, 0, 'the time range has an exclusive end');
+});
+
+test('viewport, full render and partial render share one full-shot city', () => {
+  const p = project();
+  p.meta.fps = 12;
+  p.cameras[1].path = [{ t: 0, pos: [140, 8, 0] }, { t: 1, pos: [140, 8, -150] }];
+  const world = worldSnapshot(p);
+  assert.deepEqual(buildShot(p).city, world);
+  assert.deepEqual(buildShot(p, { from: 0.5, to: 0.75 }).city, world);
+  p.activeCameraId = 'cam_bottom';
+  p.camera = p.cameras[1];
+  assert.deepEqual(worldSnapshot(p), world, 'selecting the edit camera does not change world geometry');
 });

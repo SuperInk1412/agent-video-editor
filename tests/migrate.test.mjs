@@ -7,7 +7,7 @@ import { evalCamera, normalizeCamera } from '../core/camera.js';
 import { evalElement, motionDelta, fadeMul } from '../core/evaluate.js';
 import { applyLegacy } from '../core/legacy.js';
 
-const load = (name) => JSON.parse(fs.readFileSync(new URL(`../projects/${name}/project.vdm.json`, import.meta.url), 'utf8'));
+const load = (name) => JSON.parse(fs.readFileSync(new URL(`./fixtures/${name}.json`, import.meta.url), 'utf8'));
 const near = (a, b, eps = 1e-6) => assert.ok(Math.abs(a - b) <= eps, `${a} != ${b}`);
 const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const norm = (v) => { const l = Math.hypot(v[0], v[1], v[2]) || 1; return v.map((x) => x / l); };
@@ -99,6 +99,7 @@ test('migrate: the 3D camera keeps its exact flight path', () => {
   const clean = {
     ...v2,
     camera: normalizeCamera({ ...v2.camera, shake: { ...v2.camera.shake, amp: 0 } }),
+    cameras: [], cameraOrder: [], activeCameraId: null,
   };
   let worst = 0;
   for (let t = 0; t <= v2.meta.duration; t += 0.25) {

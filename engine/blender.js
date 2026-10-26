@@ -6,8 +6,9 @@ import fs from 'node:fs/promises';
 import fss from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { paths } from '../core/store.js';
-import { encodeSequence, extractSequence, fileExists, hashOf } from './media.js';
+import { randomUUID } from 'node:crypto';
+import { paths } from './storage.js';
+import { encodeSequence, extractSequence, fileExists, hashOf, hashFile } from './media.js';
 import { is3D, writeShot } from './shot.js';
 import { which } from './which.js';
 
@@ -62,16 +63,29 @@ export async function prepareSequences(dir, project, { onLog } = {}) {
     if (el.type !== 'video' || !el.src) continue;
     const src = path.isAbsolute(el.src) ? el.src : path.join(p.root, el.src);
     if (!(await fileExists(src))) continue;
-    const key = hashOf({ src, in: el.srcIn || 0, d: el.duration, fps, w: width, h: height });
-    const seqDir = path.join(seqRoot, `${el.id}-${key}`);
+    const before = await fs.stat(src);
+    const digest = await hashFile(src);
+    const key = hashOf({ version: 2, digest, in: el.srcIn || 0, d: el.duration, fps, w: width, h: height, fit: el.style?.fit || 'cover' });
+    const seqDir = path.join(seqRoot, key);
     const marker = path.join(seqDir, '.ok');
     if (!(await fileExists(marker))) {
       onLog?.(`extract ${el.id} -> ${seqDir}`);
-      await extractSequence({
-        src, outDir: seqDir, srcIn: el.srcIn || 0, duration: el.duration,
-        fps, width, height, onLog,
-      });
-      await fs.writeFile(marker, 'ok');
+      const temporary = await fs.mkdtemp(path.join(seqRoot, '.building-'));
+      try {
+        const result = await extractSequence({
+          src, outDir: temporary, srcIn: el.srcIn || 0, duration: el.duration,
+          fps, width, height, fit: el.style?.fit || 'cover', onLog,
+        });
+        if (!result.count) throw new Error(`no video frames extracted for ${el.id}`);
+        const after = await fs.stat(src);
+        if (after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ino !== before.ino) throw Object.assign(new Error('source changed during extraction'), { code: 'SOURCE_CHANGED' });
+        await fs.writeFile(path.join(temporary, '.ok'), JSON.stringify({ version: 2, digest, count: result.count }));
+        try { await fs.rename(temporary, seqDir); }
+        catch (e) {
+          // Another process may have published this immutable content first.
+          if (!['EEXIST', 'ENOTEMPTY'].includes(e.code) || !(await fileExists(marker))) throw e;
+        }
+      } finally { await fs.rm(temporary, { recursive: true, force: true }); }
     }
     el._sequenceDir = seqDir;
   }
@@ -93,7 +107,7 @@ function killTree(child) {
 export async function runJob(dir, job, { onProgress, onLog, signal } = {}) {
   const exe = await findBlender();
   const p = await (async () => { const x = paths(dir); await fs.mkdir(path.join(x.cache, 'jobs'), { recursive: true }); return x; })();
-  const jobId = `${job.mode}-${Date.now()}`;
+  const jobId = `${job.mode}-${randomUUID()}`;
   const jobFile = path.join(p.cache, 'jobs', `${jobId}.json`);
   const projFile = path.join(p.cache, 'jobs', `${jobId}-project.json`);
 

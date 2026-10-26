@@ -10,8 +10,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   paths, loadProject, saveProject, findProjectRoot, watchProject,
   ensureProjectDirs, projectExists, withLock, PROJECT_FILE,
-} from '../core/store.js';
-import { normalizeProject } from '../core/schema.js';
+} from './storage.js';
+import { normalizeProject, assertValidProject } from '../core/schema.js';
 import { applyOps } from '../core/ops.js';
 import { probeMedia, mimeOf, fileExists } from './media.js';
 import { renderStill, renderVideo, blenderVersion, findBlender } from './blender.js';
@@ -19,8 +19,11 @@ import { analyzeBeats } from './beats.js';
 import { planProject, summarizeProject, STYLE_PRESETS } from './storyboard.js';
 import { AgentRunner, findDsh, CLI_PATH } from './agent.js';
 import { createLogger } from './log.js';
-import { cachedCity, is3D } from './shot.js';
-import { bakeCameraTrack } from '../core/camera.js';
+import { worldSnapshot } from './shot.js';
+import { readPath, writePath, isWithin, pathDenied } from './path-policy.js';
+import { pipeline as streamPipeline } from 'node:stream/promises';
+import { Transform } from 'node:stream';
+import { randomUUID } from 'node:crypto';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const APP_DIR = path.resolve(HERE, '..');
@@ -39,22 +42,34 @@ function readBody(req, limit = 40 * 1024 * 1024) {
     const chunks = [];
     req.on('data', (d) => {
       size += d.length;
-      if (size > limit) { reject(new Error('body too large')); req.destroy(); return; }
+      if (size > limit) { reject(Object.assign(new Error('body too large'), { status: 413 })); req.resume(); return; }
       chunks.push(d);
     });
     req.on('end', () => {
       const raw = Buffer.concat(chunks).toString('utf8');
       if (!raw) return resolve({});
-      try { resolve(JSON.parse(raw)); } catch (e) { reject(new Error(`bad json: ${e.message}`)); }
+      try {
+        const value = JSON.parse(raw);
+        if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('request body must be an object');
+        resolve(value);
+      } catch (e) { reject(Object.assign(new Error(`bad json: ${e.message}`), { status: 400 })); }
     });
     req.on('error', reject);
   });
 }
 
-function safeJoin(base, rel) {
-  const p = path.resolve(base, '.' + path.posix.sep + rel);
-  if (!p.startsWith(path.resolve(base))) return null;
-  return p;
+async function publishMedia(temporary, directory, filename) {
+  const ext = path.extname(filename);
+  const stem = path.basename(filename, ext);
+  for (let i = 0; ; i++) {
+    const name = i ? `${stem}-${i}${ext}` : filename;
+    try {
+      // Same-directory hard link publishes a complete file atomically without
+      // replacing another upload that chose the same human-readable name.
+      await fsp.link(temporary, path.join(directory, name));
+      return name;
+    } catch (e) { if (e.code !== 'EEXIST') throw e; }
+  }
 }
 
 async function serveFile(req, res, file, { range = false } = {}) {
@@ -64,12 +79,11 @@ async function serveFile(req, res, file, { range = false } = {}) {
   const mime = mimeOf(file);
   const head = { 'content-type': mime, 'cache-control': 'no-cache', 'accept-ranges': 'bytes', 'content-disposition': 'inline' };
   if (range && req.headers.range) {
-    const m = /bytes=(\d*)-(\d*)/.exec(req.headers.range);
-    let start = m && m[1] ? parseInt(m[1], 10) : 0;
-    let end = m && m[2] ? parseInt(m[2], 10) : st.size - 1;
-    if (Number.isNaN(start)) start = 0;
-    if (Number.isNaN(end)) end = st.size - 1;
-    if (start >= st.size) {
+    const m = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range);
+    const suffix = m && !m[1] && m[2] ? Number(m[2]) : null;
+    const start = suffix != null ? Math.max(0, st.size - suffix) : m?.[1] ? Number(m[1]) : NaN;
+    let end = suffix != null ? st.size - 1 : m?.[2] ? Number(m[2]) : st.size - 1;
+    if (!m || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || suffix === 0 || start < 0 || start >= st.size || end < start) {
       res.writeHead(416, { 'content-range': `bytes */${st.size}` });
       return res.end();
     }
@@ -79,10 +93,10 @@ async function serveFile(req, res, file, { range = false } = {}) {
       'content-range': `bytes ${start}-${end}/${st.size}`,
       'content-length': end - start + 1,
     });
-    return fs.createReadStream(file, { start, end }).pipe(res);
+    return streamPipeline(fs.createReadStream(file, { start, end }), res).catch(() => {});
   }
   res.writeHead(200, { ...head, 'content-length': st.size });
-  return fs.createReadStream(file).pipe(res);
+  return streamPipeline(fs.createReadStream(file), res).catch(() => {});
 }
 
 function openInBrowser(url, log) {
@@ -98,7 +112,7 @@ function openInBrowser(url, log) {
   }
 }
 
-export async function startServer({ root, port = 47100, open = false, onReady } = {}) {
+export async function startServer({ root, port = 47100, open = false, onReady, importRoots = [], uploadLimit = 1024 * 1024 * 1024 } = {}) {
   const projectRoot = path.resolve(root);
   if (!(await projectExists(projectRoot))) {
     throw new Error(`no ${PROJECT_FILE} in ${projectRoot}`);
@@ -156,7 +170,7 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
     adoptDisk(current);
     const work = JSON.parse(JSON.stringify(current));
     const out = await fn(work);
-    const next = normalizeProject(out?.project || work);
+    const next = normalizeProject(assertValidProject(out?.project || work));
     next.rev = current.rev; // keep rev monotonic even when restoring a snapshot
     const saved = await saveAndBroadcast(next, by);
     if (undo === 'push') pushUndo(current);
@@ -280,9 +294,14 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
   }
 
   const server = http.createServer(async (req, res) => {
-    const url = new URL(req.url, 'http://127.0.0.1');
-    const pathname = decodeURIComponent(url.pathname);
+    let pathname = req.url;
     try {
+      const origin = `http://127.0.0.1:${server.address().port}`;
+      const host = new URL(`http://${req.headers.host || ''}`);
+      if (!['127.0.0.1', 'localhost'].includes(host.hostname) || host.port !== String(server.address().port)) return json(res, 403, { error: 'invalid host', code: 'ACCESS_DENIED' });
+      if (req.headers.origin && ![origin, `http://localhost:${server.address().port}`].includes(req.headers.origin)) return json(res, 403, { error: 'invalid origin', code: 'ACCESS_DENIED' });
+      const url = new URL(req.url, origin);
+      try { pathname = decodeURIComponent(url.pathname); } catch { return json(res, 400, { error: 'invalid URL encoding', code: 'INVALID_ARGUMENT' }); }
       // ---------------- SSE ----------------
       if (pathname === '/api/events') {
         res.writeHead(200, {
@@ -301,9 +320,8 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
 
       // ---------------- 3D world (shared by viewport + blender) ----------------
       if (pathname === '/api/world' && req.method === 'GET') {
-        const flight = is3D(project) ? bakeCameraTrack(project).map((c) => c.pos) : null;
-        const city = cachedCity(project.world, flight);
-        return json(res, 200, { hash: city.hash, city });
+        const city = worldSnapshot(project);
+        return json(res, 200, { hash: city.hash, city, rev: project.rev });
       }
 
       // ---------------- logs ----------------
@@ -397,7 +415,7 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
 
       if (pathname === '/api/project' && req.method === 'POST') {
         const body = await readBody(req);
-        const replacement = normalizeProject(body.project);
+        const replacement = assertValidProject(body.project);
         const { saved } = await commit(body.by || 'ui', () => ({ project: replacement }));
         return json(res, 200, { ok: true, project: saved });
       }
@@ -444,21 +462,22 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
       if (pathname === '/api/import' && req.method === 'POST') {
         const body = await readBody(req);
         const files = Array.isArray(body.files) ? body.files : [];
-        const mediaDir = path.join(projectRoot, 'media');
-        await fsp.mkdir(mediaDir, { recursive: true });
+        await fsp.mkdir(path.join(projectRoot, 'media'), { recursive: true });
+        const mediaDir = await readPath(projectRoot, 'media');
         const imported = [];
         for (const f of files) {
-          const src = path.resolve(f);
+          const absolute = path.isAbsolute(f) ? f : path.resolve(projectRoot, f);
+          const allowed = [projectRoot, ...importRoots].find((base) => isWithin(base, absolute));
+          if (!allowed) throw pathDenied();
+          const src = await readPath(allowed, path.relative(allowed, absolute));
           if (!(await fileExists(src))) continue;
-          let name = path.basename(src);
-          let dest = path.join(mediaDir, name);
-          let i = 1;
-          while (await fileExists(dest)) {
-            const ext = path.extname(name);
-            name = `${path.basename(name, ext)}-${i++}${ext}`;
-            dest = path.join(mediaDir, name);
-          }
-          await fsp.copyFile(src, dest);
+          const temporary = path.join(mediaDir, `.import-${randomUUID()}`);
+          let name;
+          try {
+            await fsp.copyFile(src, temporary, fs.constants.COPYFILE_EXCL);
+            name = await publishMedia(temporary, mediaDir, path.basename(src));
+          } finally { await fsp.rm(temporary, { force: true }); }
+          const dest = path.join(mediaDir, name);
           let info = null;
           try { info = await probeMedia(dest); } catch { /* not media */ }
           imported.push({ path: `media/${name}`, name, info });
@@ -470,15 +489,30 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
         const rawName = String(url.searchParams.get('name') || `upload-${Date.now()}.bin`);
         const ext = path.extname(rawName);
         const base = path.basename(rawName, ext).replace(/[^\w.\- ()一-龥]/g, '_').slice(0, 80);
-        const mediaDir = path.join(projectRoot, 'media');
-        await fsp.mkdir(mediaDir, { recursive: true });
-        let name = `${base}${ext}`;
-        let dest = path.join(mediaDir, name);
-        let i = 1;
-        while (await fileExists(dest)) { name = `${base}-${i++}${ext}`; dest = path.join(mediaDir, name); }
-        const chunks = [];
-        for await (const c of req) chunks.push(c);
-        await fsp.writeFile(dest, Buffer.concat(chunks));
+        await fsp.mkdir(path.join(projectRoot, 'media'), { recursive: true });
+        const mediaDir = await readPath(projectRoot, 'media');
+        let name;
+        const temporary = path.join(mediaDir, `.upload-${randomUUID()}`);
+        let size = 0;
+        const limit = new Transform({ transform(chunk, _encoding, done) {
+          size += chunk.length;
+          done(size > uploadLimit ? Object.assign(new Error('upload too large'), { status: 413 }) : null, chunk);
+        } });
+        const failed = (error) => limit.destroy(error);
+        const aborted = () => failed(new Error('upload aborted'));
+        req.once('error', failed);
+        req.once('aborted', aborted);
+        limit.once('error', () => { req.unpipe(limit); req.resume(); });
+        try {
+          req.pipe(limit);
+          await streamPipeline(limit, fs.createWriteStream(temporary, { flags: 'wx' }));
+          name = await publishMedia(temporary, mediaDir, `${base}${ext}`);
+        } finally {
+          req.off('error', failed);
+          req.off('aborted', aborted);
+          await fsp.rm(temporary, { force: true });
+        }
+        const dest = path.join(mediaDir, name);
         let info = null;
         try { info = await probeMedia(dest); } catch { /* not media */ }
         return json(res, 200, { imported: [{ path: `media/${name}`, name, info }] });
@@ -487,7 +521,7 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
       if (pathname === '/api/probe' && req.method === 'GET') {
         const src = url.searchParams.get('src');
         if (!src) return json(res, 400, { error: 'src required' });
-        const file = path.isAbsolute(src) ? src : path.join(projectRoot, src);
+        const file = await readPath(projectRoot, src);
         if (!(await fileExists(file))) return json(res, 404, { error: 'not found' });
         return json(res, 200, await probeMedia(file));
       }
@@ -497,7 +531,7 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
         const body = await readBody(req);
         const rel = body.src || project.meta.audio?.src;
         if (!rel) return json(res, 400, { error: 'no audio' });
-        const file = path.isAbsolute(rel) ? rel : path.join(projectRoot, rel);
+        const file = await readPath(projectRoot, rel);
         toast('分析节拍中…');
         const result = await analyzeBeats(file, { duration: body.duration || null, fps: project.meta.fps });
         await commit('beats', (cur) => {
@@ -585,7 +619,7 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
         const crf = Number(body.crf ?? 18);
         const full = from <= 0.001 && to >= project.meta.duration - 0.05;
         const out = body.out
-          ? path.resolve(body.out)
+          ? await writePath(p.renders, body.out)
           : path.join(p.renders, `${full ? 'master' : 'part'}-${Date.now()}.mp4`);
         Object.assign(renderState, {
           running: true, kind: full ? 'master' : 'part', from, to, progress: 0,
@@ -690,32 +724,33 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
       if (pathname === '/' || pathname === '/index.html') {
         return serveFile(req, res, path.join(RENDERER, 'index.html'));
       }
-      if (pathname.startsWith('/app/')) return serveFile(req, res, safeJoin(APP_DIR, pathname) || '');
-      if (pathname.startsWith('/core/')) return serveFile(req, res, safeJoin(APP_DIR, pathname) || '');
+      if (pathname.startsWith('/app/')) return serveFile(req, res, await readPath(path.join(APP_DIR, 'app'), pathname.slice(5)));
+      if (pathname.startsWith('/core/')) return serveFile(req, res, await readPath(CORE, pathname.slice(6)));
       if (pathname.startsWith('/media/')) {
-        const file = safeJoin(path.join(projectRoot, 'media'), pathname.slice(7));
+        const file = await readPath(path.join(projectRoot, 'media'), pathname.slice(7));
         return file ? serveFile(req, res, file, { range: true }) : json(res, 400, { error: 'bad path' });
       }
       if (pathname.startsWith('/frames/')) {
-        const file = safeJoin(p.frames, pathname.slice(8));
+        const file = await readPath(p.frames, pathname.slice(8));
         return file ? serveFile(req, res, file) : json(res, 400, { error: 'bad path' });
       }
       if (pathname.startsWith('/renders/')) {
-        const file = safeJoin(p.renders, pathname.slice(9));
+        const file = await readPath(p.renders, pathname.slice(9));
         return file ? serveFile(req, res, file, { range: true }) : json(res, 400, { error: 'bad path' });
       }
       if (pathname.startsWith('/assets/')) {
-        const file = safeJoin(path.join(projectRoot, 'assets'), pathname.slice(8));
+        const file = await readPath(path.join(projectRoot, 'assets'), pathname.slice(8));
         return file ? serveFile(req, res, file) : json(res, 400, { error: 'bad path' });
       }
 
       return json(res, 404, { error: 'not found' });
     } catch (e) {
-      log.error('request failed', {
-        method: req.method, path: pathname, error: e.message, stack: String(e.stack || '').slice(0, 1200),
+      const status = e.status || (e.code === 'ENOENT' ? 404 : isRejection(e) ? 400 : 500);
+      log[status >= 500 ? 'error' : 'warn']('request failed', {
+        method: req.method, path: pathname, error: e.message, stack: status >= 500 ? String(e.stack || '').slice(0, 1200) : undefined,
         log: e.log ? String(e.log).slice(-3000) : undefined,
       });
-      if (!res.headersSent) json(res, 500, { error: e.message });
+      if (!res.headersSent) json(res, status, { error: e.message, code: e.code || (status === 500 ? 'INTERNAL_ERROR' : 'INVALID_ARGUMENT'), ...(e.issues ? { issues: e.issues } : {}) });
       else res.end();
     }
   });
@@ -750,7 +785,8 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
     get project() { return project; },
     async close() {
       log.info('engine shutting down');
-      agent.cancel();
+      await agent.close();
+      clearTimeout(pipelineTimer);
       unwatch();
       for (const c of clients) { try { c.end(); } catch { /* ignore */ } }
       clients.clear();

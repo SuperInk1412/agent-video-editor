@@ -37,12 +37,16 @@
 `projects/<name>/project.vdm.json` 是**唯一的编辑状态**。没有藏在内存里的影子时间线。
 
 - 每次修改都是 `core/ops.js` 里一个 JSON 操作；
-- `core/store.js` 用「mkdir 原子锁 + 临时文件 rename」写入，`rev` 自增；
+- `engine/storage.js` 用「带持有者身份的 mkdir 原子锁 + 临时文件 rename」写入，`rev` 自增；
 - UI 与 CLI/AI 都会改这个文件，引擎用 `fs.watchFile` 监听外部变更并广播；
 - 引擎的写入（UI ops、AI 提议、撤销/重做、节拍、自动分镜）排成一个队列，每次在锁里**从磁盘**
   读最新版本再应用，所以不会覆盖 CLI 刚写、还没被监听到的修改；
 - 外部写入（CLI、其他进程）被监听到时也会进撤销栈，在 UI 里一样能撤销；
 - 失败的操作不会落盘（先克隆校验再写）。
+
+`core/ops.js` 只负责内存中的编辑语义，存储与跨进程锁位于 Node 引擎层；`core/` 保持浏览器可用。
+文件锁不因持有时间长而驱逐活跃进程。可确认 PID 已退出时恢复锁；无法识别持有者的旧锁会报告
+`LOCK_ORPHANED`，避免误删其他写入者的锁。
 
 这样做的直接好处：**AI 的修改和你手动的修改是同一类东西**——看得见（时间线会跳）、
 能撤销（服务端撤销栈）、能 diff（纯 JSON）。
@@ -90,6 +94,10 @@ engine/shot.js   烘焙：{ city, camera:[逐帧机位], fx } → .vdm/cache/sho
 - **成片**：`blender/vdm_city.py` 读同一份烘焙包，合并网格 + 程序化窗格材质 + Mist 雾 +
   逐帧相机（track_quat + roll），EEVEE 渲染；
 - 因为几何与机位都来自同一份数据，"预览构图 = 成片构图"是结构保证，不靠调参对齐。
+
+`engine/shot.js::worldSnapshot()` 为所有可见相机生成整段独立航线，以同一份城市数据服务
+预览、静帧与片段渲染；相机之间不会产生额外的连接航线。`npm run check:evaluate` 使用真实
+Blender 对固定边界样例逐字段对拍，补充单元测试与预览方向检查。
 
 ## 5. AI 集成（DSH-TUI）
 

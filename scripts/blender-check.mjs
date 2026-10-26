@@ -10,7 +10,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createProject } from '../core/schema.js';
 import { applyOps } from '../core/ops.js';
-import { saveProject } from '../core/store.js';
+import { saveProject } from '../engine/storage.js';
 import { blenderVersion, renderStill } from '../engine/blender.js';
 import { findBin } from '../engine/media.js';
 

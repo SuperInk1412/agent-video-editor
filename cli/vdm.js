@@ -7,7 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   paths, loadProject, saveProject, mutateProject, findProjectRoot, projectExists,
-} from '../core/store.js';
+} from '../engine/storage.js';
 import { createProject } from '../core/schema.js';
 import { applyOps, applyOp, coerceValue } from '../core/ops.js';
 import { evalElement } from '../core/evaluate.js';

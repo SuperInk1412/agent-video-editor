@@ -132,15 +132,18 @@ window.addEventListener('pointerdown', (e) => {
 
 let worldTimer = null;
 let worldKey = '';
+let worldRequest = 0;
 function syncWorld(p) {
   if (!p.camera) return;
-  const key = JSON.stringify(p.world || {});
+  const key = JSON.stringify({ world: p.world, cameras: p.cameras, camera: p.camera,
+    cameraOrder: p.cameraOrder, fps: p.meta.fps, duration: p.meta.duration });
   if (key === worldKey) return;
+  const request = ++worldRequest;
   clearTimeout(worldTimer);
   worldTimer = setTimeout(async () => {
     try {
       const j = await fetch('/api/world').then((r) => r.json());
-      if (j.city) { worldKey = key; preview.setCity(j.city); }
+      if (j.city && request === worldRequest) { worldKey = key; preview.setCity(j.city); }
     } catch (e) { /* logged by the server when it fails */ }
   }, 250);
 }
