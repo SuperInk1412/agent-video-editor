@@ -26,10 +26,15 @@ export function serveMcp({ client, input = process.stdin, output = process.stdou
     const id = hasId && (typeof message.id === 'string' || Number.isInteger(message.id)) ? message.id : null;
     if (!message || Array.isArray(message) || message.jsonrpc !== '2.0' || typeof message.method !== 'string' || hasId && id === null) return rpcError(id, -32600, 'Invalid Request');
     const { method, params = {} } = message;
+    if (message.params !== undefined && (!params || typeof params !== 'object' || Array.isArray(params))) {
+      if (hasId) return rpcError(id, -32602, 'params must be an object');
+      return;
+    }
     if (method === 'notifications/initialized' && !hasId) { if (phase === 'initializing') phase = 'ready'; return; }
     if (method === 'notifications/cancelled' && !hasId) { pending.get(params.requestId)?.abort(); return; }
     if (!hasId) return; // Never reply to notifications, including unknown ones.
     if (pending.has(id)) return rpcError(id, -32600, 'duplicate active request id');
+    if (pending.size >= 64) return rpcError(id, -32000, 'too many active requests');
     const controller = new AbortController(); pending.set(id, controller);
     try {
       let result;

@@ -48,6 +48,18 @@ test('operation schemas reject unknown kinds and unexpected fields before runtim
   }
 });
 
+test('malformed request params and oversized input return protocol errors and close cleanly', async () => {
+  const input = new PassThrough(), output = new PassThrough(), results = [];
+  const lines = readline.createInterface({ input: output }); lines.on('line', (line) => results.push(JSON.parse(line)));
+  const server = serveMcp({ input, output, client: {}, maxMessageBytes: 128 });
+  input.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping', params: null }) + '\n');
+  input.write('x'.repeat(129));
+  await server.done;
+  assert.ok(results.some((item) => item.error.code === -32602));
+  assert.ok(results.some((item) => item.error.code === -32600));
+  lines.close();
+});
+
 function childClient(root, t) {
   const child = spawn(process.execPath, ['mcp/server.js', '--project', root], { stdio: ['pipe', 'pipe', 'pipe'] });
   const pending = new Map(); let id = 0, stderr = '';
