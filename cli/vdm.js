@@ -13,7 +13,7 @@ import { connectRuntime } from '../engine/runtime.js';
 import { errorData } from '../application/errors.js';
 import { coerceValue } from '../core/ops.js';
 import { evalElement } from '../core/evaluate.js';
-import { migrateProject, orthoScreen } from '../core/migrate.js';
+import { migrateProject, orthoScreen, evaluateMigratedObject } from '../core/migrate.js';
 import { objectPose } from '../core/scene.js';
 import { applyLegacy } from '../core/legacy.js';
 import { evalCamera, normalizeCamera } from '../core/camera.js';
@@ -502,7 +502,7 @@ async function cmdScene(root, argv, flags) {
   const v3 = migrateProject(v2);
   const scene = v3.scenes[v3.sceneId];
 
-  if (flags.json) {
+  if (flags.json && sub !== 'check') {
     console.log(JSON.stringify({ sceneId: v3.sceneId, units: v3.units, scenes: v3.scenes }, null, 2));
     return;
   }
@@ -535,15 +535,17 @@ async function cmdScene(root, argv, flags) {
       }
     }
     let drift = 0;
-    const camObj = scene.objects.find((o) => o.type === 'camera');
-    if (v2.camera && camObj) {
-      const clean = { ...v2, camera: normalizeCamera({ ...v2.camera, shake: { ...v2.camera.shake, amp: 0 } }) };
+    for (const camera of v2.cameras || (v2.camera ? [v2.camera] : [])) {
+      const camObj = scene.objects.find((o) => o.id === camera.id || !camera.id && o.type === 'camera');
+      if (!camObj) throw new Error(`missing migrated camera ${camera.id}`);
       for (let t = 0; t <= v2.meta.duration; t += 0.1) {
-        const old = evalCamera(clean, t);
-        const pose = objectPose(camObj, t);
+        const old = evalCamera({ camera, meta: v2.meta }, t);
+        const pose = evaluateMigratedObject(camObj, t, v2.meta);
         drift = Math.max(drift, Math.hypot(...pose.pivot.map((v, i) => v - old.pos[i])));
       }
     }
+    if (worstPx > 1e-6 || drift > 2e-6) throw new Error(`migration fidelity failed: ${worstPx}px, ${drift}m`);
+    if (flags.json) { console.log(JSON.stringify({ ok: true, worstPx, cameraDrift: drift, migration: v3.migration })); return; }
     const legacy = scene.objects.filter((o) => o.legacy).length;
     console.log(`${C.gr('✓')} 迁移检查  2D 元素最大误差 ${worstPx.toFixed(6)} px  相机最大漂移 ${drift.toFixed(6)} m`);
     console.log(C.dim(`  legacy 保留：${legacy} 个元素（运动预设/抖动/淡入淡出），待新编辑器重写成关键帧`));

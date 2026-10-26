@@ -240,11 +240,10 @@ export function autoStoryboard({ project, media = [], style = 'neon', brief = ''
  * Everything else — title, size, audio, beats, cameras, world, 3D objects — stays.
  */
 export function planProject(project, { media = [], style = 'neon', brief = '', seed = 7, maxSegments = 12, duration = null } = {}) {
-  project.segments = [];
-  project.elements = [];
-  if (Number(duration) > 0) project.meta.duration = Number(duration);
-  const { ops, segments } = autoStoryboard({ project, media, style, brief, seed, maxSegments });
-  applyOps(project, ops);
+  const planned = { ...project, meta: { ...project.meta, ...(Number(duration) > 0 ? { duration: Number(duration) } : {}) } };
+  const { ops, segments } = autoStoryboard({ project: planned, media, style, brief, seed, maxSegments });
+  applyOps(project, [{ op: 'replaceTimeline', elements: [], segments: [] },
+    ...(Number(duration) > 0 ? [{ op: 'setMeta', path: 'duration', value: Number(duration) }] : []), ...ops]);
   return { segments: segments.length, elements: project.elements.length };
 }
 

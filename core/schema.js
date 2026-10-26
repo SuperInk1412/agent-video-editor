@@ -3,9 +3,10 @@ import { normalizeCamera } from './camera.js';
 import { normalizeWorld } from './world.js';
 import { OBJECT_TYPES } from './scene.js';
 import { assertSafeData, isRecord, pathParts } from './json.js';
+import { PROJECT_SCHEMA } from './version.js';
 // A "project" is the single source of truth on disk: <project>/project.vdm.json
 
-export const SCHEMA = 'vdm.project/1';
+export const SCHEMA = PROJECT_SCHEMA;
 
 export const ELEMENT_TYPES = ['image', 'video', 'text', 'solid', 'shape'];
 export const SEGMENT_STATUS = ['draft', 'previewed', 'approved'];

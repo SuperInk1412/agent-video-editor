@@ -1,11 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { migrateProject, orthoScreen } from '../core/migrate.js';
+import { migrateProject, orthoScreen, evaluateMigratedObject } from '../core/migrate.js';
 import { objectPose, sampleChannel } from '../core/scene.js';
 import { evalCamera, normalizeCamera } from '../core/camera.js';
 import { evalElement, motionDelta, fadeMul } from '../core/evaluate.js';
 import { applyLegacy } from '../core/legacy.js';
+import { createProject, normalizeProject } from '../core/schema.js';
+import { applyOp } from '../core/ops.js';
 
 const load = (name) => JSON.parse(fs.readFileSync(new URL(`./fixtures/${name}.json`, import.meta.url), 'utf8'));
 const near = (a, b, eps = 1e-6) => assert.ok(Math.abs(a - b) <= eps, `${a} != ${b}`);
@@ -126,4 +128,33 @@ test('orthoScreen: metres map back onto project pixels', () => {
   const [x, y] = orthoScreen({ width: 1920, height: 1080 }, [1, 2, 0]);
   near(x, 1060, 1e-9);
   near(y, 340, 1e-9);
+});
+
+test('hybrid migration preserves every camera, object and exact animated camera evaluation', () => {
+  const p = createProject({ duration: 4 });
+  for (let i = 0; i < 2; i++) applyOp(p, { op: 'addCamera', camera: {
+    id: `camera_${i}`, visible: i === 0, center: [i, 2, 3],
+    path: [{ t: 0, pos: [0, 10, 0], speed: [[0, 0], [1, 2]] }, { t: 4, pos: [0, 20, -100] }],
+    tracks: { center: [{ t: 0, v: [0, 0, 0] }, { t: 4, v: [20, 0, 5] }], fov: [{ t: 0, v: 60 }, { t: 4, v: 110 }] },
+  } });
+  applyOp(p, { op: 'objectAdd', object: { id: 'object_1', type: 'solid', pivot: [3, 5, 7], duration: 4 } });
+  normalizeProject(p);
+  const before = JSON.stringify(p);
+  const result = migrateProject(p), scene = result.scenes.root;
+  assert.equal(scene.objects.length, 3);
+  assert.deepEqual(scene.cameraOrder, p.cameraOrder);
+  assert.equal(scene.cameraId, p.activeCameraId);
+  assert.deepEqual(scene.objects.find((o) => o.id === 'object_1'), p.scene.objects[0]);
+  for (const camera of p.cameras) {
+    const migrated = scene.objects.find((o) => o.id === camera.id);
+    assert.equal(migrated.visible, camera.visible);
+    for (let time = 0; time <= 4; time += 0.125) {
+      const expected = evalCamera({ camera, meta: p.meta }, time);
+      const actual = evaluateMigratedObject(migrated, time, p.meta);
+      assert.deepEqual(actual.worldPos, expected.pos);
+      assert.equal(actual.camera.fov, expected.fov);
+      assert.equal(actual.roll, expected.roll);
+    }
+  }
+  assert.equal(JSON.stringify(p), before, 'migration does not mutate the source project');
 });
