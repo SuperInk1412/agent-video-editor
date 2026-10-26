@@ -1,16 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { migrateProject, orthoScreen } from '../core/migrate.js';
+import { migrateProject, orthoScreen, evaluateMigratedObject } from '../core/migrate.js';
 import { objectPose, sampleChannel } from '../core/scene.js';
 import { evalCamera, normalizeCamera } from '../core/camera.js';
 import { evalElement, motionDelta, fadeMul } from '../core/evaluate.js';
 import { applyLegacy } from '../core/legacy.js';
+import { createProject, normalizeProject } from '../core/schema.js';
+import { applyOp } from '../core/ops.js';
+import { presetCurve } from '../core/curves.js';
 
-const load = (name) => JSON.parse(fs.readFileSync(new URL(`../projects/${name}/project.vdm.json`, import.meta.url), 'utf8'));
-// The live nightcity project is migrated + edited by the app, so the v2
-// fixture is frozen: migration tests must always start from the legacy file.
-const loadLegacyNight = () => JSON.parse(fs.readFileSync(new URL('./fixtures/nightcity-v2.json', import.meta.url), 'utf8'));
+const load = (name) => JSON.parse(fs.readFileSync(new URL(`./fixtures/${name}.json`, import.meta.url), 'utf8'));
+const loadLegacyNight = () => load('nightcity');
 const near = (a, b, eps = 1e-6) => assert.ok(Math.abs(a - b) <= eps, `${a} != ${b}`);
 const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const norm = (v) => { const l = Math.hypot(v[0], v[1], v[2]) || 1; return v.map((x) => x / l); };
@@ -102,6 +103,7 @@ test('migrate: the 3D camera keeps its exact flight path', () => {
   const clean = {
     ...v2,
     camera: normalizeCamera({ ...v2.camera, shake: { ...v2.camera.shake, amp: 0 } }),
+    cameras: [], cameraOrder: [], activeCameraId: null,
   };
   let worst = 0;
   for (let t = 0; t <= v2.meta.duration; t += 0.25) {
@@ -128,4 +130,48 @@ test('orthoScreen: metres map back onto project pixels', () => {
   const [x, y] = orthoScreen({ width: 1920, height: 1080 }, [1, 2, 0]);
   near(x, 1060, 1e-9);
   near(y, 340, 1e-9);
+});
+
+test('hybrid migration preserves every camera, object and exact animated camera evaluation', () => {
+  const p = createProject({ duration: 4 });
+  for (let i = 0; i < 2; i++) applyOp(p, { op: 'addCamera', camera: {
+    id: `camera_${i}`, visible: i === 0, center: [i, 2, 3],
+    path: [{ t: 0, pos: [0, 10, 0], speed: [[0, 0], [1, 2]] }, { t: 4, pos: [0, 20, -100] }],
+    tracks: { center: [{ t: 0, v: [0, 0, 0] }, { t: 4, v: [20, 0, 5] }], fov: [{ t: 0, v: 60 }, { t: 4, v: 110 }] },
+  } });
+  applyOp(p, { op: 'objectAdd', object: { id: 'object_1', type: 'solid', pivot: [3, 5, 7], duration: 4 } });
+  normalizeProject(p);
+  const before = JSON.stringify(p);
+  const result = migrateProject(p), scene = result.scenes.root;
+  assert.equal(scene.objects.length, 3);
+  assert.deepEqual(scene.cameraOrder, p.cameraOrder);
+  assert.equal(scene.cameraId, p.activeCameraId);
+  assert.deepEqual(scene.objects.find((o) => o.id === 'object_1'), p.scene.objects[0]);
+  for (const camera of p.cameras) {
+    const migrated = scene.objects.find((o) => o.id === camera.id);
+    assert.equal(migrated.visible, camera.visible);
+    for (let time = 0; time <= 4; time += 0.125) {
+      const expected = evalCamera({ camera, meta: p.meta }, time);
+      const actual = evaluateMigratedObject(migrated, time, p.meta);
+      assert.deepEqual(actual.worldPos, expected.pos);
+      assert.equal(actual.camera.fov, expected.fov);
+      assert.equal(actual.roll, expected.roll);
+    }
+  }
+  assert.equal(JSON.stringify(p), before, 'migration does not mutate the source project');
+});
+
+test('migration preserves upstream value curves on scalar element tracks', () => {
+  const p = createProject({ duration: 4 });
+  applyOp(p, { op: 'addElement', element: { type: 'solid', duration: 4, keyframes: [
+    { t: 0, path: 'transform.x', value: 0, curve: presetCurve('easeIn') },
+    { t: 4, path: 'transform.x', value: 100 },
+  ] } });
+  const migrated = migrateProject(p).scenes.root.objects.find((o) => o.id === 'el_1');
+  assert.deepEqual(migrated.tracks['pivot.x'][0].curve, presetCurve('easeIn'));
+  for (const time of [0, 0.5, 1, 2, 3, 4]) {
+    const before = evalElement(p.elements[0], time, p.meta);
+    const after = evaluateMigratedObject(migrated, time, p.meta);
+    near(after.pivot[0] * 100, before.x);
+  }
 });

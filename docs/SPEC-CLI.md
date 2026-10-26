@@ -8,6 +8,18 @@ node cli/vdm.js <command> [args] [--project <dir>] [--json]
 
 不传 `--project` 时从当前目录向上找 `project.vdm.json`。
 
+编辑命令支持 `--expected-rev N`、`--request-id ID`、`--dry-run`。`ops` 也可接收
+`{"ops":[...],"expectedRev":N,"requestId":"...","dryRun":true}`；预检不写入，重试同一请求
+返回相同事务结果。`vdm history` / `undo` / `redo` 使用持久化的项目全局历史。
+
+CLI 自动连接或启动项目专属运行时，与 UI 共用一个渲染队列。`vdm jobs` 列出任务，
+`vdm cancel <jobId>` 请求取消，`vdm engine stop` 关闭运行时并等待工作进程退出。
+退出 CLI 不取消已接收的任务。`still` / `render` 保持同步等待输出，任务本身可从其他客户端查询。
+
+`vdm cache prune --max-mb 1024 [--dry-run]` 按大小预算清理可重建缓存，渲染任务运行或排队时拒绝清理。
+该命令保留项目、历史、任务快照、源素材和成片。`vdm scene check --json` 提供迁移保真报告，
+支持多相机与现有 3D objects；场景树目前为只读实验模型，不会隐式改写项目。
+
 ## 项目
 
 | 命令 | 说明 |

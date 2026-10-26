@@ -27,7 +27,7 @@ export function createLogger({ dir, name = 'vdm', echo = true }) {
     if (echo) {
       const line = `[vdm ${LEVEL_TAG[level] || 'info'}] ${rec.msg}`;
       const extra = rec.meta ? ' ' + JSON.stringify(rec.meta).slice(0, 400) : '';
-      (level === 'error' ? console.error : console.log)(line + extra);
+      console.error(line + extra);
     }
     for (const fn of listeners) { try { fn(rec); } catch { /* ignore */ } }
     return rec;

@@ -4,6 +4,7 @@ import { evalElement } from '/core/evaluate.js';
 import { clamp } from '/core/time.js';
 import { cameraTransform, evalCamera, cameraLayers } from '/core/camera.js';
 import { Scene3D } from './preview3d.js';
+import { clearCompiledTracks, compileProject } from '/core/tracks.js';
 
 const VERT = `#version 300 es
 in vec2 a_pos;
@@ -318,6 +319,15 @@ export class Preview {
   setProject(p) {
     const changedAudio = this.project?.meta?.audio?.src !== p.meta.audio?.src;
     this.project = p;
+    clearCompiledTracks();
+    compileProject(p);
+    const live = new Map(p.elements.map((element) => [element.id, element]));
+    for (const [id, asset] of this.assets) if (!live.has(id) || !['image', 'video'].includes(live.get(id).type)) {
+      this._releaseAsset(asset); this.assets.delete(id);
+    }
+    for (const [id, entry] of this.textCache) if (!live.has(id) || live.get(id).type !== 'text') {
+      this.gl.deleteTexture(entry.tex); this.textCache.delete(id);
+    }
     if (changedAudio || !this.audioEl) this._setupAudio();
     for (const el of p.elements) this._ensureAsset(el);
   }
@@ -329,7 +339,7 @@ export class Preview {
 
   _setupAudio() {
     const src = this.project?.meta?.audio?.src;
-    if (!src) { this.audioEl = null; return; }
+    if (!src) { this.audioEl?.pause(); this.audioEl?.removeAttribute('src'); this.audioEl?.load(); this.audioEl = null; return; }
     if (!this.audioEl) {
       this.audioEl = new Audio();
       this.audioEl.preload = 'auto';
@@ -341,13 +351,20 @@ export class Preview {
 
   getAudio() { return this.audioEl; }
 
+  _releaseAsset(asset) {
+    asset.disposed = true;
+    if (asset.img) asset.img.onload = null;
+    if (asset.video) { asset.video.pause(); asset.video.removeAttribute('src'); asset.video.load(); }
+    if (asset.tex) this.gl.deleteTexture(asset.tex);
+  }
+
   _ensureAsset(el) {
     if (el.type !== 'image' && el.type !== 'video') return;
     if (!el.src) return;
     const key = `${el.type}:${el.src}`;
     let a = this.assets.get(el.id);
     if (a && a.key === key) return;
-    if (a?.tex) this.gl.deleteTexture(a.tex);
+    if (a) this._releaseAsset(a);
     const gl = this.gl;
     if (el.type === 'image') {
       const img = new Image();
@@ -355,6 +372,7 @@ export class Preview {
       img.src = `/media/${el.src.replace(/^media\//, '')}`;
       a = { kind: 'image', key, img, tex: null, ready: false };
       img.onload = () => {
+        if (a.disposed) return;
         a.tex = gl.createTexture();
         gl.bindTexture(gl.TEXTURE_2D, a.tex);
         gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
@@ -375,6 +393,7 @@ export class Preview {
       v.crossOrigin = 'anonymous';
       a = { kind: 'video', key, video: v, tex: null, ready: false };
       v.addEventListener('loadeddata', () => {
+        if (a.disposed) return;
         a.tex = gl.createTexture();
         gl.bindTexture(gl.TEXTURE_2D, a.tex);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
@@ -429,6 +448,7 @@ export class Preview {
     this.bloomFBO = [mk(hw, hh), mk(hw, hh)];
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     // text textures depend on pixel scale
+    for (const entry of this.textCache.values()) gl.deleteTexture(entry.tex);
     this.textCache.clear();
   }
 

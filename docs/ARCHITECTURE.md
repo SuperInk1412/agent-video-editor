@@ -37,12 +37,20 @@
 `projects/<name>/project.vdm.json` 是**唯一的编辑状态**。没有藏在内存里的影子时间线。
 
 - 每次修改都是 `core/ops.js` 里一个 JSON 操作；
-- `core/store.js` 用「mkdir 原子锁 + 临时文件 rename」写入，`rev` 自增；
+- `engine/storage.js` 用「带持有者身份的 mkdir 原子锁 + 临时文件 rename」写入，`rev` 自增；
 - UI 与 CLI/AI 都会改这个文件，引擎用 `fs.watchFile` 监听外部变更并广播；
-- 引擎的写入（UI ops、AI 提议、撤销/重做、节拍、自动分镜）排成一个队列，每次在锁里**从磁盘**
+- `application/project-service.js` 统一 CLI / HTTP / AI 的编辑、规划和历史；每次在锁里**从磁盘**
   读最新版本再应用，所以不会覆盖 CLI 刚写、还没被监听到的修改；
-- 外部写入（CLI、其他进程）被监听到时也会进撤销栈，在 UI 里一样能撤销；
+- 全局历史与请求回执保存在 `.vdm/transactions.json`，CLI 编辑立即进入同一撤销历史；
 - 失败的操作不会落盘（先克隆校验再写）。
+
+`core/ops.js` 只负责内存中的编辑语义，存储与跨进程锁位于 Node 引擎层；`core/` 保持浏览器可用。
+文件锁不因持有时间长而驱逐活跃进程。可确认 PID 已退出时恢复锁；无法识别持有者的旧锁会报告
+`LOCK_ORPHANED`，避免误删其他写入者的锁。
+
+提交可带 `expectedRev / requestId / dryRun`。准备记录先保存确切快照与生成 ID，再替换项目，
+最后提交历史和回执；中断后按前后 hash 恢复，不重新执行操作。无法确认提交状态时报告
+`UNKNOWN_COMMIT_STATE`。`.vdm/transactions.json` 包含历史和恢复信息，不属于可随意清理的渲染缓存。
 
 这样做的直接好处：**AI 的修改和你手动的修改是同一类东西**——看得见（时间线会跳）、
 能撤销（服务端撤销栈）、能 diff（纯 JSON）。
@@ -91,6 +99,10 @@ engine/shot.js   烘焙：{ city, camera:[逐帧机位], fx } → .vdm/cache/sho
   逐帧相机（track_quat + roll），EEVEE 渲染；
 - 因为几何与机位都来自同一份数据，"预览构图 = 成片构图"是结构保证，不靠调参对齐。
 
+`engine/shot.js::worldSnapshot()` 为所有可见相机生成整段独立航线，以同一份城市数据服务
+预览、静帧与片段渲染；相机之间不会产生额外的连接航线。`npm run check:evaluate` 使用真实
+Blender 对固定边界样例逐字段对拍，补充单元测试与预览方向检查。
+
 ## 5. AI 集成（DSH-TUI）
 
 真实的约束：headless agent **能读文件、不能执行 shell**（沙箱拦截）。
@@ -129,3 +141,30 @@ engine/shot.js   烘焙：{ city, camera:[逐帧机位], fx } → .vdm/cache/sho
 | Blender 无头 EEVEE | 10 门合成器 + 3D 能力，出片质量远高于 2D 库；EEVEE 后台可跑 |
 | 项目 JSON + ops | AI/UI/CLI 天然同构，diff/撤销/回放都免费 |
 | `dsh --profile headless --json` | 现成的流式 agent 运行时，事件可读、进程可杀 |
+
+## 8. 公共服务与外部 agent
+
+```mermaid
+flowchart LR
+  CLI[CLI] --> Runtime[每项目一个 Node 运行时]
+  MCP[MCP stdio] --> Runtime
+  UI[Electron / 浏览器] --> Runtime
+  Runtime --> Projects[ProjectService / ProjectRepository]
+  Runtime --> Jobs[JobService]
+  Projects --> Ops[纯 ESM 模型 / ops / 校验]
+  Projects --> Disk[项目 JSON / 事务恢复 / 历史回执]
+  Jobs --> Snapshots[项目与素材快照 / 产物记录]
+  Jobs --> Workers[ffmpeg / Blender / 计算 worker]
+```
+
+`.vdm/runtime-lock` 在运行时整个生命周期内保存持有者身份；发现记录 `.vdm/app.json` 含实例 ID、
+loopback 地址和本地调用凭证，附加客户端不拥有关闭权限。CLI / MCP 自动连接已存在的运行时，
+没有时启动后台进程；`vdm engine stop` 显式取消并等待任务退出。
+
+应用层任务独立于 MCP 请求：提交时固定 sourceRev 与素材内容，任务 ID 在重试后保持不变。
+抽帧、Blender 和编码使用同一个 AbortSignal，取消等待实际进程退出；重启后的未完成任务标为
+interrupted。项目编辑不修改已提交的任务输入，旧产物保留来源版本。
+
+`.vdm/cache/` 支持按预算清理，历史和任务输入位于不同目录。求值轨道按快照编译索引，
+编辑会使索引失效；CPU 较重的世界、shot 与节拍分析使用 Node worker。`npm run benchmark`
+提供可重现的采样量测。MCP 协议与工具配置见 [SPEC-MCP.md](SPEC-MCP.md)。

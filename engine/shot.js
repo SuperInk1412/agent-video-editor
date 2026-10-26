@@ -5,7 +5,12 @@ import path from 'node:path';
 import { bakeCameraTrack, cameraLayers, cameraTransform } from '../core/camera.js';
 import { objectPose } from '../core/scene.js';
 import { generateCity, cityHash } from './city.js';
-import { paths } from '../core/store.js';
+import { paths } from './storage.js';
+import { compileProject } from '../core/tracks.js';
+import { compute } from './compute.js';
+import { hashOf } from './media.js';
+import { atomicJson } from './storage.js';
+import { RENDER_PLAN_VERSION } from '../core/version.js';
 
 const r3 = (v) => Math.round(Number(v) * 1000) / 1000;
 const OBJ_TYPES = new Set(['solid', 'shape', 'text', 'image', 'video', 'container']);
@@ -21,7 +26,7 @@ export function bakeObjects(project, { fps = 24, from = 0, to = null } = {}) {
   const f1 = Math.round((to ?? project.meta.duration) * fps) + 1;
   const out = [];
   for (const o of objs) {
-    if (!OBJ_TYPES.has(o.type)) continue;
+    if (!OBJ_TYPES.has(o.type) || o.visible === false) continue;
     const start = Number(o.start) || 0;
     const end = start + (Number(o.duration) || 0);
     const geom = o.geom || {};
@@ -60,15 +65,21 @@ export function bakeObjects(project, { fps = 24, from = 0, to = null } = {}) {
 
 export const is3D = (project) => cameraLayers(project).length > 0;
 
+function forCamera(project, camera) {
+  return { ...project, camera, cameras: [], cameraOrder: [], activeCameraId: null };
+}
+
+/** Full-shot flight corridors are independent polylines, shared by every view. */
+export function worldSnapshot(project) {
+  const paths = cameraLayers(project).map((cam) => bakeCameraTrack(forCamera(project, cam), {
+    fps: project.meta.fps,
+  }).map((state) => state.pos));
+  return cachedCity(project.world, null, { paths });
+}
+
 /** Bake one camera layer, including its per-frame picture transform. */
 function bakeCameraLayer(project, cam, { fps, from, to }) {
-  const sub = {
-    ...project,
-    camera: cam,
-    cameras: [],
-    cameraOrder: [],
-    activeCameraId: null,
-  };
+  const sub = forCamera(project, cam);
   const track = bakeCameraTrack(sub, { fps, from, to });
   const frames = track.map((e) => {
     const tr = cameraTransform(cam, e.t);
@@ -96,6 +107,7 @@ function bakeCameraLayer(project, cam, { fps, from, to }) {
 }
 
 export function buildShot(project, { from = 0, to = null, fps = null } = {}) {
+  compileProject(project);
   const frameRate = fps || project.meta.fps || 24;
   const end = to ?? project.meta.duration;
   const layers = cameraLayers(project).map((cam) => bakeCameraLayer(project, cam, {
@@ -105,13 +117,10 @@ export function buildShot(project, { from = 0, to = null, fps = null } = {}) {
   // this path for one-camera projects and switches to cameraLayers when there
   // is more than one visible layer.
   const camera = bakeCameraTrack(project, { fps: frameRate, from, to: end });
-  const flight = layers.length
-    ? layers.flatMap((l) => l.camera.map((c) => c.pos))
-    : camera.map((c) => c.pos);
-  const city = generateCity(project.world, { path: flight });
+  const city = worldSnapshot(project);
   const cam = project.camera || {};
   return {
-    version: 1,
+    version: RENDER_PLAN_VERSION,
     fps: frameRate,
     frames: camera.length,
     from,
@@ -135,20 +144,24 @@ export function buildShot(project, { from = 0, to = null, fps = null } = {}) {
 /** Write the shot package next to the render job; returns its path. */
 export async function writeShot(dir, project, opts = {}) {
   const p = paths(dir);
-  const shot = buildShot(project, opts);
-  const key = `${shot.city.hash}-r${project.rev || 0}-${shot.fps}-${opts.from ?? 0}-${opts.to ?? project.meta.duration}`;
+  const { signal, ...options } = opts;
+  const key = hashOf({ version: 2, meta: project.meta, cameras: project.cameras, camera: project.camera,
+    cameraOrder: project.cameraOrder, scene: project.scene, world: project.world, options });
   const file = path.join(p.cache, `shot-${key}.json`);
+  try { return { file, shot: JSON.parse(await fs.readFile(file, 'utf8')) }; }
+  catch (e) { if (e.code !== 'ENOENT' && !(e instanceof SyntaxError)) throw e; }
+  const shot = await compute('shot', { project, options }, { signal });
   await fs.mkdir(path.dirname(file), { recursive: true });
-  await fs.writeFile(file, JSON.stringify(shot));
+  await atomicJson(file, shot);
   return { file, shot };
 }
 
 /** Cached city, used by the viewport endpoint. */
 const cityCache = new Map();
-export function cachedCity(world, path = null) {
-  const hash = cityHash(world, path);
+export function cachedCity(world, path = null, { paths = path ? [path] : [] } = {}) {
+  const hash = cityHash(world, path, { paths });
   if (cityCache.has(hash)) return cityCache.get(hash);
-  const city = generateCity(world, { path });
+  const city = generateCity(world, { paths });
   if (cityCache.size > 8) cityCache.delete(cityCache.keys().next().value);
   cityCache.set(hash, city);
   return city;

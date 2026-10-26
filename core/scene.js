@@ -10,9 +10,11 @@
 //
 // M = T(pivot) · R(dir, roll) · T(position) · S(scale) · geometry
 import { clamp, ease, speedWarp } from './time.js';
+import { compiledTrack, segmentIndex } from './tracks.js';
+import { SCENE_MODEL_VERSION } from './version.js';
 import { sampleCurve, normalizeCurve } from './curves.js';
 
-export const SCENE_VERSION = 3;
+export const SCENE_VERSION = SCENE_MODEL_VERSION;
 export const PX_PER_M = 100; // v2 (pixels) -> v3 (metres) migration scale
 export const OBJECT_TYPES = ['empty', 'camera', 'text', 'image', 'video', 'solid', 'shape', 'audio', 'container'];
 
@@ -52,6 +54,8 @@ function warp(key, u) {
 }
 
 function sortKeys(keys) {
+  const cached = Array.isArray(keys) && compiledTrack(keys, 'channel');
+  if (cached) return cached;
   return (Array.isArray(keys) ? keys : [])
     .filter((k) => k && isNum(k.t) && k.v !== undefined && k.v !== null)
     .slice()
@@ -82,7 +86,7 @@ export function sampleChannel(keys, t, fallback = 0) {
   if (t <= k[0].t) return k[0].v;
   const last = k[k.length - 1];
   if (t >= last.t) return last.v;
-  for (let i = 0; i < k.length - 1; i++) {
+  for (let i = segmentIndex(k, t, true); i < k.length - 1; i++) {
     const a = k[i];
     const b = k[i + 1];
     if (t >= a.t && t <= b.t) {
@@ -103,7 +107,7 @@ export function sampleVec3(keys, t, fallback = [0, 0, 0]) {
   if (t <= k[0].t) return vec3(k[0].v, fb);
   const last = k[k.length - 1];
   if (t >= last.t) return vec3(last.v, fb);
-  for (let i = 0; i < k.length - 1; i++) {
+  for (let i = segmentIndex(k, t, true); i < k.length - 1; i++) {
     const a = k[i];
     const b = k[i + 1];
     if (t >= a.t && t <= b.t) {
@@ -173,7 +177,7 @@ export function sampleDir(keys, t, fallback = [0, 0, -1]) {
   if (t <= k[0].t) return V.norm(vec3(k[0].v, fb));
   const last = k[k.length - 1];
   if (t >= last.t) return V.norm(vec3(last.v, fb));
-  for (let i = 0; i < k.length - 1; i++) {
+  for (let i = segmentIndex(k, t, true); i < k.length - 1; i++) {
     const a = k[i];
     const b = k[i + 1];
     if (t >= a.t && t <= b.t) {

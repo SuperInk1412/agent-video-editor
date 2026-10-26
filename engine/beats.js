@@ -1,6 +1,7 @@
 // Beat / onset analysis in pure JS (no native deps).
 // Decode via ffmpeg -> mono f32 -> STFT spectral flux -> peaks -> tempo.
-import { spawn } from 'node:child_process';
+import { runProcess } from './process.js';
+import { compute } from './compute.js';
 import { findBin } from './media.js';
 
 const SR = 22050;
@@ -8,23 +9,19 @@ const WIN = 1024;
 const HOP = 512;
 
 /** decode any media file to mono Float32Array at SR */
-export function decodePcm(file) {
-  return new Promise(async (resolve, reject) => {
-    let ffmpeg;
-    try { ffmpeg = await findBin('ffmpeg'); } catch (e) { return reject(e); }
-    const p = spawn(ffmpeg, ['-v', 'error', '-i', file, '-ac', '1', '-ar', String(SR), '-f', 'f32le', '-'], { windowsHide: true });
-    const chunks = [];
-    let err = '';
-    p.stdout.on('data', (d) => chunks.push(d));
-    p.stderr.on('data', (d) => { err += d; });
-    p.on('error', reject);
-    p.on('close', (code) => {
-      if (code !== 0) return reject(new Error(`ffmpeg decode failed: ${err.slice(-300)}`));
-      const buf = Buffer.concat(chunks);
-      const f32 = new Float32Array(buf.buffer, buf.byteOffset, Math.floor(buf.length / 4));
-      resolve(f32);
-    });
+export async function decodePcm(file, { signal, duration = null, maxBytes = 256 * 1024 * 1024 } = {}) {
+  const ffmpeg = await findBin('ffmpeg');
+  const chunks = []; let size = 0;
+  await runProcess(ffmpeg, ['-v', 'error', '-i', file, ...(duration ? ['-t', String(duration)] : []), '-ac', '1', '-ar', String(SR), '-f', 'f32le', '-'], {
+    signal, maxOutput: 1024,
+    onStdout(chunk) {
+      size += chunk.length;
+      if (size > maxBytes) throw Object.assign(new Error('audio exceeds analysis memory budget; analyze a shorter range'), { code: 'AUDIO_TOO_LARGE' });
+      chunks.push(chunk);
+    },
   });
+  const buffer = Buffer.concat(chunks);
+  return new Float32Array(buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.length - buffer.length % 4));
 }
 
 /** in-place iterative radix-2 FFT (re/im of length n, power of two) */
@@ -73,7 +70,7 @@ function onsetEnvelope(pcm) {
   const low = new Float32Array(nFrames);
   for (let f = 0; f < nFrames; f++) {
     const off = f * HOP;
-    for (let i = 0; i < WIN; i++) { re[i] = pcm[off + i] * win[i]; im[i] = 0; }
+    for (let i = 0; i < WIN; i++) { re[i] = (pcm[off + i] || 0) * win[i]; im[i] = 0; }
     fft(re, im);
     let s = 0, lo = 0;
     for (let b = 1; b < bins; b++) {
@@ -88,7 +85,8 @@ function onsetEnvelope(pcm) {
   }
   // normalise + light smoothing
   const out = new Float32Array(nFrames);
-  const max = Math.max(...flux, 1e-9);
+  let max = 1e-9;
+  for (const value of flux) max = Math.max(max, value);
   for (let i = 0; i < nFrames; i++) out[i] = flux[i] / max;
   return { env: out, low, hopSec: HOP / SR };
 }
@@ -167,8 +165,12 @@ function estimateTempo(env, hopSec) {
  * Full analysis. Returns beats on a tempo grid snapped to onsets,
  * plus raw onsets and a low-band energy envelope (for punches).
  */
-export async function analyzeBeats(file, { duration = null, fps = 30 } = {}) {
-  const pcm = await decodePcm(file);
+export function analyzeBeats(file, { signal, ...options } = {}) {
+  return compute('beats', { file, options }, { signal });
+}
+
+export async function analyzeBeatsLocal(file, { duration = null, fps = 30, signal } = {}) {
+  const pcm = await decodePcm(file, { signal, duration });
   const { env, low, hopSec } = onsetEnvelope(pcm);
   const total = duration || pcm.length / SR;
   const peaks = pickPeaks(env, hopSec);
@@ -193,7 +195,8 @@ export async function analyzeBeats(file, { duration = null, fps = 30 } = {}) {
   // coarse low-band envelope, handy for punches / reactive effects
   const envStep = 1 / 30;
   const lowEnv = [];
-  const lowMax = Math.max(...low, 1e-9);
+  let lowMax = 1e-9;
+  for (const value of low) lowMax = Math.max(lowMax, value);
   for (let t = 0; t < total; t += envStep) {
     const i = Math.min(low.length - 1, Math.floor(t / hopSec));
     lowEnv.push(Math.round((low[i] / lowMax) * 1000) / 1000);

@@ -34,7 +34,7 @@ const hexRgb = (h) => {
  * changing radius only adds/removes the affected blocks — the rest of the city
  * stays identical.
  */
-export function generateCity(worldInput, { path = null } = {}) {
+export function generateCity(worldInput, { path = null, paths = path ? [path] : [] } = {}) {
   const w = normalizeWorld(worldInput);
   const rng = mulberry32(w.seed | 0);
   const { nx, nz, block, street } = w.grid;
@@ -46,7 +46,7 @@ export function generateCity(worldInput, { path = null } = {}) {
   const neonCols = (w.neon.colors || w.neonColors || []).map(hexRgb);
 
   const radius = Number(w.corridor.radius) || 0;
-  const samples = w.corridor.enabled && radius > 0 ? pathSamples(path) : [];
+  const samples = w.corridor.enabled && radius > 0 ? paths.flatMap((flight) => pathSamples(flight)) : [];
   const corridor = samples.length >= 2;
   let cleared = 0;
 
@@ -125,7 +125,7 @@ export function generateCity(worldInput, { path = null } = {}) {
   }
 
   return {
-    hash: cityHash(w, path),
+    hash: cityHash(w, path, { paths }),
     seed: w.seed,
     bounds: { x0: -spanX / 2, x1: spanX / 2, z0: -spanZ / 2, z1: spanZ / 2 },
     grid: { ...w.grid },
@@ -196,16 +196,16 @@ function pathSignature(path) {
   for (const p of path || []) {
     const v = Array.isArray(p) ? p : p && p.pos;
     if (!Array.isArray(v) || v.length < 3) continue;
-    out.push([v[0], v[1], v[2]].map((n) => Math.round(Number(n) * 10) / 10).join(','));
+    out.push([v[0], v[1], v[2]].map(Number).join(','));
   }
   return out.join(';');
 }
 
 /** Stable hash of world params (+ camera path when the corridor is on) — cache key. */
-export function cityHash(w, path) {
+export function cityHash(w, path, { paths = path ? [path] : [] } = {}) {
   const world = normalizeWorld(w);
   let s = JSON.stringify(world);
-  if (world.corridor.enabled && path) s += `|${pathSignature(path)}`;
+  if (world.corridor.enabled && paths.length) s += `|${paths.map(pathSignature).join('|')}`;
   let h = 2166136261;
   for (let i = 0; i < s.length; i++) {
     h ^= s.charCodeAt(i);

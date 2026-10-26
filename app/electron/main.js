@@ -5,7 +5,7 @@ import path from 'node:path';
 import fsp from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { startServer } from '../../engine/server.js';
-import { findProjectRoot } from '../../core/store.js';
+import { findProjectRoot } from '../../engine/storage.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '../..');

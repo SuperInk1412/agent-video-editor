@@ -1,0 +1,771 @@
+{
+  "schema": "vdm.project/1",
+  "rev": 5,
+  "meta": {
+    "title": "锈梦 · Demo",
+    "fps": 24,
+    "width": 1920,
+    "height": 1080,
+    "duration": 24,
+    "background": "#05070d",
+    "audio": {
+      "src": "media/bgm.m4a",
+      "offset": 0,
+      "gain": 0
+    },
+    "beats": [
+      0.366,
+      0.869,
+      1.372,
+      1.875,
+      2.378,
+      2.926,
+      3.383,
+      3.901,
+      4.389,
+      4.892,
+      5.433,
+      5.898,
+      6.478,
+      6.989,
+      7.477,
+      7.988,
+      8.475,
+      8.915,
+      9.427,
+      9.961,
+      10.495,
+      11.006,
+      11.494,
+      11.958,
+      12.492,
+      13.003,
+      13.491,
+      13.978,
+      14.489,
+      14.977,
+      15.511,
+      15.954,
+      16.486,
+      16.997,
+      17.531,
+      17.966,
+      18.483,
+      18.994,
+      19.458,
+      19.992,
+      20.48,
+      20.983,
+      21.478,
+      21.989,
+      22.547,
+      22.918,
+      23.497,
+      24
+    ],
+    "tempo": 119.32,
+    "fx": {
+      "bloom": 0.55,
+      "ca": 0.35,
+      "grain": 0.12,
+      "vignette": 0.5,
+      "scanline": 0.22,
+      "grade": 0.15,
+      "contrast": 0.08,
+      "saturation": 1.12,
+      "shake": 0
+    },
+    "style": "neon",
+    "savedAt": "2026-10-25T05:53:02.442Z"
+  },
+  "segments": [
+    {
+      "start": 0,
+      "duration": 3.901,
+      "name": "镜 01",
+      "intent": "夜之城不睡",
+      "status": "draft",
+      "id": "seg_1"
+    },
+    {
+      "start": 3.901,
+      "duration": 4.087,
+      "name": "镜 02",
+      "intent": "把梦焊进骨头",
+      "status": "draft",
+      "id": "seg_2"
+    },
+    {
+      "start": 7.988,
+      "duration": 3.97,
+      "name": "镜 03",
+      "intent": "坠落也是一种方向",
+      "status": "draft",
+      "id": "seg_3"
+    },
+    {
+      "start": 11.958,
+      "duration": 3.996,
+      "name": "镜 04",
+      "intent": "谁的记忆在闪",
+      "status": "draft",
+      "id": "seg_4"
+    },
+    {
+      "start": 15.954,
+      "duration": 4.038,
+      "name": "镜 05",
+      "intent": "在噪音里认出自己",
+      "status": "draft",
+      "id": "seg_5"
+    },
+    {
+      "start": 19.992,
+      "duration": 4.008,
+      "name": "镜 06",
+      "intent": "那就别回头",
+      "status": "draft",
+      "id": "seg_6"
+    }
+  ],
+  "elements": [
+    {
+      "id": "el_bg_1",
+      "name": "背景 1",
+      "type": "image",
+      "src": "media/frame_B.jpg",
+      "segment": "seg_1",
+      "start": 0,
+      "duration": 3.901,
+      "z": 0,
+      "transform": {
+        "x": 0,
+        "y": 0,
+        "scale": 1,
+        "rotation": 0,
+        "opacity": 1
+      },
+      "style": {
+        "fit": "cover",
+        "text": "",
+        "font": "SimHei",
+        "size": 96,
+        "weight": 400,
+        "color": "#ffffff",
+        "align": "center",
+        "lineHeight": 1.18,
+        "letterSpacing": 0,
+        "shadow": 0,
+        "shape": "rect",
+        "fill": "#ffffff",
+        "radius": 0,
+        "stroke": "",
+        "strokeWidth": 0
+      },
+      "fx": {
+        "glow": 0
+      },
+      "motion": {
+        "type": "in",
+        "amount": 0.1,
+        "dir": "in"
+      },
+      "keyframes": [],
+      "visible": true,
+      "meta": {}
+    },
+    {
+      "id": "el_title",
+      "name": "主标题",
+      "type": "text",
+      "src": "",
+      "segment": "seg_1",
+      "start": 0.2,
+      "duration": 3.2,
+      "z": 1,
+      "transform": {
+        "x": 0,
+        "y": -20,
+        "scale": 1,
+        "rotation": 0,
+        "opacity": 1
+      },
+      "style": {
+        "fit": "cover",
+        "text": "锈梦 · Demo",
+        "font": "SimHei",
+        "size": 168,
+        "weight": 400,
+        "color": "#f3e600",
+        "align": "center",
+        "lineHeight": 1.18,
+        "letterSpacing": 6,
+        "shadow": 0,
+        "shape": "rect",
+        "fill": "#ffffff",
+        "radius": 0,
+        "stroke": "",
+        "strokeWidth": 0
+      },
+      "fx": {
+        "glow": 0
+      },
+      "motion": {
+        "type": "in",
+        "amount": 0.06,
+        "dir": "in"
+      },
+      "keyframes": [
+        {
+          "t": 0.2,
+          "path": "transform.scale",
+          "value": 0.9,
+          "ease": "outExpo"
+        },
+        {
+          "t": 1,
+          "path": "transform.scale",
+          "value": 1,
+          "ease": "outExpo"
+        }
+      ],
+      "visible": true,
+      "meta": {}
+    },
+    {
+      "id": "el_rule",
+      "name": "标题下划线",
+      "type": "shape",
+      "src": "",
+      "segment": "seg_1",
+      "start": 0.8,
+      "duration": 2.4,
+      "z": 2,
+      "transform": {
+        "x": 0,
+        "y": 92,
+        "scale": 1,
+        "rotation": 0,
+        "opacity": 0.95
+      },
+      "style": {
+        "fit": "cover",
+        "text": "",
+        "font": "SimHei",
+        "size": 96,
+        "weight": 400,
+        "color": "#ffffff",
+        "align": "center",
+        "lineHeight": 1.18,
+        "letterSpacing": 0,
+        "shadow": 0,
+        "shape": "rect",
+        "fill": "#ff2a4d",
+        "radius": 0,
+        "stroke": "",
+        "strokeWidth": 0,
+        "w": 760,
+        "h": 5
+      },
+      "fx": {
+        "glow": 0
+      },
+      "motion": {
+        "type": "none",
+        "amount": 0,
+        "dir": "in"
+      },
+      "keyframes": [
+        {
+          "t": 0.8,
+          "path": "transform.scale",
+          "value": 0.1,
+          "ease": "outExpo"
+        },
+        {
+          "t": 1.2,
+          "path": "transform.scale",
+          "value": 1,
+          "ease": "outExpo"
+        }
+      ],
+      "visible": true,
+      "meta": {}
+    },
+    {
+      "id": "el_bg_2",
+      "name": "背景 2",
+      "type": "image",
+      "src": "media/frame_B.jpg",
+      "segment": "seg_2",
+      "start": 3.901,
+      "duration": 4.087,
+      "z": 3,
+      "transform": {
+        "x": 0,
+        "y": 0,
+        "scale": 1,
+        "rotation": 0,
+        "opacity": 1
+      },
+      "style": {
+        "fit": "cover",
+        "text": "",
+        "font": "SimHei",
+        "size": 96,
+        "weight": 400,
+        "color": "#ffffff",
+        "align": "center",
+        "lineHeight": 1.18,
+        "letterSpacing": 0,
+        "shadow": 0,
+        "shape": "rect",
+        "fill": "#ffffff",
+        "radius": 0,
+        "stroke": "",
+        "strokeWidth": 0
+      },
+      "fx": {
+        "glow": 0
+      },
+      "motion": {
+        "type": "out",
+        "amount": 0.15000000000000002,
+        "dir": "in"
+      },
+      "keyframes": [],
+      "visible": true,
+      "meta": {}
+    },
+    {
+      "id": "el_cap_2",
+      "name": "字幕 2",
+      "type": "text",
+      "src": "",
+      "segment": "seg_2",
+      "start": 4.051,
+      "duration": 3.787,
+      "z": 4,
+      "transform": {
+        "x": 0,
+        "y": 300,
+        "scale": 1,
+        "rotation": 0,
+        "opacity": 1
+      },
+      "style": {
+        "fit": "cover",
+        "text": "把梦焊进骨头",
+        "font": "SimHei",
+        "size": 64,
+        "weight": 400,
+        "color": "#00f0ff",
+        "align": "center",
+        "lineHeight": 1.18,
+        "letterSpacing": 1,
+        "shadow": 0,
+        "shape": "rect",
+        "fill": "#ffffff",
+        "radius": 0,
+        "stroke": "",
+        "strokeWidth": 0
+      },
+      "fx": {
+        "glow": 0
+      },
+      "motion": {
+        "type": "none",
+        "amount": 0,
+        "dir": "in"
+      },
+      "keyframes": [
+        {
+          "t": 4.051,
+          "path": "transform.y",
+          "value": 360,
+          "ease": "outExpo"
+        },
+        {
+          "t": 4.051,
+          "path": "transform.opacity",
+          "value": 0,
+          "ease": "easeOut"
+        },
+        {
+          "t": 4.389,
+          "path": "transform.y",
+          "value": 300,
+          "ease": "linear"
+        },
+        {
+          "t": 4.389,
+          "path": "transform.opacity",
+          "value": 1,
+          "ease": "linear"
+        }
+      ],
+      "visible": true,
+      "meta": {}
+    },
+    {
+      "id": "el_bg_3",
+      "name": "背景 3",
+      "type": "image",
+      "src": "media/frame_F.jpg",
+      "segment": "seg_3",
+      "start": 7.988,
+      "duration": 3.97,
+      "z": 5,
+      "transform": {
+        "x": 0,
+        "y": 0,
+        "scale": 1,
+        "rotation": 0,
+        "opacity": 1
+      },
+      "style": {
+        "fit": "cover",
+        "text": "",
+        "font": "SimHei",
+        "size": 96,
+        "weight": 400,
+        "color": "#ffffff",
+        "align": "center",
+        "lineHeight": 1.18,
+        "letterSpacing": 0,
+        "shadow": 0,
+        "shape": "rect",
+        "fill": "#ffffff",
+        "radius": 0,
+        "stroke": "",
+        "strokeWidth": 0
+      },
+      "fx": {
+        "glow": 0
+      },
+      "motion": {
+        "type": "left",
+        "amount": 0.2,
+        "dir": "in"
+      },
+      "keyframes": [],
+      "visible": true,
+      "meta": {}
+    },
+    {
+      "id": "el_cap_3",
+      "name": "字幕 3",
+      "type": "text",
+      "src": "",
+      "segment": "seg_3",
+      "start": 8.138,
+      "duration": 3.6700000000000004,
+      "z": 6,
+      "transform": {
+        "x": 0,
+        "y": 300,
+        "scale": 1,
+        "rotation": 0,
+        "opacity": 1
+      },
+      "style": {
+        "fit": "cover",
+        "text": "坠落也是一种方向",
+        "font": "SimHei",
+        "size": 54,
+        "weight": 400,
+        "color": "#00f0ff",
+        "align": "center",
+        "lineHeight": 1.18,
+        "letterSpacing": 1,
+        "shadow": 0,
+        "shape": "rect",
+        "fill": "#ffffff",
+        "radius": 0,
+        "stroke": "",
+        "strokeWidth": 0
+      },
+      "fx": {
+        "glow": 0
+      },
+      "motion": {
+        "type": "none",
+        "amount": 0,
+        "dir": "in"
+      },
+      "keyframes": [],
+      "visible": true,
+      "meta": {}
+    },
+    {
+      "id": "el_bg_4",
+      "name": "背景 4",
+      "type": "image",
+      "src": "media/frame_E.jpg",
+      "segment": "seg_4",
+      "start": 11.958,
+      "duration": 3.996,
+      "z": 7,
+      "transform": {
+        "x": 0,
+        "y": 0,
+        "scale": 1,
+        "rotation": 0,
+        "opacity": 1
+      },
+      "style": {
+        "fit": "cover",
+        "text": "",
+        "font": "SimHei",
+        "size": 96,
+        "weight": 400,
+        "color": "#ffffff",
+        "align": "center",
+        "lineHeight": 1.18,
+        "letterSpacing": 0,
+        "shadow": 0,
+        "shape": "rect",
+        "fill": "#ffffff",
+        "radius": 0,
+        "stroke": "",
+        "strokeWidth": 0
+      },
+      "fx": {
+        "glow": 0
+      },
+      "motion": {
+        "type": "right",
+        "amount": 0.1,
+        "dir": "in"
+      },
+      "keyframes": [],
+      "visible": true,
+      "meta": {}
+    },
+    {
+      "id": "el_txt_4",
+      "name": "大字 4",
+      "type": "text",
+      "src": "",
+      "segment": "seg_4",
+      "start": 12.058,
+      "duration": 3.796,
+      "z": 8,
+      "transform": {
+        "x": 0,
+        "y": 0,
+        "scale": 1,
+        "rotation": 0,
+        "opacity": 1
+      },
+      "style": {
+        "fit": "cover",
+        "text": "谁的记忆在闪",
+        "font": "SimHei",
+        "size": 134,
+        "weight": 400,
+        "color": "#f3e600",
+        "align": "center",
+        "lineHeight": 1.18,
+        "letterSpacing": 2,
+        "shadow": 0,
+        "shape": "rect",
+        "fill": "#ffffff",
+        "radius": 0,
+        "stroke": "",
+        "strokeWidth": 0
+      },
+      "fx": {
+        "glow": 0
+      },
+      "motion": {
+        "type": "none",
+        "amount": 0,
+        "dir": "in"
+      },
+      "keyframes": [],
+      "visible": true,
+      "meta": {}
+    },
+    {
+      "id": "el_bg_5",
+      "name": "背景 5",
+      "type": "image",
+      "src": "media/frame_E.jpg",
+      "segment": "seg_5",
+      "start": 15.954,
+      "duration": 4.038,
+      "z": 9,
+      "transform": {
+        "x": 0,
+        "y": 0,
+        "scale": 1,
+        "rotation": 0,
+        "opacity": 1
+      },
+      "style": {
+        "fit": "cover",
+        "text": "",
+        "font": "SimHei",
+        "size": 96,
+        "weight": 400,
+        "color": "#ffffff",
+        "align": "center",
+        "lineHeight": 1.18,
+        "letterSpacing": 0,
+        "shadow": 0,
+        "shape": "rect",
+        "fill": "#ffffff",
+        "radius": 0,
+        "stroke": "",
+        "strokeWidth": 0
+      },
+      "fx": {
+        "glow": 0
+      },
+      "motion": {
+        "type": "drift",
+        "amount": 0.15000000000000002,
+        "dir": "in"
+      },
+      "keyframes": [],
+      "visible": true,
+      "meta": {}
+    },
+    {
+      "id": "el_cap_5",
+      "name": "字幕 5",
+      "type": "text",
+      "src": "",
+      "segment": "seg_5",
+      "start": 16.104,
+      "duration": 3.7380000000000004,
+      "z": 10,
+      "transform": {
+        "x": 0,
+        "y": 300,
+        "scale": 1,
+        "rotation": 0,
+        "opacity": 1
+      },
+      "style": {
+        "fit": "cover",
+        "text": "在噪音里认出自己",
+        "font": "SimHei",
+        "size": 54,
+        "weight": 400,
+        "color": "#00f0ff",
+        "align": "center",
+        "lineHeight": 1.18,
+        "letterSpacing": 1,
+        "shadow": 0,
+        "shape": "rect",
+        "fill": "#ffffff",
+        "radius": 0,
+        "stroke": "",
+        "strokeWidth": 0
+      },
+      "fx": {
+        "glow": 0
+      },
+      "motion": {
+        "type": "none",
+        "amount": 0,
+        "dir": "in"
+      },
+      "keyframes": [],
+      "visible": true,
+      "meta": {}
+    },
+    {
+      "id": "el_bg_6",
+      "name": "背景 6",
+      "type": "image",
+      "src": "media/frame_D.jpg",
+      "segment": "seg_6",
+      "start": 19.992,
+      "duration": 4.008,
+      "z": 11,
+      "transform": {
+        "x": 0,
+        "y": 0,
+        "scale": 1,
+        "rotation": 0,
+        "opacity": 1
+      },
+      "style": {
+        "fit": "cover",
+        "text": "",
+        "font": "SimHei",
+        "size": 96,
+        "weight": 400,
+        "color": "#ffffff",
+        "align": "center",
+        "lineHeight": 1.18,
+        "letterSpacing": 0,
+        "shadow": 0,
+        "shape": "rect",
+        "fill": "#ffffff",
+        "radius": 0,
+        "stroke": "",
+        "strokeWidth": 0
+      },
+      "fx": {
+        "glow": 0
+      },
+      "motion": {
+        "type": "in",
+        "amount": 0.2,
+        "dir": "in"
+      },
+      "keyframes": [],
+      "visible": true,
+      "meta": {}
+    },
+    {
+      "id": "el_cap_6",
+      "name": "字幕 6",
+      "type": "text",
+      "src": "",
+      "segment": "seg_6",
+      "start": 20.142,
+      "duration": 3.708,
+      "z": 12,
+      "transform": {
+        "x": 0,
+        "y": 300,
+        "scale": 1,
+        "rotation": 0,
+        "opacity": 1
+      },
+      "style": {
+        "fit": "cover",
+        "text": "那就别回头",
+        "font": "SimHei",
+        "size": 54,
+        "weight": 400,
+        "color": "#00f0ff",
+        "align": "center",
+        "lineHeight": 1.18,
+        "letterSpacing": 1,
+        "shadow": 0,
+        "shape": "rect",
+        "fill": "#ffffff",
+        "radius": 0,
+        "stroke": "",
+        "strokeWidth": 0
+      },
+      "fx": {
+        "glow": 0
+      },
+      "motion": {
+        "type": "none",
+        "amount": 0,
+        "dir": "in"
+      },
+      "keyframes": [],
+      "visible": true,
+      "meta": {}
+    }
+  ]
+}

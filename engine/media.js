@@ -6,6 +6,7 @@ import fs from 'node:fs/promises';
 import fss from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { runProcess } from './process.js';
 
 const execFileP = promisify(execFile);
 
@@ -30,6 +31,12 @@ export async function findBin(name) {
 }
 
 export const hashOf = (obj) => crypto.createHash('sha1').update(JSON.stringify(obj)).digest('hex').slice(0, 12);
+
+export async function hashFile(file, { signal } = {}) {
+  const hash = crypto.createHash('sha256');
+  for await (const chunk of fss.createReadStream(file, { signal })) hash.update(chunk);
+  return hash.digest('hex');
+}
 
 export async function probeMedia(file) {
   const ffprobe = await findBin('ffprobe');
@@ -57,22 +64,17 @@ export async function probeMedia(file) {
 }
 
 /** Extract a video element's source range to a PNG sequence at project fps/size (cover-cropped). */
-export async function extractSequence({ src, outDir, srcIn = 0, duration, fps, width, height, onLog }) {
+export async function extractSequence({ src, outDir, srcIn = 0, duration, fps, width, height, fit = 'cover', onLog, signal }) {
   const ffmpeg = await findBin('ffmpeg');
   await fs.mkdir(outDir, { recursive: true });
   const args = [
     '-y', '-hide_banner', '-loglevel', 'error',
     '-ss', String(Math.max(0, srcIn)), '-t', String(duration), '-i', src,
-    '-vf', `fps=${fps},scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}`,
+    '-vf', fit === 'stretch' ? `fps=${fps},scale=${width}:${height}`
+      : `fps=${fps},scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}`,
     '-start_number', '0', path.join(outDir, 'f_%05d.png'),
   ];
-  await new Promise((resolve, reject) => {
-    const p = spawn(ffmpeg, args, { windowsHide: true });
-    let err = '';
-    p.stderr.on('data', (d) => { err += d; });
-    p.on('error', reject);
-    p.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg extract failed (${code}): ${err.slice(-400)}`))));
-  });
+  await runProcess(ffmpeg, args, { signal, onLog });
   const files = (await fs.readdir(outDir)).filter((f) => f.endsWith('.png')).sort();
   return { dir: outDir, count: files.length, first: files[0] ? path.join(outDir, files[0]) : null };
 }
@@ -88,7 +90,7 @@ export async function thumbnail({ src, out, at = 0, width = 480 }) {
 }
 
 /** Encode a PNG sequence + optional audio into an mp4. */
-export async function encodeSequence({ framesDir, pattern = 'f_%05d.png', startNumber = null, fps, out, audio = null, audioOffset = 0, gain = 0, crf = 18, onLog }) {
+export async function encodeSequence({ framesDir, pattern = 'f_%05d.png', startNumber = null, fps, out, audio = null, audioOffset = 0, gain = 0, crf = 18, onLog, signal }) {
   const ffmpeg = await findBin('ffmpeg');
   await fs.mkdir(path.dirname(out), { recursive: true });
   const args = ['-y', '-hide_banner', '-framerate', String(fps)];
@@ -104,14 +106,7 @@ export async function encodeSequence({ framesDir, pattern = 'f_%05d.png', startN
     args.push('-c:a', 'aac', '-b:a', '192k', '-shortest');
   }
   args.push('-movflags', '+faststart', out);
-  await new Promise((resolve, reject) => {
-    const p = spawn(ffmpeg, args, { windowsHide: true });
-    let err = '';
-    p.stdout.on('data', (d) => onLog && onLog(String(d)));
-    p.stderr.on('data', (d) => { err += d; });
-    p.on('error', reject);
-    p.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg encode failed (${code}): ${err.slice(-800)}`))));
-  });
+  await runProcess(ffmpeg, args, { signal, onLog });
   return out;
 }
 
