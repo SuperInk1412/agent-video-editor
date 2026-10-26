@@ -10,6 +10,7 @@
 //
 // M = T(pivot) · R(dir, roll) · T(position) · S(scale) · geometry
 import { clamp, ease, speedWarp } from './time.js';
+import { sampleCurve, normalizeCurve } from './curves.js';
 
 export const SCENE_VERSION = 3;
 export const PX_PER_M = 100; // v2 (pixels) -> v3 (metres) migration scale
@@ -43,8 +44,11 @@ const V = {
 export { speedWarp };
 
 function warp(key, u) {
-  if (Array.isArray(key.speed) && key.speed.length >= 2) return speedWarp(key.speed, u);
-  return ease(key.ease || 'easeInOut', clamp(u, 0, 1));
+  const uu = clamp(u, 0, 1);
+  // A per-segment value curve wins over the legacy ease/speed settings.
+  if (key.curve) return sampleCurve(key.curve, uu);
+  if (Array.isArray(key.speed) && key.speed.length >= 2) return speedWarp(key.speed, uu);
+  return ease(key.ease || 'easeInOut', uu);
 }
 
 function sortKeys(keys) {
@@ -257,6 +261,10 @@ export function normalizeTracks(tracks) {
         else if (typeof k.v === 'number') key.v = Number(k.v);
         else key.v = k.v;
         if (k.ease) key.ease = String(k.ease);
+        if (k.curve) {
+          const curve = normalizeCurve(k.curve);
+          if (curve) key.curve = curve;
+        }
         if (Array.isArray(k.in)) key.in = k.in.map(Number);
         if (Array.isArray(k.out)) key.out = k.out.map(Number);
         if (Array.isArray(k.speed)) {

@@ -262,3 +262,16 @@ test('camera stack ops: cameraParamUnkey targets the camera that owns the key', 
   assert.deepEqual(p.cameras.find((c) => c.id === 'cam_b').tracks.fov.map((k) => k.t), [0]);
 });
 
+
+test('camera stack ops: picture pivot and offset stay inside their range', () => {
+  const p = base({ cameras: [{ id: 'cam_a', path: [] }], cameraOrder: ['cam_a'], activeCameraId: 'cam_a' });
+  applyOp(p, { op: 'cameraSet', patch: { picturePivot: [0.5, 3], pictureOffset: [0, 5] } });
+  assert.deepEqual(p.cameras[0].picturePivot, [0.5, 1]);
+  assert.deepEqual(p.cameras[0].pictureOffset, [0, 1]);
+  applyOp(p, { op: 'cameraPatch', id: 'cam_a', patch: { picturePivot: [-2, 0.2], pictureOffset: [-9, 0.5] } });
+  assert.deepEqual(p.cameras[0].picturePivot, [0, 0.2]);
+  assert.deepEqual(p.cameras[0].pictureOffset, [-1, 0.5]);
+  // keyed values use the same clamp (a black-screening offset cannot be keyed in)
+  applyOp(p, { op: 'cameraParamKey', id: 'cam_a', path: 'pictureOffset', t: 0, v: [3, -4] });
+  assert.deepEqual(p.cameras[0].tracks.pictureOffset[0].v, [1, -1]);
+});

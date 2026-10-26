@@ -43,6 +43,44 @@ def lerp(a, b, t):
     return a + (b - a) * t
 
 
+BEZIER_SOLVE_STEPS = 40
+
+
+def _bezier_axis(a, b, s):
+    inv = 1.0 - s
+    return 3.0 * inv * inv * s * a + 3.0 * inv * s * s * b + s ** 3
+
+
+def sample_curve(curve, u):
+    """Progress for a per-segment value curve (mirrors core/curves.js)."""
+    if not isinstance(curve, dict):
+        return clamp(u)
+    p1 = curve.get('p1') or (0.0, 0.0)
+    p2 = curve.get('p2') or (1.0, 1.0)
+    try:
+        x1 = clamp(float(p1[0]))
+        y1 = float(p1[1])
+        x2 = clamp(float(p2[0]))
+        y2 = float(p2[1])
+    except (TypeError, ValueError, IndexError):
+        return clamp(u)
+    if not (math.isfinite(y1) and math.isfinite(y2)):
+        return clamp(u)
+    target = clamp(u)
+    if target <= 0.0:
+        return 0.0
+    if target >= 1.0:
+        return 1.0
+    lo, hi = 0.0, 1.0
+    for _ in range(BEZIER_SOLVE_STEPS):
+        s = (lo + hi) / 2.0
+        if _bezier_axis(x1, x2, s) < target:
+            lo = s
+        else:
+            hi = s
+    return _bezier_axis(y1, y2, (lo + hi) / 2.0)
+
+
 def ease(name, p):
     p = clamp(p)
     if name == 'linear':
@@ -79,7 +117,8 @@ def sample_track(keys, path, t, base):
         if a['t'] <= t < b['t']:
             p = (t - a['t']) / max(1e-6, b['t'] - a['t'])
             if isinstance(a['value'], (int, float)) and isinstance(b['value'], (int, float)):
-                return lerp(a['value'], b['value'], ease(a.get('ease', 'easeInOut'), p))
+                progress = sample_curve(a['curve'], p) if a.get('curve') else ease(a.get('ease', 'easeInOut'), p)
+                return lerp(a['value'], b['value'], progress)
             return a['value']
     return base
 

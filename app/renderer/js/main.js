@@ -1,13 +1,15 @@
 // VedioMaker renderer main: state, playback, selection, wiring.
 import { Preview } from './preview.js';
 import { PathGizmo } from './pathgizmo.js';
-import { Timeline, escapeHtml } from './timeline.js';
+import { Timeline } from './timeline.js';
+import { CurvePanel, curvePathLabel } from './curvepanel.js';
 import { Inspector } from './inspector.js';
 import { AgentPanel } from './ai.js';
 import { PipelinePanel } from './pipeline.js';
 import { LogPanel } from './logs.js';
 import { ProjectsPanel } from './projects.js';
 import { evalCamera, pathPos, cameraTransform } from '/core/camera.js';
+import { curveSegments } from '/core/curves.js';
 import { objectPose } from '/core/scene.js';
 import { sampleTrack } from '/core/time.js';
 import {
@@ -37,7 +39,7 @@ const S = {
   clipboard: null,
 };
 
-let preview, timeline, inspector, agentPanel, pipelinePanel, logPanel, gizmo, projects;
+let preview, timeline, inspector, agentPanel, pipelinePanel, logPanel, gizmo, projects, curvePanel;
 
 // ---- error reporting: everything lands in .vdm/logs and the 日志 panel ----
 const reportedErrors = new Set();
@@ -181,7 +183,7 @@ function applyProject(p, source) {
   timeline.setSoloCameras(S.soloCameras || new Set());
   timeline.setSelection(S.selection);
   inspector.render(p, S.selection, S.time);
-  renderShots();
+  curvePanel?.setProject(p);
   $('#projTitle').textContent = p.meta.title;
   $('#projMeta').textContent = `${p.meta.width}×${p.meta.height} · ${p.meta.fps}fps · ${p.meta.duration.toFixed(1)}s · rev ${p.rev}`;
   const editBtn = $('#btnEditMode');
@@ -259,8 +261,92 @@ function select(sel = {}) {
   }
   timeline.setSelection(S.selection);
   inspector.render(S.project, S.selection, S.time);
-  renderShots();
   updateOverlay();
+}
+
+// ---------------------------------------------------------------- value curve
+
+/** Every keyed property of a host that has at least two keys, as panel tracks. */
+function curveTracksFor(host, id) {
+  const tracks = [];
+  if (host === 'element') {
+    const el = S.project.elements.find((e) => e.id === id);
+    if (!el) return tracks;
+    const byPath = new Map();
+    for (const k of el.keyframes || []) {
+      if (!byPath.has(k.path)) byPath.set(k.path, []);
+      byPath.get(k.path).push(k);
+    }
+    for (const [path, keys] of byPath) {
+      const segments = curveSegments(keys);
+      if (segments.length) tracks.push({ path, label: curvePathLabel(path), segments });
+    }
+  } else {
+    const obj = host === 'object'
+      ? (S.project.scene?.objects || []).find((o) => o.id === id)
+      : (S.project.cameras || []).find((c) => c.id === id);
+    if (!obj) return tracks;
+    for (const [path, keys] of Object.entries(obj.tracks || {})) {
+      if (host === 'camera' && path === 'path') continue;
+      const segments = curveSegments(keys);
+      if (segments.length) tracks.push({ path, label: curvePathLabel(path), segments });
+    }
+  }
+  return tracks.sort((a, b) => a.path.localeCompare(b.path));
+}
+
+/**
+ * Open the F2 curve drawer.
+ * With a keyframe pool it edits exactly that property; otherwise it falls back
+ * to the selected element/object/camera and picks its keyed property (the
+ * header dropdown can switch between them).
+ */
+function openCurvePanel() {
+  if (!curvePanel || !S.project) return;
+  const pool = S.selection.pool;
+  let host = null;
+  let id = null;
+  let wantedPath = null;
+
+  if (pool?.kind === 'keyframe' && pool.ids.length >= 2) {
+    const parts = pool.ids.map((ref) => splitRef(ref));
+    if (parts.every((p) => p && p.path && p.t != null)) {
+      const first = parts[0];
+      if (parts.every((p) => p.type === first.type && p.id === first.id && p.path === first.path)) {
+        if (first.type === 'cam' && first.path === 'path') {
+          toast('相机飞行路径请用视口里的路径手柄 / 速度曲线', 'warn');
+          return;
+        }
+        host = first.type === 'cam' ? 'camera' : first.type === 'ob' ? 'object' : 'element';
+        id = first.id;
+        wantedPath = first.path;
+      }
+    }
+  }
+  if (!host) {
+    // fall back to the current selection so F2 is never a silent no-op
+    if (S.selection.camera && S.project.camera) { host = 'camera'; id = S.project.camera.id; }
+    else if (S.selection.objectId) { host = 'object'; id = S.selection.objectId; }
+    else if (S.selection.elementId) { host = 'element'; id = S.selection.elementId; }
+  }
+  if (!host || !id) {
+    toast('先选中一个元素/物体/相机，或选中两个以上关键帧', 'warn');
+    return;
+  }
+  const tracks = curveTracksFor(host, id);
+  if (!tracks.length) {
+    toast('这个对象还没有两个以上关键帧可以连成曲线', 'warn');
+    return;
+  }
+  let index = tracks.findIndex((t) => t.path === wantedPath);
+  if (index < 0) index = 0;
+  curvePanel.open({ host, id, tracks, index });
+}
+
+function toggleCurvePanel() {
+  if (!curvePanel) return;
+  if (curvePanel.isOpen()) curvePanel.close();
+  else openCurvePanel();
 }
 
 function updateOverlay() {
@@ -409,48 +495,6 @@ function commitCameraPath() {
 }
 
 // ---------------------------------------------------------------- panels
-function renderShots() {
-  const root = $('#panelShots');
-  if (!root || !S.project) return;
-  root.innerHTML = '';
-  const head = document.createElement('div');
-  head.className = 'panel-head';
-  head.innerHTML = `<div class="panel-title">分镜 <span class="dim">${S.project.segments.length}</span></div>`;
-  const add = document.createElement('button');
-  add.className = 'mini';
-  add.textContent = '+ 分镜';
-  add.onclick = () => {
-    const t = Math.round(S.time * 100) / 100;
-    const dur = Math.min(4, Math.max(0.5, S.project.meta.duration - t));
-    op({ op: 'addSegment', segment: { start: t, duration: dur, name: `镜 ${S.project.segments.length + 1}` } });
-  };
-  head.appendChild(add);
-  root.appendChild(head);
-
-  const list = document.createElement('div');
-  list.className = 'seg-list';
-  for (const s of S.project.segments) {
-    const n = S.project.elements.filter((e) => e.segment === s.id).length;
-    const row = document.createElement('div');
-    row.className = `seg-item ${S.selection.segmentId === s.id ? 'on' : ''}`;
-    row.innerHTML = `
-      <div class="seg-top"><span class="seg-name">${escapeHtml(s.name)}</span><span class="seg-status st-${s.status}">${s.status}</span></div>
-      <div class="seg-sub"><span>${s.start.toFixed(2)}–${(s.start + s.duration).toFixed(2)}s</span><span>${n} 元素</span></div>
-      <div class="seg-intent">${escapeHtml(s.intent || '')}</div>`;
-    row.onclick = () => { S.selection = { segmentId: s.id, elementId: null, objectId: null, camera: false, pool: emptySelection() }; timeline.setSelection(S.selection); setTime(s.start); inspector.render(S.project, S.selection, S.time); renderShots(); updateOverlay(); };
-    const btns = document.createElement('div');
-    btns.className = 'seg-btns';
-    const b1 = document.createElement('button'); b1.className = 'mini'; b1.textContent = '预览帧';
-    b1.onclick = async (e) => { e.stopPropagation(); await post('/api/still', { time: s.start + s.duration / 2, scale: 0.5 }); };
-    const b2 = document.createElement('button'); b2.className = 'mini'; b2.textContent = '出片';
-    b2.onclick = async (e) => { e.stopPropagation(); await post('/api/render', { from: s.start, to: s.start + s.duration, scale: S.renderScale }); toast('开始渲染本段'); };
-    btns.append(b1, b2);
-    row.appendChild(btns);
-    list.appendChild(row);
-  }
-  root.appendChild(list);
-}
-
 async function renderMedia() {
   const root = $('#panelMedia');
   if (!root) return;
@@ -582,12 +626,6 @@ function switchRightTab(name) {
   $('#panelLogs').hidden = name !== 'logs';
   if (name === 'logs') logPanel?.refresh(true);
 }
-function switchLeftTab(name) {
-  document.querySelectorAll('[data-tabs="left"] button').forEach((b) => b.classList.toggle('on', b.dataset.tab === name));
-  $('#panelShots').hidden = name !== 'shots';
-  $('#panelMedia').hidden = name !== 'media';
-  if (name === 'media') renderMedia();
-}
 
 // ---------------------------------------------------------------- boot
 async function boot() {
@@ -683,18 +721,21 @@ async function boot() {
   timeline = new Timeline($('#timeline'), {
     onSeek: (t) => { setTime(t); if (S.playing) { S.playFrom = t; S.playWall = performance.now(); preview.setAudioTime(t); } },
     onSelect: (sel) => select(sel),
-    onSegment: (id) => {
-      S.selection = { segmentId: id, elementId: null, objectId: null, camera: false, pool: emptySelection() };
-      timeline.setSelection(S.selection);
-      renderShots();
-      inspector.render(S.project, S.selection, S.time);
-    },
     onOp: (o) => op(o),
     onPause: () => pause(),
     onElementMenu: (id, x, y) => elementMenu(id, x, y),
     onCameraMenu: (id, x, y) => cameraMenu(id, x, y),
   });
   timeline.setProject(S.project);
+
+  curvePanel = new CurvePanel($('#timeline'), {
+    getTimeline: () => timeline,
+    getProject: () => S.project,
+    onOp: (o) => op(o),
+    toast,
+  });
+  // keep the F2 drawer's x axis glued to the timeline while zooming/scrolling
+  timeline.onViewChange = () => { if (curvePanel?.isOpen()) curvePanel.draw(); };
 
   inspector = new Inspector($('#panelInsp'), {
     onOp: (o) => op(o),
@@ -723,7 +764,6 @@ async function boot() {
     onAskAI: (id) => {
       S.selection = { segmentId: id, elementId: null, objectId: null, camera: false, pool: emptySelection() };
       switchRightTab('ai');
-      switchLeftTab('shots');
       toast('在右侧写下让 AI 改什么');
     },
   });
@@ -749,8 +789,9 @@ async function boot() {
   pipelinePanel.set(state);
 
   // tabs
-  document.querySelectorAll('[data-tabs="left"] button').forEach((b) => b.onclick = () => switchLeftTab(b.dataset.tab));
   document.querySelectorAll('[data-tabs="right"] button').forEach((b) => b.onclick = () => switchRightTab(b.dataset.tab));
+  // the left panel is media-only now: paint it once at boot
+  renderMedia();
 
   // transport
   $('#btnPlay').onclick = togglePlay;
@@ -1310,6 +1351,8 @@ async function boot() {
 
   // keyboard
   window.addEventListener('keydown', (e) => {
+    // F2 works even while a value field is focused (it is not a text key).
+    if (e.key === 'F2') { e.preventDefault(); toggleCurvePanel(); return; }
     if (/INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
     S.keys.add(e.code);
     if (e.key === 'Tab') { e.preventDefault(); setEditMode(!S.editMode); return; }
@@ -1320,6 +1363,7 @@ async function boot() {
       return;
     }
     if (e.key === 'Escape') {
+      if (curvePanel?.isOpen()) { curvePanel.close(); e.preventDefault(); return; }
       const menu = $('#ctxMenu');
       if (menu && !menu.hidden) { hideContextMenu(); return; }
       if (gizmo?.objSel) { select({ elementId: null, segmentId: null }); return; }
@@ -1450,7 +1494,8 @@ async function boot() {
   };
   requestAnimationFrame(loop);
   window.__vdm = {
-    S, preview, timeline, inspector, gizmo, projects, op, toast,
+    S, preview, timeline, inspector, gizmo, projects, op, toast, curvePanel,
+    openCurvePanel: () => openCurvePanel(),
     setTime: (t) => setTime(t),
     select: (s) => select(s),
     setEditMode: (on) => setEditMode(on),
