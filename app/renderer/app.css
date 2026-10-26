@@ -329,6 +329,7 @@ body.look-mode #stageBox { box-shadow: 0 0 0 2px rgba(255,209,102,.65), 0 0 30px
 .fld .ro { flex: 1; color: var(--dim); font-family: var(--mono); font-size: 11.5px; padding: 3px 6px; background: #0b0e14; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; text-overflow: ellipsis; }
 .kf-btn { flex: 0 0 24px; padding: 2px 0; color: var(--dim2); background: transparent; border-color: transparent; }
 .kf-btn:hover { color: var(--yellow); background: #1e1c10; }
+.kf-btn.on { color: var(--yellow); }
 .row-btns { display: flex; gap: 6px; margin: 8px 0; flex-wrap: wrap; }
 .row-btns button.grow { flex: 1; }
 .chip-list { display: flex; flex-wrap: wrap; gap: 4px; }
@@ -337,7 +338,9 @@ body.look-mode #stageBox { box-shadow: 0 0 0 2px rgba(255,209,102,.65), 0 0 30px
 .kf-list { display: flex; flex-direction: column; gap: 3px; }
 .kf-row { display: grid; grid-template-columns: 46px 1fr 58px 74px 34px 22px; gap: 4px; align-items: center; font-size: 11px; padding: 3px 4px; border-radius: 4px; background: #0d1118; }
 .kf-row.at { background: #1c1a0e; }
-.kf-t { color: var(--accent); font-family: var(--mono); }
+.kf-t { color: var(--accent); font-family: var(--mono); cursor: pointer; }
+.kf-t:hover { text-decoration: underline; }
+.kf-row.outside { opacity: 0.55; }
 .kf-p { color: var(--dim); overflow: hidden; text-overflow: ellipsis; }
 .kf-v { color: var(--yellow); font-family: var(--mono); overflow: hidden; }
 .kf-ease { font-size: 10px; padding: 1px 2px; }

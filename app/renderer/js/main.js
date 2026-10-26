@@ -9,6 +9,7 @@ import { LogPanel } from './logs.js';
 import { ProjectsPanel } from './projects.js';
 import { evalCamera, pathPos, cameraTransform } from '/core/camera.js';
 import { objectPose } from '/core/scene.js';
+import { sampleTrack } from '/core/time.js';
 import {
   emptySelection, normalizeSelection, selectOne, cameraRef, objectRef, elementRef, splitRef,
   keyframeExists, keyframeDeleteOps,
@@ -630,14 +631,13 @@ async function boot() {
   inspector = new Inspector($('#panelInsp'), {
     onOp: (o) => op(o),
     getTime: () => S.time,
+    // ◆ records what the property is at the playhead (its keyed value, or the base)
     getTimeValue: (path) => {
       const el = S.project.elements.find((e) => e.id === S.selection.elementId);
       if (!el) return 0;
       const [a, b] = path.split('.');
-      if (a === 'transform') return el.transform?.[b] ?? 0;
-      if (a === 'style') return el.style?.[b] ?? 0;
-      if (a === 'fx') return el.fx?.[b] ?? 0;
-      return 0;
+      const base = a === 'transform' ? el.transform?.[b] : a === 'style' ? el.style?.[b] : a === 'fx' ? el.fx?.[b] : undefined;
+      return sampleTrack(el.keyframes, path, S.time, base ?? 0);
     },
     onSelect: (sel) => select(sel),
     onSeek: (t) => { pause(); setTime(t); },

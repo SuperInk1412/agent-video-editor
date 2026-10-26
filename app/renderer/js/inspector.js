@@ -1,5 +1,5 @@
 // Inspector: edit the selected element down to the details (or project fx when nothing is selected).
-import { evalElement } from '/core/evaluate.js';
+import { sampleTrack } from '/core/time.js';
 import { objectPose } from '/core/scene.js';
 import { RotBall } from './rotball.js';
 import { SpeedCurve, SPEED_PRESETS } from './speedcurve.js';
@@ -37,17 +37,22 @@ export class Inspector {
 
   _commit(key, op, delay = 180) {
     const prev = this.debounce.get(key);
-    if (prev) clearTimeout(prev);
-    const t = setTimeout(() => {
+    if (prev) clearTimeout(prev.timer);
+    const timer = setTimeout(() => {
       this.debounce.delete(key);
       this.opts.onOp(op);
     }, delay);
-    this.debounce.set(key, t);
+    this.debounce.set(key, { timer, op });
   }
 
+  /** send pending edits now (blur, keyframe button) instead of dropping them */
   _flush() {
-    for (const [, t] of this.debounce) clearTimeout(t);
+    const pending = [...this.debounce.values()];
     this.debounce.clear();
+    for (const { timer, op } of pending) {
+      clearTimeout(timer);
+      this.opts.onOp(op);
+    }
   }
 
   render(project, sel, time) {
@@ -104,14 +109,28 @@ export class Inspector {
     else input.addEventListener('input', emit);
     input.addEventListener('blur', () => this._flush());
 
+    const kfAt = kf ? this._keyAtPlayhead(path) : null;
     const kfBtn = kf ? h('button', {
-      class: 'kf-btn', title: '在当前时间记录关键帧（Shift+点击删除）',
+      class: `kf-btn${kfAt ? ' on' : ''}`, title: '在当前时间记录关键帧（Shift+点击删除当前时间的关键帧）',
       onclick: (e) => {
-        if (e.shiftKey) this.opts.onOp({ op: 'keyRemove', id: this._elId, path });
-        else this.opts.onOp({ op: 'keySet', id: this._elId, path, t: Math.round(this.opts.getTime() * 1000) / 1000, value: this.opts.getTimeValue(path) });
+        this._flush();
+        if (e.shiftKey) {
+          const k = this._keyAtPlayhead(path);
+          if (k) this.opts.onOp({ op: 'keyRemove', id: this._elId, path, t: k.t });
+        } else this.opts.onOp({ op: 'keySet', id: this._elId, path, t: Math.round(this.opts.getTime() * 1000) / 1000, value: this.opts.getTimeValue(path) });
       },
     }, '◆') : null;
     return h('div', { class: `fld span${span}` }, h('label', {}, label), input, kfBtn);
+  }
+
+  /** the selected element's key on `path` within half a frame of the playhead */
+  _keyAtPlayhead(path) {
+    const p = this._last?.project;
+    const el = p?.elements.find((e) => e.id === this._elId);
+    if (!el) return null;
+    const tol = 0.5 / (p.meta.fps || 24);
+    const t = this.opts.getTime();
+    return (el.keyframes || []).find((k) => k.path === path && Math.abs(k.t - t) <= tol) || null;
   }
 
   _refresh() {
@@ -122,13 +141,18 @@ export class Inspector {
 
   _renderElement(project, el, time) {
     this._elId = el.id;
-    const st = evalElement(el, time, project.meta);
     const typeLabel = { image: '图片', video: '视频', text: '文字', shape: '形状', solid: '色块' }[el.type] || el.type;
     const head = h('div', { class: 'insp-head' },
       h('div', { class: 'insp-kind' }, typeLabel),
       h('div', { class: 'insp-id' }, el.id),
       h('div', { class: 'insp-actions' },
-        h('button', { class: 'mini', onclick: () => this.opts.onOp({ op: 'duplicateElement', id: el.id, start: Math.round((el.start + el.duration) * 1000) / 1000 }) }, '复制'),
+        h('button', {
+          class: 'mini', title: '在后面复制一份（放不下时贴着结尾）',
+          onclick: () => {
+            const start = Math.max(0, Math.min(el.start + el.duration, project.meta.duration - el.duration));
+            this.opts.onOp({ op: 'duplicateElement', id: el.id, start: Math.round(start * 1000) / 1000 });
+          },
+        }, '复制'),
         h('button', { class: 'mini danger', onclick: () => { if (confirm(`删除 ${el.name}?`)) this.opts.onOp({ op: 'removeElement', id: el.id }); } }, '删除'),
       ),
     );
@@ -136,6 +160,16 @@ export class Inspector {
 
     const set = (path, patch) => this._commit(`${el.id}:${path}`, { op: 'updateElement', id: el.id, patch });
     const setPath = (path) => (v) => this._commit(`${el.id}:${path}`, { op: 'set', id: el.id, path, value: v });
+    // Keyable fields show the keyed value at the playhead (before motion presets
+    // and fades). Once a property has keys, typing a value keys it at the
+    // playhead; otherwise it edits the base value.
+    const keyed = (path) => (el.keyframes || []).some((k) => k.path === path);
+    const kv = (path, base) => sampleTrack(el.keyframes, path, time, base);
+    const tNow = () => Math.round(this.opts.getTime() * 1000) / 1000;
+    const edit = (path, patch) => (v) => {
+      if (keyed(path)) this._commit(`${el.id}:${path}`, { op: 'keySet', id: el.id, path, t: tNow(), value: v });
+      else set(path, patch(v));
+    };
 
     this.root.appendChild(this._section('基础',
       this._field({ label: '名称', type: 'text', value: el.name, onChange: (v) => set('name', { name: v }) }),
@@ -151,11 +185,11 @@ export class Inspector {
     ));
 
     this.root.appendChild(this._section('变换',
-      this._field({ label: 'X', value: round(st.x), kf: true, path: 'transform.x', onChange: (v) => set('tr', { transform: { x: v } }) }),
-      this._field({ label: 'Y', value: round(st.y), kf: true, path: 'transform.y', onChange: (v) => set('tr', { transform: { y: v } }) }),
-      this._field({ label: '缩放', value: round(st.scale, 3), step: 0.01, kf: true, path: 'transform.scale', onChange: (v) => set('tr', { transform: { scale: v } }) }),
-      this._field({ label: '旋转°', value: round(st.rotation, 2), step: 0.5, kf: true, path: 'transform.rotation', onChange: (v) => set('tr', { transform: { rotation: v } }) }),
-      this._field({ label: '不透明度', value: round(st.opacity, 3), step: 0.01, min: 0, max: 1, kf: true, path: 'transform.opacity', onChange: (v) => set('tr', { transform: { opacity: v } }) }),
+      this._field({ label: 'X', value: round(kv('transform.x', el.transform.x)), kf: true, path: 'transform.x', onChange: edit('transform.x', (v) => ({ transform: { x: v } })) }),
+      this._field({ label: 'Y', value: round(kv('transform.y', el.transform.y)), kf: true, path: 'transform.y', onChange: edit('transform.y', (v) => ({ transform: { y: v } })) }),
+      this._field({ label: '缩放', value: round(kv('transform.scale', el.transform.scale), 3), step: 0.01, kf: true, path: 'transform.scale', onChange: edit('transform.scale', (v) => ({ transform: { scale: v } })) }),
+      this._field({ label: '旋转°', value: round(kv('transform.rotation', el.transform.rotation), 2), step: 0.5, kf: true, path: 'transform.rotation', onChange: edit('transform.rotation', (v) => ({ transform: { rotation: v } })) }),
+      this._field({ label: '不透明度', value: round(kv('transform.opacity', el.transform.opacity), 3), step: 0.01, min: 0, max: 1, kf: true, path: 'transform.opacity', onChange: edit('transform.opacity', (v) => ({ transform: { opacity: v } })) }),
       this._field({ label: '跟随节拍', value: el.punch || 0, step: 0.05, min: 0, max: 2, onChange: (v) => set('punch', { punch: v }) }),
     ));
 
@@ -172,7 +206,7 @@ export class Inspector {
       this.root.appendChild(this._section('文字',
         this._field({ label: '内容', type: 'textarea', span: 3, value: el.style.text, onChange: (v) => set('style.text', { style: { text: v } }) }),
         this._field({ label: '字体', type: 'select', value: el.style.font, options: FONTS, onChange: (v) => set('style.font', { style: { font: v } }) }),
-        this._field({ label: '字号', value: el.style.size, step: 1, kf: true, path: 'style.size', onChange: (v) => set('style.size', { style: { size: v } }) }),
+        this._field({ label: '字号', value: round(kv('style.size', el.style.size), 1), step: 1, kf: true, path: 'style.size', onChange: edit('style.size', (v) => ({ style: { size: v } })) }),
         this._field({ label: '颜色', type: 'color', value: el.style.color, onChange: (v) => set('style.color', { style: { color: v } }) }),
         this._field({
           label: '对齐', type: 'select', value: el.style.align, options: [{ value: 'center', label: '居中' }, { value: 'left', label: '左' }, { value: 'right', label: '右' }],
@@ -206,7 +240,7 @@ export class Inspector {
     }
 
     this.root.appendChild(this._section('效果',
-      this._field({ label: '辉光', value: el.fx?.glow || 0, step: 0.05, min: 0, max: 2, kf: true, path: 'fx.glow', onChange: (v) => set('fx.glow', { fx: { ...el.fx, glow: v } }) }),
+      this._field({ label: '辉光', value: round(kv('fx.glow', el.fx?.glow || 0), 3), step: 0.05, min: 0, max: 2, kf: true, path: 'fx.glow', onChange: edit('fx.glow', (v) => ({ fx: { ...el.fx, glow: v } })) }),
       this._field({
         label: '混合', type: 'select', value: el.style.blend || 'normal',
         options: [{ value: 'normal', label: '正常' }, { value: 'add', label: '相加' }, { value: 'screen', label: '滤色' }],
@@ -310,8 +344,12 @@ export class Inspector {
     const list = h('div', { class: 'kf-list' });
     if (!kfs.length) list.appendChild(h('div', { class: 'hint' }, '还没有关键帧。点字段右边的 ◆ 在当前时间记录。'));
     for (const k of kfs) {
-      list.appendChild(h('div', { class: `kf-row ${Math.abs(k.t - time) < 0.05 ? 'at' : ''}` },
-        h('span', { class: 'kf-t' }, k.t.toFixed(2) + 's'),
+      const outside = k.t < el.start - 1e-6 || k.t > el.start + el.duration + 1e-6;
+      list.appendChild(h('div', {
+        class: `kf-row ${Math.abs(k.t - time) < 0.05 ? 'at' : ''} ${outside ? 'outside' : ''}`,
+        title: outside ? '这个关键帧在元素时间范围之外（切分后保留，用来保持动画连续）' : null,
+      },
+        h('span', { class: 'kf-t', title: '跳到这个关键帧', onclick: () => this.opts.onSeek?.(k.t) }, k.t.toFixed(2) + 's'),
         h('span', { class: 'kf-p' }, k.path),
         h('span', { class: 'kf-v' }, String(k.value).slice(0, 14)),
         h('select', {
@@ -319,7 +357,7 @@ export class Inspector {
           onchange: (e) => this.opts.onOp({ op: 'keySet', id: el.id, path: k.path, t: k.t, value: k.value, ease: e.target.value }),
         }, ...EASES.map((e) => h('option', { value: e, selected: e === k.ease }, e))),
         h('button', { class: 'mini', onclick: () => this.opts.onOp({ op: 'keySet', id: el.id, path: k.path, t: round(time), value: k.value, ease: k.ease }) }, '在此'),
-        h('button', { class: 'mini danger', onclick: () => this.opts.onOp({ op: 'keyRemove', id: el.id, path: k.path }) }, '×'),
+        h('button', { class: 'mini danger', title: '删除这个关键帧', onclick: () => this.opts.onOp({ op: 'keyRemove', id: el.id, path: k.path, t: k.t }) }, '×'),
       ));
     }
     this.root.appendChild(this._section(`关键帧 (${kfs.length})`, list));
