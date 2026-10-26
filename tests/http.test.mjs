@@ -104,3 +104,20 @@ test('uploads are bounded and concurrent equal filenames never overwrite each ot
   assert.deepEqual(await Promise.all(names.map((name) => fs.readFile(path.join(root, 'media', name), 'utf8'))), ['first', 'second']);
   assert.equal((await fs.readdir(path.join(root, 'media'))).some((name) => name.startsWith('.upload-')), false);
 });
+
+test('HTTP CAS, dry-run, request receipts and CLI history share one application contract', async (t) => {
+  const { root, post } = await setup(t);
+  const input = { expectedRev: 1, requestId: 'http-create', ops: [{ op: 'addElement', element: { type: 'text', duration: 2, style: { text: 'new' } } }] };
+  const preview = await (await post('api/ops', { ...input, dryRun: true })).json();
+  assert.equal(preview.rev, 1);
+  const first = await (await post('api/ops', input)).json();
+  const repeated = await (await post('api/ops', input)).json();
+  assert.equal(repeated.replayed, true);
+  assert.deepEqual(first.opResults, repeated.opResults);
+  const conflict = await post('api/ops', { ...input, requestId: 'different' });
+  assert.equal(conflict.status, 409);
+  assert.equal((await conflict.json()).currentRev, 2);
+  const { stdout } = await promisify(execFile)(process.execPath, ['cli/vdm.js', 'undo', '--project', root, '--expected-rev', '2', '--json']);
+  assert.equal(JSON.parse(stdout).rev, 3);
+  assert.equal((await loadProject(root)).elements.length, 1);
+});

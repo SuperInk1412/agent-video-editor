@@ -39,14 +39,18 @@
 - 每次修改都是 `core/ops.js` 里一个 JSON 操作；
 - `engine/storage.js` 用「带持有者身份的 mkdir 原子锁 + 临时文件 rename」写入，`rev` 自增；
 - UI 与 CLI/AI 都会改这个文件，引擎用 `fs.watchFile` 监听外部变更并广播；
-- 引擎的写入（UI ops、AI 提议、撤销/重做、节拍、自动分镜）排成一个队列，每次在锁里**从磁盘**
+- `application/project-service.js` 统一 CLI / HTTP / AI 的编辑、规划和历史；每次在锁里**从磁盘**
   读最新版本再应用，所以不会覆盖 CLI 刚写、还没被监听到的修改；
-- 外部写入（CLI、其他进程）被监听到时也会进撤销栈，在 UI 里一样能撤销；
+- 全局历史与请求回执保存在 `.vdm/transactions.json`，CLI 编辑立即进入同一撤销历史；
 - 失败的操作不会落盘（先克隆校验再写）。
 
 `core/ops.js` 只负责内存中的编辑语义，存储与跨进程锁位于 Node 引擎层；`core/` 保持浏览器可用。
 文件锁不因持有时间长而驱逐活跃进程。可确认 PID 已退出时恢复锁；无法识别持有者的旧锁会报告
 `LOCK_ORPHANED`，避免误删其他写入者的锁。
+
+提交可带 `expectedRev / requestId / dryRun`。准备记录先保存确切快照与生成 ID，再替换项目，
+最后提交历史和回执；中断后按前后 hash 恢复，不重新执行操作。无法确认提交状态时报告
+`UNKNOWN_COMMIT_STATE`。`.vdm/transactions.json` 包含历史和恢复信息，不属于可随意清理的渲染缓存。
 
 这样做的直接好处：**AI 的修改和你手动的修改是同一类东西**——看得见（时间线会跳）、
 能撤销（服务端撤销栈）、能 diff（纯 JSON）。

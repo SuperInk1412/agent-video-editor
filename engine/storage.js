@@ -111,8 +111,10 @@ async function releaseOwner(lock, name) {
 }
 
 /** Local cross-process lock. A live owner is never evicted because of its age. */
-export async function withLock(dir, fn, { timeout = 8000, stale = 15000 } = {}) {
+export async function withLock(dir, fn, { timeout = 8000, stale = 15000, lockName = 'lock' } = {}) {
   const p = await ensureProjectDirs(dir);
+  if (!['lock', 'runtime-lock', 'jobs-lock'].includes(lockName)) throw new Error('invalid lock name');
+  p.lock = path.join(p.vdm, lockName);
   const t0 = Date.now();
   const owner = `owner-${process.pid}-${randomUUID()}`;
   for (;;) {

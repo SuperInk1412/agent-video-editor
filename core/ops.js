@@ -13,6 +13,7 @@ export const OP_KINDS = [
   'cameraParamKey', 'cameraParamUnkey', 'worldSet',
   'addCamera', 'removeCamera', 'reorderCamera', 'activateCamera',
   'objectAdd', 'objectRemove', 'objectPatch', 'objectKey', 'objectUnkey',
+  'replaceTimeline', 'restoreProject',
 ];
 
 const isObj = (o) => o && typeof o === 'object' && !Array.isArray(o);
@@ -260,6 +261,20 @@ export function applyOp(p, op) {
   const changed = [];
 
   switch (kind) {
+    case 'restoreProject': {
+      // Used by audited initialization, snapshot import and history commands.
+      if (!isObj(op.project)) fail('restoreProject needs a project');
+      const revision = p.rev;
+      for (const key of Object.keys(p)) delete p[key];
+      Object.assign(p, JSON.parse(JSON.stringify(op.project)), { rev: revision });
+      return { changed: ['project'] };
+    }
+    case 'replaceTimeline': {
+      if (!Array.isArray(op.elements) || !Array.isArray(op.segments)) fail('replaceTimeline needs elements and segments');
+      p.elements = JSON.parse(JSON.stringify(op.elements));
+      p.segments = JSON.parse(JSON.stringify(op.segments));
+      return { changed: ['elements', 'segments'] };
+    }
     case 'addElement': {
       const el = op.element;
       if (!isObj(el)) fail('addElement needs element object');
@@ -412,10 +427,10 @@ export function applyOp(p, op) {
     case 'addSegment': {
       const s = op.segment || {};
       const ids = allIds(p);
-      if (!s.id) s.id = newId('seg', ids);
-      else if (ids.has(s.id)) fail(`id ${s.id} already used`);
+      const id = s.id || newId('seg', ids);
+      if (s.id && ids.has(s.id)) fail(`id ${s.id} already used`);
       const seg = {
-        id: s.id,
+        id,
         name: s.name || `seg ${p.segments.length + 1}`,
         start: Number(s.start ?? 0),
         duration: Number(s.duration ?? 2),
@@ -747,7 +762,7 @@ export function applyOp(p, op) {
 
     case 'batch': {
       const results = (op.ops || []).map((o) => applyOp(p, o));
-      return { changed: results.flatMap((r) => r.changed) };
+      return { changed: results.flatMap((r) => r.changed), results };
     }
 
     default:
@@ -759,11 +774,13 @@ export function applyOps(p, ops) {
   if (!Array.isArray(ops) || ops.length > 1000) fail('ops must be an array of at most 1000 operations');
   assertSafeData(ops);
   const changed = new Set();
+  const results = [];
   for (const op of ops) {
     const r = applyOp(p, op);
+    results.push(JSON.parse(JSON.stringify(r)));
     (r.changed || []).forEach((c) => changed.add(c));
   }
   // keep elements ordered by z for rendering
   p.elements.sort((a, b) => a.z - b.z || a.start - b.start);
-  return { changed: [...changed] };
+  return { changed: [...changed], results };
 }

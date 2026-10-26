@@ -8,6 +8,10 @@ node cli/vdm.js <command> [args] [--project <dir>] [--json]
 
 不传 `--project` 时从当前目录向上找 `project.vdm.json`。
 
+编辑命令支持 `--expected-rev N`、`--request-id ID`、`--dry-run`。`ops` 也可接收
+`{"ops":[...],"expectedRev":N,"requestId":"...","dryRun":true}`；预检不写入，重试同一请求
+返回相同事务结果。`vdm history` / `undo` / `redo` 使用持久化的项目全局历史。
+
 ## 项目
 
 | 命令 | 说明 |

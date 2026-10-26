@@ -8,15 +8,15 @@ import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
-  paths, loadProject, saveProject, findProjectRoot, watchProject,
-  ensureProjectDirs, projectExists, withLock, PROJECT_FILE,
+  paths, findProjectRoot, watchProject,
+  ensureProjectDirs, projectExists, PROJECT_FILE,
 } from './storage.js';
-import { normalizeProject, assertValidProject } from '../core/schema.js';
-import { applyOps } from '../core/ops.js';
+import { projectService } from './projects.js';
+import { errorData } from '../application/errors.js';
 import { probeMedia, mimeOf, fileExists } from './media.js';
 import { renderStill, renderVideo, blenderVersion, findBlender } from './blender.js';
 import { analyzeBeats } from './beats.js';
-import { planProject, summarizeProject, STYLE_PRESETS } from './storyboard.js';
+import { summarizeProject, STYLE_PRESETS } from './storyboard.js';
 import { AgentRunner, findDsh, CLI_PATH } from './agent.js';
 import { createLogger } from './log.js';
 import { worldSnapshot } from './shot.js';
@@ -120,7 +120,8 @@ export async function startServer({ root, port = 47100, open = false, onReady, i
   const p = await ensureProjectDirs(projectRoot);
   const log = createLogger({ dir: projectRoot });
   log.info('engine starting', { root: projectRoot, pid: process.pid, version: '0.1.0' });
-  let project = await loadProject(projectRoot);
+  const projects = projectService(projectRoot);
+  let project = await projects.read();
   let lastRev = project.rev;
 
   const clients = new Set();
@@ -133,60 +134,27 @@ export async function startServer({ root, port = 47100, open = false, onReady, i
   const toast = (message, level = 'info') => broadcast('toast', { message, level, at: Date.now() });
   log.onLine((rec) => { if (rec.level !== 'debug') broadcast('log', rec); });
 
-  // ---- undo/redo (in-memory, per session) ----
-  // Every change to the file lands here, whoever made it (UI, AI, or a CLI
-  // write noticed by the watcher), so all of them can be undone from the UI.
-  const history = { undo: [], redo: [], max: 80 };
-  const snapshot = (proj) => JSON.stringify(proj);
-  const pushUndo = (proj) => {
-    history.undo.push(snapshot(proj));
-    if (history.undo.length > history.max) history.undo.shift();
-    history.redo.length = 0;
-  };
-
-  // ---- the one write path ----
-  // Writes run one at a time, under the cross-process lock, against the file
-  // on disk (not the in-memory copy), so a CLI/agent edit that the watcher has
-  // not picked up yet is never overwritten. `fn(current)` returns the next
-  // project (it may mutate and return its argument, a private copy); throwing
-  // writes nothing.
   let writeChain = Promise.resolve();
   const serialized = (fn) => {
     const run = writeChain.then(fn, fn);
     writeChain = run.catch(() => {});
     return run;
   };
-  const adoptDisk = (fresh) => {
+  const adoptDisk = (fresh, source = 'disk', transaction = {}) => {
     if (fresh.rev === lastRev) return false;
-    pushUndo(project);
     project = fresh;
     lastRev = fresh.rev;
-    broadcast('project', { project, source: 'disk', rev: fresh.rev });
+    broadcast('project', { project, source, rev: fresh.rev, transactionId: transaction.transactionId });
     updateStoryboardStep(fresh);
     return true;
   };
-  const commit = (by, fn, { undo = 'push' } = {}) => serialized(() => withLock(projectRoot, async () => {
-    const current = await loadProject(projectRoot);
-    adoptDisk(current);
-    const work = JSON.parse(JSON.stringify(current));
-    const out = await fn(work);
-    const next = normalizeProject(assertValidProject(out?.project || work));
-    next.rev = current.rev; // keep rev monotonic even when restoring a snapshot
-    const saved = await saveAndBroadcast(next, by);
-    if (undo === 'push') pushUndo(current);
-    return { saved, result: out?.result };
-  }));
-  // Anything that goes wrong while applying ops (or validating the result) is
-  // the caller's fault (400), not the engine's (500).
-  const applyOrReject = (cur, ops) => {
-    try {
-      return applyOps(cur, ops).changed;
-    } catch (e) {
-      e.rejected = true;
-      throw e;
-    }
-  };
-  const isRejection = (e) => !!(e?.rejected || e?.issues);
+  const transact = (input, source = 'ui') => serialized(async () => {
+    const result = await projects.transact(input, { actorId: source });
+    if (!result.dryRun) adoptDisk(result.project, source, result);
+    return result;
+  });
+  const transactionOptions = (body) => ({ expectedRev: body.expectedRev, requestId: body.requestId, dryRun: body.dryRun });
+  const isRejection = (e) => !!(e?.issues || e?.code === 'OP_INVALID');
 
   // ---- pipeline state ----
   const pipelineFile = path.join(p.vdm, 'pipeline.json');
@@ -250,7 +218,8 @@ export async function startServer({ root, port = 47100, open = false, onReady, i
     onEvent: async (ev) => {
       if (ev.type === 'proposal') {
         try {
-          const { saved, result: changed } = await commit('ai', (cur) => ({ project: cur, result: applyOrReject(cur, ev.proposal.ops) }));
+          const tx = await transact({ ops: ev.proposal.ops, expectedRev: ev.baseRev, requestId: ev.runId }, 'ai');
+          const saved = tx.project, changed = tx.changedIds;
           log.info('agent applied', { ops: ev.proposal.ops.length, changed, rev: saved.rev, note: ev.proposal.note });
           broadcast('agent', { ...ev, applied: { changed, note: ev.proposal.note, rev: saved.rev } });
           addArtifact({ kind: 'ai', label: `AI 改了 ${changed.length} 项`, detail: ev.proposal.note });
@@ -271,7 +240,7 @@ export async function startServer({ root, port = 47100, open = false, onReady, i
   // queued behind our own writes, so a save we just made is never mistaken for an external edit
   const unwatch = watchProject(projectRoot, () => serialized(async () => {
     try {
-      adoptDisk(await loadProject(projectRoot));
+      adoptDisk(await projects.read());
     } catch (e) {
       toast(`项目文件读取失败: ${e.message}`, 'error');
     }
@@ -283,15 +252,6 @@ export async function startServer({ root, port = 47100, open = false, onReady, i
     else setStep('storyboard', { status: 'todo', detail: '还没有分镜' });
   }
   updateStoryboardStep(project);
-
-  async function saveAndBroadcast(next, by = 'ui') {
-    const saved = await saveProject(projectRoot, next, { by });
-    project = saved;
-    lastRev = saved.rev;
-    updateStoryboardStep(saved);
-    broadcast('project', { project: saved, source: by, rev: saved.rev });
-    return saved;
-  }
 
   const server = http.createServer(async (req, res) => {
     let pathname = req.url;
@@ -402,41 +362,18 @@ export async function startServer({ root, port = 47100, open = false, onReady, i
       if (pathname === '/api/ops' && req.method === 'POST') {
         const body = await readBody(req);
         const ops = Array.isArray(body.ops) ? body.ops : [body];
-        if (!ops.length) return json(res, 400, { error: 'no ops' });
-        try {
-          const { saved, result: changed } = await commit(body.by || 'ui', (cur) => ({ project: cur, result: applyOrReject(cur, ops) }));
-          return json(res, 200, { ok: true, changed, rev: saved.rev, project: saved });
-        } catch (e) {
-          if (!isRejection(e)) throw e;
-          log.warn('ops rejected', { error: e.message, ops: ops.map((o) => o?.op).join(',') });
-          return json(res, 400, { error: e.message, code: e.code || 'OP_FAILED' });
-        }
+        const result = await transact({ ...transactionOptions(body), ops });
+        return json(res, 200, { ok: true, ...result, changed: result.changedIds });
       }
-
+      if (pathname === '/api/project' && req.method === 'GET') return json(res, 200, { project: await projects.read() });
       if (pathname === '/api/project' && req.method === 'POST') {
         const body = await readBody(req);
-        const replacement = assertValidProject(body.project);
-        const { saved } = await commit(body.by || 'ui', () => ({ project: replacement }));
-        return json(res, 200, { ok: true, project: saved });
+        return json(res, 200, { ok: true, ...await transact({ ...transactionOptions(body), command: { type: 'replace', project: body.project } }) });
       }
-
+      if (pathname === '/api/history' && req.method === 'GET') return json(res, 200, await projects.history());
       if ((pathname === '/api/undo' || pathname === '/api/redo') && req.method === 'POST') {
-        const isUndo = pathname === '/api/undo';
-        const empty = new Error(isUndo ? 'nothing to undo' : 'nothing to redo');
-        try {
-          const { saved } = await commit(isUndo ? 'undo' : 'redo', (cur) => {
-            const from = isUndo ? history.undo : history.redo;
-            const to = isUndo ? history.redo : history.undo;
-            if (!from.length) throw empty;
-            const target = JSON.parse(from.pop());
-            to.push(snapshot(cur));
-            return { project: target };
-          }, { undo: 'none' });
-          return json(res, 200, { ok: true, project: saved, undo: history.undo.length, redo: history.redo.length });
-        } catch (e) {
-          if (e === empty) return json(res, 409, { error: e.message });
-          throw e;
-        }
+        const body = await readBody(req);
+        return json(res, 200, { ok: true, ...await transact({ ...transactionOptions(body), command: { type: pathname.endsWith('/undo') ? 'undo' : 'redo' } }) });
       }
 
       // ---------------- media ----------------
@@ -534,16 +471,13 @@ export async function startServer({ root, port = 47100, open = false, onReady, i
         const file = await readPath(projectRoot, rel);
         toast('分析节拍中…');
         const result = await analyzeBeats(file, { duration: body.duration || null, fps: project.meta.fps });
-        await commit('beats', (cur) => {
-          const ops = [
-            { op: 'setMeta', path: 'beats', value: result.beats },
-            { op: 'setMeta', path: 'tempo', value: result.tempo },
-          ];
-          if (!cur.meta.audio) ops.push({ op: 'setMeta', path: 'audio', value: { src: rel, offset: 0, gain: 0 } });
-          if (body.setDuration) ops.push({ op: 'setMeta', path: 'duration', value: Math.round(result.duration * 1000) / 1000 });
-          applyOps(cur, ops);
-          return { project: cur };
-        });
+        const ops = [
+          { op: 'setMeta', path: 'beats', value: result.beats },
+          { op: 'setMeta', path: 'tempo', value: result.tempo },
+        ];
+        if (!project.meta.audio) ops.push({ op: 'setMeta', path: 'audio', value: { src: rel, offset: 0, gain: 0 } });
+        if (body.setDuration) ops.push({ op: 'setMeta', path: 'duration', value: Math.round(result.duration * 1000) / 1000 });
+        await transact({ ...transactionOptions(body), ops }, 'beats');
         broadcast('beats', result);
         return json(res, 200, result);
       }
@@ -558,20 +492,8 @@ export async function startServer({ root, port = 47100, open = false, onReady, i
           media, style: body.style || 'neon', brief: body.brief || '',
           seed: body.seed ?? 7, maxSegments: body.maxSegments || 12, duration: body.duration || null,
         };
-        let saved, made;
-        try {
-          ({ saved, result: made } = await commit('plan', (cur) => {
-            try {
-              return { project: cur, result: planProject(cur, opts) };
-            } catch (err) {
-              err.rejected = true;
-              throw err;
-            }
-          }));
-        } catch (e) {
-          if (!isRejection(e)) throw e;
-          return json(res, 400, { error: e.message });
-        }
+        const tx = await transact({ ...transactionOptions(body), command: { type: 'plan', options: opts } }, 'plan');
+        const saved = tx.project, made = { segments: saved.segments.length, elements: saved.elements.length };
         setStep('storyboard', { status: 'done', detail: `${made.segments} 个分镜 · ${made.elements} 个元素` });
         addArtifact({ kind: 'storyboard', label: `自动分镜 · ${made.segments} 段`, detail: opts.style });
         return json(res, 200, { ok: true, project: saved, steps: made.segments });
@@ -750,7 +672,7 @@ export async function startServer({ root, port = 47100, open = false, onReady, i
         method: req.method, path: pathname, error: e.message, stack: status >= 500 ? String(e.stack || '').slice(0, 1200) : undefined,
         log: e.log ? String(e.log).slice(-3000) : undefined,
       });
-      if (!res.headersSent) json(res, status, { error: e.message, code: e.code || (status === 500 ? 'INTERNAL_ERROR' : 'INVALID_ARGUMENT'), ...(e.issues ? { issues: e.issues } : {}) });
+      if (!res.headersSent) json(res, status, { error: e.message, ...errorData(e) });
       else res.end();
     }
   });
