@@ -632,9 +632,9 @@ class SceneBuilder:
 
     def build_media(self, el, style, st0, z, src_path, sequence=None):
         if sequence:
+            # Image.frame_duration is read-only (Blender 5.2+); the frame count
+            # lives on the texture node's ImageUser, set below.
             img = self.load_image(sequence['first'], sequence=True)
-            if img:
-                img.frame_duration = max(1, int(sequence['count']))
         else:
             img = self.load_image(src_path)
         if img is None:
@@ -652,6 +652,14 @@ class SceneBuilder:
             uv = (0, 0, 1, 1)
         mesh = plane_mesh(f'{el["id"]}_mesh', self.W, self.H, uv)
         mat, nodes = textured_material(f'{el["id"]}_mat', img, st0['opacity'])
+        if sequence:
+            iu = nodes['tex'].image_user
+            iu.frame_duration = max(1, int(sequence['count']))
+            iu.frame_start = 1
+            iu.frame_offset = 0
+            iu.use_cyclic = False
+            iu.use_auto_refresh = True
+            nodes['tex']['vdm_frames'] = int(sequence['count'])
         obj = self.add_object(mesh, mat, el['id'])
         obj.location.z = 0.002 * z
         return obj, nodes, nodes['tex']
@@ -789,9 +797,13 @@ class SceneBuilder:
                         pass
 
             if tex is not None and tex.image and tex.image.source == 'SEQUENCE':
-                local = max(0, int(round((t - el['start']) * fps)))
-                tex.image_user.frame_offset = local - frame + 1
-                tex.image_user.frame_start = 1
+                # Blender reads file number clamp(frame - frame_start + 1, 0, n) + offset;
+                # pin frame_start to the current frame so that is exactly the element's
+                # local frame (f_<local>.png), holding the last frame past the clip's end.
+                count = int(tex.get('vdm_frames', tex.image_user.frame_duration) or 1)
+                local = min(count - 1, max(0, int(round((t - el['start']) * fps))))
+                tex.image_user.frame_start = frame
+                tex.image_user.frame_offset = local - 1
 
             if shadow_obj:
                 shadow_obj.hide_render = False
