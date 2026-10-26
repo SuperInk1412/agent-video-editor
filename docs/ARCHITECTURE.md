@@ -141,3 +141,30 @@ Blender 对固定边界样例逐字段对拍，补充单元测试与预览方向
 | Blender 无头 EEVEE | 10 门合成器 + 3D 能力，出片质量远高于 2D 库；EEVEE 后台可跑 |
 | 项目 JSON + ops | AI/UI/CLI 天然同构，diff/撤销/回放都免费 |
 | `dsh --profile headless --json` | 现成的流式 agent 运行时，事件可读、进程可杀 |
+
+## 8. 公共服务与外部 agent
+
+```mermaid
+flowchart LR
+  CLI[CLI] --> Runtime[每项目一个 Node 运行时]
+  MCP[MCP stdio] --> Runtime
+  UI[Electron / 浏览器] --> Runtime
+  Runtime --> Projects[ProjectService / ProjectRepository]
+  Runtime --> Jobs[JobService]
+  Projects --> Ops[纯 ESM 模型 / ops / 校验]
+  Projects --> Disk[项目 JSON / 事务恢复 / 历史回执]
+  Jobs --> Snapshots[项目与素材快照 / 产物记录]
+  Jobs --> Workers[ffmpeg / Blender / 计算 worker]
+```
+
+`.vdm/runtime-lock` 在运行时整个生命周期内保存持有者身份；发现记录 `.vdm/app.json` 含实例 ID、
+loopback 地址和本地调用凭证，附加客户端不拥有关闭权限。CLI / MCP 自动连接已存在的运行时，
+没有时启动后台进程；`vdm engine stop` 显式取消并等待任务退出。
+
+应用层任务独立于 MCP 请求：提交时固定 sourceRev 与素材内容，任务 ID 在重试后保持不变。
+抽帧、Blender 和编码使用同一个 AbortSignal，取消等待实际进程退出；重启后的未完成任务标为
+interrupted。项目编辑不修改已提交的任务输入，旧产物保留来源版本。
+
+`.vdm/cache/` 支持按预算清理，历史和任务输入位于不同目录。求值轨道按快照编译索引，
+编辑会使索引失效；CPU 较重的世界、shot 与节拍分析使用 Node worker。`npm run benchmark`
+提供可重现的采样量测。MCP 协议与工具配置见 [SPEC-MCP.md](SPEC-MCP.md)。

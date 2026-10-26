@@ -60,7 +60,8 @@ Electron 路径可用 `VDM_ELECTRON` 覆盖；Blender 用 `VDM_BLENDER` 覆盖�
 
 ## 已验证
 
-- `npm test`：100+ 个单元测试全绿（ops / 编辑语义 / 求值 / 场景 / 相机 / 迁移 / 存储锁与监听 / 节拍 / agent 解析）
+- `npm test`：覆盖 ops、编辑语义、求值、迁移、事务恢复、跨进程锁、任务、运行时和 MCP 图像回读；可选外部依赖缺失时对应集成用例明确跳过
+- `npm run check:evaluate`：85 个边界样例与真实 Blender 逐字段对拍；`npm run benchmark` 提供 10 / 100 / 1000 元素的采样量测
 - Blender 5.0.1（Windows）与 5.2.2（Linux）无头 EEVEE：1080p 单帧约 2–5s（含启动），24s@50% 成片约 70s
 - 示例项目 `projects/demo`：24s / 6 分镜 / 13 元素，成片在
   `projects/demo/.vdm/renders/master-*.mp4`（含音轨）
@@ -132,6 +133,8 @@ alpha-over，画面变换和透明度逐帧写进 strip，所以预览和最终�
 | `core/` | 纯 JS 模型：时间、求值、ops、schema、输入边界（零依赖，浏览器/Node 共用） |
 | `cli/vdm.js` | `vdm` 命令：人用，也**是 AI 的工具面** |
 | `engine/` | Node 服务：项目存储与锁、静态/媒体服务、REST+SSE、Blender 调度、agent 调度、节拍分析 |
+| `application/` | 公共事务、全局历史、任务生命周期、查询和契约校验 |
+| `mcp/` | 零依赖 stdio 协议、工具和图像资源，复用项目运行时 |
 | `app/renderer/` | 无构建步骤的 UI（原生 ESM + WebGL2） |
 | `app/electron/` | Electron 壳（启动引擎 + 开窗） |
 | `blender/` | bpy 场景构建与渲染（图层、文字、合成器、ffmpeg 封装） |

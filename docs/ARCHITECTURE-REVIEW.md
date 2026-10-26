@@ -425,5 +425,29 @@ blender/                    # 消费有版本的 job / render plan
 `check:preview`、`blender:check` 通过，并使用 Electron 截图检查当前 nightcity 工程。
 原有示例项目修改保持不变。
 
-下一阶段为 B：抽取公共应用服务，加入 expectedRev、requestId、dryRun、可恢复提交与统一历史。
-随后推进 C 的项目运行时 / JobService，再交付 D 的 MCP stdio；当前尚未实现 MCP 接口。
+阶段 B / C / D 已完成并分别提交：
+
+- `4da293c`：公共 ProjectService / ProjectRepository；expectedRev、requestId、dryRun、opResults、无变化处理；持久化全局历史与可恢复提交。真实子进程中断验证准备记录 / 项目写入后的恢复。
+- `3a55554`：每项目一个运行时；CLI / HTTP 共用的 JobService、队列、跨阶段取消、输入快照、产物与运行时发现；任务重启恢复为 interrupted。
+- `728efc3`：零依赖 MCP stdio；公开 op schema、工具、结构化错误、静帧图像与资源。两个独立 stdio 会话完成同一项目上的编辑、重试、冲突与真实静帧回读。配置见 `docs/SPEC-MCP.md`。
+
+阶段 E 的模型与渲染契约工作：统一文件 / 语义 / 场景 / render plan 版本；迁移保留所有相机、
+3D objects、轨道速度和源入点，提供无数据写入的迁移报告与精确相机求值（`a2ded8c`）。
+当前公开写模型继续使用 elements / cameras / scene.objects；完整场景树编辑器与自动项目格式切换
+属于后续产品扩展，不作为 MCP 首版的前提，也没有隐式迁移用户项目。
+
+阶段 F 的基础性能工作：轨道预编译索引、世界 / shot / 节拍 worker、shot 内容缓存、历史快照预算、
+预览媒体与文字纹理释放、旧响应去重和重连同步、暂停预览限帧、可重建缓存按预算清理。
+`npm run benchmark` 在本机 Node 26 的 1000 元素 × 256 keys × 24 次采样案例中，由约 218ms
+降为 13ms；这是单次求值基准结果，不代表整个渲染器或成片的提速倍数。
+
+验证包含 `npm test`、真实 Blender 求值对拍、预览方向回归、Blender 真帧、MCP 实际图像回读，
+并在 `/tmp/vdm-mcp-final-nightcity.png` 截取当前工程检查。增加 Node 20 / 22 / 24 CI 配置，
+本机实际运行环境仍为 Node 26；CI 配置不等于已经在远端跑过。两个示例项目原有修改保持不变。
+
+最终本机验证为 158 项测试通过，无跳过；85 个 JS / Blender 边界样例各 9 个字段完全一致。
+此外独立 Python 标准库客户端使用 `2025-06-18` 完成初始化、编辑、排队出帧和 PNG 回读，
+与测试中的 JavaScript stdio 客户端（`2025-11-25`）交叉验证；未声称已经验证所有桌面 MCP 客户端。
+
+扩展范围保持明确：没有增加远程 MCP、账号系统、渲染农场、代理媒体系统或重写前端框架；
+当前交付的是外部 agent 可直接使用、与桌面 / CLI 共用的可靠编辑和出片底座。

@@ -138,5 +138,8 @@
 
 - 所有素材放 `projects/<name>/media/`，元素里写 `media/xxx`（相对路径）。
 - 视频在渲染时会被 ffmpeg 抽成 PNG 序列（`fps/scale/cover` 烘焙进去），缓存在 `.vdm/cache/src/`。
-- `.vdm/` 全是可再生成的产物：`frames/`（静帧）、`renders/`（成片）、`agent/`（上下文包）、
-  `cache/`（序列、job、合成器贴图）。不要手改，不要提交。
+- `.vdm/` 中的 `frames/`（静帧）、`renders/`（成片）、`agent/`（上下文包）、
+  `cache/`（序列、Blender job、合成器贴图）是产物与缓存，不要手改或提交。
+- `.vdm/transactions.json` 是持久化历史、请求回执与提交恢复记录；`.vdm/jobs/` 保存应用任务
+  和提交时的项目 / 素材快照。它们不能按普通渲染缓存随意删除。
+- 文件格式、编辑语义、场景模型和渲染包分别由 `core/version.js` 管理版本；项目 `rev` 只表示编辑修订。
