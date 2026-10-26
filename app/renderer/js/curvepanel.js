@@ -5,11 +5,14 @@
 // axis (seconds are printed on the x axis), so the segment fills the panel no
 // matter how far the timeline is zoomed out.
 //
-// P1 implements the cubic-bezier easing preset: progress 0..1 over the
-// segment with two draggable control points. The other presets from the
-// design are listed but disabled until implemented.
+// Bezier presets expose their two control points; the parameterised presets
+// (bounce / elastic / cyclic / step / elasticStep) expose the handles declared
+// by core/curves.js::curveHandles, and dragging one writes the mapped parameter
+// through moveCurveHandle. The value window follows curveRange so overshoot
+// handles (elastic magnitude, cyclic sharpness) stay reachable.
 import {
   sampleCurve, normalizeCurve, presetCurve, curveLabel, curveSegments, CURVE_GROUPS,
+  curveHandles, moveCurveHandle, curveRange, curveParamsText,
 } from '/core/curves.js';
 
 const el = (tag, cls, html) => {
@@ -45,6 +48,7 @@ export class CurvePanel {
     this.toast = toast;
     this.openState = null;
     this.active = 0;
+    this.railGroup = 0;
     this.curve = null;
     this.drag = null;
     this._build();
@@ -67,7 +71,7 @@ export class CurvePanel {
       const track = this._track();
       this.curve = normalizeCurve(track?.segments[0]?.a?.curve) || presetCurve('easeInOut');
       this._syncHead();
-      this._markPreset();
+      this._syncRailGroup();
       this.draw();
     });
     this.rangeEl = el('div', 'cp-range', '');
@@ -86,7 +90,7 @@ export class CurvePanel {
     body.append(this.canvasWrap, this.rail);
 
     const foot = el('div', 'cp-foot');
-    foot.innerHTML = '<span>拖动两个白点调整曲线</span><span class="cp-sep">|</span>'
+    foot.innerHTML = '<span>拖动圆点调整曲线 / 参数</span><span class="cp-sep">|</span>'
       + '<span>点段切换编辑段</span><span class="cp-sep">|</span>'
       + '<span>预设作用于全部选中段</span><span class="cp-sep">|</span>'
       + '<span>时间轴缩放同步（Ctrl+滚轮 / 缩放按钮）</span><span class="cp-sep">|</span>'
@@ -110,6 +114,7 @@ export class CurvePanel {
     const track = this._track();
     this.curve = normalizeCurve(track?.segments[0]?.a?.curve) || presetCurve('easeInOut');
     this.root.hidden = false;
+    this.railGroup = this._groupIndex();
     this._buildRail();
     this._buildPathSelect();
     this._syncHead();
@@ -195,6 +200,7 @@ export class CurvePanel {
     this.curve = normalizeCurve(segs[this.active].a?.curve) || this.curve;
     this._buildPathSelect();
     this._syncHead();
+    this._syncRailGroup();
     this.draw();
   }
 
@@ -220,26 +226,59 @@ export class CurvePanel {
     this.titleEl.textContent = `曲线 · ${track.label || track.path}`;
     const s = track.segments[this.active] || track.segments[0];
     this.rangeEl.textContent = `${s.from.toFixed(2)}s → ${s.to.toFixed(2)}s · ${track.segments.length} 段 · 第 ${this.active + 1} 段`;
-    this.presetEl.textContent = curveLabel(this.curve);
+    const detail = curveParamsText(this.curve);
+    this.presetEl.textContent = detail ? `${curveLabel(this.curve)} · ${detail}` : curveLabel(this.curve);
+    this.presetEl.title = this.presetEl.textContent;
+  }
+
+  /** Rail tab that contains the current curve (custom bezier counts as 基础). */
+  _groupIndex() {
+    const c = normalizeCurve(this.curve);
+    const id = c?.preset || (c?.type === 'bezier' ? 'linear' : c?.type);
+    if (!id) return 0;
+    const idx = CURVE_GROUPS.findIndex((g) => g.items.some((it) => it.id === id));
+    return idx >= 0 ? idx : 0;
+  }
+
+  _syncRailGroup() {
+    const idx = this._groupIndex();
+    if (idx !== this.railGroup) {
+      this.railGroup = idx;
+      this._buildRail();
+    } else {
+      this._markPreset();
+    }
   }
 
   _buildRail() {
     this.rail.innerHTML = '';
-    for (const group of CURVE_GROUPS) {
-      this.rail.appendChild(el('div', 'cp-rail-title', group.title));
-      for (const item of group.items) {
-        const b = el('button', `cp-thumb${item.ready ? '' : ' disabled'}`);
-        b.dataset.preset = item.id;
-        const cv = document.createElement('canvas');
-        cv.width = 68; cv.height = 34;
-        this._drawThumb(cv, item.id, item.ready);
-        b.append(cv, el('span', '', item.label));
-        b.onclick = item.ready
-          ? () => this._applyPreset(item.id)
-          : () => this.toast?.(`「${item.label}」还没做`);
-        this.rail.appendChild(b);
-      }
+    const tabs = el('div', 'cp-tabs');
+    CURVE_GROUPS.forEach((group, i) => {
+      const tab = el('button', `cp-tab${i === this.railGroup ? ' on' : ''}`, group.short || group.title);
+      tab.title = group.title;
+      tab.onclick = () => {
+        if (i === this.railGroup) return;
+        this.railGroup = i;
+        this._buildRail();
+      };
+      tabs.append(tab);
+    });
+    const grid = el('div', 'cp-thumbs');
+    const group = CURVE_GROUPS[this.railGroup] || CURVE_GROUPS[0];
+    for (const item of group.items) {
+      const b = el('button', `cp-thumb${item.ready ? '' : ' disabled'}`);
+      b.dataset.preset = item.id;
+      b.title = item.label;
+      const cv = document.createElement('canvas');
+      cv.width = 68; cv.height = 34;
+      this._drawThumb(cv, item.id, item.ready);
+      b.append(cv, el('span', '', item.label));
+      b.onclick = item.ready
+        ? () => this._applyPreset(item.id)
+        : () => this.toast?.(`「${item.label}」还没做`);
+      grid.append(b);
     }
+    this.rail.append(tabs, grid);
     this._markPreset();
   }
 
@@ -257,12 +296,14 @@ export class CurvePanel {
     ctx.strokeStyle = ready ? '#17d9ff' : '#45566a';
     ctx.lineWidth = 1.5;
     const curve = ready ? presetCurve(id) : null;
+    const range = curve ? curveRange(curve) : [0, 1];
     ctx.beginPath();
-    for (let i = 0; i <= 32; i++) {
-      const u = i / 32;
-      const v = curve ? sampleCurve(curve, u) : u;
+    for (let i = 0; i <= 64; i++) {
+      const u = i / 64;
+      const raw = curve ? sampleCurve(curve, u) : u;
+      const v = clamp(raw, range[0], range[1]);
       const x = 5 + u * (w - 10);
-      const y = h - 5 - clamp(v, 0, 1) * (h - 10);
+      const y = h - 5 - ((v - range[0]) / (range[1] - range[0])) * (h - 10);
       if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     }
     ctx.stroke();
@@ -290,6 +331,7 @@ export class CurvePanel {
    * Panel geometry follows the timeline exactly: same gutter, pps and
    * scrollLeft, so keyframe diamonds in the ruler and the curve share x.
    * Zoom the timeline (buttons / Ctrl+wheel) to edit a short segment.
+   * The value window comes from `curveRange` so overshoot handles stay visible.
    */
   _geo() {
     const L = this._layout();
@@ -301,15 +343,37 @@ export class CurvePanel {
     const plotRight = L.W - L.rightPad;
     const xOf = (t) => gutter + Number(t) * pps - scroll;
     const tOf = (x) => (x + scroll - gutter) / Math.max(1, pps);
-    const yOf = (v) => L.bottom - clamp(Number(v), -0.2, 1.2) * (L.bottom - L.top);
-    const vOf = (y) => (L.bottom - y) / Math.max(1, L.bottom - L.top);
-    return { ...L, gutter, pps, scroll, plotLeft, plotRight, xOf, tOf, yOf, vOf };
+    const range = curveRange(this.curve);
+    const height = Math.max(1, L.bottom - L.top);
+    const yOf = (v) => L.bottom - ((Number(v) - range[0]) / (range[1] - range[0])) * height;
+    const vOf = (y) => range[0] + ((L.bottom - y) / height) * (range[1] - range[0]);
+    return { ...L, gutter, pps, scroll, plotLeft, plotRight, range, xOf, tOf, yOf, vOf };
   }
 
-  _handlePos(seg, g, which) {
-    const p = which === 'p1' ? this.curve?.p1 : this.curve?.p2;
-    if (!p) return null;
-    return { x: g.xOf(seg.from + p[0] * (seg.to - seg.from)), y: g.yOf(p[1]), u: p[0], v: p[1] };
+  _handlePos(seg, g, handle) {
+    if (!handle) return null;
+    return {
+      x: g.xOf(seg.from + handle.u * (seg.to - seg.from)),
+      y: g.yOf(handle.v),
+      u: handle.u,
+      v: handle.v,
+      handle,
+    };
+  }
+
+  _handleOrigin(seg, g, handle) {
+    if (!handle?.origin) return null;
+    return {
+      x: g.xOf(seg.from + handle.origin[0] * (seg.to - seg.from)),
+      y: g.yOf(handle.origin[1]),
+    };
+  }
+
+  _tickStep(span) {
+    const raw = Math.max(1e-9, (span || 1) / 6);
+    const pow = 10 ** Math.floor(Math.log10(raw));
+    const mult = raw / pow <= 1 ? 1 : raw / pow <= 2 ? 2 : raw / pow <= 5 ? 5 : 10;
+    return mult * pow;
   }
 
   // ------------------------------------------------------------ draw
@@ -323,16 +387,27 @@ export class CurvePanel {
     ctx.fillStyle = '#0c1118';
     ctx.fillRect(0, 0, W, H);
 
-    // value grid + labels
+    // value grid + labels (window depends on the curve's overshoot)
     ctx.font = '10px system-ui, sans-serif';
-    for (const v of [0, 0.25, 0.5, 0.75, 1]) {
-      const y = g.yOf(v);
+    const [vMin, vMax] = g.range;
+    const tick = this._tickStep(vMax - vMin);
+    for (let v = Math.ceil(vMin / tick) * tick; v <= vMax + 1e-9; v += tick) {
+      const value = Math.abs(v) < 1e-9 ? 0 : v;
+      const y = g.yOf(value);
       ctx.strokeStyle = '#19222f';
       ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(g.plotLeft, y + 0.5); ctx.lineTo(W - g.rightPad, y + 0.5); ctx.stroke();
       ctx.fillStyle = '#5f7288';
-      ctx.fillText(v.toFixed(2), 8, y + 3);
+      ctx.fillText(value.toFixed(tick < 1 ? 2 : 1), 8, y + 3);
     }
+    ctx.strokeStyle = 'rgba(60,80,100,0.55)';
+    ctx.setLineDash([3, 4]);
+    for (const edge of [0, 1]) {
+      if (edge <= vMin || edge >= vMax) continue;
+      const y = g.yOf(edge);
+      ctx.beginPath(); ctx.moveTo(g.plotLeft, y + 0.5); ctx.lineTo(W - g.rightPad, y + 0.5); ctx.stroke();
+    }
+    ctx.setLineDash([]);
     ctx.fillStyle = '#4c5d71';
     ctx.fillText('进度', 8, 12);
 
@@ -391,18 +466,27 @@ export class CurvePanel {
     // active handles with guides
     const seg = this._track()?.segments[this.active];
     if (seg && this.curve) {
-      for (const which of ['p1', 'p2']) {
-        const hp = this._handlePos(seg, g, which);
+      for (const handle of curveHandles(this.curve)) {
+        const hp = this._handlePos(seg, g, handle);
         if (!hp) continue;
-        const visible = hp.x >= g.plotLeft - 10 && hp.x <= W - g.rightPad + 10;
+        const visible = hp.x >= g.plotLeft - 14 && hp.x <= W - g.rightPad + 14
+          && hp.y >= g.top - 14 && hp.y <= g.bottom + 14;
         if (!visible) continue;
+        const origin = this._handleOrigin(seg, g, handle);
+        if (origin) {
+          ctx.setLineDash([3, 4]);
+          ctx.strokeStyle = 'rgba(150,175,200,0.35)';
+          ctx.beginPath(); ctx.moveTo(origin.x, origin.y); ctx.lineTo(hp.x, hp.y); ctx.stroke();
+          ctx.setLineDash([]);
+        }
         ctx.setLineDash([3, 4]);
-        ctx.strokeStyle = 'rgba(160,180,200,0.4)';
+        ctx.strokeStyle = 'rgba(160,180,200,0.32)';
         ctx.beginPath(); ctx.moveTo(g.plotLeft, hp.y); ctx.lineTo(W - g.rightPad, hp.y); ctx.stroke();
         ctx.beginPath(); ctx.moveTo(hp.x, g.top); ctx.lineTo(hp.x, g.bottom); ctx.stroke();
         ctx.setLineDash([]);
+        const active = this.drag?.handle?.id === handle.id;
         ctx.beginPath();
-        ctx.arc(hp.x, hp.y, 10, 0, Math.PI * 2);
+        ctx.arc(hp.x, hp.y, active ? 9.5 : 8, 0, Math.PI * 2);
         ctx.fillStyle = '#f4fbff';
         ctx.fill();
         ctx.strokeStyle = '#8fd8ef';
@@ -432,24 +516,27 @@ export class CurvePanel {
     const seg = this._track()?.segments[this.active];
     if (!seg) return null;
     let best = null;
-    for (const which of ['p1', 'p2']) {
-      const hp = this._handlePos(seg, g, which);
+    for (const handle of curveHandles(this.curve)) {
+      const hp = this._handlePos(seg, g, handle);
       if (!hp) continue;
       const d = Math.hypot(hp.x - x, hp.y - y);
-      if (d <= 15 && (!best || d < best.d)) best = { which, d };
+      if (d <= 15 && (!best || d < best.d)) best = { handle, d };
     }
-    return best?.which || null;
+    return best?.handle || null;
   }
 
   _down(e) {
     if (e.button !== 0) return;
     const p = this._localPoint(e);
-    const which = this._hitHandle(p.x, p.y);
-    if (which) {
+    const handle = this._hitHandle(p.x, p.y);
+    if (handle) {
       e.preventDefault();
       this.drag = {
-        which, seg: this.active,
-        curve: { ...this.curve, p1: [...this.curve.p1], p2: [...this.curve.p2] },
+        handle,
+        seg: this.active,
+        curve: this.curve,
+        pointer: p,
+        range: this._geo().range,
       };
       this.canvas.style.cursor = 'grabbing';
       return;
@@ -461,7 +548,7 @@ export class CurvePanel {
       this.active = idx;
       this.curve = normalizeCurve(this._track()?.segments[idx]?.a?.curve) || presetCurve('easeInOut');
       this._syncHead();
-      this._markPreset();
+      this._syncRailGroup();
       this.draw();
     }
   }
@@ -470,16 +557,22 @@ export class CurvePanel {
     if (!this.drag) return;
     const seg = this._track()?.segments[this.drag.seg];
     if (!seg) return;
+    const drag = this.drag;
+    const handle = drag.handle;
     const g = this._geo();
     const p = this._localPoint(e);
-    const u = clamp((g.tOf(p.x) - seg.from) / Math.max(1e-6, seg.to - seg.from), 0, 1);
-    const v = clamp(g.vOf(p.y), -0.5, 1.5);
-    const c = this.drag.curve;
-    const point = [Math.round(u * 1000) / 1000, Math.round(v * 1000) / 1000];
-    if (this.drag.which === 'p1') c.p1 = point; else c.p2 = point;
-    c.preset = null;
-    this.curve = c;
-    this.presetEl.textContent = curveLabel(c);
+    const spanPx = Math.max(1, g.xOf(seg.to) - g.xOf(seg.from));
+    const plotH = Math.max(1, g.bottom - g.top);
+    const damping = Number.isFinite(handle.damping) ? handle.damping : 1;
+    const u = clamp(handle.u + ((p.x - drag.pointer.x) / spanPx) * damping, 0, 1);
+    let v = handle.v + (-(p.y - drag.pointer.y) / plotH) * (drag.range[1] - drag.range[0]) * damping;
+    if (handle.id === 'p1' || handle.id === 'p2') {
+      v = clamp(v, -1, 2);
+    } else {
+      v = handle.allowOvershoot ? clamp(v, drag.range[0], drag.range[1]) : clamp(v, 0, 1);
+    }
+    this.curve = moveCurveHandle(drag.curve, handle.id, u, v);
+    this._syncHead();
     this._markPreset();
     this.draw();
   }
@@ -503,7 +596,7 @@ export class CurvePanel {
     if (!curve) return;
     this.curve = curve;
     this._syncHead();
-    this._markPreset();
+    this._syncRailGroup();
     this.draw();
     this._commit(curve, this._track()?.segments || []);
   }

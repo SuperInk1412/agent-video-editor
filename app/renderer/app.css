@@ -600,3 +600,16 @@ body.nf-scrubbing, body.nf-scrubbing * { cursor: ew-resize !important; user-sele
 }
 .tl-zoomb:hover { color: #dff6ff; border-color: #2b6f88; }
 .tl-zoomval { min-width: 40px; text-align: center; color: #7f93a8; font-size: 10px; }
+/* preset tabs + compact two-column thumbnail rail (value curve panel) */
+.cp-tabs { display: flex; gap: 3px; margin: 0 0 4px; }
+.cp-tab {
+  flex: 1; background: #0d1219; border: 1px solid #1d2838; border-radius: 4px;
+  color: #7f93a8; font-size: 10px; padding: 3px 0; cursor: pointer;
+}
+.cp-tab:hover { color: #dff6ff; border-color: #2b6f88; }
+.cp-tab.on { background: #12202a; border-color: #2b6f88; color: #dff6ff; }
+.cp-thumbs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+.cp-thumb { flex-direction: column; align-items: stretch; gap: 2px; padding: 2px; }
+.cp-thumb canvas { width: 100%; height: 24px; }
+.cp-thumb span { width: 100%; text-align: center; font-size: 9.5px; }
+.cp-preset { max-width: 44%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
