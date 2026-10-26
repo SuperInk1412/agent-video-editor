@@ -50,6 +50,13 @@ Blender 侧这一档用 **Cycles** 渲 `FISHEYE_EQUIDISTANT`（EEVEE 不支持�
 限制预览（`preview.soloCameras`），不写项目、不影响成片。编辑视口仍用编辑相机单层，
 退出编辑后的预览帧才显示完整相机堆栈；Blender 多相机合成属于 P5。
 
+C-b 逐帧参数：`视场角 FOV`、`看向前方`、`转弯侧倾`、`最大侧倾`、`手动 roll`、抖动幅度/
+频率/随速增强、`景深开/关`、`光圈 f` 都可以在各自属性行上打关键帧（`cameraParamKey`）。
+`随机种子`、`运动模糊开/关`、`快门角` 是整段设置（标“整段”，没有 `◆`）：快门是 Blender
+场景级参数，seed 逐帧会让手持噪波跳。`evalCamera()` 逐帧采样这些通道，`bakeCameraTrack()`
+把 `fov / roll / dof / focus` 写进 shot；Blender 的 `_build_camera` 在每帧 apply 时同步
+`use_dof / aperture_fstop / focus_distance`。
+
 轨道求值顺序（`core/camera.js`，Blender 用**同一份烘焙结果**）：
 
 ```

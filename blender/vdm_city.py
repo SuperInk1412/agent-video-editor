@@ -346,8 +346,13 @@ def _build_camera(scene, shot, width, height):
         else:
             cam_data.type = 'PERSP'
             cam_data.angle = math.radians(max(1.0, min(179.5, fov)))
-        if dof.get('enabled'):
-            cam_data.dof.focus_distance = max(1.0, d.length)
+        # DOF is sampled per frame (C-b): enabled/fstop can be keyed in the
+        # timeline; fall back to cameraCfg when an older bake has no e.dof.
+        edof = e.get('dof') or dof
+        cam_data.dof.use_dof = bool(edof.get('enabled'))
+        cam_data.dof.aperture_fstop = float(edof.get('fstop', 2.8))
+        focus = float(e.get('focus', 0.0))
+        cam_data.dof.focus_distance = max(1.0, focus if focus > 0 else d.length)
 
     def on_frame(scn, depsgraph=None):
         apply(scn.frame_current)

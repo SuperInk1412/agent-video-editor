@@ -212,8 +212,40 @@ export function cameraTransform(cam, t) {
   return { center, position, scale, opacity, picturePivot, pictureOffset };
 }
 
+/**
+ * One keyed camera parameter at time t. Transform channels come from
+ * `cameraTransform`; lens/shake/DOF channels fall back to their base values
+ * when no track exists. The timeline and bake share this so a row value is
+ * exactly what the preview/render uses.
+ */
+export function cameraParamValue(cam, path, t) {
+  const c = cam || normalizeCamera(null);
+  const tr = c.tracks || {};
+  const scalar = (name, dflt) => Number(sampleChannel(tr[name], t, dflt));
+  switch (path) {
+    case 'center': return cameraTransform(c, t).center;
+    case 'scale': return cameraTransform(c, t).scale;
+    case 'opacity': return cameraTransform(c, t).opacity;
+    case 'picturePivot': return cameraTransform(c, t).picturePivot;
+    case 'pictureOffset': return cameraTransform(c, t).pictureOffset;
+    case 'fov': return clamp(scalar('fov', pathFov(c, t)), 1, 360);
+    case 'lookAhead': return Math.max(1, scalar('lookAhead', c.lookAhead));
+    case 'bankGain': return scalar('bankGain', c.bankGain);
+    case 'maxRoll': return clamp(scalar('maxRoll', c.maxRoll), 0, 60);
+    case 'roll': return scalar('roll', c.roll || 0);
+    case 'shake.amp': return Math.max(0, scalar('shake.amp', c.shake?.amp ?? 0));
+    case 'shake.freq': return Math.max(0.1, scalar('shake.freq', c.shake?.freq ?? 1.6));
+    case 'shake.speedGain': return Math.max(0, scalar('shake.speedGain', c.shake?.speedGain ?? 1));
+    case 'shake.seed': return scalar('shake.seed', c.shake?.seed ?? 7);
+    case 'dof.enabled': return !!sampleChannel(tr['dof.enabled'], t, !!(c.dof?.enabled));
+    case 'dof.fstop': return clamp(scalar('dof.fstop', c.dof?.fstop ?? 2.8), 0.5, 32);
+    default: return undefined;
+  }
+}
+
 /** fov at time t (keyframe override, else default) */
-export function pathFov(cam, t) {  const k = cam.path;
+export function pathFov(cam, t) {
+  const k = cam.path;
   if (!k.length) return cam.fov;
   let prev = null, next = null;
   for (const p of k) {
@@ -247,7 +279,8 @@ export function evalCamera(project, t) {
   const tang = v3.norm(v3.sub(posB, posA));
 
   // explicit look keys win inside their window; elsewhere look ahead along the tangent
-  let look = v3.add(pos, v3.mul(tang, Math.max(1, cam.lookAhead)));
+  const lookAhead = cameraParamValue(cam, 'lookAhead', t);
+  let look = v3.add(pos, v3.mul(tang, Math.max(1, lookAhead)));
   const lk = cam.path.filter((k) => k.look);
   if (lk.length) {
     const first = lk[0], last = lk[lk.length - 1];
@@ -273,11 +306,19 @@ export function evalCamera(project, t) {
   const dirA = v3.norm(v3.sub(v3.add(tr.center, pathPos(cam, t - 0.01)), v3.add(tr.center, pathPos(cam, t - 0.25))));
   const dirB = v3.norm(v3.sub(v3.add(tr.center, pathPos(cam, t + 0.25)), v3.add(tr.center, pathPos(cam, t + 0.01))));
   const yawRate = (Math.atan2(dirB[0], dirB[2]) - Math.atan2(dirA[0], dirA[2])) / 0.5;
-  const bank = clamp(-yawRate * cam.bankGain * 57.2958, -cam.maxRoll, cam.maxRoll);
-  let roll = bank + (Number(cam.roll) || 0);
+  const bankGain = cameraParamValue(cam, 'bankGain', t);
+  const maxRoll = cameraParamValue(cam, 'maxRoll', t);
+  const bank = clamp(-yawRate * bankGain * 57.2958, -maxRoll, maxRoll);
+  let roll = bank + cameraParamValue(cam, 'roll', t);
 
   // shake: value noise, stronger at speed
-  const sh = cam.shake;
+  const sh = {
+    ...cam.shake,
+    amp: cameraParamValue(cam, 'shake.amp', t),
+    freq: cameraParamValue(cam, 'shake.freq', t),
+    speedGain: cameraParamValue(cam, 'shake.speedGain', t),
+    seed: cameraParamValue(cam, 'shake.seed', t),
+  };
   const amp = Number(sh.amp) || 0;
   if (amp > 0 && cam.path.length > 1) {
     const speedK = 1 + (Number(sh.speedGain) || 0) * Math.min(2.5, speed / 25);
@@ -300,10 +341,15 @@ export function evalCamera(project, t) {
   }
 
   const up = [0, 1, 0];
-  const fov = pathFov(cam, t);
-  const focus = Math.max(1, v3.len(v3.sub(look, pos)) + (Number(cam.dof?.focusOffset) || 0));
+  const fov = cameraParamValue(cam, 'fov', t);
+  const dof = {
+    enabled: cameraParamValue(cam, 'dof.enabled', t),
+    fstop: cameraParamValue(cam, 'dof.fstop', t),
+    focusOffset: Number(cam.dof?.focusOffset) || 0,
+  };
+  const focus = Math.max(1, v3.len(v3.sub(look, pos)) + dof.focusOffset);
   return {
-    ...tr, pos, look, up, fov, roll, speed, focus, bank,
+    ...tr, pos, look, up, fov, roll, speed, focus, bank, dof,
     // aliases used by the timeline rows
     center: tr.center, position: tr.position,
   };
@@ -324,6 +370,8 @@ export function bakeCameraTrack(project, { fps = 24, from = 0, to = null } = {})
       look: c.look.map((v) => Math.round(v * 1000) / 1000),
       roll: Math.round(c.roll * 1000) / 1000,
       fov: Math.round(c.fov * 1000) / 1000,
+      focus: Math.round((c.focus || 0) * 1000) / 1000,
+      dof: { enabled: !!c.dof?.enabled, fstop: Math.round((c.dof?.fstop ?? 2.8) * 1000) / 1000 },
     });
   }
   return out;

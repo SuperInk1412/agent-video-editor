@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeCamera, pathPos, pathFov, evalCamera, bakeCameraTrack, cameraTransform, v3 } from '../core/camera.js';
+import { normalizeCamera, pathPos, pathFov, evalCamera, bakeCameraTrack, cameraTransform, cameraParamValue, v3 } from '../core/camera.js';
 import { ease } from '../core/time.js';
 import { generateCity, cityHash, DEFAULT_WORLD } from '../engine/city.js';
 import { normalizeProject } from '../core/schema.js';
@@ -198,8 +198,55 @@ test('cameraParamKey / cameraParamUnkey write transform channels', () => {
   assert.deepEqual(p.camera.tracks.picturePivot[0].v, [1, 0]);
   applyOp(p, { op: 'cameraParamUnkey', path: 'center', t: 1 });
   assert.equal(p.camera.tracks.center, undefined);
-  assert.throws(() => applyOp(p, { op: 'cameraParamKey', path: 'fov', t: 1, v: 40 }), /not a keyed/);
+  assert.throws(() => applyOp(p, { op: 'cameraParamKey', path: 'shake.seed', t: 1, v: 3 }), /not a keyed/);
   assert.throws(() => applyOp(p, { op: 'cameraParamKey', path: 'center', t: 1, v: [1, 2] }), /needs/);
+});
+
+test('lens, shake and DOF channels drive evalCamera per frame', () => {
+  const p = project();
+  p.camera.shake.amp = 0;
+  p.camera.tracks = {
+    fov: [{ t: 0, v: 40 }, { t: 2, v: 120 }],
+    lookAhead: [{ t: 0, v: 30 }, { t: 2, v: 50 }],
+    bankGain: [{ t: 0, v: 0 }, { t: 2, v: 2 }],
+    maxRoll: [{ t: 0, v: 0 }, { t: 2, v: 10 }],
+    roll: [{ t: 0, v: 0 }, { t: 2, v: 20 }],
+    'dof.enabled': [{ t: 0, v: false }, { t: 2, v: true }],
+    'dof.fstop': [{ t: 0, v: 8 }, { t: 2, v: 2 }],
+  };
+  assert.equal(cameraParamValue(p.camera, 'fov', 2), 120);
+  assert.equal(cameraParamValue(p.camera, 'dof.enabled', 2), true);
+  const c = evalCamera(p, 2);
+  assert.equal(c.fov, 120);
+  assert.equal(c.dof.enabled, true);
+  assert.equal(c.dof.fstop, 2);
+  assert.ok(c.roll >= 10, `manual roll survives banking: ${c.roll}`);
+  assert.ok(Math.abs(v3.len(v3.sub(c.look, c.pos)) - 50) < 0.01, 'lookAhead is sampled');
+  assert.ok(c.focus > 0);
+  const baked = bakeCameraTrack(p, { fps: 24, from: 0, to: 2 });
+  const last = baked[baked.length - 1];
+  assert.equal(last.fov, 120);
+  assert.equal(last.dof.enabled, true);
+  assert.equal(last.dof.fstop, 2);
+  assert.ok(last.focus > 0);
+
+  const quiet = project();
+  quiet.camera.shake.amp = 0;
+  quiet.camera.tracks = { 'shake.amp': [{ t: 0, v: 0 }] };
+  const base = v3.add(quiet.camera.center, pathPos(quiet.camera, 2.4));
+  assert.ok(v3.len(v3.sub(evalCamera(quiet, 2.4).pos, base)) < 1e-9);
+});
+
+test('cameraParamKey supports lens / shake / DOF frame channels', () => {
+  const p = project();
+  applyOp(p, { op: 'cameraParamKey', path: 'fov', t: 1, v: 999 });
+  assert.equal(p.camera.tracks.fov[0].v, 360);
+  applyOp(p, { op: 'cameraParamKey', path: 'dof.enabled', t: 1, v: true });
+  assert.equal(p.camera.tracks['dof.enabled'][0].v, true);
+  applyOp(p, { op: 'cameraParamKey', path: 'shake.amp', t: 1, v: -3 });
+  assert.equal(p.camera.tracks['shake.amp'][0].v, 0);
+  applyOp(p, { op: 'cameraParamUnkey', path: 'fov', t: 1 });
+  assert.equal(p.camera.tracks.fov, undefined);
 });
 
 test('city generation is deterministic and bounded', () => {

@@ -7,7 +7,7 @@
 // property's keyframes.
 import { timecode } from '/core/time.js';
 import { objectPose } from '/core/scene.js';
-import { pathPos, cameraTransform } from '/core/camera.js';
+import { pathPos, cameraTransform, cameraParamValue } from '/core/camera.js';
 
 const el = (tag, cls, html) => {
   const n = document.createElement(tag);
@@ -453,8 +453,6 @@ export class Timeline {
   }
 
   _cameraRows(cam, host) {
-    const set = (patch) => this.onOp?.({ op: 'cameraSet', patch });
-
     // One "位置" property (path keys) plus the rest of the base transform.
     // The camera transform group stays open by default: it is what users edit
     // most, while lens/shake/DOF stay folded with summaries.
@@ -473,58 +471,66 @@ export class Timeline {
       host.appendChild(this._camVecRow(cam, 'scale', '缩放', 3, tr.scale, { step: 0.05, unit: '倍' }));
     }
 
-    const lensSummary = `FOV ${Math.round(cam.fov)}°${cam.fov >= 180 ? ' · 鱼眼' : ''}`;
-    const shakeSummary = `${round2(cam.shake.amp)}m · ${cam.shake.freq}Hz`;
-    const dofSummary = `f/${cam.dof.fstop} · 模糊 ${Math.round((cam.motionBlur.shutter || 0) * 360)}°`;
+    const fov = this._camValue(cam, 'fov');
+    const lookAhead = this._camValue(cam, 'lookAhead');
+    const bankGain = this._camValue(cam, 'bankGain');
+    const maxRoll = this._camValue(cam, 'maxRoll');
+    const roll = this._camValue(cam, 'roll');
+    const shakeAmp = this._camValue(cam, 'shake.amp');
+    const shakeFreq = this._camValue(cam, 'shake.freq');
+    const shakeGain = this._camValue(cam, 'shake.speedGain');
+    const dofOn = this._camValue(cam, 'dof.enabled');
+    const fstop = this._camValue(cam, 'dof.fstop');
+    const lensSummary = `FOV ${Math.round(fov)}°${fov >= 180 ? ' · 鱼眼' : ''}`;
+    const shakeSummary = `${round2(shakeAmp)}m · ${round2(shakeFreq)}Hz`;
+    const dofSummary = `f/${round2(fstop)} · 模糊 ${Math.round((cam.motionBlur.shutter || 0) * 360)}°`;
     host.appendChild(this._sectionRow('镜头 / 构图', 'camMain', lensSummary));
     if (this.sections.camMain) {
-      host.appendChild(this._camNumRow('视场角 FOV', cam.fov, {
-        step: 1, min: 1, max: 360,
-        badge: cam.fov >= 180 ? '鱼眼' : '',
-        apply: (v) => set({ fov: v }),
+      host.appendChild(this._camParamNumRow(cam, 'fov', '视场角 FOV', fov, {
+        step: 1, min: 1, max: 360, badge: fov >= 180 ? '鱼眼' : '',
       }));
       host.appendChild(this._camHintRow('≥180° 自动切等距鱼眼（可到 360°）；Blender 侧用 Cycles 渲这一档。'));
-      host.appendChild(this._camNumRow('看向前方 (m)', cam.lookAhead, {
-        step: 5, min: 2, max: 500, apply: (v) => set({ lookAhead: v }),
+      host.appendChild(this._camParamNumRow(cam, 'lookAhead', '看向前方 (m)', lookAhead, {
+        step: 5, min: 2, max: 500,
       }));
-      host.appendChild(this._camNumRow('转弯侧倾', cam.bankGain, {
-        step: 0.1, min: 0, max: 4, apply: (v) => set({ bankGain: v }),
+      host.appendChild(this._camParamNumRow(cam, 'bankGain', '转弯侧倾', bankGain, {
+        step: 0.1, min: 0, max: 4,
       }));
-      host.appendChild(this._camNumRow('最大侧倾°', cam.maxRoll, {
-        step: 1, min: 0, max: 60, apply: (v) => set({ maxRoll: v }),
+      host.appendChild(this._camParamNumRow(cam, 'maxRoll', '最大侧倾°', maxRoll, {
+        step: 1, min: 0, max: 60,
       }));
-      host.appendChild(this._camNumRow('手动 roll°', cam.roll || 0, {
-        step: 1, min: -60, max: 60, apply: (v) => set({ roll: v }),
+      host.appendChild(this._camParamNumRow(cam, 'roll', '手动 roll°', roll, {
+        step: 1, min: -60, max: 60,
       }));
     }
 
     host.appendChild(this._sectionRow('抖动', 'camShake', shakeSummary));
     if (this.sections.camShake) {
-      host.appendChild(this._camNumRow('抖动幅度', cam.shake.amp, {
-        step: 0.05, min: 0, max: 5, apply: (v) => set({ shake: { ...cam.shake, amp: v } }),
+      host.appendChild(this._camParamNumRow(cam, 'shake.amp', '抖动幅度', shakeAmp, {
+        step: 0.05, min: 0, max: 5,
       }));
-      host.appendChild(this._camNumRow('抖动频率', cam.shake.freq, {
-        step: 0.1, min: 0.1, max: 8, apply: (v) => set({ shake: { ...cam.shake, freq: v } }),
+      host.appendChild(this._camParamNumRow(cam, 'shake.freq', '抖动频率', shakeFreq, {
+        step: 0.1, min: 0.1, max: 8,
       }));
-      host.appendChild(this._camNumRow('随速度增强', cam.shake.speedGain, {
-        step: 0.1, min: 0, max: 2, apply: (v) => set({ shake: { ...cam.shake, speedGain: v } }),
+      host.appendChild(this._camParamNumRow(cam, 'shake.speedGain', '随速度增强', shakeGain, {
+        step: 0.1, min: 0, max: 2,
       }));
-      host.appendChild(this._camNumRow('随机种子', cam.shake.seed, {
-        step: 1, apply: (v) => set({ shake: { ...cam.shake, seed: v } }),
+      host.appendChild(this._camParamNumRow(cam, 'shake.seed', '随机种子', cam.shake.seed, {
+        step: 1, keyable: false, badge: '整段',
       }));
     }
 
     host.appendChild(this._sectionRow('景深 / 模糊', 'camDof', dofSummary));
     if (this.sections.camDof) {
-      host.appendChild(this._camSelectRow('景深', String(!!cam.dof.enabled), [['false', '关'], ['true', '开']],
-        (v) => set({ dof: { ...cam.dof, enabled: v === 'true' } })));
-      host.appendChild(this._camNumRow('光圈 f', cam.dof.fstop, {
-        step: 0.2, min: 0.5, max: 32, apply: (v) => set({ dof: { ...cam.dof, fstop: v } }),
+      host.appendChild(this._camParamSelectRow(cam, 'dof.enabled', '景深', dofOn,
+        [['false', '关'], ['true', '开']]));
+      host.appendChild(this._camParamNumRow(cam, 'dof.fstop', '光圈 f', fstop, {
+        step: 0.2, min: 0.5, max: 32,
       }));
-      host.appendChild(this._camSelectRow('运动模糊', String(!!cam.motionBlur.enabled), [['true', '开'], ['false', '关']],
-        (v) => set({ motionBlur: { ...cam.motionBlur, enabled: v === 'true' } })));
-      host.appendChild(this._camNumRow('快门角', cam.motionBlur.shutter, {
-        step: 0.05, min: 0, max: 1, apply: (v) => set({ motionBlur: { ...cam.motionBlur, shutter: v } }),
+      host.appendChild(this._camParamSelectRow(cam, 'motionBlur.enabled', '运动模糊', cam.motionBlur.enabled,
+        [['true', '开'], ['false', '关']], { keyable: false, badge: '整段' }));
+      host.appendChild(this._camParamNumRow(cam, 'motionBlur.shutter', '快门角', cam.motionBlur.shutter, {
+        step: 0.05, min: 0, max: 1, keyable: false, badge: '整段',
       }));
     }
   }
@@ -655,6 +661,16 @@ export class Timeline {
       || (this.project?.camera?.id === id ? this.project.camera : null);
   }
 
+  _camPatch(path, v) {
+    if (!path.includes('.')) return { [path]: v };
+    const [a, b] = path.split('.');
+    return { [a]: { [b]: v } };
+  }
+
+  _camValue(cam, path, t = this.time) {
+    return cameraParamValue(cam, path, t);
+  }
+
   _camHasTrack(cam, path) {
     return (cam?.tracks?.[path] || []).length > 0;
   }
@@ -670,10 +686,25 @@ export class Timeline {
     if (this._camHasTrack(cam, path)) {
       this.onOp?.({ op: 'cameraParamKey', id: camId, path, t, v });
     } else {
-      const patch = { [path]: v };
-      if (path === 'opacity') patch.opacity = Math.max(0, Math.min(1, v));
+      const patch = this._camPatch(path, path === 'opacity' ? Math.max(0, Math.min(1, v)) : v);
       this.onOp?.({ op: 'cameraSet', patch });
     }
+  }
+
+  _commitCamSelect(camId, path, raw) {
+    const cam = this._camById(camId);
+    if (!cam) return;
+    const v = raw === 'true' ? true : raw === 'false' ? false : raw;
+    const t = round3(this.time);
+    if (this._camHasTrack(cam, path)) {
+      this.onOp?.({ op: 'cameraParamKey', id: camId, path, t, v });
+    } else {
+      this.onOp?.({ op: 'cameraSet', patch: this._camPatch(path, v) });
+    }
+  }
+
+  _commitCamShotValue(camId, path, value) {
+    this.onOp?.({ op: 'cameraSet', patch: this._camPatch(path, value) });
   }
 
   _toggleCamParamKey(camId, path) {
@@ -686,8 +717,7 @@ export class Timeline {
       this.onOp?.({ op: 'cameraParamUnkey', id: camId, path, t });
       return;
     }
-    const tr = cameraTransform(cam, t);
-    const v = path === 'opacity' ? tr.opacity : tr[path];
+    const v = this._camValue(cam, path, t);
     this.onOp?.({ op: 'cameraParamKey', id: camId, path, t, v });
   }
 
@@ -713,9 +743,12 @@ export class Timeline {
     for (const k of pr.keys || []) k.node.classList.toggle('at', Math.abs(k.t - this.time) < 5e-4);
   }
 
-  _camNumRow(label, value, { step = 0.1, min, max, apply, badge = '' } = {}) {
-    const row = el('div', 'tl-row tl-camprop');
+  _camParamNumRow(cam, path, label, value, { step = 0.1, min, max, badge = '', keyable = true } = {}) {
+    const row = el('div', 'tl-row tl-camprop tl-camparamrow');
+    row.dataset.cam = cam.id;
+    row.dataset.path = path;
     const g = el('div', 'tl-gutter');
+    g.dataset.cam = cam.id;
     g.appendChild(el('span', 'tl-plabel', label));
     const { box, inp } = this._numBox('d', '');
     box.classList.add('tl-camnum');
@@ -723,23 +756,43 @@ export class Timeline {
     if (min != null) inp.min = String(min);
     if (max != null) inp.max = String(max);
     inp.value = String(round2(value));
-    const key = `cam:${label}`;
+    const editKey = `cam:${cam.id}:${path}`;
     inp.addEventListener('focus', () => this.onPause?.());
     inp.addEventListener('input', () => {
-      const v = Number(inp.value);
-      if (!Number.isFinite(v)) return;
-      this._schedule(key, () => apply(v));
+      this._editTimes.set(editKey, round3(this.time));
+      this._schedule(editKey, () => {
+        if (keyable) this._commitCamParam(cam.id, path);
+        else {
+          const v = Number(inp.value);
+          if (Number.isFinite(v)) this._commitCamShotValue(cam.id, path, v);
+        }
+      });
     });
-    inp.addEventListener('blur', () => this._flush(key));
+    inp.addEventListener('blur', () => { this._flush(editKey); this._syncProps(); });
     g.appendChild(box);
     if (badge) g.appendChild(el('span', 'tl-camfish', badge));
-    row.append(g, el('div', 'tl-track'));
+    let kf = null;
+    if (keyable) {
+      kf = el('button', 'tl-kf', '◆');
+      kf.addEventListener('click', (e) => { e.stopPropagation(); this._toggleCamParamKey(cam.id, path); });
+      g.appendChild(kf);
+    }
+    const lane = el('div', 'tl-track');
+    row.append(g, lane);
+    if (keyable) {
+      const pr = { camId: cam.id, path, kind: 'scalar', dims: 1, inputs: [inp], kf, lane, row, sig: '' };
+      this._camPropRows.push(pr);
+      this._refreshCamPropLane(pr, cam);
+    }
     return row;
   }
 
-  _camSelectRow(label, value, options, apply) {
-    const row = el('div', 'tl-row tl-camprop');
+  _camParamSelectRow(cam, path, label, value, options, { badge = '', keyable = true } = {}) {
+    const row = el('div', 'tl-row tl-camprop tl-camparamrow');
+    row.dataset.cam = cam.id;
+    row.dataset.path = path;
     const g = el('div', 'tl-gutter');
+    g.dataset.cam = cam.id;
     g.appendChild(el('span', 'tl-plabel', label));
     const sel = document.createElement('select');
     sel.className = 'tl-camselect';
@@ -750,9 +803,25 @@ export class Timeline {
       o.selected = String(v) === String(value);
       sel.appendChild(o);
     }
-    sel.addEventListener('change', () => apply(sel.value));
+    sel.addEventListener('change', () => {
+      if (keyable) this._commitCamSelect(cam.id, path, sel.value);
+      else this.onOp?.({ op: 'cameraSet', patch: this._camPatch(path, sel.value === 'true') });
+    });
     g.appendChild(sel);
-    row.append(g, el('div', 'tl-track'));
+    if (badge) g.appendChild(el('span', 'tl-camfish', badge));
+    let kf = null;
+    if (keyable) {
+      kf = el('button', 'tl-kf', '◆');
+      kf.addEventListener('click', (e) => { e.stopPropagation(); this._toggleCamParamKey(cam.id, path); });
+      g.appendChild(kf);
+    }
+    const lane = el('div', 'tl-track');
+    row.append(g, lane);
+    if (keyable) {
+      const pr = { camId: cam.id, path, kind: 'select', sel, inputs: [], dims: 1, kf, lane, row, sig: '' };
+      this._camPropRows.push(pr);
+      this._refreshCamPropLane(pr, cam);
+    }
     return row;
   }
 
@@ -1052,9 +1121,13 @@ export class Timeline {
     for (const pr of this._camPropRows) {
       const cam = this._camById(pr.camId);
       if (!cam) continue;
-      const tr = cameraTransform(cam, t);
-      const values = pr.dims === 1 ? [tr[pr.path]] : (tr[pr.path] || []);
-      pr.inputs.forEach((inp, i) => set(inp, values[i]));
+      const value = this._camValue(cam, pr.path, t);
+      if (pr.kind === 'select') {
+        if (pr.sel && document.activeElement !== pr.sel) pr.sel.value = String(value);
+      } else {
+        const values = pr.dims === 1 ? [value] : (value || []);
+        pr.inputs.forEach((inp, i) => set(inp, values[i]));
+      }
       if (pr.kf) {
         const track = cam.tracks?.[pr.path] || [];
         const at = track.some((k) => Math.abs(k.t - t) < 1e-3);

@@ -86,15 +86,26 @@ function activeCamera(p, create = false) {
 /** Camera transform channels addressed by the timeline keyframes. */
 const CAMERA_TRACK_DIMS = {
   center: 3, scale: 3, picturePivot: 2, pictureOffset: 2, opacity: 1,
+  fov: 1, lookAhead: 1, bankGain: 1, maxRoll: 1, roll: 1,
+  'shake.amp': 1, 'shake.freq': 1, 'shake.speedGain': 1,
+  'dof.enabled': 1, 'dof.fstop': 1,
+};
+
+const CAMERA_TRACK_RANGES = {
+  fov: [1, 360], lookAhead: [1, 500], bankGain: [0, 4], maxRoll: [0, 60], roll: [-60, 60],
+  'shake.amp': [0, 5], 'shake.freq': [0.1, 8], 'shake.speedGain': [0, 2],
+  'dof.fstop': [0.5, 32],
 };
 
 function cameraTrackValue(path, v) {
   const dims = CAMERA_TRACK_DIMS[path];
-  if (!dims) fail(`camera ${path} is not a keyed transform property`);
+  if (!dims) fail(`camera ${path} is not a keyed property`);
+  if (path === 'dof.enabled') return v === true || v === 'true';
   if (dims === 1) {
     const n = Number(v);
     if (!Number.isFinite(n)) fail(`${path} needs a number`);
-    return path === 'opacity' ? Math.max(0, Math.min(1, n)) : n;
+    const range = path === 'opacity' ? [0, 1] : CAMERA_TRACK_RANGES[path];
+    return range ? Math.max(range[0], Math.min(range[1], n)) : n;
   }
   if (!Array.isArray(v) || v.length < dims || !v.slice(0, dims).every((n) => Number.isFinite(Number(n)))) {
     fail(`${path} needs [${'x,y,z'.split(',').slice(0, dims).join(',')}]`);
@@ -476,7 +487,7 @@ export function applyOp(p, op) {
       const cam = cameraById(p, op.id);
       if (!cam) fail('no camera');
       const path = String(op.path || '');
-      if (!CAMERA_TRACK_DIMS[path]) fail(`camera ${path} is not a keyed transform property`);
+      if (!CAMERA_TRACK_DIMS[path]) fail(`camera ${path} is not a keyed property`);
       const t = Math.round(Number(op.t) * 1000) / 1000;
       if (!Number.isFinite(t)) fail('cameraParamUnkey needs t');
       const tracks = cam.tracks || {};
