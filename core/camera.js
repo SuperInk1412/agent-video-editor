@@ -3,6 +3,8 @@
 import { clamp, speedWarp } from './time.js';
 
 export const DEFAULT_CAMERA = {
+  id: null,
+  name: '',
   fov: 62,
   near: 0.5,
   far: 5000,
@@ -10,6 +12,12 @@ export const DEFAULT_CAMERA = {
   bankGain: 1.2,
   maxRoll: 32,
   roll: 0,
+  center: [0, 0, 0],
+  opacity: 1,
+  scale: [1, 1, 1],
+  picturePivot: [0.5, 0.5],
+  pictureOffset: [0, 0],
+  visible: true,
   shake: { amp: 0.6, freq: 1.6, octaves: 3, speedGain: 1.0, seed: 7 },
   dof: { enabled: false, fstop: 2.8, focusOffset: 0 },
   motionBlur: { enabled: true, shutter: 0.5 },
@@ -68,9 +76,21 @@ function ease(name, p) {
   }
 }
 
+const numVec = (v, n, dflt) => (Array.isArray(v) && v.length === n && v.every((x) => Number.isFinite(Number(x)))
+  ? v.map(Number)
+  : dflt.slice());
+
 export function normalizeCamera(cam) {
   const c = { ...DEFAULT_CAMERA, ...(cam || {}) };
   c.fov = clamp(Number.isFinite(Number(c.fov)) ? Number(c.fov) : DEFAULT_CAMERA.fov, 1, 360);
+  c.id = c.id != null ? String(c.id) : null;
+  c.name = String(c.name || '');
+  c.center = numVec(cam?.center, 3, DEFAULT_CAMERA.center);
+  c.scale = numVec(cam?.scale, 3, DEFAULT_CAMERA.scale);
+  c.picturePivot = numVec(cam?.picturePivot, 2, DEFAULT_CAMERA.picturePivot);
+  c.pictureOffset = numVec(cam?.pictureOffset, 2, DEFAULT_CAMERA.pictureOffset);
+  c.opacity = clamp(Number.isFinite(Number(c.opacity)) ? Number(c.opacity) : 1, 0, 1);
+  c.visible = c.visible !== false;
   c.shake = { ...DEFAULT_CAMERA.shake, ...(cam?.shake || {}) };
   c.dof = { ...DEFAULT_CAMERA.dof, ...(cam?.dof || {}) };
   c.motionBlur = { ...DEFAULT_CAMERA.motionBlur, ...(cam?.motionBlur || {}) };

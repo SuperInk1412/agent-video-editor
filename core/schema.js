@@ -84,8 +84,48 @@ export function createProject(opts = {}) {
     segments: [],
     elements: [],
     camera: null,
+    cameras: [],
+    cameraOrder: [],
+    activeCameraId: null,
     world: normalizeWorld(),
   };
+}
+
+/**
+ * Camera stack: `cameras[]` is the source, `cameraOrder` is top→bottom, and
+ * `activeCameraId` picks the edit camera. The legacy `project.camera` stays as
+ * an alias of the active camera so the existing single-camera code paths keep
+ * working while the stack is rolled out.
+ */
+export function normalizeCameraStack(p) {
+  const raw = Array.isArray(p.cameras) ? p.cameras.filter(Boolean) : [];
+  if (!raw.length && p.camera) raw.push(p.camera);
+  const used = new Set();
+  const cams = raw.map((c, i) => {
+    const cam = normalizeCamera(c);
+    let id = cam.id || `cam_${i + 1}`;
+    while (used.has(id)) id = `cam_${i + 1}_${used.size + 1}`;
+    used.add(id);
+    cam.id = id;
+    cam.name = cam.name || `相机 ${i + 1}`;
+    return cam;
+  });
+  const byId = new Map(cams.map((c) => [c.id, c]));
+  const order = [];
+  const seen = new Set();
+  for (const id of Array.isArray(p.cameraOrder) ? p.cameraOrder : []) {
+    const sid = String(id);
+    if (byId.has(sid) && !seen.has(sid)) { seen.add(sid); order.push(sid); }
+  }
+  for (const c of cams) if (!seen.has(c.id)) { seen.add(c.id); order.push(c.id); }
+  const active = byId.has(String(p.activeCameraId))
+    ? String(p.activeCameraId)
+    : (order[0] || null);
+  p.cameras = order.map((id) => byId.get(id));
+  p.cameraOrder = order;
+  p.activeCameraId = active;
+  p.camera = active ? byId.get(active) : null;
+  return p;
 }
 
 /** Fill in defaults for every known field without clobbering user values. */
@@ -139,7 +179,7 @@ export function normalizeProject(p) {
   elIds.clear();
   p.elements.forEach((e) => elIds.add(e.id));
 
-  p.camera = p.camera ? normalizeCamera(p.camera) : null;
+  normalizeCameraStack(p);
   p.world = normalizeWorld(p.world);
   return p;
 }
@@ -177,6 +217,20 @@ export function validateProject(p) {
       if (!k.path) push(`elements[${i}].keyframes[${j}].path`, 'missing path');
     });
   });
+  const camIds = new Set();
+  (p.cameras || []).forEach((c, i) => {
+    if (!c.id) push(`cameras[${i}].id`, 'missing id');
+    else if (camIds.has(c.id)) push(`cameras[${i}].id`, `duplicate id ${c.id}`);
+    camIds.add(c.id);
+    if (!Array.isArray(c.path)) push(`cameras[${i}].path`, 'path must be an array');
+  });
+  const order = Array.isArray(p.cameraOrder) ? p.cameraOrder : [];
+  order.forEach((id, i) => {
+    if (!camIds.has(id)) push(`cameraOrder[${i}]`, `unknown camera ${id}`);
+  });
+  if (p.activeCameraId != null && !camIds.has(p.activeCameraId)) {
+    push('activeCameraId', `unknown camera ${p.activeCameraId}`);
+  }
   return issues;
 }
 
