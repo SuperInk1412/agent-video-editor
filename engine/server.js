@@ -85,6 +85,19 @@ async function serveFile(req, res, file, { range = false } = {}) {
   return fs.createReadStream(file).pipe(res);
 }
 
+function openInBrowser(url, log) {
+  const [cmd, args] = process.platform === 'win32'
+    ? ['cmd', ['/c', 'start', '', url]]
+    : [process.platform === 'darwin' ? 'open' : 'xdg-open', [url]];
+  try {
+    const child = spawn(cmd, args, { windowsHide: true, detached: true, stdio: 'ignore' });
+    child.on('error', (e) => log.warn('could not open a browser', { url, error: e.message }));
+    child.unref();
+  } catch (e) {
+    log.warn('could not open a browser', { url, error: e.message });
+  }
+}
+
 export async function startServer({ root, port = 47100, open = false, onReady } = {}) {
   const projectRoot = path.resolve(root);
   if (!(await projectExists(projectRoot))) {
@@ -690,9 +703,7 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
   const info = { port: actualPort, pid: process.pid, url: `http://127.0.0.1:${actualPort}/`, root: projectRoot, startedAt: Date.now() };
   await fsp.writeFile(path.join(p.vdm, 'app.json'), JSON.stringify(info, null, 2));
 
-  if (open && process.platform === 'win32') {
-    spawn('cmd', ['/c', 'start', '', info.url], { windowsHide: true, detached: true, stdio: 'ignore' }).unref();
-  }
+  if (open) openInBrowser(info.url, log);
   onReady?.(info);
 
   return {

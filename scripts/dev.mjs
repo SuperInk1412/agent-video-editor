@@ -2,10 +2,10 @@
 // `node scripts/dev.mjs`            -> Electron window
 // `node scripts/dev.mjs --web`      -> engine server + browser tab
 import { spawn } from 'node:child_process';
-import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { findProjectRoot } from '../core/store.js';
+import { which, firstExecutable } from '../engine/which.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..');
@@ -15,15 +15,15 @@ const webMode = argv.includes('--web');
 const ELECTRON_CANDIDATES = [
   process.env.VDM_ELECTRON,
   path.join(REPO, 'node_modules', 'electron', 'dist', 'electron.exe'),
+  path.join(REPO, 'node_modules', 'electron', 'dist', 'electron'),
+  path.join(REPO, 'node_modules', 'electron', 'dist', 'Electron.app', 'Contents', 'MacOS', 'Electron'),
   'E:/Software/KTUM6/resources/app/node_modules/electron/dist/electron.exe',
   'C:/Program Files/Electron/electron.exe',
+  '/Applications/Electron.app/Contents/MacOS/Electron',
 ].filter(Boolean);
 
 function findElectron() {
-  for (const c of ELECTRON_CANDIDATES) {
-    if (fs.existsSync(c)) return c;
-  }
-  return null;
+  return firstExecutable(ELECTRON_CANDIDATES) || which('electron');
 }
 
 // --project > where you stood when launching > pick a project in the app
@@ -50,7 +50,7 @@ if (webMode) {
 } else {
   const exe = findElectron();
   if (!exe) {
-    console.error('[vdm] 没找到 Electron。设置环境变量 VDM_ELECTRON 指向 electron.exe，或运行 `node scripts/dev.mjs --web` 用浏览器打开。');
+    console.error('[vdm] 没找到 Electron。把 electron 加进 PATH，或设置 VDM_ELECTRON 指向 Electron 可执行文件，或运行 `node scripts/dev.mjs --web` 用浏览器打开。');
     process.exit(1);
   }
   const passthrough = [];

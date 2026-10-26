@@ -5,25 +5,36 @@
 // The headless profile can read files but cannot run shell commands, so the edit
 // protocol is: the agent reads project.vdm.json and replies with an ops JSON object
 // ({"note", "ops"}), which the engine validates and applies through core/ops.js.
-import { spawn, execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import fss from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import os from 'node:os';
+import { which } from './which.js';
 
-const execFileP = promisify(execFile);
 const NL = String.fromCharCode(10);
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const CLI_PATH = path.resolve(HERE, '../cli/vdm.js');
 
 const isElectron = !!process.versions.electron;
 
-function npmRoots() {
-  const appdata = process.env.APPDATA || '';
+function npmRoots(node) {
+  if (process.platform === 'win32') {
+    const appdata = process.env.APPDATA || '';
+    return [
+      path.join(appdata, 'npm', 'node_modules'),
+      path.join(process.env.ProgramFiles || 'C:/Program Files', 'nodejs', 'node_modules'),
+    ];
+  }
+  const home = os.homedir();
   return [
-    path.join(appdata, 'npm', 'node_modules'),
-    path.join(process.env.ProgramFiles || 'C:/Program Files', 'nodejs', 'node_modules'),
+    process.env.npm_config_prefix && path.join(process.env.npm_config_prefix, 'lib', 'node_modules'),
+    node && path.join(path.dirname(path.dirname(node)), 'lib', 'node_modules'),
+    path.join(home, '.local', 'lib', 'node_modules'),
+    path.join(home, '.npm-global', 'lib', 'node_modules'),
+    '/usr/local/lib/node_modules',
+    '/usr/lib/node_modules',
   ].filter(Boolean);
 }
 
@@ -37,12 +48,7 @@ async function findNode() {
   if (cachedNode) return cachedNode;
   if (process.env.VDM_NODE) { cachedNode = process.env.VDM_NODE; return cachedNode; }
   if (!isElectron) { cachedNode = process.execPath; return cachedNode; }
-  try {
-    const { stdout } = await execFileP(process.platform === 'win32' ? 'where' : 'which', ['node'], { windowsHide: true });
-    const hit = stdout.split(NL).map((s) => s.trim()).find((s) => s && fss.existsSync(s));
-    if (hit) { cachedNode = hit; return hit; }
-  } catch { /* fall through */ }
-  cachedNode = process.execPath;
+  cachedNode = which('node') || process.execPath;
   return cachedNode;
 }
 
@@ -51,21 +57,17 @@ export async function findDsh() {
   if (process.env.VDM_DSH && fss.existsSync(process.env.VDM_DSH)) {
     return { node, bin: process.env.VDM_DSH };
   }
-  for (const root of npmRoots()) {
+  for (const root of npmRoots(node)) {
     const bin = path.join(root, '@deepseek-ai', 'dsh', 'lib', 'bin.js');
     if (fss.existsSync(bin)) return { node, bin };
   }
-  try {
-    const { stdout } = await execFileP(process.platform === 'win32' ? 'where' : 'which', ['dsh'], { windowsHide: true });
-    const shim = stdout.split(NL).map((s) => s.trim()).find(Boolean);
-    if (shim) {
-      for (const root of npmRoots()) {
-        const bin = path.join(root, '@deepseek-ai', 'dsh', 'lib', 'bin.js');
-        if (fss.existsSync(bin)) return { node, bin };
-      }
-      return { node, bin: shim };
-    }
-  } catch { /* not installed */ }
+  const shim = which('dsh');
+  if (!shim) return null;
+  // npm links `dsh` straight to lib/bin.js on POSIX; on Windows it is a .cmd shim
+  // that node cannot run, so only hand node a real JS entry.
+  let real = shim;
+  try { real = fss.realpathSync(shim); } catch { /* keep the shim */ }
+  if (/\.(c|m)?js$/i.test(real)) return { node, bin: real };
   return null;
 }
 
