@@ -3,7 +3,7 @@ import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { withLock, paths, loadProject, atomicJson } from './storage.js';
-import { cloneProject } from '../core/schema.js';
+import { assertValidProject } from '../core/schema.js';
 import { fault } from '../application/errors.js';
 
 const stable = (value) => JSON.stringify(value, function (_key, item) {
@@ -28,9 +28,14 @@ export class ProjectRepository {
     let state;
     try { state = JSON.parse(await fs.readFile(this.stateFile, 'utf8')); }
     catch (e) { if (e.code !== 'ENOENT') throw fault('UNKNOWN_COMMIT_STATE', 'transaction journal is unreadable'); state = empty(); }
+    const validState = (value) => value?.version === 1 && Array.isArray(value.undo) && Array.isArray(value.redo)
+      && Array.isArray(value.entries) && value.receipts && typeof value.receipts === 'object' && !Array.isArray(value.receipts);
+    if (state?.version !== 1 || (!state.pending && !validState(state))) throw fault('UNKNOWN_COMMIT_STATE', 'unsupported or malformed transaction journal');
     let current = await this.load();
     if (state.pending) {
       const pending = state.pending;
+      if (!validState(pending.state) || hash(pending.project) !== pending.afterHash) throw fault('UNKNOWN_COMMIT_STATE', 'invalid prepared transaction');
+      try { assertValidProject(pending.project); } catch { throw fault('UNKNOWN_COMMIT_STATE', 'invalid prepared project snapshot'); }
       if (hash(current) !== pending.beforeHash && hash(current) !== pending.afterHash) throw fault('UNKNOWN_COMMIT_STATE', 'project does not match either side of pending commit');
       if (hash(current) === pending.beforeHash) await atomicJson(this.paths.file, pending.project);
       current = await this.load();

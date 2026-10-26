@@ -2,11 +2,12 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { paths } from './storage.js';
 import { fault } from '../application/errors.js';
+import { readPath } from './path-policy.js';
 
 /** Only regenerable cache entries are eligible; jobs, history and artifacts stay. */
 export async function pruneCache(root, { maxBytes = 1024 * 1024 * 1024, dryRun = false } = {}) {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || typeof dryRun !== 'boolean') throw fault('INVALID_ARGUMENT', 'invalid cache budget');
-  const cache = paths(root).cache;
+  const cache = await readPath(root, path.relative(root, paths(root).cache));
   const measure = async (file) => {
     const stat = await fs.lstat(file);
     if (stat.isSymbolicLink()) return 0;

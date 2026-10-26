@@ -4,6 +4,9 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { projectService } from '../engine/projects.js';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 
 async function fixture(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'vdm-transactions-'));
@@ -67,4 +70,22 @@ test('concurrent application instances serialize CAS and global history', async 
   const outcomes = await Promise.allSettled([1, 2, 3].map(() => projectService(root).transact({ expectedRev: 1, ops: [add] })));
   assert.equal(outcomes.filter((r) => r.status === 'fulfilled').length, 1);
   assert.ok(outcomes.filter((r) => r.status === 'rejected').every((r) => r.reason.code === 'REV_CONFLICT'));
+});
+
+for (const stage of ['prepared', 'project']) test(`a terminated writer at ${stage} recovers its lock, snapshot and receipt together`, async (t) => {
+  const { root } = await fixture(t);
+  await assert.rejects(promisify(execFile)(process.execPath, [fileURLToPath(new URL('./fixtures/transaction-crash.mjs', import.meta.url)), root, stage]), { code: 17 });
+  const result = await projectService(root).transact({ expectedRev: 1, requestId: 'killed-writer', ops: [{ op: 'addElement', element: { type: 'solid', duration: 1 } }] });
+  assert.equal(result.replayed, true);
+  assert.equal(result.project.elements.length, 1);
+  assert.equal(result.rev, 2);
+  assert.equal((await projectService(root).history()).undo, 1);
+});
+
+test('unrecognizable journal state blocks writes instead of dropping receipts and history', async (t) => {
+  const { root, service } = await fixture(t);
+  const before = await fs.readFile(path.join(root, 'project.vdm.json'), 'utf8');
+  await fs.writeFile(path.join(root, '.vdm/transactions.json'), JSON.stringify({ version: 99 }));
+  await assert.rejects(service.transact({ ops: [add] }), { code: 'UNKNOWN_COMMIT_STATE' });
+  assert.equal(await fs.readFile(path.join(root, 'project.vdm.json'), 'utf8'), before);
 });
