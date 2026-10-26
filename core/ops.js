@@ -137,6 +137,38 @@ function findSeg(p, id) {
   return s;
 }
 
+const t3 = (t) => Math.round(t * 1000) / 1000;
+
+/** Keyframe times are absolute: moving an element carries its animation along. */
+function shiftTiming(el, dt) {
+  if (!dt) return;
+  el.keyframes = (el.keyframes || []).map((k) => ({ ...k, t: t3(k.t + dt) }));
+  const span = el.motion?.span;
+  if (Array.isArray(span) && span.length === 2) el.motion.span = span.map((v) => t3(Number(v) + dt));
+}
+
+/**
+ * Keys a half of a split element needs for [start, end]: everything inside plus the
+ * nearest key on each side per path, so sampling inside the range is unchanged.
+ */
+function keysForRange(keys, start, end) {
+  const byPath = new Map();
+  for (const k of keys || []) {
+    if (!byPath.has(k.path)) byPath.set(k.path, []);
+    byPath.get(k.path).push(k);
+  }
+  const out = [];
+  for (const list of byPath.values()) {
+    list.sort((a, b) => a.t - b.t);
+    const before = list.filter((k) => k.t < start - 1e-6).pop();
+    const after = list.find((k) => k.t > end + 1e-6);
+    for (const k of list) {
+      if (k === before || k === after || (k.t >= start - 1e-6 && k.t <= end + 1e-6)) out.push({ ...k });
+    }
+  }
+  return out.sort((a, b) => a.t - b.t);
+}
+
 // ---------------------------------------------------------------- v3 objects
 
 function rootScene(p, create = false) {
@@ -282,37 +314,73 @@ export function applyOp(p, op) {
       const copy = JSON.parse(JSON.stringify(src));
       copy.id = newId('el', ids);
       copy.name = `${src.name} copy`;
-      copy.start = op.start != null ? Number(op.start) : src.start + (op.offset ?? 0);
+      copy.start = Math.max(0, op.start != null ? Number(op.start) : src.start + Number(op.offset ?? 0));
+      if (!Number.isFinite(copy.start)) fail('duplicateElement start must be a number');
       copy.z = src.z + 0.5;
+      shiftTiming(copy, copy.start - src.start);
       p.elements.push(copy);
       return { changed: [copy.id], element: copy };
     }
 
     case 'moveElement': {
+      // start only (or start with the same duration) = move: keyframes travel along.
+      // start + new duration = left trim: content stays put in time, video skips ahead.
+      // `keys: "shift" | "keep"` overrides the guess.
       const el = findEl(p, op.id);
-      if (op.start != null) el.start = Math.max(0, Number(op.start));
-      if (op.duration != null) el.duration = Math.max(1 / 120, Number(op.duration));
+      const oldStart = el.start;
+      const oldDur = el.duration;
+      if (op.start != null) {
+        const s0 = Number(op.start);
+        if (!Number.isFinite(s0)) fail('moveElement start must be a number');
+        el.start = Math.max(0, s0);
+      }
+      if (op.duration != null) {
+        const d0 = Number(op.duration);
+        if (!Number.isFinite(d0)) fail('moveElement duration must be a number');
+        el.duration = Math.max(1 / 120, d0);
+      }
       if (op.z != null) el.z = Number(op.z);
-      if (op.segment !== undefined) el.segment = op.segment;
+      if (op.segment !== undefined) {
+        if (op.segment && !p.segments.some((s) => s.id === op.segment)) fail(`unknown segment ${op.segment}`);
+        el.segment = op.segment || null;
+      }
+      const dt = el.start - oldStart;
+      if (Math.abs(dt) > 1e-9) {
+        const trim = Math.abs(el.duration - oldDur) > 1e-6;
+        const carry = op.keys === 'shift' || (op.keys !== 'keep' && !trim);
+        if (carry) shiftTiming(el, dt);
+        else if (el.type === 'video') el.srcIn = t3(Math.max(0, (Number(el.srcIn) || 0) + dt));
+      }
       changed.push(el.id);
       return { changed, element: el };
     }
 
     case 'splitElement': {
+      // Both halves must look exactly like the original did: keyframe times are
+      // absolute, the motion preset keeps its original span, there is no fade at
+      // the cut, and the right half of a video resumes where the left one stopped.
       const el = findEl(p, op.id);
-      const at = Number(op.at);
+      const at = t3(Number(op.at));
       if (!(at > el.start + 0.02 && at < el.start + el.duration - 0.02)) fail('split point outside element');
       const ids = allIds(p);
+      const end = el.start + el.duration;
       const right = JSON.parse(JSON.stringify(el));
       right.id = newId('el', ids);
+      right.name = el.name;
       right.start = at;
-      right.duration = el.start + el.duration - at;
-      // shift keyframes that belong to the right half
-      right.keyframes = (right.keyframes || [])
-        .filter((k) => k.t >= at)
-        .map((k) => ({ ...k, t: k.t - at }));
-      el.duration = at - el.start;
-      el.keyframes = (el.keyframes || []).filter((k) => k.t < at);
+      right.duration = t3(end - at);
+      right.keyframes = keysForRange(el.keyframes, at, end);
+      right.fadeIn = 0;
+      if (el.type === 'video') right.srcIn = t3((Number(el.srcIn) || 0) + (at - el.start));
+      const motion = el.motion || {};
+      if (motion.type && motion.type !== 'none' && Number(motion.amount)) {
+        const span = Array.isArray(motion.span) && motion.span.length === 2 ? motion.span : [el.start, end];
+        el.motion = { ...motion, span: [...span] };
+        right.motion = { ...motion, span: [...span] };
+      }
+      el.duration = t3(at - el.start);
+      el.keyframes = keysForRange(el.keyframes, el.start, at);
+      el.fadeOut = 0;
       p.elements.push(right);
       return { changed: [el.id, right.id], element: right };
     }
@@ -377,7 +445,9 @@ export function applyOp(p, op) {
       const el = findEl(p, op.id);
       if (!op.path) fail('keySet needs path');
       const t = Math.round(Number(op.t) * 1000) / 1000;
-      const kf = { t, path: op.path, value: coerceValue(op.value), ease: op.ease || 'easeInOut' };
+      if (!Number.isFinite(t)) fail('keySet needs t');
+      const old = (el.keyframes || []).find((k) => k.path === op.path && Math.abs(k.t - t) < 1e-4);
+      const kf = { t, path: op.path, value: coerceValue(op.value), ease: op.ease || old?.ease || 'easeInOut' };
       el.keyframes = (el.keyframes || []).filter((k) => !(k.path === kf.path && Math.abs(k.t - t) < 1e-4));
       el.keyframes.push(kf);
       el.keyframes.sort((a, b) => a.t - b.t);
@@ -385,7 +455,9 @@ export function applyOp(p, op) {
     }
 
     case 'keyRemove': {
+      // with t: remove the one key at that time; without: clear the whole track
       const el = findEl(p, op.id);
+      if (!op.path) fail('keyRemove needs path');
       // `t` deletes one key; without it the whole path goes (legacy callers).
       const t = op.t == null ? null : Math.round(Number(op.t) * 1000) / 1000;
       if (t != null && !Number.isFinite(t)) fail('keyRemove needs a finite t');

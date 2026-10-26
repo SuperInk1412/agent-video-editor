@@ -128,7 +128,8 @@ export function watchProject(dir, cb) {
   const file = paths(dir).file;
   let last = '';
   const listener = (cur) => {
-    if (!cur.exists) return;
+    // fs.Stats has no `exists`; a missing file reports a zeroed mtime
+    if (!cur || !cur.mtimeMs) return;
     const stamp = `${cur.mtimeMs}:${cur.size}`;
     if (stamp === last) return;
     last = stamp;

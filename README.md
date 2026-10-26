@@ -36,6 +36,9 @@ cd projects/nightcity && npm start
 # 或者纯浏览器形态
 npm run web
 
+# demo 的素材不进仓库：有参考工程就从里面抽，没有就生成占位图 + 按已提交节拍合成的鼓点
+npm run demo
+
 # 命令行走一遍：新建 → 分析节拍 → 自动分镜 → 出帧 → 出片
 node cli/vdm.js init projects/myfilm --title "我的片子" --duration 20 --audio bgm.m4a
 cd projects/myfilm
@@ -47,13 +50,15 @@ node ../../cli/vdm.js still 3.2 --out .vdm/frames/a.png
 node ../../cli/vdm.js render --from 0 --to 8 --out .vdm/renders/part.mp4
 ```
 
-Electron 路径可用 `VDM_ELECTRON` 覆盖；Blender 用 `VDM_BLENDER` 覆盖（默认自动找
-`E:/mvtools/blender/*` 和 `C:/Program Files/Blender Foundation/*`）。
+Electron 路径可用 `VDM_ELECTRON` 覆盖；Blender 用 `VDM_BLENDER` 覆盖。不设时先找常见安装位置
+（`C:/Program Files/Blender Foundation/*`、`/Applications/Blender.app` 等），再在 `PATH` 里找，
+所以 Linux / macOS 上装好 `blender`、`electron` 就能直接用。换机器后跑一次 `npm run blender:check`
+确认渲染链路。
 
 ## 已验证
 
-- `npm test`：64 个单元测试全绿（ops / 求值 / 场景 / 相机 / 迁移 / 存储锁 / 节拍 / agent 解析）
-- Blender 5.0.1 无头 EEVEE：1080p 单帧约 3–5s（含启动），24s@50% 成片约 70s
+- `npm test`：100+ 个单元测试全绿（ops / 编辑语义 / 求值 / 场景 / 相机 / 迁移 / 存储锁与监听 / 节拍 / agent 解析）
+- Blender 5.0.1（Windows）与 5.2.2（Linux）无头 EEVEE：1080p 单帧约 2–5s（含启动），24s@50% 成片约 70s
 - 示例项目 `projects/demo`：24s / 6 分镜 / 13 元素，成片在
   `projects/demo/.vdm/renders/master-*.mp4`（含音轨）
 - AI 闭环：在 UI 里选中分镜 → 描述改动 → agent 返回 ops → 引擎落盘 → 预览/时间线即时刷新（可撤销）

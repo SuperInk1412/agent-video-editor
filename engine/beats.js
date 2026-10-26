@@ -117,28 +117,45 @@ function pickPeaks(env, hopSec, { minGap = 0.09, delta = 0.06, mult = 1.35 } = {
   return peaks;
 }
 
-/** autocorrelation tempo estimate from onset envelope */
+/**
+ * Autocorrelation tempo estimate from the onset envelope.
+ * The envelope is smoothed (sharp onsets miss non-integer lags, which used to
+ * favour the double period) and mean-removed, and candidates are weighted by a
+ * log-normal prior around 120 bpm, so kick/snare patterns are not read at half tempo.
+ */
 function estimateTempo(env, hopSec) {
-  const minLag = Math.round(0.30 / hopSec); // 200 bpm
-  const maxLag = Math.round(1.20 / hopSec); // 50 bpm
-  let best = { lag: 0, score: -1 };
-  for (let lag = minLag; lag <= maxLag; lag++) {
-    let s = 0;
-    for (let i = 0; i + lag < env.length; i++) s += env[i] * env[i + lag];
-    s /= env.length - lag;
-    // slight preference for 90-160 bpm
-    const bpm = 60 / (lag * hopSec);
-    const w = bpm < 70 ? 0.7 : bpm > 180 ? 0.6 : 1;
-    if (s * w > best.score) best = { lag, score: s * w };
+  const n = env.length;
+  const sm = new Float32Array(n);
+  const k = [1, 2, 3, 2, 1];
+  let mean = 0;
+  for (let i = 0; i < n; i++) {
+    let s = 0, w = 0;
+    for (let j = -2; j <= 2; j++) {
+      const x = env[i + j];
+      if (x !== undefined) { s += x * k[j + 2]; w += k[j + 2]; }
+    }
+    sm[i] = s / w;
+    mean += sm[i];
   }
-  if (!best.lag) return { tempo: 0, periodSec: 0 };
-  let lag = best.lag;
-  // refine with parabolic interpolation on the autocorrelation
+  mean /= Math.max(1, n);
+  for (let i = 0; i < n; i++) sm[i] -= mean;
   const ac = (l) => {
     let s = 0;
-    for (let i = 0; i + l < env.length; i++) s += env[i] * env[i + l];
-    return s / Math.max(1, env.length - l);
+    for (let i = 0; i + l < n; i++) s += sm[i] * sm[i + l];
+    return s / Math.max(1, n - l);
   };
+  const minLag = Math.max(2, Math.round(0.25 / hopSec)); // 240 bpm
+  const maxLag = Math.round(1.5 / hopSec); // 40 bpm
+  let best = { lag: 0, score: -Infinity };
+  for (let lag = minLag; lag <= maxLag && lag < n - 1; lag++) {
+    const bpm = 60 / (lag * hopSec);
+    const prior = Math.exp(-0.5 * (Math.log2(bpm / 120) / 0.6) ** 2);
+    const score = ac(lag) * prior;
+    if (score > best.score) best = { lag, score };
+  }
+  if (!best.lag || !(best.score > 0)) return { tempo: 0, periodSec: 0 };
+  const lag = best.lag;
+  // refine with parabolic interpolation on the autocorrelation
   const y0 = ac(lag - 1), y1 = ac(lag), y2 = ac(lag + 1);
   const d = (y0 - y2) / (2 * (y0 - 2 * y1 + y2) || 1);
   const refined = lag + Math.max(-0.5, Math.min(0.5, d));

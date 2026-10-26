@@ -20,11 +20,17 @@
 ## 验证
 
 ```bash
-npm test                          # 14 个单元测试（core + beats + agent 解析）
+npm test                          # 单元测试（ops / 编辑语义 / 求值 / 相机 / 存储与监听 / 节拍 / agent 解析）
 npm run check:preview             # 预览朝向回归检查（红顶/蓝底标记图，读像素断言）
+npm run blender:check             # 找 Blender/ffmpeg 并真渲一帧临时项目（文字 + 色块 + 视频）
 node cli/vdm.js still 1.5 --out /tmp/a.png    # 真渲一帧（需要 Blender）
 node scripts/dev.mjs --project projects/demo --capture=/tmp/ui.png --at=1.8
 ```
+
+- Blender / Electron / dsh 都会在 `PATH` 里找（Linux / macOS 不用设环境变量）；
+  `VDM_BLENDER` / `VDM_ELECTRON` / `VDM_DSH` 仍然优先。
+- 改了求值规则，除了单测，再用 Blender 跑一遍 `vdm_build.eval_element` 和 JS 对拍
+  （同一组元素、同一组时间点，数值应完全一致）。
 
 - 截图自检走 Electron 的 `--capture`（`show:false` + offscreen），**不要用无头 Chrome**：
   浏览器会请求 `/media/*.mp4|m4a`，可能触发本机 IDM 之类的下载嗅探弹窗。

@@ -53,9 +53,14 @@
   "motion": { "type": "in", "amount": 0.08 },   // none/in/out/left/right/up/down/drift/shake
   "punch": 0.8,                    // 跟随节拍缩放（0..2）
   "fadeIn": 0.45, "fadeOut": 0.4,
+  "srcIn": 0,                      // video：从素材的第几秒开始播
   "keyframes": [ { "t": 0.2, "path": "transform.scale", "value": 0.9, "ease": "outExpo" } ]
 }
 ```
+
+- 关键帧的 `t` 是**项目绝对时间**（秒），不是相对元素起点。
+- `motion.span = [t0, t1]`（可选）把运动预设钉在一段绝对时间上；没有时按元素自身的
+  `start..start+duration` 走。切分会写入它，让两半延续同一个运动。
 
 ### style 字段
 
@@ -71,8 +76,8 @@
 ```
 1. base   = transform/style 里的静态值
 2. 关键帧  = 对同 path 的关键帧按 t 插值（数值线性 + ease；字符串/颜色取前值）
-3. motion = 预设增量（scale 乘法、x/y 加法、rotation 加法）
-4. punch  = 每个节拍点乘 (1 + punch·0.05·e^{-Δt/0.12})
+3. motion = 预设增量（scale 乘法、x/y 加法、rotation 加法），进度 p 取 motion.span 或元素自身范围
+4. punch  = 每个节拍点乘 (1 + punch·0.05·e^{-Δt/0.12})，和有没有运动预设无关
 5. fade   = opacity × clamp((t-start)/fadeIn) × clamp((end-t)/fadeOut)
 ```
 
@@ -103,7 +108,7 @@
 {"op":"removeElement","id":"el_x"}
 {"op":"duplicateElement","id":"el_x","start":4.0}
 {"op":"moveElement","id":"el_x","start":4.0,"duration":2.5,"z":3}
-{"op":"splitElement","id":"el_x","at":2.3}          // 关键帧随右半段 rebase
+{"op":"splitElement","id":"el_x","at":2.3}
 {"op":"reorder","id":"el_x","z":5}
 {"op":"addSegment","segment":{"start":0,"duration":3,"name":"镜 01"}}
 {"op":"updateSegment","id":"seg_1","patch":{"status":"approved"}}
@@ -111,9 +116,20 @@
 {"op":"setMeta","path":"background","value":"#05070d"}
 {"op":"setFx","fx":{"bloom":0.6}}
 {"op":"keySet","id":"el_x","path":"transform.scale","t":1.6,"value":1.15,"ease":"outExpo"}
-{"op":"keyRemove","id":"el_x","path":"transform.scale"}
+{"op":"keyRemove","id":"el_x","path":"transform.scale","t":1.6}   // 不带 t：清空整条轨
 {"op":"batch","ops":[...]}
 ```
+
+时间相关的编辑语义（预览和 Blender 都依赖它们，改动要补测试 `tests/edit.test.mjs`）：
+
+- **moveElement**：只改 `start`（或 `start` 加不变的 `duration`）= 平移，关键帧和 `motion.span`
+  一起平移；`start` 和 `duration` 一起变 = 左裁剪，关键帧留在原处，视频的 `srcIn` 前进同样的秒数。
+  `"keys": "shift" | "keep"` 可以显式指定。
+- **splitElement**：两半各保留自己范围内的关键帧，外加每条轨在范围外最近的一个（保证插值不变）；
+  切口处左半不淡出、右半不淡入；右半视频的 `srcIn` 接上左半；有运动预设时两半共用原来的 `motion.span`。
+  结果：切开前后逐帧渲染一致。
+- **duplicateElement**：副本放到新 `start` 时，关键帧和 `motion.span` 跟着平移。
+- **keySet**：同一时刻已有关键帧时，不传 `ease` 就保留原来的缓动。
 
 校验规则：id 唯一、`duration > 0`、`segment` 必须存在、`type` 合法、分割点在元素内部。
 任何一条失败 → 整个批次不落盘。

@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { paths } from '../core/store.js';
 import { encodeSequence, extractSequence, fileExists, hashOf } from './media.js';
 import { is3D, writeShot } from './shot.js';
+import { which } from './which.js';
 
 const execFileP = promisify(execFile);
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -20,7 +21,7 @@ const CANDIDATES = () => [
   'C:/Program Files/Blender Foundation/Blender 5.0/blender.exe',
   'C:/Program Files/Blender Foundation/Blender 4.5/blender.exe',
   'C:/Program Files/Blender Foundation/Blender 4.2/blender.exe',
-  'blender',
+  '/Applications/Blender.app/Contents/MacOS/Blender',
 ].filter(Boolean);
 
 let found = null;
@@ -37,15 +38,11 @@ export async function findBlender({ refresh = false } = {}) {
     } catch { /* ignore */ }
   }
   for (const c of cands) {
-    if (c === 'blender') continue;
     if (await fileExists(c)) { found = c; return c; }
   }
-  try {
-    const { stdout } = await execFileP('where', ['blender'], { windowsHide: true });
-    const first = stdout.split(/\r?\n/).find(Boolean);
-    if (first) { found = first.trim(); return found; }
-  } catch { /* not on PATH */ }
-  throw new Error('Blender not found. Set VDM_BLENDER to blender.exe');
+  const onPath = which('blender');
+  if (onPath) { found = onPath; return found; }
+  throw new Error('Blender not found. Add it to PATH or set VDM_BLENDER to the blender executable');
 }
 
 export async function blenderVersion() {

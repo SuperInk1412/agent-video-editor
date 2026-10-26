@@ -3,13 +3,14 @@
 VedioMaker -> Blender scene builder.
 
 Mirrors core/evaluate.js exactly:
-    transform = base -> keyframes -> motion delta -> fade
+    transform = base -> keyframes -> motion delta (+ beat punch) -> fade
     y axis points DOWN in the project, UP in Blender (we negate it)
     world units == project pixels (orthographic camera, ortho_scale = width)
 
 Everything is built once, then a frame_change_pre handler updates each layer,
 so an animation render stays fast.
 """
+import bisect
 import bpy
 import json
 import math
@@ -83,28 +84,60 @@ def sample_track(keys, path, t, base):
     return base
 
 
+def kick(beats, t, dur=0.14):
+    """Exponential pulse after the last beat <= t (mirrors core/time.js::kick)."""
+    i = bisect.bisect_right(beats, t) - 1
+    if i < 0:
+        return 0.0
+    dt = t - beats[i]
+    if dt > dur * 5:
+        return 0.0
+    return math.exp(-dt / dur)
+
+
+def motion_progress(el, t):
+    """motion.span = [t0, t1] pins the preset to an absolute range (kept across splits)."""
+    span = (el.get('motion') or {}).get('span')
+    if isinstance(span, (list, tuple)) and len(span) == 2:
+        try:
+            a, b = float(span[0]), float(span[1])
+        except (TypeError, ValueError):
+            a = b = 0.0
+        if b > a:
+            return clamp((t - a) / (b - a))
+    return clamp((t - el['start']) / max(1e-6, el['duration']))
+
+
+def punch_mul(el, t, meta):
+    punch = float(el.get('punch') or 0)
+    beats = meta.get('beats') or []
+    if punch <= 0 or not beats:
+        return 1.0
+    return 1 + punch * 0.05 * kick(beats, t, 0.12)
+
+
 def motion_delta(el, t, meta):
     m = el.get('motion') or {}
     amt = float(m.get('amount') or 0)
-    d = {'x': 0.0, 'y': 0.0, 'scale': 1.0, 'rotation': 0.0}
+    d = {'x': 0.0, 'y': 0.0, 'scale': punch_mul(el, t, meta), 'rotation': 0.0}
     if not amt:
         return d
-    p = clamp((t - el['start']) / max(1e-6, el['duration']))
+    p = motion_progress(el, t)
     q = 0.35 * ease('easeInOut', p) + 0.65 * p
     w, h = meta['width'], meta['height']
     typ = m.get('type', 'none')
     if typ == 'in':
-        d['scale'] = 1 + amt * q
+        d['scale'] *= 1 + amt * q
     elif typ == 'out':
-        d['scale'] = 1 + amt * (1 - q)
+        d['scale'] *= 1 + amt * (1 - q)
     elif typ == 'left':
-        d['x'] = -amt * w * (q - 0.5); d['scale'] = 1.02
+        d['x'] = -amt * w * (q - 0.5); d['scale'] *= 1.02
     elif typ == 'right':
-        d['x'] = amt * w * (q - 0.5); d['scale'] = 1.02
+        d['x'] = amt * w * (q - 0.5); d['scale'] *= 1.02
     elif typ == 'up':
-        d['y'] = amt * h * (q - 0.5); d['scale'] = 1.02
+        d['y'] = amt * h * (q - 0.5); d['scale'] *= 1.02
     elif typ == 'down':
-        d['y'] = -amt * h * (q - 0.5); d['scale'] = 1.02
+        d['y'] = -amt * h * (q - 0.5); d['scale'] *= 1.02
     elif typ == 'drift':
         d['x'] = amt * w * (q - 0.5); d['y'] = -amt * h * 0.25 * (q - 0.5)
     elif typ == 'shake':
@@ -599,9 +632,9 @@ class SceneBuilder:
 
     def build_media(self, el, style, st0, z, src_path, sequence=None):
         if sequence:
+            # Image.frame_duration is read-only (Blender 5.2+); the frame count
+            # lives on the texture node's ImageUser, set below.
             img = self.load_image(sequence['first'], sequence=True)
-            if img:
-                img.frame_duration = max(1, int(sequence['count']))
         else:
             img = self.load_image(src_path)
         if img is None:
@@ -619,6 +652,14 @@ class SceneBuilder:
             uv = (0, 0, 1, 1)
         mesh = plane_mesh(f'{el["id"]}_mesh', self.W, self.H, uv)
         mat, nodes = textured_material(f'{el["id"]}_mat', img, st0['opacity'])
+        if sequence:
+            iu = nodes['tex'].image_user
+            iu.frame_duration = max(1, int(sequence['count']))
+            iu.frame_start = 1
+            iu.frame_offset = 0
+            iu.use_cyclic = False
+            iu.use_auto_refresh = True
+            nodes['tex']['vdm_frames'] = int(sequence['count'])
         obj = self.add_object(mesh, mat, el['id'])
         obj.location.z = 0.002 * z
         return obj, nodes, nodes['tex']
@@ -756,9 +797,13 @@ class SceneBuilder:
                         pass
 
             if tex is not None and tex.image and tex.image.source == 'SEQUENCE':
-                local = max(0, int(round((t - el['start']) * fps)))
-                tex.image_user.frame_offset = local - frame + 1
-                tex.image_user.frame_start = 1
+                # Blender reads file number clamp(frame - frame_start + 1, 0, n) + offset;
+                # pin frame_start to the current frame so that is exactly the element's
+                # local frame (f_<local>.png), holding the last frame past the clip's end.
+                count = int(tex.get('vdm_frames', tex.image_user.frame_duration) or 1)
+                local = min(count - 1, max(0, int(round((t - el['start']) * fps))))
+                tex.image_user.frame_start = frame
+                tex.image_user.frame_offset = local - 1
 
             if shadow_obj:
                 shadow_obj.hide_render = False

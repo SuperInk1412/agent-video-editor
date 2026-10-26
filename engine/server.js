@@ -8,15 +8,15 @@ import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
-  paths, loadProject, saveProject, mutateProject, findProjectRoot, watchProject,
-  ensureProjectDirs, projectExists, PROJECT_FILE,
+  paths, loadProject, saveProject, findProjectRoot, watchProject,
+  ensureProjectDirs, projectExists, withLock, PROJECT_FILE,
 } from '../core/store.js';
-import { normalizeProject, createProject } from '../core/schema.js';
+import { normalizeProject } from '../core/schema.js';
 import { applyOps } from '../core/ops.js';
 import { probeMedia, mimeOf, fileExists } from './media.js';
 import { renderStill, renderVideo, blenderVersion, findBlender } from './blender.js';
 import { analyzeBeats } from './beats.js';
-import { autoStoryboard, summarizeProject, STYLE_PRESETS } from './storyboard.js';
+import { planProject, summarizeProject, STYLE_PRESETS } from './storyboard.js';
 import { AgentRunner, findDsh, CLI_PATH } from './agent.js';
 import { createLogger } from './log.js';
 import { cachedCity, is3D } from './shot.js';
@@ -85,6 +85,19 @@ async function serveFile(req, res, file, { range = false } = {}) {
   return fs.createReadStream(file).pipe(res);
 }
 
+function openInBrowser(url, log) {
+  const [cmd, args] = process.platform === 'win32'
+    ? ['cmd', ['/c', 'start', '', url]]
+    : [process.platform === 'darwin' ? 'open' : 'xdg-open', [url]];
+  try {
+    const child = spawn(cmd, args, { windowsHide: true, detached: true, stdio: 'ignore' });
+    child.on('error', (e) => log.warn('could not open a browser', { url, error: e.message }));
+    child.unref();
+  } catch (e) {
+    log.warn('could not open a browser', { url, error: e.message });
+  }
+}
+
 export async function startServer({ root, port = 47100, open = false, onReady } = {}) {
   const projectRoot = path.resolve(root);
   if (!(await projectExists(projectRoot))) {
@@ -107,6 +120,8 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
   log.onLine((rec) => { if (rec.level !== 'debug') broadcast('log', rec); });
 
   // ---- undo/redo (in-memory, per session) ----
+  // Every change to the file lands here, whoever made it (UI, AI, or a CLI
+  // write noticed by the watcher), so all of them can be undone from the UI.
   const history = { undo: [], redo: [], max: 80 };
   const snapshot = (proj) => JSON.stringify(proj);
   const pushUndo = (proj) => {
@@ -114,6 +129,50 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
     if (history.undo.length > history.max) history.undo.shift();
     history.redo.length = 0;
   };
+
+  // ---- the one write path ----
+  // Writes run one at a time, under the cross-process lock, against the file
+  // on disk (not the in-memory copy), so a CLI/agent edit that the watcher has
+  // not picked up yet is never overwritten. `fn(current)` returns the next
+  // project (it may mutate and return its argument, a private copy); throwing
+  // writes nothing.
+  let writeChain = Promise.resolve();
+  const serialized = (fn) => {
+    const run = writeChain.then(fn, fn);
+    writeChain = run.catch(() => {});
+    return run;
+  };
+  const adoptDisk = (fresh) => {
+    if (fresh.rev === lastRev) return false;
+    pushUndo(project);
+    project = fresh;
+    lastRev = fresh.rev;
+    broadcast('project', { project, source: 'disk', rev: fresh.rev });
+    updateStoryboardStep(fresh);
+    return true;
+  };
+  const commit = (by, fn, { undo = 'push' } = {}) => serialized(() => withLock(projectRoot, async () => {
+    const current = await loadProject(projectRoot);
+    adoptDisk(current);
+    const work = JSON.parse(JSON.stringify(current));
+    const out = await fn(work);
+    const next = normalizeProject(out?.project || work);
+    next.rev = current.rev; // keep rev monotonic even when restoring a snapshot
+    const saved = await saveAndBroadcast(next, by);
+    if (undo === 'push') pushUndo(current);
+    return { saved, result: out?.result };
+  }));
+  // Anything that goes wrong while applying ops (or validating the result) is
+  // the caller's fault (400), not the engine's (500).
+  const applyOrReject = (cur, ops) => {
+    try {
+      return applyOps(cur, ops).changed;
+    } catch (e) {
+      e.rejected = true;
+      throw e;
+    }
+  };
+  const isRejection = (e) => !!(e?.rejected || e?.issues);
 
   // ---- pipeline state ----
   const pipelineFile = path.join(p.vdm, 'pipeline.json');
@@ -177,11 +236,7 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
     onEvent: async (ev) => {
       if (ev.type === 'proposal') {
         try {
-          const next = JSON.parse(JSON.stringify(project));
-          normalizeProject(next);
-          const { changed } = applyOps(next, ev.proposal.ops);
-          pushUndo(project);
-          const saved = await saveAndBroadcast(next, 'ai');
+          const { saved, result: changed } = await commit('ai', (cur) => ({ project: cur, result: applyOrReject(cur, ev.proposal.ops) }));
           log.info('agent applied', { ops: ev.proposal.ops.length, changed, rev: saved.rev, note: ev.proposal.note });
           broadcast('agent', { ...ev, applied: { changed, note: ev.proposal.note, rev: saved.rev } });
           addArtifact({ kind: 'ai', label: `AI 改了 ${changed.length} 项`, detail: ev.proposal.note });
@@ -199,19 +254,14 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
   });
 
   // ---- external file changes ----
-  const unwatch = watchProject(projectRoot, async () => {
+  // queued behind our own writes, so a save we just made is never mistaken for an external edit
+  const unwatch = watchProject(projectRoot, () => serialized(async () => {
     try {
-      const fresh = await loadProject(projectRoot);
-      if (fresh.rev !== lastRev) {
-        project = fresh;
-        lastRev = fresh.rev;
-        broadcast('project', { project, source: 'disk', rev: fresh.rev });
-        updateStoryboardStep(fresh);
-      }
+      adoptDisk(await loadProject(projectRoot));
     } catch (e) {
       toast(`项目文件读取失败: ${e.message}`, 'error');
     }
-  });
+  }));
 
   function updateStoryboardStep(proj) {
     const n = proj.segments.length;
@@ -335,43 +385,40 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
         const body = await readBody(req);
         const ops = Array.isArray(body.ops) ? body.ops : [body];
         if (!ops.length) return json(res, 400, { error: 'no ops' });
-        pushUndo(project);
-        const next = JSON.parse(JSON.stringify(project));
-        normalizeProject(next);
-        let changed = [];
         try {
-          ({ changed } = applyOps(next, ops));
+          const { saved, result: changed } = await commit(body.by || 'ui', (cur) => ({ project: cur, result: applyOrReject(cur, ops) }));
+          return json(res, 200, { ok: true, changed, rev: saved.rev, project: saved });
         } catch (e) {
-          history.undo.pop();
-          log.warn('ops rejected', { error: e.message, ops: ops.map((o) => o.op).join(',') });
+          if (!isRejection(e)) throw e;
+          log.warn('ops rejected', { error: e.message, ops: ops.map((o) => o?.op).join(',') });
           return json(res, 400, { error: e.message, code: e.code || 'OP_FAILED' });
         }
-        const saved = await saveAndBroadcast(next, body.by || 'ui');
-        return json(res, 200, { ok: true, changed, rev: saved.rev, project: saved });
       }
 
       if (pathname === '/api/project' && req.method === 'POST') {
         const body = await readBody(req);
-        const next = normalizeProject(body.project);
-        pushUndo(project);
-        const saved = await saveAndBroadcast(next, body.by || 'ui');
+        const replacement = normalizeProject(body.project);
+        const { saved } = await commit(body.by || 'ui', () => ({ project: replacement }));
         return json(res, 200, { ok: true, project: saved });
       }
 
-      if (pathname === '/api/undo' && req.method === 'POST') {
-        if (!history.undo.length) return json(res, 409, { error: 'nothing to undo' });
-        const prev = JSON.parse(history.undo.pop());
-        history.redo.push(snapshot(project));
-        const saved = await saveAndBroadcast(prev, 'undo');
-        return json(res, 200, { ok: true, project: saved });
-      }
-
-      if (pathname === '/api/redo' && req.method === 'POST') {
-        if (!history.redo.length) return json(res, 409, { error: 'nothing to redo' });
-        const nextp = JSON.parse(history.redo.pop());
-        history.undo.push(snapshot(project));
-        const saved = await saveAndBroadcast(nextp, 'redo');
-        return json(res, 200, { ok: true, project: saved });
+      if ((pathname === '/api/undo' || pathname === '/api/redo') && req.method === 'POST') {
+        const isUndo = pathname === '/api/undo';
+        const empty = new Error(isUndo ? 'nothing to undo' : 'nothing to redo');
+        try {
+          const { saved } = await commit(isUndo ? 'undo' : 'redo', (cur) => {
+            const from = isUndo ? history.undo : history.redo;
+            const to = isUndo ? history.redo : history.undo;
+            if (!from.length) throw empty;
+            const target = JSON.parse(from.pop());
+            to.push(snapshot(cur));
+            return { project: target };
+          }, { undo: 'none' });
+          return json(res, 200, { ok: true, project: saved, undo: history.undo.length, redo: history.redo.length });
+        } catch (e) {
+          if (e === empty) return json(res, 409, { error: e.message });
+          throw e;
+        }
       }
 
       // ---------------- media ----------------
@@ -453,13 +500,16 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
         const file = path.isAbsolute(rel) ? rel : path.join(projectRoot, rel);
         toast('分析节拍中…');
         const result = await analyzeBeats(file, { duration: body.duration || null, fps: project.meta.fps });
-        pushUndo(project);
-        const next = JSON.parse(JSON.stringify(project));
-        next.meta.beats = result.beats;
-        next.meta.tempo = result.tempo;
-        if (!next.meta.audio) next.meta.audio = { src: rel, offset: 0, gain: 0 };
-        if (body.setDuration) next.meta.duration = Math.round(result.duration * 1000) / 1000;
-        await saveAndBroadcast(next, 'beats');
+        await commit('beats', (cur) => {
+          const ops = [
+            { op: 'setMeta', path: 'beats', value: result.beats },
+            { op: 'setMeta', path: 'tempo', value: result.tempo },
+          ];
+          if (!cur.meta.audio) ops.push({ op: 'setMeta', path: 'audio', value: { src: rel, offset: 0, gain: 0 } });
+          if (body.setDuration) ops.push({ op: 'setMeta', path: 'duration', value: Math.round(result.duration * 1000) / 1000 });
+          applyOps(cur, ops);
+          return { project: cur };
+        });
         broadcast('beats', result);
         return json(res, 200, result);
       }
@@ -468,30 +518,29 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
         const body = await readBody(req);
         const media = body.media || (await (async () => {
           const dir = path.join(projectRoot, 'media');
-          try { return (await fsp.readdir(dir)).filter((f) => /\.(png|jpe?g|webp|gif|mp4|webm|mov)$/i.test(f)).map((f) => `media/${f}`); } catch { return []; }
+          try { return (await fsp.readdir(dir)).filter((f) => /\.(png|jpe?g|webp|gif|mp4|webm|mov)$/i.test(f)).sort().map((f) => `media/${f}`); } catch { return []; }
         })());
-        pushUndo(project);
-        const base = createProject({
-          title: project.meta.title,
-          fps: project.meta.fps,
-          width: project.meta.width,
-          height: project.meta.height,
-          duration: body.duration || project.meta.duration,
-          background: project.meta.background,
-          audio: project.meta.audio,
-        });
-        base.meta.beats = project.meta.beats;
-        base.meta.tempo = project.meta.tempo;
-        const { ops } = autoStoryboard({
-          project: base, media, style: body.style || 'neon',
-          brief: body.brief || '', seed: body.seed ?? 7, maxSegments: body.maxSegments || 12,
-        });
-        let changed = [];
-        try { ({ changed } = applyOps(base, ops)); } catch (e) { history.undo.pop(); return json(res, 400, { error: e.message }); }
-        const saved = await saveAndBroadcast(base, 'plan');
-        setStep('storyboard', { status: 'done', detail: `${base.segments.length} 个分镜 · ${base.elements.length} 个元素` });
-        addArtifact({ kind: 'storyboard', label: `自动分镜 · ${base.segments.length} 段`, detail: body.style || 'neon' });
-        return json(res, 200, { ok: true, project: saved, steps: base.segments.length });
+        const opts = {
+          media, style: body.style || 'neon', brief: body.brief || '',
+          seed: body.seed ?? 7, maxSegments: body.maxSegments || 12, duration: body.duration || null,
+        };
+        let saved, made;
+        try {
+          ({ saved, result: made } = await commit('plan', (cur) => {
+            try {
+              return { project: cur, result: planProject(cur, opts) };
+            } catch (err) {
+              err.rejected = true;
+              throw err;
+            }
+          }));
+        } catch (e) {
+          if (!isRejection(e)) throw e;
+          return json(res, 400, { error: e.message });
+        }
+        setStep('storyboard', { status: 'done', detail: `${made.segments} 个分镜 · ${made.elements} 个元素` });
+        addArtifact({ kind: 'storyboard', label: `自动分镜 · ${made.segments} 段`, detail: opts.style });
+        return json(res, 200, { ok: true, project: saved, steps: made.segments });
       }
 
       // ---------------- capture (what the user sees) ----------------
@@ -662,7 +711,10 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
 
       return json(res, 404, { error: 'not found' });
     } catch (e) {
-      log.error('request failed', { method: req.method, path: pathname, error: e.message, stack: String(e.stack || '').slice(0, 1200) });
+      log.error('request failed', {
+        method: req.method, path: pathname, error: e.message, stack: String(e.stack || '').slice(0, 1200),
+        log: e.log ? String(e.log).slice(-3000) : undefined,
+      });
       if (!res.headersSent) json(res, 500, { error: e.message });
       else res.end();
     }
@@ -690,9 +742,7 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
   const info = { port: actualPort, pid: process.pid, url: `http://127.0.0.1:${actualPort}/`, root: projectRoot, startedAt: Date.now() };
   await fsp.writeFile(path.join(p.vdm, 'app.json'), JSON.stringify(info, null, 2));
 
-  if (open && process.platform === 'win32') {
-    spawn('cmd', ['/c', 'start', '', info.url], { windowsHide: true, detached: true, stdio: 'ignore' }).unref();
-  }
+  if (open) openInBrowser(info.url, log);
   onReady?.(info);
 
   return {
