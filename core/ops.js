@@ -386,7 +386,11 @@ export function applyOp(p, op) {
 
     case 'keyRemove': {
       const el = findEl(p, op.id);
-      el.keyframes = (el.keyframes || []).filter((k) => k.path !== op.path);
+      // `t` deletes one key; without it the whole path goes (legacy callers).
+      const t = op.t == null ? null : Math.round(Number(op.t) * 1000) / 1000;
+      if (t != null && !Number.isFinite(t)) fail('keyRemove needs a finite t');
+      el.keyframes = (el.keyframes || []).filter((k) => k.path !== op.path
+        || (t != null && Math.abs(k.t - t) > 1e-4));
       return { changed: [el.id] };
     }
 
@@ -419,9 +423,12 @@ export function applyOp(p, op) {
     }
 
     case 'cameraRemove': {
-      const cam = activeCamera(p);
+      // `id` targets a specific camera (timeline keyframe deletion); without
+      // it the active camera is used, which is what the path gizmo expects.
+      const cam = op.id ? cameraById(p, op.id) : activeCamera(p);
       if (!cam) fail('no camera');
       const t = Math.round(Number(op.t) * 1000) / 1000;
+      if (!Number.isFinite(t)) fail('cameraRemove needs a finite t');
       cam.path = (cam.path || []).filter((k) => Math.abs(k.t - t) > 1e-4);
       return { changed: ['camera', cam.id] };
     }

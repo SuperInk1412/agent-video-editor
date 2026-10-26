@@ -229,3 +229,36 @@ test('camera stack ops: cameraKey targets the active camera only', () => {
   assert.deepEqual(p.camera.path[0].pos, [1, 2, 3]);
 });
 
+test('camera stack ops: deleting a path key can target the camera that owns it', () => {
+  const p = base({
+    cameras: [
+      { id: 'cam_a', path: [{ t: 0, pos: [0, 0, 0] }, { t: 2, pos: [0, 0, 9] }] },
+      { id: 'cam_b', path: [{ t: 0, pos: [1, 0, 0] }] },
+    ],
+    cameraOrder: ['cam_a', 'cam_b'],
+    activeCameraId: 'cam_b',
+  });
+  applyOp(p, { op: 'cameraRemove', id: 'cam_a', t: 2 });
+  assert.deepEqual(p.cameras.find((c) => c.id === 'cam_a').path.map((k) => k.t), [0]);
+  // the active camera was not the target, so its keys stay untouched
+  assert.deepEqual(p.cameras.find((c) => c.id === 'cam_b').path.map((k) => k.t), [0]);
+  // without an id the active camera is still the default target
+  applyOp(p, { op: 'cameraRemove', t: 0 });
+  assert.deepEqual(p.cameras.find((c) => c.id === 'cam_b').path, []);
+  assert.deepEqual(p.cameras.find((c) => c.id === 'cam_a').path.map((k) => k.t), [0]);
+});
+
+test('camera stack ops: cameraParamUnkey targets the camera that owns the key', () => {
+  const p = base({
+    cameras: [
+      { id: 'cam_a', path: [], tracks: { fov: [{ t: 0, v: 40 }, { t: 3, v: 80 }] } },
+      { id: 'cam_b', path: [], tracks: { fov: [{ t: 0, v: 60 }] } },
+    ],
+    cameraOrder: ['cam_a', 'cam_b'],
+    activeCameraId: 'cam_b',
+  });
+  applyOp(p, { op: 'cameraParamUnkey', id: 'cam_a', path: 'fov', t: 3 });
+  assert.deepEqual(p.cameras.find((c) => c.id === 'cam_a').tracks.fov.map((k) => k.t), [0]);
+  assert.deepEqual(p.cameras.find((c) => c.id === 'cam_b').tracks.fov.map((k) => k.t), [0]);
+});
+

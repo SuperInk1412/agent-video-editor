@@ -92,6 +92,73 @@ export function splitRef(ref) {
   return { type, id, host, path: leaf, t: null };
 }
 
+// ---------------------------------------------------------------- keyframes
+// A keyframe ref carries enough information to delete the key it points at.
+// Objects keep one track per axis (`pivot`, `pivot.x`…), so a single dot in
+// the timeline can span several tracks; camera keys live either in `path` or
+// in `cam.tracks[channel]`; element keys are a flat `keyframes` list.
+
+const KEY_AXES = ['x', 'y', 'z'];
+
+function keyframeHost(project, split) {
+  if (split.type === 'cam') {
+    return (project?.cameras || []).find((c) => c.id === split.id)
+      || (project?.camera?.id === split.id ? project.camera : null);
+  }
+  if (split.type === 'ob') return (project?.scene?.objects || []).find((o) => o.id === split.id) || null;
+  return (project?.elements || []).find((e) => e.id === split.id) || null;
+}
+
+const hasKeyAt = (list, t) => (list || []).some((k) => Math.abs(Number(k?.t) - t) <= 1e-4);
+
+function objectKeyTracks(obj, path, t) {
+  const tracks = obj?.tracks || {};
+  return [path, ...KEY_AXES.map((a) => `${path}.${a}`)].filter((name) => hasKeyAt(tracks[name], t));
+}
+
+/** Does the keyframe ref still resolve in `project`? Stale refs get dropped. */
+export function keyframeExists(project, ref) {
+  const s = splitRef(ref);
+  if (!s || s.path == null || s.t == null) return false;
+  const host = keyframeHost(project, s);
+  if (!host) return false;
+  if (s.type === 'cam') {
+    return s.path === 'path' ? hasKeyAt(host.path, s.t) : hasKeyAt(host.tracks?.[s.path], s.t);
+  }
+  if (s.type === 'ob') return objectKeyTracks(host, s.path, s.t).length > 0;
+  return (host.keyframes || []).some((k) => k.path === s.path && Math.abs(Number(k.t) - s.t) <= 1e-4);
+}
+
+/**
+ * Keyframe refs -> object ops that delete exactly those keys. Refs that no
+ * longer resolve are skipped, so a stale pool is harmless. The ops are meant
+ * to run as one `batch`: one save, one undo step.
+ */
+export function keyframeDeleteOps(refs, project) {
+  const ops = [];
+  const seen = new Set();
+  const push = (op, key) => { if (!seen.has(key)) { seen.add(key); ops.push(op); } };
+  for (const ref of refs || []) {
+    const s = splitRef(ref);
+    if (!s || s.path == null || s.t == null) continue;
+    if (!keyframeExists(project, ref)) continue;
+    const host = keyframeHost(project, s);
+    if (s.type === 'cam') {
+      if (s.path === 'path') push({ op: 'cameraRemove', id: host.id, t: s.t }, `cameraRemove:${host.id}:${s.t}`);
+      else push({ op: 'cameraParamUnkey', id: host.id, path: s.path, t: s.t }, `cameraParamUnkey:${host.id}:${s.path}:${s.t}`);
+      continue;
+    }
+    if (s.type === 'ob') {
+      for (const track of objectKeyTracks(host, s.path, s.t)) {
+        push({ op: 'objectUnkey', id: host.id, path: track, t: s.t }, `objectUnkey:${host.id}:${track}:${s.t}`);
+      }
+      continue;
+    }
+    push({ op: 'keyRemove', id: host.id, path: s.path, t: s.t }, `keyRemove:${host.id}:${s.path}:${s.t}`);
+  }
+  return ops;
+}
+
 /** Legacy single-selection fields -> the element pool used before P4. */
 export function poolFromSelection(sel) {
   if (sel?.pool) return normalizeSelection(sel.pool);

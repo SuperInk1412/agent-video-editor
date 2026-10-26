@@ -263,8 +263,11 @@ selection = {
 当前落地：同质选中池（元素 / 属性 / 关键帧，Ctrl 加选；关键帧不能混入元素/属性池）已进
 时间轴：元素行、相机行、属性行、菱形都会按池高亮；`U` 对主选相机 / 选中的 3D 元素生效，
 按上述三态把有键的组展开成 `keyed`、无键组收起。组标题点击按 `full → collapsed → full`
-循环，`keyed` 点击进入 `collapsed`。属性池加元素/组展开规则、`B` 框选关键帧和批量操作
-仍是下一步。
+循环，`keyed` 点击进入 `collapsed`。选中的关键帧按 `Delete` / `Backspace` 删除：
+`core/selection.js::keyframeDeleteOps()` 把每条 ref 解析成 `cameraRemove`（path 键）/
+`cameraParamUnkey`（参数键）/ `objectUnkey`（对象键，一个菱形可能跨 `pivot.x` 等轴轨道）/
+`keyRemove`（2D 元素键），多条合成一个 `batch`，一次保存一次撤销；删除后选中池清空。
+属性池加元素/组展开规则、`B` 框选关键帧和其余批量操作仍是下一步。
 
 ## 7. 并行开发切片
 

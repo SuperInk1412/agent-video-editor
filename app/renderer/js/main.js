@@ -11,6 +11,7 @@ import { evalCamera, pathPos, cameraTransform } from '/core/camera.js';
 import { objectPose } from '/core/scene.js';
 import {
   emptySelection, normalizeSelection, selectOne, cameraRef, objectRef, elementRef, splitRef,
+  keyframeExists, keyframeDeleteOps,
 } from '/core/selection.js';
 
 const $ = (s) => document.querySelector(s);
@@ -155,7 +156,10 @@ function applyProject(p, source) {
     const camIds = new Set((p.cameras || []).map((c) => c.id));
     const objIds = new Set((p.scene?.objects || []).map((o) => o.id));
     const elIds = new Set((p.elements || []).map((e) => e.id));
+    const keyPool = S.selection.pool.kind === 'keyframe';
     const ids = S.selection.pool.ids.filter((ref) => {
+      // keyframes also disappear when the key itself is deleted elsewhere
+      if (keyPool) return keyframeExists(p, ref);
       const s = splitRef(ref);
       if (!s) return false;
       if (s.type === 'cam') return camIds.has(s.id);
@@ -1264,6 +1268,18 @@ async function boot() {
     else if (e.key === 'Home') { pause(); setTime(0); }
     else if (e.key === 'End') { pause(); setTime(dur); }
     else if (e.key === 'Delete' || e.key === 'Backspace') {
+      const pool = S.selection.pool;
+      // A keyframe pool wins over the host the key belongs to: Delete removes
+      // the selected keyframes, not the whole camera/object.
+      if (pool?.kind === 'keyframe' && pool.ids.length) {
+        const ops = keyframeDeleteOps(pool.ids, S.project);
+        if (ops.length) {
+          e.preventDefault();
+          select({});
+          op(ops.length === 1 ? ops[0] : { op: 'batch', ops });
+        }
+        return;
+      }
       if (S.selection.elementId) { e.preventDefault(); op({ op: 'removeElement', id: S.selection.elementId }); S.selection.elementId = null; }
       else if (S.selection.objectId) {
         e.preventDefault();

@@ -41,6 +41,19 @@ test('set / update / remove work and reject unknown ids', () => {
   assert.throws(() => applyOp(p, { op: 'removeElement', id: 'nope' }), /no element/);
 });
 
+test('keyRemove drops one key when t is given, the whole path otherwise', () => {
+  const p = fresh();
+  const { element } = applyOp(p, { op: 'addElement', element: { type: 'solid', start: 0, duration: 3 } });
+  const id = element.id;
+  applyOp(p, { op: 'keySet', id, path: 'transform.scale', t: 0, value: 1 });
+  applyOp(p, { op: 'keySet', id, path: 'transform.scale', t: 1, value: 2 });
+  applyOp(p, { op: 'keySet', id, path: 'transform.x', t: 0, value: 5 });
+  applyOp(p, { op: 'keyRemove', id, path: 'transform.scale', t: 1 });
+  assert.deepEqual(p.elements[0].keyframes.map((k) => [k.path, k.t]), [['transform.scale', 0], ['transform.x', 0]]);
+  applyOp(p, { op: 'keyRemove', id, path: 'transform.scale' });
+  assert.deepEqual(p.elements[0].keyframes.map((k) => k.path), ['transform.x']);
+});
+
 test('splitElement moves keyframes to the right half', () => {
   const p = fresh();
   const { element } = applyOp(p, {
