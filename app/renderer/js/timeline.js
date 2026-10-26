@@ -2,11 +2,12 @@
 // Element rows expand in place: the left column edits the element's properties
 // and the right lanes show per-property keyframes, all on the same row grid.
 // The camera is an element too: its attributes are folded inside the camera
-// row, and the flight path is one "摄像机位置" property whose keyframes are
-// the diamonds on that row's lane.
+// row. The transform group has one row per property (center, path position,
+// picture pivot/offset, opacity, scale); each lane's diamonds are that
+// property's keyframes.
 import { timecode } from '/core/time.js';
 import { objectPose } from '/core/scene.js';
-import { pathPos } from '/core/camera.js';
+import { pathPos, cameraTransform } from '/core/camera.js';
 
 const el = (tag, cls, html) => {
   const n = document.createElement(tag);
@@ -37,6 +38,7 @@ export class Timeline {
     this.camOpenId = null;
     this.soloCameras = new Set();
     this._camPos = null;
+    this._camPropRows = [];
     this._camDrag = null;
     this.zoom = 1;
     this.pps = 60;
@@ -98,7 +100,7 @@ export class Timeline {
 
     const hint = el('div', 'tl-hint');
     hint.innerHTML = '<span>▾ 元素 / 相机展开</span><span class="tl-hint-sep">|</span>'
-      + '<span>中心点 / 位置 / 缩放 各 3 维</span><span class="tl-hint-sep">|</span>'
+      + '<span>中心点 / 位置 / 缩放 3 维，画面 2 维</span><span class="tl-hint-sep">|</span>'
       + '<span>拖播放头，数值按关键帧实时同步</span><span class="tl-hint-sep">|</span>'
       + '<span><b>◆</b> 打帧 / 删帧</span>';
     this.root.appendChild(hint);
@@ -281,6 +283,7 @@ export class Timeline {
     this.camHeadGutter.classList.toggle('dim', !cams.length);
     this.camsWrap.innerHTML = '';
     this._camPos = null;
+    this._camPropRows = [];
     if (this.camOpenId && p.activeCameraId && this.camOpenId !== p.activeCameraId) this.camOpenId = null;
     if (this.camOpenId && !cams.some((c) => c.id === this.camOpenId)) this.camOpenId = null;
     for (const cam of cams) this._cameraGroup(cam, p);
@@ -452,9 +455,23 @@ export class Timeline {
   _cameraRows(cam, host) {
     const set = (patch) => this.onOp?.({ op: 'cameraSet', patch });
 
-    // One "摄像机位置" property. Its lane diamonds are the flight keys.
+    // One "位置" property (path keys) plus the rest of the base transform.
+    // The camera transform group stays open by default: it is what users edit
+    // most, while lens/shake/DOF stay folded with summaries.
     host.appendChild(this._sectionRow('变换', 'camPos'));
-    if (this.sections.camPos) host.appendChild(this._camPosRow());
+    if (this.sections.camPos) {
+      const tr = cameraTransform(cam, this.time);
+      host.appendChild(this._camVecRow(cam, 'center', '中心点', 3, tr.center, { step: 0.1, unit: 'm' }));
+      host.appendChild(this._camPosRow(cam));
+      host.appendChild(this._camVecRow(cam, 'picturePivot', '画面中心', 2, tr.picturePivot, {
+        step: 0.01, min: 0, max: 1, unit: '0..1',
+      }));
+      host.appendChild(this._camVecRow(cam, 'pictureOffset', '画面位置', 2, tr.pictureOffset, {
+        step: 0.01, unit: '0..1',
+      }));
+      host.appendChild(this._camOpacityRow(cam, tr.opacity));
+      host.appendChild(this._camVecRow(cam, 'scale', '缩放', 3, tr.scale, { step: 0.05, unit: '倍' }));
+    }
 
     const lensSummary = `FOV ${Math.round(cam.fov)}°${cam.fov >= 180 ? ' · 鱼眼' : ''}`;
     const shakeSummary = `${round2(cam.shake.amp)}m · ${cam.shake.freq}Hz`;
@@ -512,10 +529,13 @@ export class Timeline {
     }
   }
 
-  _camPosRow() {
+  _camPosRow(cam = this.project?.camera) {
     const row = el('div', 'tl-row tl-camprop tl-camposrow');
+    row.dataset.cam = cam?.id || '';
+    row.dataset.path = 'path';
     const g = el('div', 'tl-gutter');
-    g.appendChild(el('span', 'tl-plabel', '摄像机位置'));
+    g.dataset.cam = cam?.id || '';
+    g.appendChild(el('span', 'tl-plabel', '位置'));
     const inputs = [];
     for (const ax of AX) {
       const { box, inp } = this._numBox(ax, ax.toUpperCase());
@@ -575,15 +595,122 @@ export class Timeline {
       posRow.lane.innerHTML = '';
       posRow.keys = keys.map((t) => {
         const d = el('div', 'tl-key');
-        d.dataset.cam = '1';
+        d.dataset.cam = cam.id;
+        d.dataset.path = 'path';
         d.dataset.t = String(t);
         d.style.left = `${t * this.pps}px`;
-        d.title = `摄像机位置 · ${t.toFixed(2)}s`;
+        d.title = `位置 · ${t.toFixed(2)}s`;
         posRow.lane.appendChild(d);
         return { t, node: d };
       });
     }
     for (const k of posRow.keys) k.node.classList.toggle('at', Math.abs(k.t - this.time) < 5e-4);
+  }
+
+  _camVecRow(cam, path, label, dims, values, { step = 0.1, min, max, letter } = {}) {
+    const row = el('div', 'tl-row tl-camprop tl-camxform');
+    row.dataset.cam = cam.id;
+    row.dataset.path = path;
+    const g = el('div', 'tl-gutter');
+    g.dataset.cam = cam.id;
+    g.appendChild(el('span', 'tl-plabel', label));
+    const inputs = [];
+    for (let i = 0; i < dims; i++) {
+      const axis = AX[i];
+      const mark = letter !== undefined ? letter : axis.toUpperCase();
+      const { box, inp } = this._numBox(axis, mark);
+      inp.step = String(step);
+      if (min != null) inp.min = String(min);
+      if (max != null) inp.max = String(max);
+      inp.value = String(round2(values[i]));
+      const editKey = `cam:${cam.id}:${path}`;
+      inp.addEventListener('focus', () => this.onPause?.());
+      inp.addEventListener('input', () => {
+        this._editTimes.set(editKey, round3(this.time));
+        this._schedule(editKey, () => this._commitCamParam(cam.id, path));
+      });
+      inp.addEventListener('blur', () => { this._flush(editKey); this._syncProps(); });
+      inputs.push(inp);
+      g.appendChild(box);
+    }
+    const kf = el('button', 'tl-kf', '◆');
+    kf.addEventListener('click', (e) => { e.stopPropagation(); this._toggleCamParamKey(cam.id, path); });
+    g.appendChild(kf);
+    const lane = el('div', 'tl-track');
+    row.append(g, lane);
+    const pr = { camId: cam.id, path, kind: dims === 1 ? 'scalar' : 'vec', dims, inputs, kf, lane, row, sig: '' };
+    this._camPropRows.push(pr);
+    this._refreshCamPropLane(pr, cam);
+    return row;
+  }
+
+  _camOpacityRow(cam, value) {
+    return this._camVecRow(cam, 'opacity', '透明度', 1, [value], {
+      step: 0.01, min: 0, max: 1, letter: '',
+    });
+  }
+
+  _camById(id) {
+    return (this.project?.cameras || []).find((c) => c.id === id)
+      || (this.project?.camera?.id === id ? this.project.camera : null);
+  }
+
+  _camHasTrack(cam, path) {
+    return (cam?.tracks?.[path] || []).length > 0;
+  }
+
+  _commitCamParam(camId, path) {
+    const cam = this._camById(camId);
+    const pr = this._camPropRows.find((x) => x.camId === camId && x.path === path);
+    if (!cam || !pr) return;
+    const values = pr.inputs.map((i) => Number(i.value));
+    if (!values.every(Number.isFinite)) return;
+    const v = pr.dims === 1 ? values[0] : values;
+    const t = this._editTimes.get(`cam:${camId}:${path}`) ?? round3(this.time);
+    if (this._camHasTrack(cam, path)) {
+      this.onOp?.({ op: 'cameraParamKey', id: camId, path, t, v });
+    } else {
+      const patch = { [path]: v };
+      if (path === 'opacity') patch.opacity = Math.max(0, Math.min(1, v));
+      this.onOp?.({ op: 'cameraSet', patch });
+    }
+  }
+
+  _toggleCamParamKey(camId, path) {
+    const cam = this._camById(camId);
+    if (!cam) return;
+    this.onPause?.();
+    const t = round3(this.time);
+    const track = cam.tracks?.[path] || [];
+    if (track.some((k) => Math.abs(k.t - t) < 1e-3)) {
+      this.onOp?.({ op: 'cameraParamUnkey', id: camId, path, t });
+      return;
+    }
+    const tr = cameraTransform(cam, t);
+    const v = path === 'opacity' ? tr.opacity : tr[path];
+    this.onOp?.({ op: 'cameraParamKey', id: camId, path, t, v });
+  }
+
+  _refreshCamPropLane(pr, cam) {
+    const keys = (cam.tracks?.[pr.path] || [])
+      .map((k) => round3(k.t))
+      .sort((a, b) => a - b);
+    const sig = keys.join(',');
+    if (sig !== pr.sig) {
+      pr.sig = sig;
+      pr.lane.innerHTML = '';
+      pr.keys = keys.map((t) => {
+        const d = el('div', 'tl-key');
+        d.dataset.cam = cam.id;
+        d.dataset.path = pr.path;
+        d.dataset.t = String(t);
+        d.style.left = `${t * this.pps}px`;
+        d.title = `${pr.path} · ${t.toFixed(2)}s`;
+        pr.lane.appendChild(d);
+        return { t, node: d };
+      });
+    }
+    for (const k of pr.keys || []) k.node.classList.toggle('at', Math.abs(k.t - this.time) < 5e-4);
   }
 
   _camNumRow(label, value, { step = 0.1, min, max, apply, badge = '' } = {}) {
@@ -922,6 +1049,22 @@ export class Timeline {
       this._camPos.kf.title = at ? '删除这一帧' : has ? `在当前时间打点（已有 ${cam.path.length} 帧）` : '在当前时间打点';
       this._refreshCamLane();
     }
+    for (const pr of this._camPropRows) {
+      const cam = this._camById(pr.camId);
+      if (!cam) continue;
+      const tr = cameraTransform(cam, t);
+      const values = pr.dims === 1 ? [tr[pr.path]] : (tr[pr.path] || []);
+      pr.inputs.forEach((inp, i) => set(inp, values[i]));
+      if (pr.kf) {
+        const track = cam.tracks?.[pr.path] || [];
+        const at = track.some((k) => Math.abs(k.t - t) < 1e-3);
+        const has = track.length > 0;
+        pr.kf.classList.toggle('on', at);
+        pr.kf.classList.toggle('has', !at && has);
+        pr.kf.title = at ? '删除这一帧' : has ? `在当前时间打帧（已有 ${track.length} 帧）` : '在当前时间打帧';
+      }
+      this._refreshCamPropLane(pr, cam);
+    }
     for (const [id, h] of this._objHeads) {
       const o = this._obj(id);
       if (!o) continue;
@@ -1104,7 +1247,7 @@ export class Timeline {
     const gutterEl = target.closest?.('.tl-gutter[data-id]');
 
     // ---- 3D elements ----
-    const camKeyEl = target.closest?.('.tl-key[data-cam="1"]');
+    const camKeyEl = target.closest?.('.tl-key[data-cam]');
     if (camKeyEl) {
       this.cameraSel = true;
       this.elementId = null; this.segmentId = null; this.objectId = null;

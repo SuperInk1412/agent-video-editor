@@ -8,7 +8,8 @@ export const OP_KINDS = [
   'addElement', 'updateElement', 'set', 'removeElement', 'moveElement',
   'splitElement', 'duplicateElement', 'reorder', 'addSegment', 'updateSegment',
   'removeSegment', 'setMeta', 'setFx', 'keySet', 'keyRemove', 'batch',
-  'cameraKey', 'cameraRemove', 'cameraSet', 'cameraPath', 'cameraPatch', 'worldSet',
+  'cameraKey', 'cameraRemove', 'cameraSet', 'cameraPath', 'cameraPatch',
+  'cameraParamKey', 'cameraParamUnkey', 'worldSet',
   'addCamera', 'removeCamera', 'reorderCamera', 'activateCamera',
   'objectAdd', 'objectRemove', 'objectPatch', 'objectKey', 'objectUnkey',
 ];
@@ -82,8 +83,39 @@ function activeCamera(p, create = false) {
   return cam;
 }
 
-function findEl(p, id) {
-  const el = p.elements.find((e) => e.id === id);
+/** Camera transform channels addressed by the timeline keyframes. */
+const CAMERA_TRACK_DIMS = {
+  center: 3, scale: 3, picturePivot: 2, pictureOffset: 2, opacity: 1,
+};
+
+function cameraTrackValue(path, v) {
+  const dims = CAMERA_TRACK_DIMS[path];
+  if (!dims) fail(`camera ${path} is not a keyed transform property`);
+  if (dims === 1) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) fail(`${path} needs a number`);
+    return path === 'opacity' ? Math.max(0, Math.min(1, n)) : n;
+  }
+  if (!Array.isArray(v) || v.length < dims || !v.slice(0, dims).every((n) => Number.isFinite(Number(n)))) {
+    fail(`${path} needs [${'x,y,z'.split(',').slice(0, dims).join(',')}]`);
+  }
+  const out = v.slice(0, dims).map(Number);
+  if (path === 'picturePivot') {
+    out[0] = Math.max(0, Math.min(1, out[0]));
+    out[1] = Math.max(0, Math.min(1, out[1]));
+  }
+  return out;
+}
+
+function cameraById(p, id) {
+  ensureCameraStack(p);
+  if (!id) return p.camera || null;
+  const cam = p.cameras.find((c) => c.id === String(id));
+  if (!cam) fail(`no camera ${id}`);
+  return cam;
+}
+
+function findEl(p, id) {  const el = p.elements.find((e) => e.id === id);
   if (!el) fail(`no element ${id}`);
   return el;
 }
@@ -419,6 +451,39 @@ export function applyOp(p, op) {
       const next = deepMerge(cam, op.patch || {});
       Object.keys(next).forEach((k) => { cam[k] = next[k]; });
       if (cam.id === p.activeCameraId) p.camera = cam;
+      return { changed: ['camera', cam.id] };
+    }
+
+    case 'cameraParamKey': {
+      const cam = cameraById(p, op.id) || activeCamera(p, true);
+      if (!cam) fail('no camera');
+      const path = String(op.path || '');
+      const t = Math.round(Number(op.t) * 1000) / 1000;
+      if (!Number.isFinite(t) || t < 0) fail('cameraParamKey needs t >= 0');
+      const tracks = cam.tracks || (cam.tracks = {});
+      const old = (tracks[path] || []).find((k) => Math.abs(k.t - t) <= 1e-4);
+      const key = { t, v: cameraTrackValue(path, op.v !== undefined ? op.v : op.value) };
+      if (op.ease) key.ease = String(op.ease);
+      else if (old?.ease) key.ease = old.ease;
+      tracks[path] = (tracks[path] || [])
+        .filter((k) => Math.abs(k.t - t) > 1e-4)
+        .concat(key)
+        .sort((a, b) => a.t - b.t);
+      return { changed: ['camera', cam.id], key };
+    }
+
+    case 'cameraParamUnkey': {
+      const cam = cameraById(p, op.id);
+      if (!cam) fail('no camera');
+      const path = String(op.path || '');
+      if (!CAMERA_TRACK_DIMS[path]) fail(`camera ${path} is not a keyed transform property`);
+      const t = Math.round(Number(op.t) * 1000) / 1000;
+      if (!Number.isFinite(t)) fail('cameraParamUnkey needs t');
+      const tracks = cam.tracks || {};
+      if (!Array.isArray(tracks[path])) return { changed: [] };
+      const left = tracks[path].filter((k) => Math.abs(k.t - t) > 1e-4);
+      if (left.length) tracks[path] = left;
+      else delete tracks[path];
       return { changed: ['camera', cam.id] };
     }
 

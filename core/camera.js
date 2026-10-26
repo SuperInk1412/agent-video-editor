@@ -1,6 +1,7 @@
 // Camera rig: Catmull-Rom path, auto look-ahead, banking, shake, fov.
 // Pure math — used by the realtime viewport, the engine (bake for Blender) and the CLI.
 import { clamp, speedWarp } from './time.js';
+import { normalizeTracks, sampleAxes, sampleChannel, sampleVec3 } from './scene.js';
 
 export const DEFAULT_CAMERA = {
   id: null,
@@ -17,6 +18,7 @@ export const DEFAULT_CAMERA = {
   scale: [1, 1, 1],
   picturePivot: [0.5, 0.5],
   pictureOffset: [0, 0],
+  tracks: {},
   visible: true,
   shake: { amp: 0.6, freq: 1.6, octaves: 3, speedGain: 1.0, seed: 7 },
   dof: { enabled: false, fstop: 2.8, focusOffset: 0 },
@@ -90,6 +92,7 @@ export function normalizeCamera(cam) {
   c.picturePivot = numVec(cam?.picturePivot, 2, DEFAULT_CAMERA.picturePivot);
   c.pictureOffset = numVec(cam?.pictureOffset, 2, DEFAULT_CAMERA.pictureOffset);
   c.opacity = clamp(Number.isFinite(Number(c.opacity)) ? Number(c.opacity) : 1, 0, 1);
+  c.tracks = normalizeTracks(cam?.tracks);
   c.visible = c.visible !== false;
   c.shake = { ...DEFAULT_CAMERA.shake, ...(cam?.shake || {}) };
   c.dof = { ...DEFAULT_CAMERA.dof, ...(cam?.dof || {}) };
@@ -154,9 +157,40 @@ export function pathPos(cam, t) {
   return bez3(p1, c1, c2, p2, s);
 }
 
+/** Active camera of a project (falls back to the legacy single-camera alias). */
+export function activeCameraOf(project) {
+  const id = project?.activeCameraId;
+  const found = id && Array.isArray(project?.cameras)
+    ? project.cameras.find((c) => c.id === id)
+    : null;
+  return found || project?.camera || null;
+}
+
+/**
+ * Keyframed camera transform at time t.
+ *
+ * `center` is a world point; `position` is the path offset relative to it.
+ * `scale` / `picturePivot` / `pictureOffset` are picture-space values for the
+ * layer compositor (normalized 0..1 for pivot/offset), `opacity` is the layer
+ * alpha. Keeping this in one function means the viewport, bake and timeline
+ * all show the same sampled values.
+ */
+export function cameraTransform(cam, t) {
+  const c = cam || normalizeCamera(null);
+  const tr = c.tracks || {};
+  const center = sampleAxes(tr, 'center', t, c.center || DEFAULT_CAMERA.center);
+  const position = pathPos(c, t);
+  const scale = sampleAxes(tr, 'scale', t, c.scale || DEFAULT_CAMERA.scale);
+  const opacity = clamp(Number(sampleChannel(tr.opacity, t, c.opacity ?? 1)), 0, 1);
+  const pivotBase = c.picturePivot || DEFAULT_CAMERA.picturePivot;
+  const offsetBase = c.pictureOffset || DEFAULT_CAMERA.pictureOffset;
+  const picturePivot = sampleVec3(tr.picturePivot, t, [pivotBase[0], pivotBase[1], 0]).slice(0, 2);
+  const pictureOffset = sampleVec3(tr.pictureOffset, t, [offsetBase[0], offsetBase[1], 0]).slice(0, 2);
+  return { center, position, scale, opacity, picturePivot, pictureOffset };
+}
+
 /** fov at time t (keyframe override, else default) */
-export function pathFov(cam, t) {
-  const k = cam.path;
+export function pathFov(cam, t) {  const k = cam.path;
   if (!k.length) return cam.fov;
   let prev = null, next = null;
   for (const p of k) {
@@ -182,10 +216,11 @@ export function pathSpeed(cam, t, dt = 0.1) {
  * @returns {{pos:number[], look:number[], up:number[], fov:number, roll:number, speed:number, focus:number}}
  */
 export function evalCamera(project, t) {
-  const cam = project.camera || normalizeCamera(null);
-  const pos = pathPos(cam, t);
-  const posA = pathPos(cam, t - 0.16);
-  const posB = pathPos(cam, t + 0.16);
+  const cam = activeCameraOf(project) || normalizeCamera(null);
+  const tr = cameraTransform(cam, t);
+  const pos = v3.add(tr.center, tr.position);
+  const posA = v3.add(tr.center, pathPos(cam, t - 0.16));
+  const posB = v3.add(tr.center, pathPos(cam, t + 0.16));
   const tang = v3.norm(v3.sub(posB, posA));
 
   // explicit look keys win inside their window; elsewhere look ahead along the tangent
@@ -212,8 +247,8 @@ export function evalCamera(project, t) {
   const speed = v3.len(v3.sub(posB, posA)) / 0.32;
 
   // banking: yaw rate around +Y
-  const dirA = v3.norm(v3.sub(pathPos(cam, t - 0.01), pathPos(cam, t - 0.25)));
-  const dirB = v3.norm(v3.sub(pathPos(cam, t + 0.25), pathPos(cam, t + 0.01)));
+  const dirA = v3.norm(v3.sub(v3.add(tr.center, pathPos(cam, t - 0.01)), v3.add(tr.center, pathPos(cam, t - 0.25))));
+  const dirB = v3.norm(v3.sub(v3.add(tr.center, pathPos(cam, t + 0.25)), v3.add(tr.center, pathPos(cam, t + 0.01))));
   const yawRate = (Math.atan2(dirB[0], dirB[2]) - Math.atan2(dirA[0], dirA[2])) / 0.5;
   const bank = clamp(-yawRate * cam.bankGain * 57.2958, -cam.maxRoll, cam.maxRoll);
   let roll = bank + (Number(cam.roll) || 0);
@@ -244,7 +279,11 @@ export function evalCamera(project, t) {
   const up = [0, 1, 0];
   const fov = pathFov(cam, t);
   const focus = Math.max(1, v3.len(v3.sub(look, pos)) + (Number(cam.dof?.focusOffset) || 0));
-  return { pos, look, up, fov, roll, speed, focus, bank };
+  return {
+    ...tr, pos, look, up, fov, roll, speed, focus, bank,
+    // aliases used by the timeline rows
+    center: tr.center, position: tr.position,
+  };
 }
 
 /** Sample the whole shot into per-frame camera states (baked for Blender). */

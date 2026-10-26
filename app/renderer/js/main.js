@@ -7,7 +7,7 @@ import { AgentPanel } from './ai.js';
 import { PipelinePanel } from './pipeline.js';
 import { LogPanel } from './logs.js';
 import { ProjectsPanel } from './projects.js';
-import { evalCamera } from '/core/camera.js';
+import { evalCamera, pathPos, cameraTransform } from '/core/camera.js';
 import { objectPose } from '/core/scene.js';
 
 const $ = (s) => document.querySelector(s);
@@ -141,6 +141,9 @@ function syncWorld(p) {
 
 function applyProject(p, source) {
   S.project = p;
+  // JSON responses cannot preserve the server-side `camera` alias identity;
+  // re-point it at the active stack entry so edits and reads share one object.
+  if (p?.activeCameraId) p.camera = (p.cameras || []).find((c) => c.id === p.activeCameraId) || p.camera;
   syncWorld(p);
   if (S.selection.elementId && !p.elements.find((e) => e.id === S.selection.elementId)) S.selection.elementId = null;
   if (S.selection.segmentId && !p.segments.find((s) => s.id === S.selection.segmentId)) S.selection.segmentId = null;
@@ -261,6 +264,7 @@ function fitStage() {
 // ---------------------------------------------------------------- 3D viewport
 const clampNum = (v, a, b) => Math.min(b, Math.max(a, v));
 const v3sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const v3add = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
 const v3len = (a) => Math.hypot(a[0], a[1], a[2]);
 const v3norm = (a) => { const l = v3len(a) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
 const v3cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
@@ -762,6 +766,8 @@ async function boot() {
   };
   // Ctrl while dragging snaps to half a metre.
   const snap3 = (v, e) => (e?.ctrlKey ? v.map((n) => Math.round(n * 2) / 2) : v);
+  const camCenter = (cam, t) => cameraTransform(cam, t).center;
+  const camWorldKey = (cam, key) => v3add(camCenter(cam, key.t), key.pos);
   const selectAt = (sx, sy) => {
     const id = preview.hitTest(sx, sy, S.time);
     if (id) return select({ elementId: id });
@@ -796,8 +802,8 @@ async function boot() {
     {
       label: '在当前时间打点',
       run: () => {
-        const c = evalCamera(S.project, S.time);
-        op({ op: 'cameraKey', t: S.time, pos: c.pos.map((v) => Math.round(v * 100) / 100) });
+        const pos = pathPos(S.project.camera, S.time).map((v) => Math.round(v * 100) / 100);
+        op({ op: 'cameraKey', t: S.time, pos });
       },
     },
     { sep: true },
@@ -808,8 +814,8 @@ async function boot() {
     {
       label: '在当前时间打点',
       run: () => {
-        const c = evalCamera(S.project, S.time);
-        op({ op: 'cameraKey', t: S.time, pos: c.pos.map((v) => Math.round(v * 100) / 100) });
+        const pos = pathPos(S.project.camera, S.time).map((v) => Math.round(v * 100) / 100);
+        op({ op: 'cameraKey', t: S.time, pos });
       },
     },
     {
@@ -878,7 +884,8 @@ async function boot() {
       if (key && (hit.kind === 'out' || hit.kind === 'in')) {
         other = hit.kind === 'out' ? 'in' : 'out';
         const ow = gizmo.handleWorld(hit.index, other);
-        if (ow) oppLen = Math.hypot(ow[0] - key.pos[0], ow[1] - key.pos[1], ow[2] - key.pos[2]);
+        const own = gizmo.handleWorld(hit.index, 'node');
+        if (ow && own) oppLen = Math.hypot(ow[0] - own[0], ow[1] - own[1], ow[2] - own[2]);
       }
       drag = { kind: hit.kind, index: hit.index, other, oppLen, normal, x: cx, y: cy, moved: false };
       try { canvas.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
@@ -1025,8 +1032,7 @@ async function boot() {
         const t = Math.round(S.time * 1000) / 1000;
         let key = cam.path.find((k) => Math.abs(k.t - t) < 1e-3);
         if (!key) {
-          const c = evalCamera(S.project, t);
-          key = { t, pos: c.pos.slice(), look: null, fov: null, ease: 'easeInOut', out: null, in: null };
+          key = { t, pos: pathPos(cam, t).slice(), look: null, fov: null, ease: 'easeInOut', out: null, in: null };
           cam.path.push(key);
           cam.path.sort((a, b) => a.t - b.t);
         }
@@ -1050,9 +1056,9 @@ async function boot() {
       }
       const key = S.project.camera?.path?.[drag.index];
       if (!key) return;
-      const w = preview.scene3d.planeHit(sx, sy, key.pos, drag.normal);
+      const w = preview.scene3d.planeHit(sx, sy, camWorldKey(S.project.camera, key), drag.normal);
       if (!w) return;
-      key.pos = snap3(w.map(r2), e);
+      key.pos = snap3(v3sub(w, camCenter(S.project.camera, key.t)).map(r2), e);
       drag.moved = true;
       preview.render(S.time);
       gizmo.draw();
@@ -1113,12 +1119,13 @@ async function boot() {
     }
     const key = S.project.camera?.path?.[drag.index];
     if (!key) return;
-    const w = preview.scene3d.planeHit(sx, sy, key.pos, drag.normal);
+    const world = camWorldKey(S.project.camera, key);
+    const w = preview.scene3d.planeHit(sx, sy, world, drag.normal);
     if (!w) return;
     if (drag.kind === 'node') {
-      key.pos = snap3(w.map(r2), e);
+      key.pos = snap3(v3sub(w, camCenter(S.project.camera, key.t)).map(r2), e);
     } else {
-      const v = [w[0] - key.pos[0], w[1] - key.pos[1], w[2] - key.pos[2]];
+      const v = [w[0] - world[0], w[1] - world[1], w[2] - world[2]];
       key[drag.kind] = v.map(r2);
       // default keeps the two handles collinear; Shift frees the dragged one
       if (!e.shiftKey && drag.other) {

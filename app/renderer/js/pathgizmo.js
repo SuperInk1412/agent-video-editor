@@ -1,7 +1,7 @@
 // 3D viewport gizmo: camera motion path, draggable nodes, bezier handles, grid.
 // Draws on a transparent canvas sitting on top of the WebGL stage; the stage
 // owns pointer events, this module only knows how to draw and hit-test.
-import { evalCamera, pathPos } from '/core/camera.js';
+import { evalCamera, pathPos, cameraTransform } from '/core/camera.js';
 import { objectPose } from '/core/scene.js';
 
 const CYAN = '#17d9ff';
@@ -106,6 +106,18 @@ export class PathGizmo {
       key.pos[1] + (a[1] - b[1]) / 6 * s,
       key.pos[2] + (a[2] - b[2]) / 6 * s,
     ];
+  }
+
+  /** World position of a path key: center(t) + relative path position. */
+  worldKey(cam, key) {
+    const center = cameraTransform(cam, key.t).center;
+    return add3(center, key.pos);
+  }
+
+  /** World position of a bezier handle (also center + relative handle). */
+  worldHandle(cam, key, kind, prev, next) {
+    const center = cameraTransform(cam, key.t).center;
+    return add3(center, this.handle(key, kind, prev, next));
   }
 
   /** Project copy with shake disabled, so the gizmo never jitters. */
@@ -269,14 +281,16 @@ export class PathGizmo {
     ctx.beginPath();
     let pen = false;
     for (let t = t0; t <= t1 + 1e-6; t += step) {
-      const s = this.project(pathPos(cam, t));
+      const world = add3(cameraTransform(cam, t).center, pathPos(cam, t));
+      const s = this.project(world);
       if (!s) { pen = false; continue; }
       if (pen) ctx.lineTo(s[0], s[1]); else { ctx.moveTo(s[0], s[1]); pen = true; }
     }
     ctx.stroke();
 
     if (time >= t0 && time <= t1) {
-      const now = this.project(pathPos(cam, time));
+      const world = add3(cameraTransform(cam, time).center, pathPos(cam, time));
+      const now = this.project(world);
       if (now) {
         ctx.fillStyle = '#fff';
         ctx.beginPath(); ctx.arc(now[0], now[1], 2.6, 0, Math.PI * 2); ctx.fill();
@@ -307,7 +321,7 @@ export class PathGizmo {
       const active = i === this.sel;
       const hot = this.hover?.kind === 'node' && this.hover.index === i;
       if (!active && !hot) return;
-      const s = this.project(key.pos);
+      const s = this.project(this.worldKey(cam, key));
       if (!s) return;
       ctx.beginPath();
       ctx.arc(s[0], s[1], 6, 0, Math.PI * 2);
@@ -318,10 +332,9 @@ export class PathGizmo {
   }
 
   _handle(ctx, key, prev, next, kind, color, k) {
-    const self = this;
-    const h = this.handle(key, kind, prev, next);
-    const a = this.project(key.pos);
-    const b = this.project(h);
+    const cam = this.camera();
+    const a = this.project(this.worldKey(cam, key));
+    const b = this.project(this.worldHandle(cam, key, kind, prev, next));
     if (!a || !b) return;
     const explicit = Array.isArray(key[kind]);
     ctx.strokeStyle = explicit ? color : 'rgba(255,255,255,.28)';
@@ -588,12 +601,12 @@ export class PathGizmo {
       const prev = cam.path[this.sel - 1] || key;
       const next = cam.path[this.sel + 1] || key;
       for (const kind of ['out', 'in']) {
-        if (dist(this.handle(key, kind, prev, next)) <= 9) return { kind, index: this.sel };
+        if (dist(this.worldHandle(cam, key, kind, prev, next)) <= 9) return { kind, index: this.sel };
       }
     }
     let best = null;
     cam.path.forEach((key, i) => {
-      const d = dist(key.pos);
+      const d = dist(this.worldKey(cam, key));
       if (d <= 10 && (!best || d < best.d)) best = { kind: 'node', index: i, d };
     });
     return best ? { kind: best.kind, index: best.index } : null;
@@ -604,10 +617,10 @@ export class PathGizmo {
     const cam = this.camera();
     const key = cam?.path?.[index];
     if (!key) return null;
-    if (kind === 'node') return key.pos.slice();
+    if (kind === 'node') return this.worldKey(cam, key);
     const prev = cam.path[index - 1] || key;
     const next = cam.path[index + 1] || key;
-    return this.handle(key, kind, prev, next);
+    return this.worldHandle(cam, key, kind, prev, next);
   }
 }
 

@@ -446,6 +446,12 @@ body.look-mode #stageBox { box-shadow: 0 0 0 2px rgba(255,209,102,.65), 0 0 30px
   display: grid; grid-template-columns: 104px 110px minmax(0, 1fr);
   gap: 6px; padding: 0 9px; align-items: center;
 }
+/* Transform rows are a real property row: 1 label + up to 3 numbers + ◆. */
+.tl-camxform .tl-gutter {
+  grid-template-columns: 96px repeat(3, minmax(0, 1fr)) 24px;
+  gap: 4px;
+}
+.tl-camxform .tl-kf { width: 100%; grid-column: 5; }
 .tl-camnum { width: 110px; }
 .tl-camselect { width: 110px; height: 22px; padding: 0 4px; font-size: 10.5px; }
 .tl-camfish {

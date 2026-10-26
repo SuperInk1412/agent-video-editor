@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeCamera, pathPos, pathFov, evalCamera, bakeCameraTrack, v3 } from '../core/camera.js';
+import { normalizeCamera, pathPos, pathFov, evalCamera, bakeCameraTrack, cameraTransform, v3 } from '../core/camera.js';
 import { ease } from '../core/time.js';
 import { generateCity, cityHash, DEFAULT_WORLD } from '../engine/city.js';
 import { normalizeProject } from '../core/schema.js';
@@ -138,6 +138,68 @@ test('bakeCameraTrack covers the range', () => {
   assert.equal(track[48].f, 49);
   for (let i = 1; i < track.length; i++) assert.ok(track[i].f > track[i - 1].f);
   assert.ok(Array.isArray(track[10].look));
+});
+
+test('center is a world point; path positions stay relative', () => {
+  const p = project();
+  p.camera.shake.amp = 0;
+  p.camera.center = [10, -20, 5];
+  const rel = pathPos(p.camera, 3.3);
+  const c = evalCamera(p, 3.3);
+  assert.deepEqual(c.position, rel);
+  assert.deepEqual(c.pos, [10 + rel[0], -20 + rel[1], 5 + rel[2]]);
+  // Moving the center must not change the path itself.
+  assert.deepEqual(pathPos(p.camera, 3.3), rel);
+});
+
+test('camera transforms sample their keyed channels', () => {
+  const cam = normalizeCamera({
+    center: [0, 0, 0], opacity: 1, scale: [1, 1, 1],
+    picturePivot: [0.5, 0.5], pictureOffset: [0, 0],
+    path: [{ t: 0, pos: [0, 0, 0] }, { t: 2, pos: [4, 0, 0] }],
+    tracks: {
+      center: [{ t: 0, v: [0, 0, 0] }, { t: 2, v: [10, 20, 30] }],
+      opacity: [{ t: 0, v: 1 }, { t: 2, v: 0.4 }],
+      scale: [{ t: 0, v: [1, 1, 1] }, { t: 2, v: [2, 1, 0.5] }],
+      picturePivot: [{ t: 0, v: [0.5, 0.5] }, { t: 2, v: [0.2, 0.8] }],
+      pictureOffset: [{ t: 0, v: [0, 0] }, { t: 2, v: [-0.1, 0.25] }],
+    },
+  });
+  const tr = cameraTransform(cam, 2);
+  assert.deepEqual(tr.center, [10, 20, 30]);
+  assert.deepEqual(tr.position, [4, 0, 0]);
+  assert.deepEqual(tr.scale, [2, 1, 0.5]);
+  assert.equal(tr.opacity, 0.4);
+  assert.deepEqual(tr.picturePivot, [0.2, 0.8]);
+  assert.deepEqual(tr.pictureOffset, [-0.1, 0.25]);
+
+  const p = project();
+  p.camera.shake.amp = 0;
+  p.camera.tracks = cam.tracks;
+  const c = evalCamera(p, 2);
+  const rel = pathPos(p.camera, 2);
+  assert.deepEqual(c.center, [10, 20, 30]);
+  assert.deepEqual(c.position, rel);
+  assert.deepEqual(c.pos, [10 + rel[0], 20 + rel[1], 30 + rel[2]]);
+  assert.deepEqual(c.picturePivot, [0.2, 0.8]);
+  assert.equal(c.opacity, 0.4);
+});
+
+test('cameraParamKey / cameraParamUnkey write transform channels', () => {
+  const p = project();
+  applyOp(p, { op: 'cameraParamKey', path: 'center', t: 1, v: [1, 2, 3] });
+  assert.deepEqual(p.camera.tracks.center[0].v, [1, 2, 3]);
+  applyOp(p, { op: 'cameraParamKey', path: 'center', t: 1, v: [4, 5, 6] });
+  assert.equal(p.camera.tracks.center.length, 1);
+  assert.deepEqual(p.camera.tracks.center[0].v, [4, 5, 6]);
+  applyOp(p, { op: 'cameraParamKey', path: 'opacity', t: 1, v: 2 });
+  assert.equal(p.camera.tracks.opacity[0].v, 1);
+  applyOp(p, { op: 'cameraParamKey', path: 'picturePivot', t: 1, v: [1.4, -0.2] });
+  assert.deepEqual(p.camera.tracks.picturePivot[0].v, [1, 0]);
+  applyOp(p, { op: 'cameraParamUnkey', path: 'center', t: 1 });
+  assert.equal(p.camera.tracks.center, undefined);
+  assert.throws(() => applyOp(p, { op: 'cameraParamKey', path: 'fov', t: 1, v: 40 }), /not a keyed/);
+  assert.throws(() => applyOp(p, { op: 'cameraParamKey', path: 'center', t: 1, v: [1, 2] }), /needs/);
 });
 
 test('city generation is deterministic and bounded', () => {
