@@ -1,11 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import {
   sampleBezier, sampleCurve, normalizeCurve, presetCurve, curveLabel, BEZIER_SOLVE_STEPS,
+  samplePreset, curveParamsText, curveHandles, moveCurveHandle, curveRange,
 } from '../core/curves.js';
 import { sampleTrack } from '../core/time.js';
 import { createProject, normalizeProject } from '../core/schema.js';
 import { applyOp } from '../core/ops.js';
+
+const AM = JSON.parse(fs.readFileSync(new URL('./fixtures/am-curve-samples.json', import.meta.url), 'utf8'));
+const close = (a, b, eps = 1e-9, msg = '') => assert.ok(
+  Math.abs(a - b) <= eps, `${msg} expected ${b}, got ${a}`,
+);
 
 const fresh = () => normalizeProject(createProject({ title: 'curve', duration: 10 }));
 
@@ -84,4 +91,123 @@ test('ops: keyCurve attaches and clears a curve on the left key', () => {
   assert.throws(() => applyOp(p, {
     op: 'keyCurve', host: 'element', id, path: 'transform.opacity', from: 0, to: 9,
   }), /no keyframe at 9/);
+});
+
+test('curves: preset formulas match the reference 257-point samples', () => {
+  for (const group of AM.groups) {
+    const curve = presetCurve(group.preset);
+    assert.ok(curve, `preset ${group.preset} exists`);
+    assert.deepEqual(curve.params, group.params, `${group.id} uses the reference defaults`);
+    for (const [u, expected] of group.samples.slice(0, -1)) {
+      const got = sampleCurve(curve, u);
+      assert.ok(
+        Math.abs(got - expected) <= AM.tolerance,
+        `${group.id} u=${u}: expected ${expected}, got ${got}`,
+      );
+    }
+    // The reference elasticStep stops at 0.8 on its last sample; this app pins
+    // every segment end to the target value so the final frame never jumps.
+    assert.equal(sampleCurve(curve, 1), 1, `${group.id} endpoint`);
+  }
+});
+
+test('curves: every preset starts at 0 and ends at 1', () => {
+  for (const id of ['bounce', 'elastic', 'cyclic', 'step', 'elasticStep']) {
+    const curve = presetCurve(id);
+    assert.equal(sampleCurve(curve, -1), 0, `${id} below range`);
+    assert.equal(sampleCurve(curve, 0), 0, `${id} start`);
+    assert.equal(sampleCurve(curve, 1), 1, `${id} end`);
+    assert.equal(sampleCurve(curve, 2), 1, `${id} above range`);
+  }
+});
+
+test('curves: preset params are clamped, defaulted and rounded', () => {
+  const c = normalizeCurve({
+    type: 'bounce',
+    params: { firstStepLength: -3, bounciness: 2, extra: 9 },
+  });
+  assert.equal(c.firstStepLength, undefined, 'flat fields are not copied');
+  assert.deepEqual(c.params, { firstStepLength: 0.01, bounciness: 1 });
+  const d = normalizeCurve({ type: 'cyclic', params: { stepLength: 0.123456789 } });
+  assert.equal(d.params.stepLength, 0.123457, 'six param decimals');
+  assert.equal(d.params.sharpness, 0, 'missing params fall back to the schema');
+  assert.equal(normalizeCurve({ type: 'nope', params: {} }), null);
+  assert.equal(samplePreset('nope', {}, 0.3), 0.3, 'unknown kind is linear');
+});
+
+test('curves: labels and parameter readouts', () => {
+  assert.equal(curveLabel(presetCurve('bounce')), '弹跳');
+  assert.equal(curveLabel(presetCurve('elasticStep')), '弹动步数');
+  assert.equal(curveParamsText(presetCurve('bounce')), '步长 0.30 · 回弹 0.80');
+  assert.equal(curveParamsText(presetCurve('elastic')), '步长 0.25 · 衰减 0.50 · 幅度 1.00');
+  assert.equal(curveParamsText(presetCurve('easeInOut')), '');
+  const edited = moveCurveHandle(presetCurve('bounce'), 'main', 0.4, 0.2);
+  assert.equal(edited.preset, undefined);
+  assert.equal(curveLabel(edited), '自定义弹跳');
+});
+
+test('curves: handles follow the reference positions, including elastic overshoot', () => {
+  const bounce = curveHandles(presetCurve('bounce'));
+  assert.equal(bounce.length, 1);
+  assert.equal(bounce[0].id, 'main');
+  close(bounce[0].u, 0.27);
+  close(bounce[0].v, 0.2);
+
+  const elastic = curveHandles(presetCurve('elastic'));
+  const magnitude = elastic.find((h) => h.id === 'magnitude');
+  assert.equal(magnitude.allowOvershoot, true);
+  close(magnitude.v, 2, 1e-9, 'magnitude handle sits above 1');
+  assert.ok(curveRange(presetCurve('elastic'))[1] >= 2.05);
+
+  assert.equal(curveHandles(presetCurve('step')).length, 2);
+  assert.equal(curveHandles(presetCurve('cyclic')).length, 4);
+  assert.equal(curveHandles(presetCurve('elasticStep')).length, 2);
+  assert.equal(curveHandles(null).length, 0);
+});
+
+test('curves: handle drags write the mapped parameter on the mapped axis', () => {
+  const bounce = moveCurveHandle(presetCurve('bounce'), 'main', 0.27, 0.2);
+  assert.deepEqual(bounce.params, { firstStepLength: 0.3, bounciness: 0.8 });
+
+  const elastic = moveCurveHandle(presetCurve('elastic'), 'main', 0.5, 0.4);
+  assert.equal(elastic.params.stepLength, 0.25, 'x / (attack + 1)');
+  assert.equal(elastic.params.decay, 0.4);
+  const mag = moveCurveHandle(presetCurve('elastic'), 'magnitude', 0, 1.6);
+  assert.equal(mag.params.magnitude, 0.6);
+
+  const cyclic = presetCurve('cyclic');
+  assert.equal(moveCurveHandle(cyclic, 'step', 0.4, 0.9).params.stepLength, 0.4, 'y ignored');
+  assert.equal(moveCurveHandle(cyclic, 'decay', 0.2, 0.8).params.decay, 0.8, 'x ignored');
+  assert.equal(moveCurveHandle(cyclic, 'sharpness', 0.142857, 0.9).params.sharpness, 0.5);
+  assert.equal(moveCurveHandle(cyclic, 'skew', 0.142857, 0).params.skew, 0.5);
+
+  const step = presetCurve('step');
+  assert.equal(moveCurveHandle(step, 'main', 0.5, 0).params.stepLength, 0.5);
+  assert.equal(moveCurveHandle(step, 'smooth', 0.375, 0).params.smoothing, 0.5);
+
+  const eStep = presetCurve('elasticStep');
+  assert.equal(moveCurveHandle(eStep, 'main', 0.4, 0).params.stepLength, 0.4);
+  assert.equal(moveCurveHandle(eStep, 'magnitude', 1, 0.9).params.magnitude, 0.9);
+
+  const bez = moveCurveHandle(presetCurve('easeInOut'), 'p2', 0.7, 1.3);
+  assert.deepEqual(bez.p2, [0.7, 1.3]);
+  assert.equal(bez.preset, undefined);
+});
+
+test('curves: keyCurve stores preset params and sampleTrack uses them', () => {
+  const p = fresh();
+  const { element } = applyOp(p, { op: 'addElement', element: { type: 'solid', start: 0, duration: 4 } });
+  const id = element.id;
+  applyOp(p, { op: 'keySet', id, path: 'transform.opacity', t: 0, value: 0 });
+  applyOp(p, { op: 'keySet', id, path: 'transform.opacity', t: 2, value: 1 });
+  applyOp(p, {
+    op: 'keyCurve', host: 'element', id, path: 'transform.opacity', from: 0, to: 2,
+    curve: presetCurve('bounce'),
+  });
+  const key = p.elements[0].keyframes.find((k) => k.t === 0);
+  assert.equal(key.curve.type, 'bounce');
+  assert.equal(key.curve.preset, 'bounce', 'preset id survives ops/normalisation');
+  assert.deepEqual(key.curve.params, { firstStepLength: 0.3, bounciness: 0.8 });
+  const mid = sampleTrack(p.elements[0].keyframes, 'transform.opacity', 1, 0);
+  close(mid, sampleCurve(presetCurve('bounce'), 0.5), 1e-9, 'sampleTrack follows the preset');
 });

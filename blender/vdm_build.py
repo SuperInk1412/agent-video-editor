@@ -51,10 +51,208 @@ def _bezier_axis(a, b, s):
     return 3.0 * inv * inv * s * a + 3.0 * inv * s * s * b + s ** 3
 
 
+# ---------------------------------------------------------------- value curves
+# Mirrors core/curves.js. Formulas are ports of the reference easings in
+# 参考程序/alight-curve-editor (see tests/fixtures/am-curve-samples.json); keep
+# the two implementations in sync.
+
+AM_PI = 3.14159
+
+PRESET_PARAM_SPECS = {
+    'bounce': {
+        'firstStepLength': (0.01, 1.0, 0.3),
+        'bounciness': (0.0, 1.0, 0.8),
+    },
+    'elastic': {
+        'stepLength': (0.01, 1.0, 0.25),
+        'attack': (0.0, 10.0, 1.0),
+        'decay': (0.0, 1.0, 0.5),
+        'magnitude': (0.0, 1.0, 1.0),
+    },
+    'cyclic': {
+        'stepLength': (0.001, 1.0, 0.2857143),
+        'sharpness': (0.0, 1.0, 0.0),
+        'skew': (0.0, 1.0, 0.5),
+        'decay': (0.0, 1.0, 0.0),
+    },
+    'step': {
+        'stepLength': (0.01, 1.0, 0.25),
+        'smoothing': (0.0, 1.0, 0.0),
+    },
+    'elasticStep': {
+        'stepLength': (0.01, 1.0, 0.2),
+        'magnitude': (0.0, 1.0, 0.5),
+    },
+}
+
+PRESET_TYPES = {
+    'bounce': 'bounce',
+    'elastic': 'elastic',
+    'cyclic': 'cyclic',
+    'step': 'step',
+    'elasticStep': 'elasticStep',
+}
+
+
+def _curve_mix(a, b, t):
+    return a * (1.0 - t) + b * t
+
+
+def _round_param(v):
+    # JS Math.round rounds halves up; Python's round() is banker's rounding.
+    return math.floor(v * 1000000.0 + 0.5) / 1000000.0
+
+
+def _preset_params(kind, raw):
+    spec = PRESET_PARAM_SPECS.get(kind)
+    if not spec:
+        return None
+    src = raw if isinstance(raw, dict) else {}
+    out = {}
+    for key, (lo, hi, default) in spec.items():
+        try:
+            value = float(src.get(key, default))
+        except (TypeError, ValueError):
+            value = default
+        if not math.isfinite(value):
+            value = default
+        out[key] = _round_param(clamp(value, lo, hi))
+    return out
+
+
+def _bounce_sample(p, u):
+    first = p['firstStepLength']
+    bounce = p['bounciness']
+    if first <= 0.0:
+        return 1.0
+    start = 0.0
+    length = first
+    amplitude = 1.0
+    probe = u + first / 2.0
+    for _ in range(512):
+        end = start + length
+        if probe <= end:
+            if start + length / 3.0 > first / 2.0 + 1.0 or (length < 0.1 and end > first / 2.0 + 1.0):
+                return 1.0
+            x = abs(((probe - start) / length - 0.5) * 2.0)
+            return x * x * amplitude + (1.0 - amplitude)
+        length *= bounce
+        amplitude *= bounce
+        if amplitude < 0.005:
+            return 1.0
+        start = end
+    return 1.0
+
+
+def _elastic_basic(p, x):
+    length = max(p['stepLength'], 0.01)
+    cos = math.cos((AM_PI * x) / length)
+    falloff = 1.0 - max(x, 0.005)
+    return cos * abs(falloff ** (p['decay'] * p['decay'] * 15.0 + 1.0))
+
+
+def _elastic_sample(p, u):
+    length = max(p['stepLength'], 0.01)
+
+    def ease(x):
+        return 1.0 - _elastic_basic(p, x) * p['magnitude']
+
+    if u >= length:
+        return ease(u)
+    ramp = (1.0 - math.cos((AM_PI * u) / length)) / 2.0
+    return _curve_mix(ramp * ease(length), ease(u), (u / length) ** 3)
+
+
+def _cyclic_sample(p, u):
+    length = max(p['stepLength'], 0.001)
+
+    def pct(x):
+        return (((x % length) + length) % length) / length
+
+    def cos_interp(x):
+        return 1.0 - ((math.cos((x / length) * AM_PI * 2.0) + 1.0) / 2.0)
+
+    def saw_interp(x):
+        return 1.0 - abs(pct(x) - 0.5) * 2.0
+
+    def skew_interp(x):
+        q = pct(x)
+        f = 0.5
+        if q < p['skew']:
+            f = (0.5 * q) / p['skew']
+        elif q > p['skew']:
+            f = 0.5 + ((q - p['skew']) / (1.0 - p['skew'])) / 2.0
+        return (x - q * length) + length * f
+
+    warped = skew_interp(u)
+    value = _curve_mix(cos_interp(warped), saw_interp(warped), p['sharpness'])
+    base = u - (u % length)
+    if length / 4.0 + base > 1.0:
+        value = 0.0
+    elif length / 2.0 + base < 1.0 and base + (length * 3.0) / 4.0 > 1.0 and pct(u) > p['skew']:
+        value = 1.0
+    return value * (1.0 - u * p['decay']) + u * p['decay']
+
+
+def _step_sample(p, u):
+    length = max(p['stepLength'], 0.001)
+    ramp_start = length - p['smoothing'] * length
+    rest = u % length
+    if ramp_start == length:
+        raw = 1.0 if rest >= length else 0.0
+    else:
+        raw = clamp((rest - ramp_start) / (length - ramp_start))
+    smooth = raw * raw * (3.0 - 2.0 * raw)
+    return (u - rest) + smooth * length
+
+
+def _elastic_step_sample(p, u):
+    length = max(p['stepLength'], 0.001)
+    if u < length:
+        return 0.0
+    inner = {
+        'stepLength': 0.5 - 0.45 * p['magnitude'],
+        'decay': 1.0 - p['magnitude'] * 0.5,
+        'magnitude': (1.0 - p['magnitude']) * 0.5 + 0.5,
+    }
+    rest = u % length
+    value = _elastic_sample(inner, rest / length)
+    return (u - rest) + length * (value - 1.0)
+
+
+def sample_preset(kind, params, u):
+    """Progress for a preset kind and its parameter bag; endpoints are pinned."""
+    p = _preset_params(kind, params)
+    target = clamp(u)
+    if not p:
+        return target
+    if target <= 0.0:
+        return 0.0
+    if target >= 1.0:
+        return 1.0
+    if kind == 'bounce':
+        return _bounce_sample(p, target)
+    if kind == 'elastic':
+        return _elastic_sample(p, target)
+    if kind == 'cyclic':
+        return _cyclic_sample(p, target)
+    if kind == 'step':
+        return _step_sample(p, target)
+    if kind == 'elasticStep':
+        return _elastic_step_sample(p, target)
+    return target
+
+
 def sample_curve(curve, u):
     """Progress for a per-segment value curve (mirrors core/curves.js)."""
     if not isinstance(curve, dict):
         return clamp(u)
+    kind = curve.get('type')
+    if not kind and curve.get('preset'):
+        kind = PRESET_TYPES.get(curve.get('preset'))
+    if kind and kind != 'bezier':
+        raw = curve.get('params')
+        return sample_preset(kind, raw if isinstance(raw, dict) else curve, u)
     p1 = curve.get('p1') or (0.0, 0.0)
     p2 = curve.get('p2') or (1.0, 1.0)
     try:
