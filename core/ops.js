@@ -4,6 +4,7 @@ import { DEFAULT_TRANSFORM, DEFAULT_STYLE, DEFAULT_FX, ELEMENT_TYPES, newId } fr
 import { SCENE_VERSION, normalizeObject } from './scene.js';
 import { normalizeCamera } from './camera.js';
 import { normalizeCurve } from './curves.js';
+import { EXT_OP_KINDS, applyExtOp } from './ops-ext.js';
 
 export const OP_KINDS = [
   'addElement', 'updateElement', 'set', 'removeElement', 'moveElement',
@@ -13,6 +14,8 @@ export const OP_KINDS = [
   'cameraParamKey', 'cameraParamUnkey', 'worldSet',
   'addCamera', 'removeCamera', 'reorderCamera', 'activateCamera',
   'objectAdd', 'objectRemove', 'objectPatch', 'objectKey', 'objectUnkey',
+  // ops added by feature modules through core/ops-ext.js
+  ...EXT_OP_KINDS,
 ];
 
 const isObj = (o) => o && typeof o === 'object' && !Array.isArray(o);
@@ -792,8 +795,23 @@ export function applyOp(p, op) {
       return { changed: results.flatMap((r) => r.changed) };
     }
 
-    default:
+    default: {
+      // Feature modules register their ops through core/ops-ext.js instead of
+      // editing this switch. They get the same validation helpers core ops use.
+      const ext = applyExtOp(p, op, {
+        fail,
+        deepMerge,
+        getPath,
+        setPath,
+        newId,
+        coerceValue,
+        findElement: (id) => findEl(p, id),
+        findObject: (id) => findObj(p, id),
+        findCamera: (id) => cameraById(p, id),
+      });
+      if (ext) return ext;
       fail(`unknown op ${kind}`);
+    }
   }
 }
 
