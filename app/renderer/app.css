@@ -75,6 +75,7 @@ textarea { resize: vertical; line-height: 1.4; }
 .toolbar .tool:hover { color: var(--text); background: #161d28; border-color: var(--line); }
 .toolbar .tool.on { color: var(--accent); background: #0d2029; border-color: #1d4a5c; }
 .tool-wrap { position: relative; }
+.toolbar .tool-sep { width: 1px; height: 18px; margin: 0 4px; background: var(--line); }
 .tool-menu {
   position: absolute; left: 0; top: 34px; z-index: 30; min-width: 108px; padding: 4px;
   background: #0f1622; border: 1px solid #26364b; border-radius: 6px;
@@ -143,6 +144,8 @@ main { display: grid; grid-template-columns: 272px minmax(0, 1fr) 356px; min-hei
 .media-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 .media-card { border: 1px solid var(--line); border-radius: 5px; overflow: hidden; background: #0b0e14; cursor: pointer; position: relative; }
 .media-card:hover { border-color: #2a6a87; }
+.media-card.on { border-color: var(--accent); }
+.media-card.on .fileicon { color: var(--accent); }
 .media-card img { width: 100%; height: 74px; object-fit: cover; display: block; }
 .media-card .fileicon { height: 74px; display: grid; place-items: center; font-size: 22px; color: var(--dim); }
 .media-cap { font-size: 10.5px; color: var(--dim); padding: 3px 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

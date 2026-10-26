@@ -34,6 +34,7 @@ const S = {
   grid: true,
   keys: new Set(),
   soloCameras: new Set(),
+  clipboard: null,
 };
 
 let preview, timeline, inspector, agentPanel, pipelinePanel, logPanel, gizmo, projects;
@@ -476,25 +477,92 @@ async function renderMedia() {
   for (const m of S.media) {
     const isVid = /\.(mp4|webm|mov)$/i.test(m.path);
     const isImg = /\.(png|jpe?g|webp|gif)$/i.test(m.path);
+    const isAud = /\.(m4a|mp3|wav|flac|ogg|aac|opus)$/i.test(m.path);
+    const isTrack = isAud && S.project.meta.audio?.src === m.path;
     const card = document.createElement('div');
-    card.className = 'media-card';
+    card.className = `media-card${isTrack ? ' on' : ''}`;
+    card.title = isAud ? (isTrack ? '当前配乐' : '点击设为配乐（会重新分析节拍）') : (isImg || isVid ? '点击在播放头处加入时间线' : '不支持的素材类型');
     card.innerHTML = isImg
       ? `<img src="/${m.path}" loading="lazy">`
-      : `<div class="fileicon">${isVid ? '▶' : '♪'}</div>`;
+      : `<div class="fileicon">${isVid ? '▶' : isAud ? '♪' : '?'}</div>`;
     const cap = document.createElement('div');
     cap.className = 'media-cap';
-    cap.textContent = m.name;
+    cap.textContent = isTrack ? `♪ 配乐 · ${m.name}` : m.name;
     card.appendChild(cap);
-    card.onclick = () => addMediaAt(m, isVid);
+    card.onclick = () => {
+      if (isAud) setSoundtrack(m);
+      else if (isImg || isVid) addMediaAt(m, isVid);
+      else toast('只能把图片和视频放进时间线', 'warn');
+    };
     grid.appendChild(card);
   }
   root.appendChild(grid);
 }
 
+async function setSoundtrack(m) {
+  if (S.project.meta.audio?.src === m.path) { toast('已经是当前配乐'); return; }
+  const prev = S.project.meta.audio || {};
+  const j = await op({ op: 'setMeta', path: 'audio', value: { src: m.path, offset: 0, gain: prev.gain || 0 } });
+  if (!j) return;
+  renderMedia();
+  toast('已设为配乐，正在分析节拍…');
+  try {
+    const b = await post('/api/beats', {});
+    toast(`配乐节拍 ${b.tempo} bpm · ${b.beats.length} 拍`, 'success');
+  } catch (e) { toast(`节拍分析失败: ${e.message}`, 'error'); }
+}
+
+/** segment under time t, if any */
+const segmentAt = (t) => S.project.segments.find((s) => t >= s.start && t < s.start + s.duration) || null;
+
+/** latest start <= t at which `dur` seconds still fit inside the project */
+const fitStart = (t, dur) => Math.round(Math.max(0, Math.min(t, S.project.meta.duration - dur)) * 1000) / 1000;
+
+/** Text / colour block at the playhead, on top of everything, then select it. */
+async function add2DElement(kind) {
+  if (!S.project) return null;
+  const len = Math.min(3, S.project.meta.duration);
+  const start = fitStart(S.time, len);
+  const base = {
+    start, duration: len, segment: segmentAt(start)?.id || null,
+    transform: { x: 0, y: 0, scale: 1, rotation: 0, opacity: 1 }, fadeIn: 0.2, fadeOut: 0.2,
+  };
+  const element = kind === 'text'
+    ? { ...base, type: 'text', name: '文字', style: { text: '新文字', size: 120, color: '#ffffff', align: 'center' } }
+    : { ...base, type: 'shape', name: '色块', style: { shape: 'rect', fill: '#ff2a4d', w: 640, h: 120, radius: 0 } };
+  const j = await op({ op: 'addElement', element });
+  const id = j?.changed?.[0];
+  if (!id) return null;
+  select({ elementId: id });
+  switchRightTab('insp');
+  if (kind === 'text') {
+    const ta = $('#panelInsp textarea');
+    if (ta) { ta.focus(); ta.select(); }
+  }
+  return id;
+}
+
+/** paste a copied element at the playhead; its animation travels with it */
+function pasteElement(src) {
+  const start = fitStart(S.time, src.duration);
+  const dt = start - src.start;
+  const el = JSON.parse(JSON.stringify(src));
+  delete el.id;
+  delete el.z;
+  el.start = start;
+  el.segment = segmentAt(start)?.id || null;
+  el.keyframes = (el.keyframes || []).map((k) => ({ ...k, t: Math.round((k.t + dt) * 1000) / 1000 }));
+  if (Array.isArray(el.motion?.span)) el.motion.span = el.motion.span.map((v) => Math.round((v + dt) * 1000) / 1000);
+  return op({ op: 'addElement', element: el }).then((j) => {
+    if (j?.changed?.[0]) select({ elementId: j.changed[0] });
+    return j;
+  });
+}
+
 function addMediaAt(m, isVid) {
-  const seg = S.project.segments.find((s) => S.time >= s.start && S.time < s.start + s.duration);
-  const start = Math.round(S.time * 100) / 100;
-  const dur = Math.min(4, Math.max(1, S.project.meta.duration - start));
+  const dur = Math.min(4, S.project.meta.duration);
+  const start = fitStart(S.time, dur);
+  const seg = segmentAt(start);
   op({
     op: 'addElement',
     element: {
@@ -766,6 +834,8 @@ async function boot() {
     setViewMode('select');
   };
   $('#toolCamera').onclick = () => { hideToolMenu(); createCamera(); };
+  $('#toolText').onclick = () => { hideToolMenu(); add2DElement('text'); };
+  $('#toolShape').onclick = () => { hideToolMenu(); add2DElement('shape'); };
   $('#tool3D').onclick = (e) => {
     e.stopPropagation();
     if (tool3DMenu) tool3DMenu.hidden = !tool3DMenu.hidden;
@@ -1292,7 +1362,23 @@ async function boot() {
     } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
       e.preventDefault();
       if (e.shiftKey) $('#btnRedo').click(); else $('#btnUndo').click();
+    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') {
+      const el = S.project.elements.find((x) => x.id === S.selection.elementId);
+      if (el && !window.getSelection()?.toString()) {
+        e.preventDefault();
+        S.clipboard = JSON.parse(JSON.stringify(el));
+        toast(`已复制 ${el.name || el.id}，Ctrl+V 粘贴到播放头`);
+      }
+    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
+      if (S.clipboard) { e.preventDefault(); pasteElement(S.clipboard); }
     } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'd') {
+      const el = S.project.elements.find((x) => x.id === S.selection.elementId);
+      if (el) {
+        e.preventDefault();
+        op({ op: 'duplicateElement', id: el.id, start: fitStart(el.start + el.duration, el.duration) })
+          .then((j) => { const id = j?.changed?.[0]; if (id) select({ elementId: id }); });
+        return;
+      }
       const o = (S.project.scene?.objects || []).find((x) => x.id === S.selection.objectId);
       if (o) {
         e.preventDefault();
