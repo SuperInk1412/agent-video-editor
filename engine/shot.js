@@ -6,6 +6,11 @@ import { bakeCameraTrack, cameraLayers, cameraTransform } from '../core/camera.j
 import { objectPose } from '../core/scene.js';
 import { generateCity, cityHash } from './city.js';
 import { paths } from './storage.js';
+import { compileProject } from '../core/tracks.js';
+import { compute } from './compute.js';
+import { hashOf } from './media.js';
+import { atomicJson } from './storage.js';
+import { RENDER_PLAN_VERSION } from '../core/version.js';
 
 const r3 = (v) => Math.round(Number(v) * 1000) / 1000;
 const OBJ_TYPES = new Set(['solid', 'shape', 'text', 'image', 'video', 'container']);
@@ -102,6 +107,7 @@ function bakeCameraLayer(project, cam, { fps, from, to }) {
 }
 
 export function buildShot(project, { from = 0, to = null, fps = null } = {}) {
+  compileProject(project);
   const frameRate = fps || project.meta.fps || 24;
   const end = to ?? project.meta.duration;
   const layers = cameraLayers(project).map((cam) => bakeCameraLayer(project, cam, {
@@ -114,7 +120,7 @@ export function buildShot(project, { from = 0, to = null, fps = null } = {}) {
   const city = worldSnapshot(project);
   const cam = project.camera || {};
   return {
-    version: 1,
+    version: RENDER_PLAN_VERSION,
     fps: frameRate,
     frames: camera.length,
     from,
@@ -138,11 +144,15 @@ export function buildShot(project, { from = 0, to = null, fps = null } = {}) {
 /** Write the shot package next to the render job; returns its path. */
 export async function writeShot(dir, project, opts = {}) {
   const p = paths(dir);
-  const shot = buildShot(project, opts);
-  const key = `${shot.city.hash}-r${project.rev || 0}-${shot.fps}-${opts.from ?? 0}-${opts.to ?? project.meta.duration}`;
+  const { signal, ...options } = opts;
+  const key = hashOf({ version: 2, meta: project.meta, cameras: project.cameras, camera: project.camera,
+    cameraOrder: project.cameraOrder, scene: project.scene, world: project.world, options });
   const file = path.join(p.cache, `shot-${key}.json`);
+  try { return { file, shot: JSON.parse(await fs.readFile(file, 'utf8')) }; }
+  catch (e) { if (e.code !== 'ENOENT' && !(e instanceof SyntaxError)) throw e; }
+  const shot = await compute('shot', { project, options }, { signal });
   await fs.mkdir(path.dirname(file), { recursive: true });
-  await fs.writeFile(file, JSON.stringify(shot));
+  await atomicJson(file, shot);
   return { file, shot };
 }
 

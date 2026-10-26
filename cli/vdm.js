@@ -420,6 +420,7 @@ async function cmdRender(root, flags) {
 }
 async function renderCommand(root, input, flags) {
   const runtime = await client(root);
+  if (flags['dry-run']) throw new Error('use editing dry-run for ops; rendering creates a queued job');
   const submitted = await runtime.call('job.submit', { ...input, ...txOptions(flags),
     scale: num(flags.scale, 1), samples: num(flags.samples, 16), crf: num(flags.crf, 18) });
   if (!flags.json) console.error(`渲染任务 ${submitted.id} · rev ${submitted.sourceRev}`);
@@ -619,6 +620,9 @@ async function main() {
   const root = await resolveRoot(flags);
 
   switch (cmd) {
+    case 'cache': console.log(JSON.stringify(await (await client(root)).call('cache.prune', {
+      maxBytes: Math.round(num(flags['max-mb'], 1024) * 1024 * 1024), dryRun: !!flags['dry-run'],
+    }))); return;
     case 'engine': { const runtime = await client(root); console.log(JSON.stringify(rest[0] === 'stop' ? await runtime.call('runtime.stop') : { root: runtime.info.root, pid: runtime.info.pid, url: runtime.info.url })); return; }
     case 'jobs': console.log(JSON.stringify(await (await client(root)).call('job.list'))); return;
     case 'cancel': console.log(JSON.stringify(await (await client(root)).call('job.cancel', { id: rest[0] }))); return;

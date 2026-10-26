@@ -32,6 +32,8 @@ export async function createJobService(root, projects, onEvent, { execute } = {}
     retry(jobs, input, actorId) {
       assertSafeData(input);
       if (!isRecord(input)) throw fault('INVALID_ARGUMENT', 'render input must be an object');
+      const fields = new Set(['kind', 'time', 'from', 'to', 'scale', 'samples', 'crf', 'expectedRev', 'requestId']);
+      if (Object.keys(input).some((key) => !fields.has(key))) throw fault('INVALID_ARGUMENT', 'unknown render parameter');
       if (input.requestId !== undefined && (typeof input.requestId !== 'string' || !input.requestId || input.requestId.length > 200)) throw fault('INVALID_ARGUMENT', 'invalid requestId');
       const found = input.requestId && jobs.find((j) => j.actorId === actorId && j.requestId === input.requestId);
       if (found && found.inputHash !== digest(input)) throw fault('REQUEST_ID_CONFLICT', 'requestId already used for another render');
@@ -65,7 +67,7 @@ export async function createJobService(root, projects, onEvent, { execute } = {}
           entry.src = sources.get(entry.src).path;
         }
         await atomicJson(file(id, 'project.json'), project);
-        return { id, actorId, requestId: input.requestId || null, inputHash: digest(input), kind, options,
+        return { id, actorId, requestId: input.requestId || null, inputHash: digest(input), kind, options, duration: project.meta.duration,
           sourceRev: project.rev, status: 'queued', progress: 0,
           total: kind === 'still' ? 1 : Math.round((options.to - options.from) * project.meta.fps),
           createdAt: new Date().toISOString(), sources: [...sources].map(([src, info]) => ({ src, ...info })) };
@@ -87,8 +89,10 @@ export async function createJobService(root, projects, onEvent, { execute } = {}
     if (job.status !== 'succeeded' || !job.artifact) throw fault('ARTIFACT_NOT_FOUND', 'job has no completed artifact');
     const artifact = { ...job.artifact };
     if (image) {
-      if (artifact.mimeType !== 'image/png' || artifact.size > 8 * 1024 * 1024) throw fault('INVALID_ARGUMENT', 'inline image must be a PNG of at most 8 MiB');
-      artifact.base64 = (await fs.readFile(artifact.path)).toString('base64');
+      const file = await readPath(p.frames, path.basename(artifact.path));
+      const actual = await fs.stat(file);
+      if (artifact.mimeType !== 'image/png' || actual.size > 8 * 1024 * 1024) throw fault('INVALID_ARGUMENT', 'inline image must be a PNG of at most 8 MiB');
+      artifact.base64 = (await fs.readFile(file)).toString('base64');
     }
     return artifact;
   };

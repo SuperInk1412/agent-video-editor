@@ -29,6 +29,10 @@ import { createJobService } from './jobs.js';
 import { readSelection, contextAt } from '../application/queries.js';
 import { OP_KINDS } from '../core/ops.js';
 import { mediaService } from './media-service.js';
+import { compute } from './compute.js';
+import { hashOf } from './media.js';
+import { PROJECT_SCHEMA, EDIT_SEMANTICS_VERSION, RENDER_PLAN_VERSION } from '../core/version.js';
+import { pruneCache } from './cache.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const APP_DIR = path.resolve(HERE, '..');
@@ -131,8 +135,9 @@ async function startOwnedServer({ root, port = 47100, open = false, onReady, imp
   let lastRev = project.rev;
 
   const clients = new Set();
+  let eventId = 0;
   const broadcast = (type, data) => {
-    const payload = `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
+    const payload = `id: ${++eventId}\nevent: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
     for (const c of clients) {
       try { c.write(payload); } catch { /* dropped */ }
     }
@@ -152,6 +157,9 @@ async function startOwnedServer({ root, port = 47100, open = false, onReady, imp
     lastRev = fresh.rev;
     broadcast('project', { project, source, rev: fresh.rev, transactionId: transaction.transactionId });
     updateStoryboardStep(fresh);
+    for (const step of pipeline.steps) if (step.sourceRev != null && step.sourceRev !== fresh.rev) {
+      step.status = 'todo'; step.detail = `项目已更新（原产物 rev ${step.sourceRev}）`;
+    }
     return true;
   };
   const transact = (input, source = 'ui') => serialized(async () => {
@@ -220,6 +228,7 @@ async function startOwnedServer({ root, port = 47100, open = false, onReady, imp
   const finishedJobs = new Set();
   const jobs = await createJobService(projectRoot, projects, (job) => {
     broadcast('job', job);
+    if (jobs?.active && jobs.active.id !== job.id) return;
     const running = !['succeeded', 'failed', 'cancelled', 'interrupted'].includes(job.status);
     Object.assign(renderState, { running, jobId: job.id, sourceRev: job.sourceRev,
       kind: job.kind, from: job.options.from, to: job.options.to,
@@ -230,7 +239,9 @@ async function startOwnedServer({ root, port = 47100, open = false, onReady, imp
       finishedJobs.add(job.id);
       if (job.artifact) {
         addArtifact({ ...job.artifact, label: `${job.kind === 'still' ? '预览帧' : '成片'} · rev ${job.sourceRev}` });
-        setStep(job.kind === 'still' ? 'stills' : 'render', { status: 'done', detail: `rev ${job.sourceRev}` });
+        const full = job.kind === 'video' && job.options.from === 0 && job.options.to >= job.duration;
+        setStep(job.kind === 'still' ? 'stills' : full ? 'master' : 'render', { sourceRev: job.sourceRev,
+          status: job.sourceRev === project.rev ? 'done' : 'todo', detail: `${job.sourceRev === project.rev ? '' : '项目已更新，产物来自 '}rev ${job.sourceRev}` });
       }
     }
   });
@@ -276,6 +287,7 @@ async function startOwnedServer({ root, port = 47100, open = false, onReady, imp
   updateStoryboardStep(project);
 
   const instanceId = randomUUID(), token = randomUUID();
+  let worldKey, worldPromise;
   const server = http.createServer(async (req, res) => {
     let pathname = req.url;
     try {
@@ -305,7 +317,11 @@ async function startOwnedServer({ root, port = 47100, open = false, onReady, imp
           case 'media.list': result = await media.list(params); break;
           case 'media.probe': result = await media.probe(params); break;
           case 'media.import': result = await media.import(params); break;
-          case 'capabilities': result = { projectSchema: 'vdm.project/1', semanticsVersion: 1, renderPlanVersion: 1,
+          case 'cache.prune': result = await jobs.serial(async () => {
+            if (jobs.active || [...jobs.jobs.values()].some((job) => job.status === 'queued')) throw Object.assign(new Error('cannot prune cache while render jobs are pending'), { code: 'JOB_BUSY', status: 409 });
+            return pruneCache(projectRoot, params);
+          }); break;
+          case 'capabilities': result = { projectSchema: PROJECT_SCHEMA, semanticsVersion: EDIT_SEMANTICS_VERSION, renderPlanVersion: RENDER_PLAN_VERSION,
             ops: OP_KINDS.filter((op) => !['restoreProject', 'replaceTimeline'].includes(op)),
             models: ['elements', 'cameras', 'scene.objects'], sceneTree: 'experimental, read-only',
             rendering: { concurrency: 1, backend: 'Blender', textLayout: 'approximate preview parity' },
@@ -333,8 +349,16 @@ async function startOwnedServer({ root, port = 47100, open = false, onReady, imp
 
       // ---------------- 3D world (shared by viewport + blender) ----------------
       if (pathname === '/api/world' && req.method === 'GET') {
-        const city = worldSnapshot(project);
-        return json(res, 200, { hash: city.hash, city, rev: project.rev });
+        const snapshot = project;
+        const key = hashOf({ world: snapshot.world, cameras: snapshot.cameras, cameraOrder: snapshot.cameraOrder,
+          fps: snapshot.meta.fps, duration: snapshot.meta.duration });
+        if (!worldPromise || key !== worldKey) {
+          worldKey = key;
+          worldPromise = compute('world', snapshot);
+          worldPromise.catch(() => { if (worldKey === key) worldPromise = null; });
+        }
+        const city = await worldPromise;
+        return json(res, 200, { hash: city.hash, city, rev: snapshot.rev });
       }
 
       // ---------------- logs ----------------
@@ -544,7 +568,7 @@ async function startOwnedServer({ root, port = 47100, open = false, onReady, imp
       }
       if (pathname === '/api/render/cancel' && req.method === 'POST') {
         const body = await readBody(req);
-        const id = body.id || renderState.jobId;
+        const id = body.id || jobs.active?.id || renderState.jobId;
         return json(res, 200, { ok: true, ...(id ? { job: await jobs.cancel(id) } : {}) });
       }
       if (pathname === '/api/jobs' && req.method === 'GET') return json(res, 200, { jobs: await jobs.list() });

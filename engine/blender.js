@@ -109,7 +109,7 @@ export async function runJob(dir, job, { onProgress, onLog, signal } = {}) {
   delete payload.projectData;
   // 3D shot: bake city + per-frame camera once, let Blender consume the same package
   if (is3D(job.project)) {
-    const { file } = await writeShot(dir, job.project, { fps: job.project.meta.fps });
+    const { file } = await writeShot(dir, job.project, { fps: job.project.meta.fps, signal });
     payload.shot = file;
   }
   await fs.writeFile(jobFile, JSON.stringify(payload, null, 2));

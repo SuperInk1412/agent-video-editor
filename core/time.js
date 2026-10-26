@@ -1,4 +1,5 @@
 // Time / easing / keyframe math. Pure ESM, shared by engine, CLI and renderer.
+import { compiledTrack, segmentIndex } from './tracks.js';
 export const EPS = 1e-6;
 export const clamp = (v, a = 0, b = 1) => (v < a ? a : v > b ? b : v);
 export const lerp = (a, b, t) => a + (b - a) * t;
@@ -93,11 +94,12 @@ export function kick(beats, t, dur = 0.14) {
  */
 export function sampleTrack(keys, path, t, base = null) {
   if (!keys || !keys.length) return base;
-  const list = keys.filter((k) => k.path === path).sort((a, b) => a.t - b.t);
+  const index = compiledTrack(keys, 'element');
+  const list = index ? index.get(path) || [] : keys.filter((k) => k.path === path).sort((a, b) => a.t - b.t);
   if (!list.length) return base;
   if (t <= list[0].t) return list[0].value;
   if (t >= list[list.length - 1].t) return list[list.length - 1].value;
-  for (let i = 0; i < list.length - 1; i++) {
+  for (let i = segmentIndex(list, t); i < list.length - 1; i++) {
     const a = list[i], b = list[i + 1];
     if (t >= a.t && t < b.t) {
       const p = (t - a.t) / Math.max(EPS, b.t - a.t);

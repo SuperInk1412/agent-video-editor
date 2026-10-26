@@ -10,6 +10,7 @@ import { ProjectsPanel } from './projects.js';
 import { evalCamera, pathPos, cameraTransform } from '/core/camera.js';
 import { objectPose } from '/core/scene.js';
 import { sampleTrack } from '/core/time.js';
+import { clearCompiledTracks } from '/core/tracks.js';
 import {
   emptySelection, normalizeSelection, selectOne, cameraRef, objectRef, elementRef, splitRef,
   keyframeExists, keyframeDeleteOps,
@@ -60,7 +61,7 @@ window.addEventListener('unhandledrejection', (e) => reportError('unhandledrejec
 async function post(url, body) {
   const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) });
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(j.error || `${r.status}`);
+  if (!r.ok) throw Object.assign(new Error(j.error || `${r.status}`), j);
   return j;
 }
 
@@ -71,10 +72,14 @@ let opChain = Promise.resolve();
 function op(...ops) {
   const run = async () => {
     try {
-      const j = await post('/api/ops', { ops });
+      const j = await post('/api/ops', { ops, expectedRev: S.project.rev, requestId: crypto.randomUUID() });
       if (j.project) applyProject(j.project, 'local');
       return j;
     } catch (e) {
+      if (e.code === 'REV_CONFLICT') {
+        const latest = await fetch('/api/project').then((response) => response.json()).catch(() => null);
+        if (latest?.project) applyProject(latest.project, 'resync');
+      }
       toast(`操作失败: ${e.message}`, 'error');
       return null;
     }
@@ -149,6 +154,7 @@ function syncWorld(p) {
 }
 
 function applyProject(p, source) {
+  if (source !== 'boot' && S.project && p.rev <= S.project.rev) return;
   S.project = p;
   // JSON responses cannot preserve the server-side `camera` alias identity;
   // re-point it at the active stack entry so edits and reads share one object.
@@ -1089,6 +1095,7 @@ async function boot() {
   });
 
   canvas.addEventListener('pointermove', (e) => {
+    if (drag) clearCompiledTracks();
     const { sx, sy, cx, cy } = stageXY(e);
     const r2 = (v) => Math.round(v * 100) / 100;
     if (!drag) {
@@ -1399,6 +1406,10 @@ async function boot() {
 
   // events
   const es = new EventSource('/api/events');
+  es.addEventListener('hello', async () => {
+    const latest = await fetch('/api/project').then((response) => response.json()).catch(() => null);
+    if (latest?.project) applyProject(latest.project, 'resync');
+  });
   es.addEventListener('project', (e) => {
     const d = JSON.parse(e.data);
     applyProject(d.project, d.source);
@@ -1430,6 +1441,7 @@ async function boot() {
 
   // playback loop
   let last = performance.now();
+  let lastDraw = 0;
   const loop = (now) => {
     const dt = Math.min(0.1, Math.max(0, (now - last) / 1000));
     last = now;
@@ -1443,7 +1455,8 @@ async function boot() {
         $('#stageTime').textContent = `${t.toFixed(2)} / ${S.project.meta.duration.toFixed(2)}s`;
       }
     }
-    if (S.project) {
+    if (S.project && (S.playing || S.editMode || now - lastDraw > 100)) {
+      lastDraw = now;
       if (S.editMode) flyEdit(dt);
       preview.render(S.time);
       gizmo?.draw();

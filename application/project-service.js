@@ -13,6 +13,16 @@ export const content = (project) => {
   return copy;
 };
 
+function boundHistory(entries) {
+  const keep = []; let bytes = 0;
+  for (let i = entries.length - 1; i >= 0 && keep.length < 80; i--) {
+    const size = JSON.stringify(entries[i]).length * 2;
+    if (keep.length && bytes + size > 32 * 1024 * 1024) break;
+    keep.unshift(entries[i]); bytes += size;
+  }
+  return keep;
+}
+
 /** One application write path; repository supplies locking and crash recovery. */
 export class ProjectService {
   constructor(repository, { plan } = {}) { this.repository = repository; this.plan = plan; }
@@ -79,8 +89,8 @@ export class ProjectService {
           if (current) state.undo.push(cloneProject(current));
           state.redo = [];
         }
-        state.undo = state.undo.slice(-80);
-        state.redo = state.redo.slice(-80);
+        state.undo = boundHistory(state.undo);
+        state.redo = boundHistory(state.redo);
         state.entries.push({ transactionId: id, actorId, requestId, command: command.type, beforeRev: current?.rev || 0, rev: next.rev, at, changedIds: applied.changed });
         state.entries = state.entries.slice(-500);
       } else next = current;

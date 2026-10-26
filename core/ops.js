@@ -4,6 +4,7 @@ import { DEFAULT_TRANSFORM, DEFAULT_STYLE, DEFAULT_FX, ELEMENT_TYPES, newId } fr
 import { SCENE_VERSION, normalizeObject } from './scene.js';
 import { normalizeCamera } from './camera.js';
 import { assertSafeData, pathParts } from './json.js';
+import { clearCompiledTracks } from './tracks.js';
 
 export const OP_KINDS = [
   'addElement', 'updateElement', 'set', 'removeElement', 'moveElement',
@@ -254,6 +255,7 @@ export function coerceValue(value) {
  * Ops never touch disk.
  */
 export function applyOp(p, op) {
+  clearCompiledTracks();
   assertSafeData(op);
   if (!op || typeof op !== 'object') fail('op must be an object');
   const kind = op.op;

@@ -23,7 +23,10 @@ export function runProcess(executable, args, { cwd, signal, timeout = 0, onStdou
       output = (output + chunk).slice(-maxOutput);
       try { onStdout?.(chunk); } catch (e) { failure = e; terminate(); }
     });
-    child.stderr.on('data', (chunk) => { stderr = (stderr + chunk).slice(-maxOutput); onLog?.(String(chunk)); });
+    child.stderr.on('data', (chunk) => {
+      stderr = (stderr + chunk).slice(-maxOutput);
+      try { onLog?.(String(chunk)); } catch (e) { failure = e; terminate(); }
+    });
     child.on('error', (e) => { failure = e; });
     child.on('close', (code) => {
       clearTimeout(timer);
