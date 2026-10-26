@@ -8,7 +8,7 @@ export const OP_KINDS = [
   'addElement', 'updateElement', 'set', 'removeElement', 'moveElement',
   'splitElement', 'duplicateElement', 'reorder', 'addSegment', 'updateSegment',
   'removeSegment', 'setMeta', 'setFx', 'keySet', 'keyRemove', 'batch',
-  'cameraKey', 'cameraRemove', 'cameraSet', 'cameraPath', 'worldSet',
+  'cameraKey', 'cameraRemove', 'cameraSet', 'cameraPath', 'cameraPatch', 'worldSet',
   'addCamera', 'removeCamera', 'reorderCamera', 'activateCamera',
   'objectAdd', 'objectRemove', 'objectPatch', 'objectKey', 'objectUnkey',
 ];
@@ -409,6 +409,16 @@ export function applyOp(p, op) {
           speed: normSpeed(k.speed),
         }))
         .sort((a, b) => a.t - b.t);
+      return { changed: ['camera', cam.id] };
+    }
+
+    case 'cameraPatch': {
+      ensureCameraStack(p);
+      const cam = p.cameras.find((c) => c.id === op.id);
+      if (!cam) fail(`no camera ${op.id}`);
+      const next = deepMerge(cam, op.patch || {});
+      Object.keys(next).forEach((k) => { cam[k] = next[k]; });
+      if (cam.id === p.activeCameraId) p.camera = cam;
       return { changed: ['camera', cam.id] };
     }
 

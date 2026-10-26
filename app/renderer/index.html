@@ -11,6 +11,18 @@
   <div id="app">
     <header id="top">
       <div class="brand"><span class="logo">◆</span> <b>VedioMaker</b> <span class="ver">0.1</span></div>
+      <div id="tools" class="toolbar">
+        <button id="toolSelect" class="tool on" title="选择工具 (V)">↖</button>
+        <button id="toolCamera" class="tool" title="新建相机（当前视口机位）">▣</button>
+        <div class="tool-wrap">
+          <button id="tool3D" class="tool" title="新建 3D 物体（长按选择）">▦</button>
+          <div id="tool3DMenu" class="tool-menu" hidden>
+            <button data-primitive="box">立方体</button>
+            <button data-primitive="cylinder">圆柱</button>
+            <button data-primitive="pen">钢笔</button>
+          </div>
+        </div>
+      </div>
       <div class="proj"><span id="projTitle">—</span><span class="sep">/</span><span id="projMeta" class="dim"></span></div>
       <div class="transport">
         <button id="btnUndo" title="撤销 (Ctrl+Z)">↶</button>
@@ -30,7 +42,6 @@
           <option value="1">100%</option>
         </select>
         <button id="btnEditMode" title="编辑视口 / 镜头视角 (Tab)">编辑视口</button>
-        <button id="btnAddElement" title="在编辑视口前方添加一个 3D 元素">＋元素</button>
         <button id="btnStill" title="用 Blender 渲染当前时刻的一帧">预览帧</button>
         <button id="btnRender" class="primary">渲染成片</button>
       </div>

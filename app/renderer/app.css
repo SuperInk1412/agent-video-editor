@@ -66,6 +66,26 @@ textarea { resize: vertical; line-height: 1.4; }
 .brand { font-size: 14px; letter-spacing: .4px; white-space: nowrap; }
 .brand .logo { color: var(--accent); }
 .brand .ver { color: var(--dim2); font-size: 11px; margin-left: 4px; }
+.toolbar { display: flex; align-items: center; gap: 3px; flex: 0 0 auto; }
+.toolbar .tool {
+  width: 30px; height: 30px; padding: 0; display: grid; place-items: center;
+  background: transparent; border: 1px solid transparent; color: var(--dim);
+  font-size: 15px; border-radius: 5px;
+}
+.toolbar .tool:hover { color: var(--text); background: #161d28; border-color: var(--line); }
+.toolbar .tool.on { color: var(--accent); background: #0d2029; border-color: #1d4a5c; }
+.tool-wrap { position: relative; }
+.tool-menu {
+  position: absolute; left: 0; top: 34px; z-index: 30; min-width: 108px; padding: 4px;
+  background: #0f1622; border: 1px solid #26364b; border-radius: 6px;
+  box-shadow: 0 10px 28px rgba(0,0,0,.55);
+}
+.tool-menu[hidden] { display: none; }
+.tool-menu button {
+  display: block; width: 100%; text-align: left; background: none; border: 0;
+  color: #d6e6f5; font-size: 12px; padding: 6px 9px; border-radius: 4px;
+}
+.tool-menu button:hover { background: #1a2738; }
 .proj { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
 #projTitle { font-weight: 600; white-space: nowrap; }
 #projMeta { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -412,6 +432,11 @@ body.look-mode #stageBox { box-shadow: 0 0 0 2px rgba(255,209,102,.65), 0 0 30px
 .tl-camkey:hover { background: #fff27a; }
 
 /* ---------------- camera element (timeline) ---------------- */
+.tl-camsec { height: 22px; }
+.tl-cams { position: relative; }
+.tl-camrow.cam-hidden { opacity: .42; }
+.tl-camrow.solo-hidden { opacity: .3; }
+.tl-camrow.cam-dragging { opacity: .5; box-shadow: 0 0 0 1px rgba(23,217,255,.25) inset; }
 .tl-camhead .tl-objkind {
   margin-left: auto; background: #241a33; border-color: #4b3a6b; color: #d6b8ff;
 }

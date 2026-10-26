@@ -28,6 +28,7 @@ const S = {
   viewMode: 'select',
   grid: true,
   keys: new Set(),
+  soloCameras: new Set(),
 };
 
 let preview, timeline, inspector, agentPanel, pipelinePanel, logPanel, gizmo, projects;
@@ -548,6 +549,27 @@ async function boot() {
       },
     ]);
   };
+  const cameraMenu = (id, x, y) => {
+    const cam = (S.project.cameras || []).find((c) => c.id === id);
+    if (!cam) return;
+    const solo = S.soloCameras;
+    const checked = solo.has(id);
+    showContextMenu(x, y, [
+      {
+        label: checked ? '✓ 单独查看该相机（们）' : '单独查看该相机（们）',
+        run: () => {
+          if (checked) solo.delete(id); else solo.add(id);
+          timeline.setSoloCameras(solo);
+        },
+      },
+      { label: '激活相机', run: () => { op({ op: 'activateCamera', id }); select({ camera: true }); } },
+      { sep: true },
+      {
+        label: '删除相机', danger: true,
+        run: () => { if (confirm(`删除 ${cam.name || id}?`)) op({ op: 'removeCamera', id }); },
+      },
+    ]);
+  };
 
   timeline = new Timeline($('#timeline'), {
     onSeek: (t) => { setTime(t); if (S.playing) { S.playFrom = t; S.playWall = performance.now(); preview.setAudioTime(t); } },
@@ -561,6 +583,7 @@ async function boot() {
     onOp: (o) => op(o),
     onPause: () => pause(),
     onElementMenu: (id, x, y) => elementMenu(id, x, y),
+    onCameraMenu: (id, x, y) => cameraMenu(id, x, y),
   });
   timeline.setProject(S.project);
 
@@ -639,9 +662,10 @@ async function boot() {
 
   // Add a 3D element in front of the editing camera, then select it so it can
   // be dragged (which keys its pivot at the playhead).
-  const addSceneElement = async () => {
+  const addSceneElement = async (primitive = 'box') => {
     if (!S.project) return null;
     if (!S.project.world) { toast('这个项目没有 3D 世界，先给它一个城市/背景', 'error'); return null; }
+    if (primitive === 'pen') { toast('钢笔建模工具下一步接', 'warn'); return null; }
     if (!S.editMode) setEditMode(true);
     const c = S.editCam || evalCamera(S.project, S.time);
     const fwd = v3norm(v3sub(c.look, c.pos));
@@ -654,21 +678,64 @@ async function boot() {
     const base = [c.pos[0] + fwd[0] * 30, c.pos[1] + fwd[1] * 30, c.pos[2] + fwd[2] * 30];
     const pivot = base.map((v, i) => Math.round((v + right[i] * ox + up[i] * oy) * 100) / 100);
     const id = `ob_${Date.now().toString(36)}`;
+    const label = primitive === 'cylinder' ? '圆柱' : '立方体';
+    const geom = primitive === 'cylinder' ? { w: 4, h: 6, d: 4 } : { w: 8, h: 4, d: 0.5 };
     const j = await op({
       op: 'objectAdd',
       object: {
-        id, type: 'solid', name: `元素 ${n}`, pivot,
-        geom: { w: 8, h: 4, d: 0.5 },
+        id, type: 'solid', name: `${label} ${n}`, primitive,
+        pivot, geom,
         style: { color: '#17d9ff', emissive: 1 },
         start: 0, duration: S.project.meta.duration,
       },
     });
     if (!j) return null;
     select({ objectId: id });
-    toast('已添加元素：拖动它会在当前时间打位置关键帧', 'success');
+    toast(`已添加${label}；拖动它会在当前时间打位置关键帧`, 'success');
     return id;
   };
-  $('#btnAddElement').onclick = addSceneElement;
+
+  const createCamera = async () => {
+    if (!S.project) return null;
+    const view = (S.editMode && S.editCam)
+      || (S.project.camera ? evalCamera(S.project, S.time) : null)
+      || preview.scene3d.lastCam;
+    if (!view) { toast('没有可用视角，先建一个 3D 世界', 'error'); return null; }
+    const rnd = (v) => Math.round(v * 100) / 100;
+    const at = Math.round(S.time * 1000) / 1000;
+    const cam = {
+      name: `相机 ${(S.project.cameras?.length || 0) + 1}`,
+      fov: view.fov ?? 62,
+      roll: view.roll ?? 0,
+      center: [0, 0, 0],
+      path: [{ t: at, pos: view.pos.map(rnd), look: view.look.map(rnd) }],
+    };
+    const j = await op({ op: 'addCamera', camera: cam });
+    if (!j) return null;
+    select({ camera: true });
+    toast('已从当前视口新建相机并激活', 'success');
+    return j.project?.activeCameraId || null;
+  };
+
+  // top-left tools: select / new camera / new 3D (long-press submenu)
+  const tool3DMenu = $('#tool3DMenu');
+  const hideToolMenu = () => { if (tool3DMenu) tool3DMenu.hidden = true; };
+  $('#toolSelect').onclick = () => {
+    $('#toolSelect').classList.add('on');
+    if (!S.editMode && S.project?.camera) setEditMode(true);
+    setViewMode('select');
+  };
+  $('#toolCamera').onclick = () => { hideToolMenu(); createCamera(); };
+  $('#tool3D').onclick = (e) => {
+    e.stopPropagation();
+    if (tool3DMenu) tool3DMenu.hidden = !tool3DMenu.hidden;
+  };
+  tool3DMenu?.querySelectorAll('button').forEach((b) => {
+    b.onclick = () => { hideToolMenu(); addSceneElement(b.dataset.primitive); };
+  });
+  document.addEventListener('pointerdown', (e) => {
+    if (!e.target.closest?.('.tool-wrap')) hideToolMenu();
+  });
 
   projects = new ProjectsPanel({ toast });
   $('#btnProject').onclick = () => projects.open();

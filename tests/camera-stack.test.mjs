@@ -179,6 +179,22 @@ test('camera stack ops: reorderCamera and activateCamera', () => {
   assert.throws(() => applyOp(p, { op: 'activateCamera', id: 'nope' }), /no camera/);
 });
 
+test('camera stack ops: cameraPatch targets one camera by id', () => {
+  const p = base({
+    cameras: [
+      { id: 'cam_a', visible: true, path: [] },
+      { id: 'cam_b', visible: true, path: [] },
+    ],
+    cameraOrder: ['cam_a', 'cam_b'],
+    activeCameraId: 'cam_a',
+  });
+  applyOp(p, { op: 'cameraPatch', id: 'cam_b', patch: { visible: false, name: 'B' } });
+  assert.equal(p.cameras.find((c) => c.id === 'cam_b').visible, false);
+  assert.equal(p.cameras.find((c) => c.id === 'cam_b').name, 'B');
+  assert.equal(p.cameras.find((c) => c.id === 'cam_a').visible, true);
+  assert.equal(p.camera.id, 'cam_a');
+});
+
 test('camera stack ops: cameraKey targets the active camera only', () => {
   const p = base({
     cameras: [

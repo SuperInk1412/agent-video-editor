@@ -19,7 +19,7 @@ const TYPE_COLOR = { image: '#3b6ea5', video: '#2f8f6b', text: '#a06a2b', shape:
 const AX = ['x', 'y', 'z'];
 
 export class Timeline {
-  constructor(root, { onSeek, onSelect, onOp, onSegment, onPause, onElementMenu } = {}) {
+  constructor(root, { onSeek, onSelect, onOp, onSegment, onPause, onElementMenu, onCameraMenu } = {}) {
     this.root = root;
     this.onSeek = onSeek;
     this.onSelect = onSelect;
@@ -27,14 +27,17 @@ export class Timeline {
     this.onSegment = onSegment;
     this.onPause = onPause;
     this.onElementMenu = onElementMenu;
+    this.onCameraMenu = onCameraMenu;
     this.project = null;
     this.time = 0;
     this.segmentId = null;
     this.elementId = null;
     this.objectId = null;
     this.cameraSel = false;
-    this.camOpen = false;
+    this.camOpenId = null;
+    this.soloCameras = new Set();
     this._camPos = null;
+    this._camDrag = null;
     this.zoom = 1;
     this.pps = 60;
     this.expanded = new Set();
@@ -83,16 +86,15 @@ export class Timeline {
     this.segTrack = el('div', 'tl-track');
     this.segRow.append(this.segGutter, this.segTrack);
 
-    this.camRow = el('div', 'tl-row tl-camrow tl-objhead tl-camhead');
-    this.camRow.dataset.cam = '1';
-    this.camGutter = el('div', 'tl-gutter', '<span>相机</span>');
-    this.camTrack = el('div', 'tl-track');
-    this.camRow.append(this.camGutter, this.camTrack);
+    this.camHead = el('div', 'tl-row tl-sechead tl-camsec');
+    this.camHeadGutter = el('div', 'tl-gutter', '<span>相机</span>');
+    this.camHeadTrack = el('div', 'tl-track');
+    this.camHead.append(this.camHeadGutter, this.camHeadTrack);
 
-    this.camPropsWrap = el('div', 'tl-camprops');
+    this.camsWrap = el('div', 'tl-cams');
     this.elsWrap = el('div', 'tl-els');
     this.playhead = el('div', 'tl-playhead');
-    this.inner.append(this.rulerRow, this.segRow, this.camRow, this.camPropsWrap, this.elsWrap, this.playhead);
+    this.inner.append(this.rulerRow, this.segRow, this.camHead, this.camsWrap, this.elsWrap, this.playhead);
 
     const hint = el('div', 'tl-hint');
     hint.innerHTML = '<span>▾ 元素 / 相机展开</span><span class="tl-hint-sep">|</span>'
@@ -194,7 +196,7 @@ export class Timeline {
 
   _updateHeight() {
     const app = document.querySelector('#app');
-    const open = (this.camOpen && !!this.project?.camera) || this.expanded.size > 0;
+    const open = (!!this.camOpenId && !!this.project?.camera) || this.expanded.size > 0;
     if (app) app.classList.toggle('tl-expanded', open);
   }
 
@@ -270,34 +272,18 @@ export class Timeline {
       this.segTrack.appendChild(b);
     }
 
-    // camera element: folded header row, attributes live inside
-    this.camTrack.innerHTML = '';
-    this.camGutter.innerHTML = '';
-    this.camPropsWrap.innerHTML = '';
+    // camera stack: a section header + one row per camera (top of the stack
+    // first). The expanded camera is always the active one.
+    const cams = Array.isArray(p.cameras) && p.cameras.length ? p.cameras : (p.camera ? [p.camera] : []);
+    this.camHeadGutter.innerHTML = cams.length
+      ? `<span>相机</span><span class="tl-sub">${cams.length} 台</span>`
+      : '<span>相机 · 无</span>';
+    this.camHeadGutter.classList.toggle('dim', !cams.length);
+    this.camsWrap.innerHTML = '';
     this._camPos = null;
-    const cam = p.camera;
-    this.camGutter.classList.toggle('dim', !cam);
-    this.camRow.classList.toggle('dim', !cam);
-    this.camRow.classList.toggle('sel', !!cam && this.cameraSel);
-    if (cam) {
-      const caret = el('button', 'tl-objtoggle', this.camOpen ? '▾' : '▸');
-      caret.title = this.camOpen ? '折叠相机属性' : '展开相机属性';
-      caret.addEventListener('click', (e) => { e.stopPropagation(); this._toggleCam(); });
-      const dot = el('span', 'tl-camdot');
-      const name = el('span', 'tl-objname', '相机');
-      const kind = el('span', 'tl-objkind', 'CAM');
-      this.camGutter.append(caret, dot, name, kind);
-
-      const b = el('div', 'blk cam');
-      b.dataset.kind = 'camera';
-      b.style.left = '0px';
-      b.style.width = `${Math.max(8, p.meta.duration * this.pps)}px`;
-      b.innerHTML = `<span class="blk-name">镜头</span><span class="blk-meta">${cam.path.length} 关键点</span>`;
-      this.camTrack.appendChild(b);
-      if (this.camOpen) this._cameraRows(cam);
-    } else {
-      this.camGutter.append(el('span', '', '相机 · 无'));
-    }
+    if (this.camOpenId && p.activeCameraId && this.camOpenId !== p.activeCameraId) this.camOpenId = null;
+    if (this.camOpenId && !cams.some((c) => c.id === this.camOpenId)) this.camOpenId = null;
+    for (const cam of cams) this._cameraGroup(cam, p);
 
     // v2 (2D) element lanes, then the 3D objects
     this.elsWrap.innerHTML = '';
@@ -346,71 +332,181 @@ export class Timeline {
     for (const o of objs) this._objectGroup(o);
   }
 
-  // ------------------------------------------------------------ camera element
-  _toggleCam() {
-    this.camOpen = !this.camOpen;
-    if (this.camOpen) this._scrollTo = 'camera';
+  // ------------------------------------------------------------ camera stack
+  _activeCameraId() {
+    return this.project?.activeCameraId || this.project?.camera?.id || null;
+  }
+
+  _activateCamera(id) {
+    if (!id) return;
+    if (this._activeCameraId() !== id) this.camOpenId = null;
+    this.cameraSel = true;
+    this.onSelect?.({ camera: true });
+    this._paintSelection();
+    if (this._activeCameraId() === id) return;
+    const r = this.onOp?.({ op: 'activateCamera', id });
+    if (r?.then) r.then(() => this.render(true)).catch(() => {});
+  }
+
+  _toggleCam(id) {
+    if (!id) return;
+    if (this.camOpenId === id) {
+      this.camOpenId = null;
+      this.render(true);
+      return;
+    }
+    this.camOpenId = id;
+    this.cameraSel = true;
+    this.onSelect?.({ camera: true });
+    if (this._activeCameraId() !== id) {
+      const r = this.onOp?.({ op: 'activateCamera', id });
+      if (r?.then) r.then(() => this.render(true)).catch(() => {});
+      else this.render(true);
+    } else {
+      this.render(true);
+    }
+  }
+
+  setSoloCameras(ids) {
+    this.soloCameras = new Set(ids || []);
     this.render(true);
   }
 
-  _cameraRows(cam) {
+  _startCameraDrag(id, startY, row) {
+    const rows = [...this.camsWrap.querySelectorAll('.tl-camhead[data-cam]')];
+    if (rows.length < 2) return;
+    const from = rows.findIndex((r) => r.dataset.cam === id);
+    if (from < 0) return;
+    let target = from;
+    let moved = false;
+    row.classList.add('cam-dragging');
+    const move = (e) => {
+      if (!moved && Math.abs(e.clientY - startY) < 4) return;
+      moved = true;
+      let best = Infinity;
+      rows.forEach((r, i) => {
+        const b = r.getBoundingClientRect();
+        const d = Math.abs(e.clientY - (b.top + b.height / 2));
+        if (d < best) { best = d; target = i; }
+      });
+    };
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+      row.classList.remove('cam-dragging');
+      if (moved && target !== from) this.onOp?.({ op: 'reorderCamera', id, index: target });
+      // 拖动后激活被拖的相机；单击（没移动）也算选中
+      this._activateCamera(id);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+  }
+
+  _cameraGroup(cam, p) {
+    const activeId = p.activeCameraId || p.camera?.id || null;
+    const open = this.camOpenId === cam.id;
+    const row = el('div', 'tl-row tl-objhead tl-camhead tl-camrow');
+    row.dataset.cam = cam.id;
+    row.classList.toggle('sel', cam.id === activeId && this.cameraSel);
+    row.classList.toggle('cam-hidden', cam.visible === false);
+    row.classList.toggle('solo-hidden', this.soloCameras.size > 0 && !this.soloCameras.has(cam.id));
+    row.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.onCameraMenu?.(cam.id, e.clientX, e.clientY);
+    });
+
+    const g = el('div', 'tl-gutter');
+    g.dataset.cam = cam.id;
+    const eye = el('button', 'tl-objeye', '◉');
+    eye.title = cam.visible === false ? '显示该相机' : '隐藏该相机（变换仍作用于子集）';
+    if (cam.visible === false) eye.classList.add('off');
+    eye.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.onOp?.({ op: 'cameraPatch', id: cam.id, patch: { visible: cam.visible === false } });
+    });
+    const caret = el('button', 'tl-objtoggle', open ? '▾' : '▸');
+    caret.title = open ? '折叠相机属性' : '展开相机属性';
+    caret.addEventListener('click', (e) => { e.stopPropagation(); this._toggleCam(cam.id); });
+    const dot = el('span', 'tl-camdot');
+    const name = el('span', 'tl-objname');
+    name.textContent = cam.name || '相机';
+    name.title = '相机';
+    const kind = el('span', 'tl-objkind', 'CAM');
+    g.append(eye, caret, dot, name, kind);
+
+    const track = el('div', 'tl-track');
+    const block = el('div', 'blk cam');
+    block.dataset.cam = cam.id;
+    block.style.left = '0px';
+    block.style.width = `${Math.max(8, p.meta.duration * this.pps)}px`;
+    block.innerHTML = `<span class="blk-name">${escapeHtml(cam.name || '镜头')}</span><span class="blk-meta">${(cam.path || []).length} 关键点</span>`;
+    track.appendChild(block);
+    row.append(g, track);
+    this.camsWrap.appendChild(row);
+    if (open) this._cameraRows(cam, this.camsWrap);
+  }
+
+  _cameraRows(cam, host) {
     const set = (patch) => this.onOp?.({ op: 'cameraSet', patch });
 
     // One "摄像机位置" property. Its lane diamonds are the flight keys.
-    this.camPropsWrap.appendChild(this._sectionRow('变换', 'camPos'));
-    if (this.sections.camPos) this.camPropsWrap.appendChild(this._camPosRow());
+    host.appendChild(this._sectionRow('变换', 'camPos'));
+    if (this.sections.camPos) host.appendChild(this._camPosRow());
 
     const lensSummary = `FOV ${Math.round(cam.fov)}°${cam.fov >= 180 ? ' · 鱼眼' : ''}`;
     const shakeSummary = `${round2(cam.shake.amp)}m · ${cam.shake.freq}Hz`;
     const dofSummary = `f/${cam.dof.fstop} · 模糊 ${Math.round((cam.motionBlur.shutter || 0) * 360)}°`;
-    this.camPropsWrap.appendChild(this._sectionRow('镜头 / 构图', 'camMain', lensSummary));
+    host.appendChild(this._sectionRow('镜头 / 构图', 'camMain', lensSummary));
     if (this.sections.camMain) {
-      this.camPropsWrap.appendChild(this._camNumRow('视场角 FOV', cam.fov, {
+      host.appendChild(this._camNumRow('视场角 FOV', cam.fov, {
         step: 1, min: 1, max: 360,
         badge: cam.fov >= 180 ? '鱼眼' : '',
         apply: (v) => set({ fov: v }),
       }));
-      this.camPropsWrap.appendChild(this._camHintRow('≥180° 自动切等距鱼眼（可到 360°）；Blender 侧用 Cycles 渲这一档。'));
-      this.camPropsWrap.appendChild(this._camNumRow('看向前方 (m)', cam.lookAhead, {
+      host.appendChild(this._camHintRow('≥180° 自动切等距鱼眼（可到 360°）；Blender 侧用 Cycles 渲这一档。'));
+      host.appendChild(this._camNumRow('看向前方 (m)', cam.lookAhead, {
         step: 5, min: 2, max: 500, apply: (v) => set({ lookAhead: v }),
       }));
-      this.camPropsWrap.appendChild(this._camNumRow('转弯侧倾', cam.bankGain, {
+      host.appendChild(this._camNumRow('转弯侧倾', cam.bankGain, {
         step: 0.1, min: 0, max: 4, apply: (v) => set({ bankGain: v }),
       }));
-      this.camPropsWrap.appendChild(this._camNumRow('最大侧倾°', cam.maxRoll, {
+      host.appendChild(this._camNumRow('最大侧倾°', cam.maxRoll, {
         step: 1, min: 0, max: 60, apply: (v) => set({ maxRoll: v }),
       }));
-      this.camPropsWrap.appendChild(this._camNumRow('手动 roll°', cam.roll || 0, {
+      host.appendChild(this._camNumRow('手动 roll°', cam.roll || 0, {
         step: 1, min: -60, max: 60, apply: (v) => set({ roll: v }),
       }));
     }
 
-    this.camPropsWrap.appendChild(this._sectionRow('抖动', 'camShake', shakeSummary));
+    host.appendChild(this._sectionRow('抖动', 'camShake', shakeSummary));
     if (this.sections.camShake) {
-      this.camPropsWrap.appendChild(this._camNumRow('抖动幅度', cam.shake.amp, {
+      host.appendChild(this._camNumRow('抖动幅度', cam.shake.amp, {
         step: 0.05, min: 0, max: 5, apply: (v) => set({ shake: { ...cam.shake, amp: v } }),
       }));
-      this.camPropsWrap.appendChild(this._camNumRow('抖动频率', cam.shake.freq, {
+      host.appendChild(this._camNumRow('抖动频率', cam.shake.freq, {
         step: 0.1, min: 0.1, max: 8, apply: (v) => set({ shake: { ...cam.shake, freq: v } }),
       }));
-      this.camPropsWrap.appendChild(this._camNumRow('随速度增强', cam.shake.speedGain, {
+      host.appendChild(this._camNumRow('随速度增强', cam.shake.speedGain, {
         step: 0.1, min: 0, max: 2, apply: (v) => set({ shake: { ...cam.shake, speedGain: v } }),
       }));
-      this.camPropsWrap.appendChild(this._camNumRow('随机种子', cam.shake.seed, {
+      host.appendChild(this._camNumRow('随机种子', cam.shake.seed, {
         step: 1, apply: (v) => set({ shake: { ...cam.shake, seed: v } }),
       }));
     }
 
-    this.camPropsWrap.appendChild(this._sectionRow('景深 / 模糊', 'camDof', dofSummary));
+    host.appendChild(this._sectionRow('景深 / 模糊', 'camDof', dofSummary));
     if (this.sections.camDof) {
-      this.camPropsWrap.appendChild(this._camSelectRow('景深', String(!!cam.dof.enabled), [['false', '关'], ['true', '开']],
+      host.appendChild(this._camSelectRow('景深', String(!!cam.dof.enabled), [['false', '关'], ['true', '开']],
         (v) => set({ dof: { ...cam.dof, enabled: v === 'true' } })));
-      this.camPropsWrap.appendChild(this._camNumRow('光圈 f', cam.dof.fstop, {
+      host.appendChild(this._camNumRow('光圈 f', cam.dof.fstop, {
         step: 0.2, min: 0.5, max: 32, apply: (v) => set({ dof: { ...cam.dof, fstop: v } }),
       }));
-      this.camPropsWrap.appendChild(this._camSelectRow('运动模糊', String(!!cam.motionBlur.enabled), [['true', '开'], ['false', '关']],
+      host.appendChild(this._camSelectRow('运动模糊', String(!!cam.motionBlur.enabled), [['true', '开'], ['false', '关']],
         (v) => set({ motionBlur: { ...cam.motionBlur, enabled: v === 'true' } })));
-      this.camPropsWrap.appendChild(this._camNumRow('快门角', cam.motionBlur.shutter, {
+      host.appendChild(this._camNumRow('快门角', cam.motionBlur.shutter, {
         step: 0.05, min: 0, max: 1, apply: (v) => set({ motionBlur: { ...cam.motionBlur, shutter: v } }),
       }));
     }
@@ -958,8 +1054,9 @@ export class Timeline {
   }
 
   _scrollObject(id) {
+    const camId = this.camOpenId || this._activeCameraId();
     const row = id === 'camera'
-      ? this.inner.querySelector('.tl-camhead')
+      ? (camId ? this.inner.querySelector(`.tl-camhead[data-cam="${camId}"]`) : null)
       : this.inner.querySelector(`.tl-objhead[data-obj="${id}"]`);
     if (!row) return;
     const r = row.getBoundingClientRect();
@@ -986,13 +1083,17 @@ export class Timeline {
       this.inner.querySelector(`.blk.seg[data-id="${this.segmentId}"]`)?.classList.add('sel');
     }
     if (this.cameraSel) {
-      this.inner.querySelector('.blk.cam')?.classList.add('sel');
-      this.inner.querySelector('.tl-camhead')?.classList.add('sel');
+      const camId = this._activeCameraId();
+      if (camId) {
+        this.inner.querySelector(`.blk.cam[data-cam="${camId}"]`)?.classList.add('sel');
+        this.inner.querySelector(`.tl-camhead[data-cam="${camId}"]`)?.classList.add('sel');
+      }
       this.inner.querySelector('.tl-camposrow')?.classList.add('sel');
     }
   }
 
   _down(ev) {
+    if (ev.button !== 0) return;
     const target = ev.target;
     // controls / fields handle themselves (focus, clicks)
     if (/INPUT|TEXTAREA|SELECT/.test(target.tagName || '') || target.closest('button')) return;
@@ -1031,6 +1132,12 @@ export class Timeline {
       this.propSel = { objId: id, path: pr.dataset.path };
       this.onSelect?.({ objectId: id });
       this._paintSelection();
+      return;
+    }
+    // camera row header: select/activate + vertical drag to reorder the stack
+    const camHead = target.closest?.('.tl-camhead[data-cam]');
+    if (camHead) {
+      this._startCameraDrag(camHead.dataset.cam, ev.clientY, camHead);
       return;
     }
     const objHead = target.closest?.('.tl-objhead');
@@ -1089,20 +1196,12 @@ export class Timeline {
 
     // ---- camera / segments / v2 ----
     if (blk?.classList.contains('cam')) {
-      this.cameraSel = true;
-      this.elementId = null; this.segmentId = null; this.objectId = null;
-      this.onSelect?.({ camera: true });
-      this._paintSelection();
+      this._activateCamera(blk.dataset.cam);
       return;
     }
-    // camera header / property labels (the lane itself still scrubs)
-    if (target.closest?.('.tl-camhead')
-      || target.closest?.('.tl-camprop .tl-gutter')
-      || target.closest?.('.tl-camhint .tl-gutter')) {
-      this.cameraSel = true;
-      this.elementId = null; this.segmentId = null; this.objectId = null;
-      this.onSelect?.({ camera: true });
-      this._paintSelection();
+    // camera property labels (the lane itself still scrubs)
+    if (target.closest?.('.tl-camprop .tl-gutter') || target.closest?.('.tl-camhint .tl-gutter')) {
+      this._activateCamera(this._activeCameraId());
       return;
     }
 
