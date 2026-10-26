@@ -116,3 +116,81 @@ test('camera stack: active camera ops update the stack entry', () => {
   assert.equal(p.cameras.find((c) => c.id === 'cam_b').fov, 100);
   assert.equal(p.cameras.find((c) => c.id === 'cam_a').fov, 50);
 });
+
+test('camera stack ops: addCamera is top, active, and gets stack defaults', () => {
+  const p = base({
+    cameras: [{ id: 'cam_a', name: 'A', fov: 50, path: [] }],
+    cameraOrder: ['cam_a'],
+    activeCameraId: 'cam_a',
+  });
+  const r = applyOp(p, {
+    op: 'addCamera',
+    camera: { name: '新机位', fov: 70, path: [{ t: 0, pos: [0, 10, 0], look: [0, 10, -10] }] },
+  });
+  assert.equal(p.cameras.length, 2);
+  assert.equal(p.cameras[0].id, r.camera.id);
+  assert.equal(p.cameraOrder[0], r.camera.id);
+  assert.equal(p.activeCameraId, r.camera.id);
+  assert.equal(p.camera, r.camera);
+  assert.equal(p.camera.name, '新机位');
+  assert.deepEqual(p.camera.center, [0, 0, 0]);
+  assert.deepEqual(p.camera.picturePivot, [0.5, 0.5]);
+  assert.equal(p.camera.opacity, 1);
+  assert.equal(p.camera.visible, true);
+  assert.equal(p.camera.path.length, 1);
+});
+
+test('camera stack ops: removeCamera falls back to the next camera, then null', () => {
+  const p = base({
+    cameras: [
+      { id: 'cam_a', name: 'A', path: [] },
+      { id: 'cam_b', name: 'B', path: [] },
+    ],
+    cameraOrder: ['cam_a', 'cam_b'],
+    activeCameraId: 'cam_a',
+  });
+  applyOp(p, { op: 'removeCamera', id: 'cam_a' });
+  assert.deepEqual(p.cameras.map((c) => c.id), ['cam_b']);
+  assert.equal(p.activeCameraId, 'cam_b');
+  assert.equal(p.camera.id, 'cam_b');
+  applyOp(p, { op: 'removeCamera', id: 'cam_b' });
+  assert.deepEqual(p.cameras, []);
+  assert.deepEqual(p.cameraOrder, []);
+  assert.equal(p.activeCameraId, null);
+  assert.equal(p.camera, null);
+});
+
+test('camera stack ops: reorderCamera and activateCamera', () => {
+  const p = base({
+    cameras: [
+      { id: 'cam_a', path: [] },
+      { id: 'cam_b', path: [] },
+      { id: 'cam_c', path: [] },
+    ],
+    cameraOrder: ['cam_a', 'cam_b', 'cam_c'],
+    activeCameraId: 'cam_a',
+  });
+  applyOp(p, { op: 'reorderCamera', id: 'cam_c', index: 0 });
+  assert.deepEqual(p.cameraOrder, ['cam_c', 'cam_a', 'cam_b']);
+  assert.deepEqual(p.cameras.map((c) => c.id), ['cam_c', 'cam_a', 'cam_b']);
+  applyOp(p, { op: 'activateCamera', id: 'cam_b' });
+  assert.equal(p.activeCameraId, 'cam_b');
+  assert.equal(p.camera.id, 'cam_b');
+  assert.throws(() => applyOp(p, { op: 'activateCamera', id: 'nope' }), /no camera/);
+});
+
+test('camera stack ops: cameraKey targets the active camera only', () => {
+  const p = base({
+    cameras: [
+      { id: 'cam_a', path: [] },
+      { id: 'cam_b', path: [] },
+    ],
+    cameraOrder: ['cam_a', 'cam_b'],
+    activeCameraId: 'cam_b',
+  });
+  applyOp(p, { op: 'cameraKey', t: 1, pos: [1, 2, 3] });
+  assert.equal(p.cameras.find((c) => c.id === 'cam_a').path.length, 0);
+  assert.equal(p.cameras.find((c) => c.id === 'cam_b').path.length, 1);
+  assert.deepEqual(p.camera.path[0].pos, [1, 2, 3]);
+});
+

@@ -2,12 +2,14 @@
 // Ops are plain JSON so they can be logged, replayed, diffed and undone.
 import { DEFAULT_TRANSFORM, DEFAULT_STYLE, DEFAULT_FX, ELEMENT_TYPES, newId } from './schema.js';
 import { SCENE_VERSION, normalizeObject } from './scene.js';
+import { normalizeCamera } from './camera.js';
 
 export const OP_KINDS = [
   'addElement', 'updateElement', 'set', 'removeElement', 'moveElement',
   'splitElement', 'duplicateElement', 'reorder', 'addSegment', 'updateSegment',
   'removeSegment', 'setMeta', 'setFx', 'keySet', 'keyRemove', 'batch',
   'cameraKey', 'cameraRemove', 'cameraSet', 'cameraPath', 'worldSet',
+  'addCamera', 'removeCamera', 'reorderCamera', 'activateCamera',
   'objectAdd', 'objectRemove', 'objectPatch', 'objectKey', 'objectUnkey',
 ];
 
@@ -46,6 +48,38 @@ const fail = (msg) => { const e = new Error(msg); e.code = 'OP_INVALID'; throw e
 
 function allIds(p) {
   return new Set([...p.elements.map((e) => e.id), ...p.segments.map((s) => s.id)]);
+}
+
+// ---------------------------------------------------------------- camera stack
+function ensureCameraStack(p) {
+  if (!Array.isArray(p.cameras)) p.cameras = [];
+  if (!Array.isArray(p.cameraOrder)) p.cameraOrder = [];
+  if (!p.cameras.length && p.camera) p.cameras.push(p.camera);
+  const ids = new Set(p.cameras.map((c) => c.id).filter(Boolean));
+  for (const cam of p.cameras) {
+    if (!cam.id) { cam.id = newId('cam', ids); ids.add(cam.id); }
+    if (!cam.name) cam.name = `相机 ${p.cameras.indexOf(cam) + 1}`;
+  }
+  p.cameraOrder = p.cameraOrder.filter((id, i, a) => p.cameras.some((c) => c.id === id) && a.indexOf(id) === i);
+  for (const cam of p.cameras) if (!p.cameraOrder.includes(cam.id)) p.cameraOrder.push(cam.id);
+  let active = p.cameras.find((c) => c.id === p.activeCameraId);
+  if (!active) active = p.cameras.find((c) => c.id === p.camera?.id) || p.cameras[0] || null;
+  p.camera = active || null;
+  p.activeCameraId = active ? active.id : null;
+  return p;
+}
+
+function activeCamera(p, create = false) {
+  ensureCameraStack(p);
+  if (p.camera) return p.camera;
+  if (!create) return null;
+  const ids = new Set(p.cameras.map((c) => c.id));
+  const cam = normalizeCamera({ id: newId('cam', ids), name: `相机 ${p.cameras.length + 1}`, path: [] });
+  p.cameras.unshift(cam);
+  p.cameraOrder.unshift(cam.id);
+  p.activeCameraId = cam.id;
+  p.camera = cam;
+  return cam;
 }
 
 function findEl(p, id) {
@@ -317,7 +351,7 @@ export function applyOp(p, op) {
       if (!Array.isArray(op.pos) || op.pos.length !== 3) fail('cameraKey needs pos:[x,y,z]');
       const t = Math.round(Number(op.t) * 1000) / 1000;
       if (!Number.isFinite(t)) fail('cameraKey needs t');
-      const cam = p.camera || (p.camera = { path: [] });
+      const cam = activeCamera(p, true);
       // Keep the existing curve shape when only the position is being edited.
       const old = (cam.path || []).find((k) => Math.abs(k.t - t) <= 1e-4);
       cam.path = (cam.path || []).filter((k) => Math.abs(k.t - t) > 1e-4);
@@ -338,29 +372,30 @@ export function applyOp(p, op) {
       if (speed) entry.speed = speed;
       cam.path.push(entry);
       cam.path.sort((a, b) => a.t - b.t);
-      return { changed: ['camera'] };
+      return { changed: ['camera', cam.id] };
     }
 
     case 'cameraRemove': {
-      if (!p.camera) fail('no camera');
+      const cam = activeCamera(p);
+      if (!cam) fail('no camera');
       const t = Math.round(Number(op.t) * 1000) / 1000;
-      p.camera.path = (p.camera.path || []).filter((k) => Math.abs(k.t - t) > 1e-4);
-      return { changed: ['camera'] };
+      cam.path = (cam.path || []).filter((k) => Math.abs(k.t - t) > 1e-4);
+      return { changed: ['camera', cam.id] };
     }
 
     case 'cameraSet': {
-      const cam = p.camera || (p.camera = { path: [] });
+      const cam = activeCamera(p, true);
       const patch = op.patch || {};
       const next = deepMerge(cam, patch);
       Object.keys(next).forEach((k) => { cam[k] = next[k]; });
       if (Array.isArray(cam.path)) cam.path.sort((a, b) => a.t - b.t);
-      return { changed: ['camera'] };
+      return { changed: ['camera', cam.id] };
     }
 
     case 'cameraPath': {
       // Whole-path write used by the 3D viewport (drag a node / pull a handle).
       if (!Array.isArray(op.path)) fail('cameraPath needs path[]');
-      const cam = p.camera || (p.camera = { path: [] });
+      const cam = activeCamera(p, true);
       cam.path = op.path
         .filter((k) => k && Array.isArray(k.pos) && k.pos.length === 3 && Number.isFinite(Number(k.t)))
         .map((k) => ({
@@ -374,7 +409,63 @@ export function applyOp(p, op) {
           speed: normSpeed(k.speed),
         }))
         .sort((a, b) => a.t - b.t);
-      return { changed: ['camera'] };
+      return { changed: ['camera', cam.id] };
+    }
+
+    case 'addCamera': {
+      ensureCameraStack(p);
+      const src = isObj(op.camera) ? op.camera : {};
+      const taken = new Set(p.cameras.map((c) => c.id));
+      const id = src.id && !taken.has(String(src.id)) ? String(src.id) : newId('cam', taken);
+      const cam = normalizeCamera({ ...src, id });
+      cam.name = src.name || `相机 ${p.cameras.length + 1}`;
+      const at = Math.max(0, Math.min(p.cameras.length, Number.isFinite(Number(op.index)) ? Number(op.index) : 0));
+      p.cameras.splice(at, 0, cam);
+      p.cameraOrder.splice(at, 0, cam.id);
+      p.activeCameraId = cam.id;
+      p.camera = cam;
+      return { changed: ['cameras', cam.id], camera: cam };
+    }
+
+    case 'removeCamera': {
+      ensureCameraStack(p);
+      const id = op.id;
+      const i = p.cameras.findIndex((c) => c.id === id);
+      if (i < 0) fail(`no camera ${id}`);
+      const [cam] = p.cameras.splice(i, 1);
+      p.cameraOrder = p.cameraOrder.filter((x) => x !== cam.id);
+      if (p.activeCameraId === cam.id) {
+        const next = p.cameras.find((c) => c.id === p.cameraOrder[0]) || p.cameras[0] || null;
+        p.camera = next;
+        p.activeCameraId = next ? next.id : null;
+      } else if (p.camera === cam) {
+        p.camera = p.cameras.find((c) => c.id === p.activeCameraId) || p.cameras[0] || null;
+      }
+      return { changed: ['cameras', cam.id] };
+    }
+
+    case 'reorderCamera': {
+      ensureCameraStack(p);
+      const id = op.id;
+      const cam = p.cameras.find((c) => c.id === id);
+      if (!cam) fail(`no camera ${id}`);
+      const from = p.cameras.indexOf(cam);
+      const want = Number(op.index);
+      if (!Number.isFinite(want)) fail('reorderCamera needs index');
+      const to = Math.max(0, Math.min(p.cameras.length - 1, want));
+      p.cameras.splice(from, 1);
+      p.cameras.splice(to, 0, cam);
+      p.cameraOrder = p.cameras.map((c) => c.id);
+      return { changed: ['cameras', cam.id] };
+    }
+
+    case 'activateCamera': {
+      ensureCameraStack(p);
+      const cam = p.cameras.find((c) => c.id === op.id);
+      if (!cam) fail(`no camera ${op.id}`);
+      p.activeCameraId = cam.id;
+      p.camera = cam;
+      return { changed: ['camera', cam.id] };
     }
 
     case 'worldSet': {
