@@ -54,7 +54,7 @@ test('keyRemove drops one key when t is given, the whole path otherwise', () => 
   assert.deepEqual(p.elements[0].keyframes.map((k) => k.path), ['transform.x']);
 });
 
-test('splitElement moves keyframes to the right half', () => {
+test('splitElement keeps both halves looking exactly like the original', () => {
   const p = fresh();
   const { element } = applyOp(p, {
     op: 'addElement',
@@ -65,8 +65,8 @@ test('splitElement moves keyframes to the right half', () => {
   const right = p.elements.find((e) => e.start === 2);
   assert.equal(left.duration, 2);
   assert.equal(right.duration, 2);
-  assert.deepEqual(left.keyframes.map((k) => k.t), [0.5]);
-  assert.deepEqual(right.keyframes.map((k) => k.t), [1], 'right keyframes are rebased');
+  assert.deepEqual(left.keyframes.map((k) => k.t), [0.5, 3], 'left keeps the key it interpolates towards');
+  assert.deepEqual(right.keyframes.map((k) => k.t), [0.5, 3], 'key times stay absolute');
 });
 
 test('addSegment sorts and element assignment validates', () => {
