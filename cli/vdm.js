@@ -8,9 +8,9 @@ import { fileURLToPath } from 'node:url';
 import {
   paths, loadProject, saveProject, mutateProject, findProjectRoot, projectExists,
 } from '../core/store.js';
-import { createProject, normalizeProject, validateProject, DEFAULT_FX, clone } from '../core/schema.js';
+import { createProject } from '../core/schema.js';
 import { applyOps, applyOp, coerceValue } from '../core/ops.js';
-import { evalElement, motionDelta, fadeMul } from '../core/evaluate.js';
+import { evalElement } from '../core/evaluate.js';
 import { migrateProject, orthoScreen } from '../core/migrate.js';
 import { objectPose } from '../core/scene.js';
 import { applyLegacy } from '../core/legacy.js';
@@ -378,34 +378,19 @@ async function cmdBeats(root, flags) {
 }
 
 async function cmdPlan(root, flags) {
-  const p = await loadProject(root);
-  const { autoStoryboard } = await import('../engine/storyboard.js');
+  const { planProject } = await import('../engine/storyboard.js');
   const media = flags.media
     ? String(flags.media).split(',').map((s) => s.trim().replace(/^media\//, '')).map((s) => `media/${s}`)
     : (await fsp.readdir(path.join(root, 'media')).catch(() => []))
-      .filter((f) => /\.(png|jpe?g|webp|gif|mp4|webm|mov)$/i.test(f)).map((f) => `media/${f}`);
-  const base = createProject({
-    title: p.meta.title, fps: p.meta.fps, width: p.meta.width, height: p.meta.height,
-    duration: flags.duration ? num(flags.duration) : p.meta.duration,
-    background: p.meta.background, audio: p.meta.audio,
-  });
-  base.meta.beats = p.meta.beats;
-  base.meta.tempo = p.meta.tempo;
-  const { ops } = autoStoryboard({
-    project: base, media, style: flags.style || 'neon', brief: flags.brief || '',
+      .filter((f) => /\.(png|jpe?g|webp|gif|mp4|webm|mov)$/i.test(f)).sort().map((f) => `media/${f}`);
+  const style = flags.style || 'neon';
+  const { project, result } = await mutateProject(root, (p) => planProject(p, {
+    media, style, brief: typeof flags.brief === 'string' ? flags.brief : '',
     seed: num(flags.seed, 7), maxSegments: num(flags['max-segments'], 12),
-  });
-  const planned = clone(base);
-  applyOps(planned, ops);
-  planned.meta.title = p.meta.title;
-  planned.meta.audio = p.meta.audio;
-  planned.meta.beats = p.meta.beats;
-  planned.meta.tempo = p.meta.tempo;
-  planned.rev = p.rev;
-  await saveProject(root, planned, { by: 'cli' });
-  base.segments = planned.segments;
-  base.elements = planned.elements;
-  console.log(`${C.gr('✓')} 自动分镜: ${base.segments.length} 段 / ${base.elements.length} 元素  ${C.dim(`(style=${flags.style || 'neon'})`)}`);
+    duration: flags.duration ? num(flags.duration) : null,
+  }), { by: 'cli' });
+  if (flags.json) console.log(JSON.stringify({ ok: true, ...result, rev: project.rev }));
+  else console.log(`${C.gr('✓')} 自动分镜: ${result.segments} 段 / ${result.elements} 元素  ${C.dim(`(style=${style}) rev ${project.rev}`)}`);
 }
 
 async function cmdStill(root, argv, flags) {

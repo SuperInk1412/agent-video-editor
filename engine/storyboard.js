@@ -1,6 +1,6 @@
 // Auto-storyboard: beats + media pool -> visible, editable ops.
 // Deterministic (seeded) so re-running the same brief gives the same board.
-import { newId } from '../core/schema.js';
+import { applyOps } from '../core/ops.js';
 
 export const STYLE_PRESETS = {
   neon: {
@@ -35,7 +35,15 @@ function mulberry32(a) {
   };
 }
 
-const pick = (rng, arr) => arr[Math.floor(rng() * arr.length) % arr.length];
+/** seeded Fisher–Yates: every asset is used once before any repeats */
+function shuffled(rng, arr) {
+  const out = arr.slice();
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
 
 /**
  * Build a storyboard.
@@ -68,7 +76,8 @@ export function autoStoryboard({ project, media = [], style = 'neon', brief = ''
   // ---- segmentation: 8 beats per shot (4 when very slow), clamped ----
   const perSeg = beatDur * 8;
   let count = Math.max(1, Math.min(maxSegments, Math.round(duration / Math.max(1.2, perSeg))));
-  if (lines.length && count > lines.length) count = Math.max(count, 1);
+  // one shot per brief line, as long as every shot stays at least 1.2s long
+  if (lines.length > count) count = Math.max(count, Math.min(lines.length, maxSegments, Math.floor(duration / 1.2)));
   const boundaries = [];
   for (let i = 0; i < count; i++) {
     const start = (duration * i) / count;
@@ -101,9 +110,8 @@ export function autoStoryboard({ project, media = [], style = 'neon', brief = ''
   }
 
   // ---- media assignment ----
-  const images = media.filter((m) => /\.(png|jpe?g|webp|gif)$/i.test(m));
-  const videos = media.filter((m) => /\.(mp4|webm|mov)$/i.test(m));
-  const pool = images.length ? images : videos;
+  const pool = media.filter((m) => /\.(png|jpe?g|webp|gif|mp4|webm|mov)$/i.test(m));
+  const order = shuffled(rng, pool);
 
   const motions = ['in', 'out', 'left', 'right', 'drift'];
   let z = 0;
@@ -111,7 +119,7 @@ export function autoStoryboard({ project, media = [], style = 'neon', brief = ''
   segments.forEach((seg, i) => {
     const caption = (lines[i] || '').trim();
     if (pool.length) {
-      const src = pick(rng, pool);
+      const src = order[i % order.length];
       const isVid = /\.(mp4|webm|mov)$/i.test(src);
       ops.push({
         op: 'addElement',
@@ -225,6 +233,19 @@ export function autoStoryboard({ project, media = [], style = 'neon', brief = ''
 
   // clear previous content is the caller's job (it passes an emptied project)
   return { ops, segments };
+}
+
+/**
+ * Replace the 2D timeline of `project` (in place) with an auto storyboard.
+ * Everything else — title, size, audio, beats, cameras, world, 3D objects — stays.
+ */
+export function planProject(project, { media = [], style = 'neon', brief = '', seed = 7, maxSegments = 12, duration = null } = {}) {
+  project.segments = [];
+  project.elements = [];
+  if (Number(duration) > 0) project.meta.duration = Number(duration);
+  const { ops, segments } = autoStoryboard({ project, media, style, brief, seed, maxSegments });
+  applyOps(project, ops);
+  return { segments: segments.length, elements: project.elements.length };
 }
 
 /** Turn a project into a compact text summary the agent can read. */

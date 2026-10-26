@@ -11,12 +11,12 @@ import {
   paths, loadProject, saveProject, findProjectRoot, watchProject,
   ensureProjectDirs, projectExists, withLock, PROJECT_FILE,
 } from '../core/store.js';
-import { normalizeProject, createProject } from '../core/schema.js';
+import { normalizeProject } from '../core/schema.js';
 import { applyOps } from '../core/ops.js';
 import { probeMedia, mimeOf, fileExists } from './media.js';
 import { renderStill, renderVideo, blenderVersion, findBlender } from './blender.js';
 import { analyzeBeats } from './beats.js';
-import { autoStoryboard, summarizeProject, STYLE_PRESETS } from './storyboard.js';
+import { planProject, summarizeProject, STYLE_PRESETS } from './storyboard.js';
 import { AgentRunner, findDsh, CLI_PATH } from './agent.js';
 import { createLogger } from './log.js';
 import { cachedCity, is3D } from './shot.js';
@@ -518,30 +518,29 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
         const body = await readBody(req);
         const media = body.media || (await (async () => {
           const dir = path.join(projectRoot, 'media');
-          try { return (await fsp.readdir(dir)).filter((f) => /\.(png|jpe?g|webp|gif|mp4|webm|mov)$/i.test(f)).map((f) => `media/${f}`); } catch { return []; }
+          try { return (await fsp.readdir(dir)).filter((f) => /\.(png|jpe?g|webp|gif|mp4|webm|mov)$/i.test(f)).sort().map((f) => `media/${f}`); } catch { return []; }
         })());
-        pushUndo(project);
-        const base = createProject({
-          title: project.meta.title,
-          fps: project.meta.fps,
-          width: project.meta.width,
-          height: project.meta.height,
-          duration: body.duration || project.meta.duration,
-          background: project.meta.background,
-          audio: project.meta.audio,
-        });
-        base.meta.beats = project.meta.beats;
-        base.meta.tempo = project.meta.tempo;
-        const { ops } = autoStoryboard({
-          project: base, media, style: body.style || 'neon',
-          brief: body.brief || '', seed: body.seed ?? 7, maxSegments: body.maxSegments || 12,
-        });
-        let changed = [];
-        try { ({ changed } = applyOps(base, ops)); } catch (e) { history.undo.pop(); return json(res, 400, { error: e.message }); }
-        const saved = await saveAndBroadcast(base, 'plan');
-        setStep('storyboard', { status: 'done', detail: `${base.segments.length} 个分镜 · ${base.elements.length} 个元素` });
-        addArtifact({ kind: 'storyboard', label: `自动分镜 · ${base.segments.length} 段`, detail: body.style || 'neon' });
-        return json(res, 200, { ok: true, project: saved, steps: base.segments.length });
+        const opts = {
+          media, style: body.style || 'neon', brief: body.brief || '',
+          seed: body.seed ?? 7, maxSegments: body.maxSegments || 12, duration: body.duration || null,
+        };
+        let saved, made;
+        try {
+          ({ saved, result: made } = await commit('plan', (cur) => {
+            try {
+              return { project: cur, result: planProject(cur, opts) };
+            } catch (err) {
+              err.rejected = true;
+              throw err;
+            }
+          }));
+        } catch (e) {
+          if (!isRejection(e)) throw e;
+          return json(res, 400, { error: e.message });
+        }
+        setStep('storyboard', { status: 'done', detail: `${made.segments} 个分镜 · ${made.elements} 个元素` });
+        addArtifact({ kind: 'storyboard', label: `自动分镜 · ${made.segments} 段`, detail: opts.style });
+        return json(res, 200, { ok: true, project: saved, steps: made.segments });
       }
 
       // ---------------- capture (what the user sees) ----------------
