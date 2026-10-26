@@ -127,6 +127,7 @@ test('template registry: homogeneous selection pool and U states', () => {
   assert.equal(SELECTION.homogeneous, true);
   assert.equal(SELECTION.aggregate.element, 'all-properties');
   assert.equal(SELECTION.aggregate.group, 'group-properties');
+  assert.equal(SELECTION.aggregate.reverse, 'expand-to-properties');
   assert.equal(SELECTION.keyframe.mixable, false);
   assert.equal(SELECTION.keyframe.requiresClear, true);
   assert.equal(SELECTION.keyframe.marquee, 'B');
@@ -134,15 +135,21 @@ test('template registry: homogeneous selection pool and U states', () => {
   assert.deepEqual(SELECTION.u.groups, ['full', 'keyed', 'collapsed']);
 });
 
-test('template registry: camera stack order and solo scope', () => {
+test('template registry: camera stack order, add, and solo scope', () => {
   assert.equal(CAMERA_STACK.list, 'cameras');
   assert.equal(CAMERA_STACK.order, 'cameraOrder');
   assert.equal(CAMERA_STACK.active, 'activeCameraId');
   assert.equal(CAMERA_STACK.timelineOrder, 'top-over-bottom');
   assert.equal(CAMERA_STACK.blend, 'alpha');
   assert.equal(CAMERA_STACK.solo.scope, 'viewport');
+  assert.equal(CAMERA_STACK.add.source, 'toolbar-only');
+  assert.equal(CAMERA_STACK.add.position, 'top');
+  assert.equal(CAMERA_STACK.add.active, true);
   assert.equal(ELEMENTS.camera.layer.stack, true);
   assert.equal(ELEMENTS.camera.layer.solo, 'viewport');
+  assert.equal(ELEMENTS.camera.create.source, 'current-viewport');
+  assert.equal(ELEMENTS.camera.create.stack, 'top');
+  assert.equal(ELEMENTS.camera.create.active, true);
 });
 
 test('template registry: lookup helpers', () => {

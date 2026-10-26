@@ -229,7 +229,15 @@ export const ELEMENTS = {
     preview: { renderer: 'camera3d', post: 'layerQuad' },
     blender: { builder: 'blender/vdm_city.py', panorama: 'FISHEYE_EQUIDISTANT', layers: 'compositor' },
     timeline: { block: 'camera', positionRow: 'camera.path', keyableGroups: ['transform', 'lens', 'shake', 'dofMb'] },
-    create: { tool: 'create-camera' },
+    create: {
+      tool: 'create-camera',
+      source: 'current-viewport',
+      at: 'playhead',
+      pathKeys: 1,
+      look: true,
+      stack: 'top',
+      active: true,
+    },
   },
   solid: {
     type: 'solid', schemaVersion: SCHEMA_VERSION, label: '3D 物体', idPrefix: 'ob_',
@@ -287,6 +295,7 @@ export const SELECTION = {
   aggregate: {
     element: 'all-properties',
     group: 'group-properties',
+    reverse: 'expand-to-properties',
   },
   keyframe: {
     mixable: false,
@@ -307,6 +316,7 @@ export const CAMERA_STACK = {
   timelineOrder: 'top-over-bottom',
   background: 'black',
   visibility: 'visible',
+  add: { source: 'toolbar-only', position: 'top', active: true },
   solo: { scope: 'viewport', menu: 'cameraContext' },
 };
 
