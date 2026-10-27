@@ -623,7 +623,7 @@ def _build_city_geometry(scene, city):
 
 # ---------------------------------------------------------------- 2D layer
 
-def _embed_elements(scene, opts):
+def _embed_elements(scene, opts, shot=None):
     """The project's 2D elements as planes in the world (unified space).
 
     The 2D SceneBuilder (same eval_element as 2D projects) builds them in pixel
@@ -644,7 +644,35 @@ def _embed_elements(scene, opts):
     scene.collection.objects.link(rig)
     with bpy.context.temp_override(scene=scene):
         SceneBuilder(project, opts).build(scene=scene, embed=rig)
+    _carry_elements(scene, rig, (shot or {}).get('elementCarriers') or [])
     return rig
+
+
+def _carry_elements(scene, rig, carriers):
+    """Camera-parented elements: carry empty (baked camera motion since binding)
+    -> a copy of the screen rig -> the element's objects (text, plane, shadow)."""
+    from mathutils import Matrix
+    for entry in carriers:
+        eid = str(entry.get('id'))
+        frames = entry.get('frames') or []
+        if not frames:
+            continue
+        carry = bpy.data.objects.new('VDM_Carry_' + eid, None)
+        carry.rotation_mode = 'QUATERNION'
+        scene.collection.objects.link(carry)
+        for fr in frames:
+            carry.location = Vector(fr['loc'])
+            carry.rotation_quaternion = Matrix(fr['rot']).to_quaternion()
+            carry.keyframe_insert('location', frame=int(fr['f']))
+            carry.keyframe_insert('rotation_quaternion', frame=int(fr['f']))
+        screen = bpy.data.objects.new('VDM_Screen_' + eid, None)
+        screen.location = rig.location
+        screen.scale = rig.scale
+        screen.parent = carry
+        scene.collection.objects.link(screen)
+        for ob in list(rig.children):
+            if ob.name == eid or ob.name.startswith(eid + '_shadow'):
+                ob.parent = screen
 
 
 def _build_overlay(opts):
@@ -797,7 +825,7 @@ def build_shot_scene(shot, opts):
     # 2D elements: planes in the world on the screen plane (single camera); the
     # multi-camera path still lays them over the picture (see _build_overlay)
     if not opts.get('_no_overlay'):
-        _embed_elements(scene, opts)
+        _embed_elements(scene, opts, shot)
     build_compositor(scene, meta, os.path.join(opts['root'], '.vdm', 'cache', 'comp'),
                      fog=city.get('fog'),
                      backdrop=city.get('sky') if city.get('empty') else None)

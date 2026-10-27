@@ -4,6 +4,9 @@ import { evalElement } from '/core/evaluate.js';
 import { clamp } from '/core/time.js';
 import { cameraTransform, evalCamera, cameraLayers } from '/core/camera.js';
 import { Scene3D } from './preview3d.js';
+import { elementCarrier, carrierMatrix } from '/core/hierarchy.js';
+
+const IDENTITY4 = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
 
 const VERT = `#version 300 es
 in vec2 a_pos;
@@ -18,12 +21,13 @@ uniform float u_world;
 uniform mat4 u_vp;
 uniform vec4 u_px2w;
 uniform float u_z;
+uniform mat4 u_carry;   // camera-parented elements: the camera's motion since binding (identity otherwise)
 out vec2 v_uv;
 void main(){
   vec3 p = u_mat * vec3(a_pos, 1.0);
   if (u_world > 0.5) {
     vec2 q = (p.xy - u_px2w.xy) / u_px2w.z;
-    gl_Position = u_vp * vec4(q.x / 100.0, u_px2w.w - q.y / 100.0, u_z, 1.0);
+    gl_Position = u_vp * (u_carry * vec4(q.x / 100.0, u_px2w.w - q.y / 100.0, u_z, 1.0));
   } else {
     vec2 ndc = vec2(p.x / u_res.x * 2.0 - 1.0, 1.0 - p.y / u_res.y * 2.0);
     gl_Position = vec4(ndc, 0.0, 1.0);
@@ -628,6 +632,8 @@ export class Preview {
       }
     }
     out.sort((a, b) => a.el.z - b.el.z);
+    // elements parented to a camera ride along with it (screen-locked)
+    for (const L of out) if (L.el.parent) L.carry = carrierMatrix(elementCarrier(p, L.el, t));
     return out;
   }
 
@@ -712,8 +718,12 @@ export class Preview {
       const S = W / (Number(world.meta?.width) || 1920);
       const c = world.camPos;
       const dist = (L) => {
-        const x = (L.st.x || 0) / 100, y = cyW - (L.st.y || 0) / 100, z = L.st.z || 0;
-        return Math.hypot(x - c[0], y - c[1], z - c[2]);
+        let w = [(L.st.x || 0) / 100, cyW - (L.st.y || 0) / 100, L.st.z || 0];
+        if (L.carry) {
+          const m = L.carry;
+          w = [0, 1, 2].map((i) => m[i] * w[0] + m[4 + i] * w[1] + m[8 + i] * w[2] + m[12 + i]);
+        }
+        return Math.hypot(w[0] - c[0], w[1] - c[1], w[2] - c[2]);
       };
       list = layers.map((L, i) => ({ L, i, d: dist(L) }))
         .sort((a, b) => (Math.abs(a.d - b.d) > 1e-6 ? b.d - a.d : a.i - b.i))
@@ -740,7 +750,10 @@ export class Preview {
           gl.useProgram(pr.program);
           gl.uniformMatrix3fv(pr.u.u_mat, false, layer.M);
           gl.uniform2f(pr.u.u_res, W, H);
-          if (world) gl.uniform1f(pr.u.u_z, layer.st.z || 0);
+          if (world) {
+            gl.uniform1f(pr.u.u_z, layer.st.z || 0);
+            gl.uniformMatrix4fv(pr.u.u_carry, false, layer.carry || IDENTITY4);
+          }
           gl.uniform4fv(pr.u.u_uv, new Float32Array(layer.uv));
           gl.uniform1f(pr.u.u_opacity, layer.st.opacity);
           gl.uniform1f(pr.u.u_glow, layer.st.glow || layer.el.fx?.glow || 0);
@@ -753,7 +766,10 @@ export class Preview {
           gl.useProgram(pr.program);
           gl.uniformMatrix3fv(pr.u.u_mat, false, layer.M);
           gl.uniform2f(pr.u.u_res, W, H);
-          if (world) gl.uniform1f(pr.u.u_z, layer.st.z || 0);
+          if (world) {
+            gl.uniform1f(pr.u.u_z, layer.st.z || 0);
+            gl.uniformMatrix4fv(pr.u.u_carry, false, layer.carry || IDENTITY4);
+          }
           gl.uniform4fv(pr.u.u_color, new Float32Array(layer.color));
           gl.uniform2f(pr.u.u_size, layer.w, layer.h);
           gl.uniform1f(pr.u.u_radius, layer.radius);
