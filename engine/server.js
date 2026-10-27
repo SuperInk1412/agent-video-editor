@@ -13,7 +13,7 @@ import {
 } from './storage.js';
 import { projectService } from './projects.js';
 import { errorData } from '../application/errors.js';
-import { probeMedia, mimeOf, fileExists } from './media.js';
+import { probeMedia, mimeOf, fileExists, findBin } from './media.js';
 import { blenderVersion, findBlender } from './blender.js';
 import { analyzeBeats } from './beats.js';
 import { summarizeProject, STYLE_PRESETS } from './storyboard.js';
@@ -38,6 +38,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const APP_DIR = path.resolve(HERE, '..');
 const RENDERER = path.join(APP_DIR, 'app', 'renderer');
 const CORE = path.join(APP_DIR, 'core');
+let ffmpegAvailable = null; // Promise<boolean>, cached for the engine lifetime (/api/state)
 
 const json = (res, code, obj) => {
   const body = JSON.stringify(obj);
@@ -384,12 +385,15 @@ async function startOwnedServer({ root, port = 47100, open = false, onReady, imp
         let blender = null;
         try { blender = await blenderVersion(); } catch { /* not installed */ }
         const dsh = await findDsh();
+        // ffmpeg availability for the status bar; probed once per engine process
+        ffmpegAvailable ??= findBin('ffmpeg').then(() => true, () => false);
         return json(res, 200, {
           root: projectRoot,
           project,
           rev: project.rev,
           cli: CLI_PATH,
           blender,
+          ffmpeg: await ffmpegAvailable,
           agent: { available: !!dsh, running: agent.running, runId: agent.runId },
           render: renderState,
           pipeline,
