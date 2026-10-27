@@ -1,0 +1,167 @@
+/* Inspector (属性页), rotation ball, speed curve — docs/DESIGN.md §1.4. Tokens only. */
+
+/* ---------------- legacy .fld rows (still used by the 渲染 page) ---------------- */
+.fld { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; }
+.fld label { flex: 0 0 72px; color: var(--text-2); font-size: var(--fs-sm); }
+.fld.span3, .fld.span2 { flex-wrap: wrap; }
+.fld.span3 label, .fld.span2 label { flex-basis: 100%; margin-bottom: 2px; }
+.fld .ro, .insp .ro {
+  flex: 1; min-width: 0; color: var(--text-2); font-family: var(--font-mono); font-size: var(--fs-xs);
+  height: var(--h-md); line-height: calc(var(--h-md) - 2px); padding: 0 6px;
+  background: var(--field); border: 1px solid var(--border); border-radius: var(--r-sm);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* ---------------- sticky header ---------------- */
+.insp-head {
+  position: sticky; top: -10px; z-index: 3;
+  display: flex; align-items: center; gap: 6px;
+  min-height: 40px; margin: -10px -10px 0; padding: 0 6px 0 10px;
+  background: var(--surface-1); border-bottom: 1px solid var(--border);
+}
+.insp-kind { flex: 0 0 auto; }
+.insp-name {
+  flex: 0 1 auto; min-width: 32px; height: var(--h-sm); padding: 0 4px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left;
+  font-size: var(--fs-md); font-weight: 500; line-height: calc(var(--h-sm) - 2px); color: var(--text-1);
+  background: transparent; border: 1px solid transparent; border-radius: var(--r-sm);
+}
+button.insp-name { cursor: text; }
+button.insp-name:hover { background: var(--surface-2); border-color: var(--border); }
+.insp-name.static { cursor: default; }
+.insp-head input.insp-rename { flex: 1 1 auto; min-width: 0; height: var(--h-sm); font-size: var(--fs-md); }
+.insp-id {
+  flex: 0 10 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--text-3); font-family: var(--font-mono); font-size: var(--fs-xs);
+}
+.insp-actions { margin-left: auto; display: flex; gap: 2px; flex: 0 0 auto; }
+.insp-actions.wide { margin: 10px 0; }
+.insp-head + .hint.pad { padding: 8px 0 6px; }
+
+/* ---------------- collapsible sections ---------------- */
+.insp .sec { margin: 0 -10px; border-bottom: 1px solid var(--border-subtle); }
+.insp .sec-head {
+  height: 28px; padding: 0 10px 0 6px; gap: 4px;
+  font-size: var(--fs-sm); font-weight: 500; color: var(--text-2);
+}
+.insp .sec-head:hover { background: var(--surface-2); color: var(--text-1); }
+.insp .sec-head:focus-visible { outline: none; box-shadow: inset var(--focus-ring); }
+.insp .sec-chev { flex: 0 0 auto; color: var(--text-3); transition: transform var(--dur) var(--ease); }
+.insp .sec.collapsed .sec-chev { transform: rotate(-90deg); }
+.insp .sec-count {
+  color: var(--text-3); font-family: var(--font-mono); font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+.insp .sec-tag {
+  display: inline-flex; align-items: center; height: 18px; padding: 0 5px; margin-left: 2px;
+  font-size: var(--fs-xs); color: var(--edit); background: var(--edit-bg);
+  border: 1px solid var(--edit-border); border-radius: var(--r-sm);
+}
+.insp .sec-body { padding: 2px 10px 8px; }
+.insp .sec-body > .hint { margin: 2px 0 6px; }
+.insp .sec-body > .row-btns { margin: 4px 0; }
+
+/* ---------------- property rows: label | control | ◆ ---------------- */
+.insp .prop {
+  display: grid; align-items: center;
+  grid-template-columns: 72px minmax(0, 1fr) 20px; gap: 6px;
+  min-height: var(--h-md); margin: 0 0 4px;
+}
+.insp .prop > label { line-height: var(--h-md); }
+.insp .prop > select,
+.insp .prop > input[type="text"],
+.insp .prop > textarea { width: 100%; min-width: 0; }
+.insp .prop > select { padding: 0 4px; }
+.insp .prop.tall { align-items: start; }
+.insp .prop.tall > textarea { min-height: 48px; padding: 4px 7px; font-size: var(--fs-sm); }
+.insp .prop .chk { display: flex; align-items: center; height: var(--h-md); }
+.insp .prop .chk input { margin: 0; width: 14px; height: 14px; }
+.insp .kf-slot { width: 20px; }
+
+/* number box: [axis] value [unit] */
+.insp .nbox {
+  display: flex; align-items: center; gap: 3px; min-width: 0; height: var(--h-md); padding: 0 5px;
+  background: var(--field); border: 1px solid var(--border); border-radius: var(--r-sm); cursor: text;
+  transition: border-color var(--dur-fast);
+}
+.insp .nbox:hover { border-color: var(--border-strong); }
+.insp .nbox:focus-within { border-color: var(--accent-border); box-shadow: var(--focus-ring); }
+.insp .nbox input {
+  flex: 1 1 auto; width: 100%; min-width: 0; height: 100%; padding: 0;
+  background: transparent; border: 0; border-radius: 0; box-shadow: none;
+  font-family: var(--font-mono); font-size: var(--fs-sm); font-variant-numeric: tabular-nums;
+}
+.insp .nbox input:focus { border: 0; box-shadow: none; }
+.insp .nbox .ax {
+  flex: 0 0 auto; font-size: var(--fs-xs); font-weight: 600; color: var(--text-3); user-select: none;
+}
+.insp .nbox .ax-x { color: var(--axis-x); }
+.insp .nbox .ax-y { color: var(--axis-y); }
+.insp .nbox .ax-z { color: var(--axis-z); }
+.insp .nbox .unit { flex: 0 0 auto; font-size: var(--fs-xs); color: var(--text-3); user-select: none; }
+
+.insp .vec { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; min-width: 0; }
+.insp .vec.vec-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.insp .vec.vec-1 { grid-template-columns: minmax(0, 1fr); }
+
+/* colour: 24×24 swatch + hex */
+.insp .color-ctl { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.insp input[type="color"].swatch {
+  flex: 0 0 24px; width: 24px; height: 24px; padding: 0; cursor: pointer;
+  background: transparent; border: 1px solid var(--border-strong); border-radius: var(--r-sm);
+}
+.insp input[type="color"].swatch::-webkit-color-swatch-wrapper { padding: 0; }
+.insp input[type="color"].swatch::-webkit-color-swatch { border: 0; border-radius: 3px; }
+.insp .color-ctl input.hex {
+  flex: 1 1 auto; width: 100%; min-width: 0;
+  font-family: var(--font-mono); font-size: var(--fs-sm); text-transform: lowercase;
+}
+.insp .color-ctl input.hex.invalid { border-color: var(--danger); }
+
+/* control + trailing button (seed, beats) */
+.insp .ctl-with-btn { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.insp .ctl-with-btn > .nbox, .insp .ctl-with-btn > .ro { flex: 1 1 auto; }
+.insp .ctl-with-btn > button { flex: 0 0 auto; height: var(--h-md); }
+
+/* ---------------- ◆ keyframe button: none / animated / on key ---------------- */
+.insp .kf-btn {
+  display: grid; place-items: center; width: 20px; height: 20px; padding: 0;
+  font-size: var(--fs-sm); line-height: 1; color: var(--text-3);
+  background: transparent; border: 1px solid transparent; border-radius: var(--r-sm);
+}
+.insp .kf-btn:hover { color: var(--keyframe); background: var(--keyframe-bg); border-color: transparent; }
+.insp .kf-btn.anim { color: var(--keyframe); }
+.insp .kf-btn.on { color: var(--keyframe); background: var(--keyframe-bg); border-color: var(--keyframe-border); }
+
+/* ---------------- keyframe list ---------------- */
+.kf-list { display: flex; flex-direction: column; gap: 2px; }
+.kf-row {
+  display: grid; grid-template-columns: 40px minmax(0, 1fr) minmax(0, 1fr) 68px 22px 22px;
+  gap: 4px; align-items: center; min-height: var(--h-md); padding: 0 2px 0 4px;
+  font-size: var(--fs-xs); border-radius: var(--r-sm);
+}
+.kf-row:hover { background: var(--surface-2); }
+.kf-row.at { background: var(--keyframe-bg); }
+.kf-row.outside { opacity: .55; }
+.kf-row .kf-t {
+  padding: 0; height: auto; text-align: left; cursor: pointer;
+  font-family: var(--font-mono); font-size: var(--fs-xs); font-variant-numeric: tabular-nums;
+  color: var(--accent); background: transparent; border: 0;
+}
+.kf-row .kf-t:hover { background: transparent; text-decoration: underline; }
+.kf-p { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kf-v {
+  color: var(--keyframe); font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.kf-row .kf-ease { width: 100%; min-width: 0; height: var(--h-sm); padding: 0 2px; font-size: var(--fs-xs); }
+
+/* ---------------- footer actions (segment) ---------------- */
+.insp-foot { margin: 10px 0; }
+
+/* ---------------- rotation ball / speed curve ---------------- */
+.rotball-wrap { display: flex; justify-content: center; padding: 4px 0; }
+.rotball { display: block; cursor: crosshair; border-radius: 50%; }
+.speed-wrap { padding: 4px 0 8px; border-radius: var(--r-sm); background: var(--surface-0); margin: 2px 0 6px; }
+.speedcurve { display: block; margin: 0 auto; }
+.speed-wrap .row-btns { padding: 2px 6px 0; display: flex; gap: 4px; margin: 4px 0 0; }

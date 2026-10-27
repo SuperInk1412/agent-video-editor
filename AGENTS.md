@@ -8,6 +8,7 @@
 1. `docs/ARCHITECTURE.md` —— 进程模型、数据流、为什么这样分层
 2. `docs/SPEC-PROJECT.md` —— 项目 JSON 格式与**求值语义**（预览/Blender 必须一致）
 3. `docs/SPEC-CLI.md` —— `vdm` 命令面
+4. `docs/DESIGN.md` —— UI 设计规范（改任何界面前先读：布局、token、组件、快捷键）
 
 ## 硬约束
 

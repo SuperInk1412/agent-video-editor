@@ -5,7 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>VedioMaker</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='26' x='6' font-size='26' fill='%2317d9ff'%3E%E2%97%86%3C/text%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/app/renderer/app.css">
+  <link rel="stylesheet" href="/app/renderer/css/tokens.css">
+  <link rel="stylesheet" href="/app/renderer/css/base.css">
+  <link rel="stylesheet" href="/app/renderer/css/components.css">
+  <link rel="stylesheet" href="/app/renderer/css/shell.css">
+  <link rel="stylesheet" href="/app/renderer/css/inspector.css">
+  <link rel="stylesheet" href="/app/renderer/css/agent.css">
+  <link rel="stylesheet" href="/app/renderer/css/assets.css">
+  <link rel="stylesheet" href="/app/renderer/css/timeline.css">
+  <link rel="stylesheet" href="/app/renderer/css/dialogs.css">
 </head>
 <body>
   <svg class="icon-sprite" aria-hidden="true">
@@ -33,15 +41,80 @@
     <symbol id="i-text" viewBox="0 0 16 16">
       <path d="M3 4h10M8 4v9M5.8 13h4.4"/>
     </symbol>
+    <symbol id="i-pointer" viewBox="0 0 16 16"><path d="M4 2.5v10l2.8-2.6 1.9 4 1.7-.8-1.9-3.9h3.9z"/></symbol>
+    <symbol id="i-move" viewBox="0 0 16 16"><path d="M5.5 9.5v-5a1 1 0 0 1 2 0V8M7.5 7.5v-4a1 1 0 0 1 2 0V8M9.5 8V4.5a1 1 0 0 1 2 0V8M11.5 8V6a1 1 0 0 1 2 0v4.5a4 4 0 0 1-4 4H8.3a3.6 3.6 0 0 1-2.9-1.5l-2.2-2.9a1.1 1.1 0 0 1 1.7-1.4l.6.8"/></symbol>
+    <symbol id="i-camera" viewBox="0 0 16 16"><rect x="1.75" y="4.5" width="9" height="7" rx="1.5"/><path d="m10.75 7 3.5-2v6l-3.5-2"/></symbol>
+    <symbol id="i-square" viewBox="0 0 16 16"><rect x="3" y="3" width="10" height="10" rx="1.5"/></symbol>
+    <symbol id="i-cube" viewBox="0 0 16 16"><path d="M2.5 5.5l3-3h8v8l-3 3h-8z"/><path d="M2.5 5.5h8v8M10.5 5.5l3-3"/></symbol>
+    <symbol id="i-music" viewBox="0 0 16 16"><path d="M6 12V3.5l7-1.5v8.5"/><circle cx="4.5" cy="12" r="1.5"/><circle cx="11.5" cy="10.5" r="1.5"/></symbol>
+    <symbol id="i-undo" viewBox="0 0 16 16"><path d="M5.5 3 2.5 6l3 3"/><path d="M2.5 6H9a3.75 3.75 0 0 1 0 7.5H6"/></symbol>
+    <symbol id="i-redo" viewBox="0 0 16 16"><path d="m10.5 3 3 3-3 3"/><path d="M13.5 6H7a3.75 3.75 0 0 0 0 7.5h3"/></symbol>
+    <symbol id="i-play" viewBox="0 0 16 16"><path d="M5 3.3v9.4a.6.6 0 0 0 .9.5l7.3-4.7a.6.6 0 0 0 0-1L5.9 2.8a.6.6 0 0 0-.9.5z" fill="currentColor"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 16 16"><rect x="4" y="3" width="2.5" height="10" rx=".5" fill="currentColor"/><rect x="9.5" y="3" width="2.5" height="10" rx=".5" fill="currentColor"/></symbol>
+    <symbol id="i-step-back" viewBox="0 0 16 16"><path d="M10.5 4v8L5 8z" fill="currentColor"/></symbol>
+    <symbol id="i-step-fwd" viewBox="0 0 16 16"><path d="M5.5 4v8L11 8z" fill="currentColor"/></symbol>
+    <symbol id="i-skip-start" viewBox="0 0 16 16"><path d="M3.5 3.5v9"/><path d="M12.5 4v8L6.5 8z" fill="currentColor"/></symbol>
+    <symbol id="i-skip-end" viewBox="0 0 16 16"><path d="M12.5 3.5v9"/><path d="M3.5 4v8l6-4z" fill="currentColor"/></symbol>
+    <symbol id="i-repeat" viewBox="0 0 16 16"><path d="M2.5 7.5V7a3 3 0 0 1 3-3h8"/><path d="m11.5 2 2 2-2 2"/><path d="M13.5 8.5V9a3 3 0 0 1-3 3h-8"/><path d="m4.5 14-2-2 2-2"/></symbol>
+    <symbol id="i-grid" viewBox="0 0 16 16"><rect x="2.5" y="2.5" width="11" height="11" rx="1"/><path d="M6.17 2.5v11M9.83 2.5v11M2.5 6.17h11M2.5 9.83h11"/></symbol>
+    <symbol id="i-safe-frame" viewBox="0 0 16 16"><rect x="1.75" y="3" width="12.5" height="10" rx="1"/><rect x="4" y="5" width="8" height="6" stroke-dasharray="1.5 1.5"/><path d="M8 7v2M7 8h2"/></symbol>
+    <symbol id="i-search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.25"/><path d="m10.2 10.2 3.3 3.3"/></symbol>
+    <symbol id="i-filter" viewBox="0 0 16 16"><path d="M2.5 3.5h11l-4.25 5v4.5l-2.5 1.25V8.5z"/></symbol>
+    <symbol id="i-magnet" viewBox="0 0 16 16"><path d="M3.5 2.5V8a4.5 4.5 0 0 0 9 0V2.5h-3V8a1.5 1.5 0 0 1-3 0V2.5z"/><path d="M3.5 5.5h3M9.5 5.5h3"/></symbol>
+    <symbol id="i-scissors" viewBox="0 0 16 16"><circle cx="4.5" cy="11.5" r="2"/><circle cx="11.5" cy="11.5" r="2"/><path d="M5.9 10.1 12.5 2.5M10.1 10.1 3.5 2.5"/></symbol>
+    <symbol id="i-curve" viewBox="0 0 16 16"><path d="M2.5 12.5C9 12.5 7 3.5 13.5 3.5"/><circle cx="2.5" cy="12.5" r="1.1"/><circle cx="13.5" cy="3.5" r="1.1"/></symbol>
+    <symbol id="i-zoom-in" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.25"/><path d="m10.2 10.2 3.3 3.3M5 7h4M7 5v4"/></symbol>
+    <symbol id="i-zoom-out" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.25"/><path d="m10.2 10.2 3.3 3.3M5 7h4"/></symbol>
+    <symbol id="i-fit" viewBox="0 0 16 16"><path d="M2.5 6V3.5a1 1 0 0 1 1-1H6M10 2.5h2.5a1 1 0 0 1 1 1V6M13.5 10v2.5a1 1 0 0 1-1 1H10M6 13.5H3.5a1 1 0 0 1-1-1V10"/><path d="M5.5 8h5M5.5 8l1.5-1.5M5.5 8 7 9.5M10.5 8 9 6.5M10.5 8 9 9.5"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></symbol>
+    <symbol id="i-upload" viewBox="0 0 16 16"><path d="M8 10.5v-8M4.5 6 8 2.5 11.5 6"/><path d="M2.5 10.5v2a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-2"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 16 16"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5V4A1.5 1.5 0 0 0 9 2.5H4A1.5 1.5 0 0 0 2.5 4v5A1.5 1.5 0 0 0 4 10.5h1.5"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 16 16"><path d="M2.5 4.5h11M6.5 4.5V3a.5.5 0 0 1 .5-.5h2a.5.5 0 0 1 .5.5v1.5M4 4.5l.6 8.1a1 1 0 0 0 1 .9h4.8a1 1 0 0 0 1-.9l.6-8.1M6.75 7v4M9.25 7v4"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 16 16"><path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z"/><circle cx="8" cy="8" r="2"/></symbol>
+    <symbol id="i-eye-off" viewBox="0 0 16 16"><path d="M6.6 3.7A6.6 6.6 0 0 1 8 3.5c4 0 6.5 4.5 6.5 4.5a11 11 0 0 1-1.6 2.1M10.9 11.4A6.3 6.3 0 0 1 8 12.5c-4 0-6.5-4.5-6.5-4.5a11.4 11.4 0 0 1 2.6-3.1M6.6 6.6a2 2 0 0 0 2.8 2.8M2.5 2.5l11 11"/></symbol>
+    <symbol id="i-chevron-down" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4"/></symbol>
+    <symbol id="i-chevron-right" viewBox="0 0 16 16"><path d="m6 4 4 4-4 4"/></symbol>
+    <symbol id="i-chevron-left" viewBox="0 0 16 16"><path d="m10 4-4 4 4 4"/></symbol>
+    <symbol id="i-x" viewBox="0 0 16 16"><path d="m4 4 8 8M12 4l-8 8"/></symbol>
+    <symbol id="i-more" viewBox="0 0 16 16"><circle cx="3.5" cy="8" r=".6" fill="currentColor"/><circle cx="8" cy="8" r=".6" fill="currentColor"/><circle cx="12.5" cy="8" r=".6" fill="currentColor"/></symbol>
+    <symbol id="i-command" viewBox="0 0 16 16"><path d="M6 6h4v4H6z"/><path d="M6 6H4.5A1.5 1.5 0 1 1 6 4.5zM10 6V4.5A1.5 1.5 0 1 1 11.5 6zM10 10h1.5a1.5 1.5 0 1 1-1.5 1.5zM6 10v1.5A1.5 1.5 0 1 1 4.5 10z"/></symbol>
+    <symbol id="i-help" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.25"/><path d="M6.2 6.3a1.9 1.9 0 0 1 3.7.5c0 1.3-1.9 1.6-1.9 2.7"/><circle cx="8" cy="11.4" r=".4" fill="currentColor"/></symbol>
+    <symbol id="i-film" viewBox="0 0 16 16"><rect x="2.5" y="2.5" width="11" height="11" rx="1.5"/><path d="M5.5 2.5v11M10.5 2.5v11M2.5 5.5h3M2.5 8h3M2.5 10.5h3M10.5 5.5h3M10.5 8h3M10.5 10.5h3"/></symbol>
+    <symbol id="i-photo" viewBox="0 0 16 16"><path d="M2.5 5.5a1 1 0 0 1 1-1h1.8l1-1.5h3.4l1 1.5h1.8a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1z"/><circle cx="8" cy="8.5" r="2.25"/></symbol>
+    <symbol id="i-terminal" viewBox="0 0 16 16"><rect x="1.75" y="2.75" width="12.5" height="10.5" rx="1.5"/><path d="m4.5 6 2 2-2 2M8 10.5h3.5"/></symbol>
+    <symbol id="i-sparkles" viewBox="0 0 16 16"><path d="M6.5 2.5 7.6 5.9 11 7 7.6 8.1 6.5 11.5 5.4 8.1 2 7 5.4 5.9z"/><path d="M12 10v3.5M10.25 11.75h3.5"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 16 16"><path d="M2 4.5a1 1 0 0 1 1-1h3l1.5 1.5H13a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1z"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 16 16"><path d="M13.5 8A5.5 5.5 0 1 1 8 2.5c1.5 0 2.9.6 4 1.6l1.5 1.4"/><path d="M13.5 2.5v3h-3"/></symbol>
+    <symbol id="i-check" viewBox="0 0 16 16"><path d="m3 8.5 3.25 3.25L13 5"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 16 16"><path d="M8 2.5 14 13H2z"/><path d="M8 6.5v3"/><circle cx="8" cy="11.2" r=".4" fill="currentColor"/></symbol>
+    <symbol id="i-info" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.25"/><path d="M8 7.5V11"/><circle cx="8" cy="5.2" r=".4" fill="currentColor"/></symbol>
+    <symbol id="i-layers" viewBox="0 0 16 16"><path d="m8 2 6 3-6 3-6-3z"/><path d="m2 8 6 3 6-3M2 11l6 3 6-3"/></symbol>
+    <symbol id="i-assets" viewBox="0 0 16 16"><rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="9" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="2.5" y="9" width="4.5" height="4.5" rx="1"/><rect x="9" y="9" width="4.5" height="4.5" rx="1"/></symbol>
+    <symbol id="i-sliders" viewBox="0 0 16 16"><path d="M2.5 4.5h6M11.5 4.5h2M2.5 11.5h2M7.5 11.5h6"/><circle cx="10" cy="4.5" r="1.5"/><circle cx="6" cy="11.5" r="1.5"/></symbol>
+    <symbol id="i-send" viewBox="0 0 16 16"><path d="M14 2 7 9"/><path d="M14 2 9.5 14 7 9 2 6.5z"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 16 16"><rect x="3.5" y="3.5" width="9" height="9" rx="1.5" fill="currentColor"/></symbol>
+    <symbol id="i-keyframe" viewBox="0 0 16 16"><path d="M8 2.5 13.5 8 8 13.5 2.5 8z"/></symbol>
   </svg>
   <div id="app">
     <header id="top">
-      <div class="brand"><span class="logo">◆</span> <b>VedioMaker</b> <span class="ver">0.1</span></div>
-      <div id="tools" class="toolbar">
-        <button id="toolSelect" class="tool on" title="选择工具 (V)">↖</button>
-        <button id="toolCamera" class="tool" title="新建相机（当前视口机位）">▣</button>
+      <div class="top-left">
+        <svg class="ic logo" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-keyframe"/></svg>
+        <button id="btnProject" class="btn ghost proj-btn" aria-haspopup="menu" aria-label="项目" data-tip="项目">
+          <span id="projTitle">—</span>
+          <svg class="ic ic-sm" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-chevron-down"/></svg>
+        </button>
+        <span class="vrule"></span>
+        <button id="btnUndo" class="icon-btn" aria-label="撤销" data-tip="撤销" data-kbd="Ctrl+Z"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-undo"/></svg></button>
+        <button id="btnRedo" class="icon-btn" aria-label="重做" data-tip="重做" data-kbd="Ctrl+Shift+Z"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-redo"/></svg></button>
+      </div>
+      <div id="tools" class="toolbar top-center">
+        <button id="toolSelect" class="tool on" aria-pressed="true" aria-label="选择" data-tip="选择" data-kbd="V"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-pointer"/></svg><span class="tool-label">选择</span></button>
+        <span class="tool-sep"></span>
+        <button id="toolCamera" class="tool" aria-label="相机" data-tip="相机&#10;用当前视口机位新建相机"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-camera"/></svg><span class="tool-label">相机</span></button>
+        <button id="toolText" class="tool" aria-label="文字" data-tip="文字&#10;在播放头处新建文字"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-text"/></svg><span class="tool-label">文字</span></button>
+        <button id="toolShape" class="tool" aria-label="色块" data-tip="色块&#10;在播放头处新建色块"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-square"/></svg><span class="tool-label">色块</span></button>
         <div class="tool-wrap">
-          <button id="tool3D" class="tool" title="新建 3D 物体 / 图片 / 视频 / 文字">▦</button>
+          <button id="tool3D" class="tool" aria-haspopup="menu" aria-label="3D" data-tip="3D&#10;新建 3D 物体 / 图片 / 视频 / 文字" data-kbd="Shift+A"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-cube"/></svg><span class="tool-label">3D</span><svg class="ic ic-sm caret" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-chevron-down"/></svg></button>
           <div id="tool3DMenu" class="tool-menu" hidden>
             <div class="tool-menu-label">3D 物体</div>
             <button data-primitive="box"><svg class="mi" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-box"/></svg><span>立方体</span></button>
@@ -49,46 +122,56 @@
             <button data-primitive="pen"><svg class="mi" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-pen"/></svg><span>钢笔</span></button>
             <div class="tool-menu-sep"></div>
             <div class="tool-menu-label">场景元素</div>
-            <button data-add="empty" title="只做变换和父级，不进成片"><svg class="mi" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-empty"/></svg><span>空元素</span></button>
-            <button data-add="image" title="从 media/ 里选择图片"><svg class="mi" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-image"/></svg><span>图片…</span></button>
-            <button data-add="video" title="从 media/ 里选择视频"><svg class="mi" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-video"/></svg><span>视频…</span></button>
-            <button data-add="text" title="带厚度的 3D 文字"><svg class="mi" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-text"/></svg><span>3D 文字</span></button>
+            <button data-add="empty" data-tip="只做变换和父级，不进成片"><svg class="mi" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-empty"/></svg><span>空元素</span></button>
+            <button data-add="image" data-tip="从 media/ 里选择图片"><svg class="mi" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-image"/></svg><span>图片…</span></button>
+            <button data-add="video" data-tip="从 media/ 里选择视频"><svg class="mi" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-video"/></svg><span>视频…</span></button>
+            <button data-add="text" data-tip="带厚度的 3D 文字"><svg class="mi" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-text"/></svg><span>3D 文字</span></button>
           </div>
         </div>
-        <span class="tool-sep"></span>
-        <button id="toolText" class="tool" title="在播放头处新建文字">T</button>
-        <button id="toolShape" class="tool" title="在播放头处新建色块">◼</button>
       </div>
-      <div class="proj"><span id="projTitle">—</span><span class="sep">/</span><span id="projMeta" class="dim"></span></div>
-      <div class="transport">
-        <button id="btnUndo" title="撤销 (Ctrl+Z)">↶</button>
-        <button id="btnRedo" title="重做 (Ctrl+Shift+Z)">↷</button>
-        <span class="vrule"></span>
-        <button id="btnPrev" title="上一帧 (←)">⏴</button>
-        <button id="btnPlay" title="播放 / 暂停 (Space)">▶</button>
-        <button id="btnNext" title="下一帧 (→)">⏵</button>
-        <span id="timecode" class="tc">0.00s</span>
-      </div>
-      <div class="actions">
-        <span id="renderBadge" class="badge" hidden></span>
-        <button id="btnProject" title="打开项目 (Ctrl+O)">项目</button>
-        <button id="btnRestart" title="快速重启 (Ctrl+Shift+R)">重启</button>
-        <select id="renderScale" title="渲染分辨率">
-          <option value="0.5">50%</option>
-          <option value="1">100%</option>
-        </select>
-        <button id="btnEditMode" title="编辑视口 / 镜头视角 (Tab)">编辑视口</button>
-        <button id="btnStill" title="用 Blender 渲染当前时刻的一帧">预览帧</button>
-        <button id="btnRender" class="primary">渲染成片</button>
+      <div class="top-right">
+        <div id="viewSeg" class="seg" role="group" aria-label="视图" hidden>
+          <button id="btnViewEdit" data-view="edit" aria-pressed="false" data-tip="编辑视口&#10;自由机位，可拖动元素和相机路径" data-kbd="Tab">编辑视口</button>
+          <button id="btnViewCam" data-view="cam" aria-pressed="true" data-tip="镜头视角&#10;按成片相机看画面" data-kbd="Tab">镜头视角</button>
+        </div>
+        <button id="btnCommand" class="icon-btn" aria-label="命令面板" data-tip="命令面板" data-kbd="Ctrl+K"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-command"/></svg></button>
+        <button id="btnStill" class="btn" data-tip="预览帧&#10;用 Blender 渲染当前时刻的一帧"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-photo"/></svg><span>预览帧</span></button>
+        <div class="split-btn">
+          <button id="btnRender" class="btn primary" data-tip="渲染成片&#10;用 Blender 渲染整条时间线"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-film"/></svg><span>渲染成片</span></button>
+          <button id="btnRenderMenu" class="btn primary" aria-haspopup="menu" aria-label="渲染选项" data-tip="渲染选项&#10;分辨率、渲染当前段、取消"><svg class="ic ic-sm" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-chevron-down"/></svg></button>
+        </div>
       </div>
     </header>
 
     <main>
       <aside id="left">
-        <div class="panel" id="panelMedia"></div>
+        <div class="tabs" role="tablist" aria-label="左栏" data-tabs="left">
+          <button role="tab" data-tab="media" class="on" aria-selected="true" aria-controls="panelMedia">资源</button>
+          <button role="tab" data-tab="layers" aria-selected="false" aria-controls="panelLayers">图层</button>
+        </div>
+        <div class="panel" id="panelMedia" role="tabpanel"></div>
+        <div class="panel" id="panelLayers" role="tabpanel" hidden></div>
       </aside>
+      <div id="splitLeft" class="splitter" role="separator" aria-orientation="vertical" aria-label="调整左栏宽度（双击折叠）"></div>
 
       <section id="center">
+        <div id="stageToolbar">
+          <div class="st-left">
+            <span id="viewBadge" class="badge">镜头视角</span>
+            <div id="viewMode" class="seg" role="group" aria-label="编辑视口工具" hidden>
+              <button data-mode="select" aria-pressed="true" data-tip="选择&#10;点选、拖动元素和路径" data-kbd="Alt">选择</button>
+              <button data-mode="move" aria-pressed="false" data-tip="移动&#10;拖动环绕、滚轮推拉、WASDQE 飞行" data-kbd="Alt">移动</button>
+            </div>
+          </div>
+          <div class="st-mid">
+            <button id="btnGrid" class="btn ghost mini" aria-pressed="true" data-tip="网格" data-kbd="G"><svg class="ic ic-sm" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-grid"/></svg><span>网格</span></button>
+            <button id="btnSafe" class="btn ghost mini" aria-pressed="false" data-tip="安全框&#10;90% 字幕安全框 · 93% 动作安全框 · 中心十字（不进成片）"><svg class="ic ic-sm" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-safe-frame"/></svg><span>安全框</span></button>
+            <span id="stageHint" class="hint"></span>
+          </div>
+          <div class="st-right">
+            <span id="stageMeta" class="mono dim"></span>
+          </div>
+        </div>
         <div id="stageWrap">
           <div id="stageBox">
             <canvas id="stage"></canvas>
@@ -97,34 +180,74 @@
               <polygon id="selPoly" points=""></polygon>
             </svg>
             <div id="selLabel"></div>
+            <svg id="safeArea" viewBox="0 0 1920 1080" preserveAspectRatio="none" aria-hidden="true" hidden>
+              <rect class="sa-action" x="67.2" y="37.8" width="1785.6" height="1004.4"></rect>
+              <rect class="sa-title" x="96" y="54" width="1728" height="972"></rect>
+              <path class="sa-cross" d="M920 540H1000M960 500V580"></path>
+            </svg>
             <div id="inlineTextLayer" class="inline-text-layer" hidden>
               <textarea id="inlineTextArea" wrap="off" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
             </div>
           </div>
         </div>
-        <div id="stageBar">
-          <span id="stageTime" class="mono">0.00 / 0.00s</span>
-          <span id="viewMode" class="mode-badge" hidden>选择</span>
-          <span id="selInfo" class="sel-info" hidden></span>
-          <span id="stageHint" class="hint">Tab 编辑视口 · Alt 切换 选择/移动相机 · Ctrl 吸附 0.5m · G 网格 · 右键菜单 · 空格播放</span>
+        <div id="transport">
+          <button id="btnFirst" class="icon-btn" aria-label="首帧" data-tip="首帧" data-kbd="Home"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-skip-start"/></svg></button>
+          <button id="btnPrev" class="icon-btn" aria-label="上一帧" data-tip="上一帧&#10;Shift+← 后退 1 秒" data-kbd="←"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-step-back"/></svg></button>
+          <button id="btnPlay" class="icon-btn lg" aria-label="播放" data-tip="播放 / 暂停" data-kbd="Space"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-play"/></svg></button>
+          <button id="btnNext" class="icon-btn" aria-label="下一帧" data-tip="下一帧&#10;Shift+→ 前进 1 秒" data-kbd="→"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-step-fwd"/></svg></button>
+          <button id="btnLast" class="icon-btn" aria-label="末帧" data-tip="末帧" data-kbd="End"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-skip-end"/></svg></button>
+          <button id="btnLoop" class="icon-btn" aria-label="循环播放" aria-pressed="false" data-tip="循环播放" data-kbd="L"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-repeat"/></svg></button>
+          <span class="vrule"></span>
+          <span id="timecode" class="tc" role="button" tabindex="0" aria-label="当前时间（点击输入跳转）" data-tip="当前时间&#10;点击输入：1.8 · 1:02.5 · 54f"></span>
+          <span id="tcDuration" class="tc-dur mono"></span>
+          <span class="tr-spacer"></span>
+          <span id="selInfo" class="sel-info" hidden><span id="selType" class="badge"></span><span id="selName" class="sel-name"></span></span>
+          <button id="btnHelp" class="icon-btn" aria-label="快捷键速查" data-tip="快捷键速查" data-kbd="?"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-help"/></svg></button>
         </div>
       </section>
 
+      <div id="splitRight" class="splitter" role="separator" aria-orientation="vertical" aria-label="调整右栏宽度（双击折叠）"></div>
       <aside id="right">
-        <div class="tabs" data-tabs="right">
-          <button data-tab="insp" class="on">检查器</button>
-          <button data-tab="ai">AI</button>
-          <button data-tab="pipe">流水线</button>
-          <button data-tab="logs">日志</button>
+        <div class="tabs" role="tablist" aria-label="右栏" data-tabs="right">
+          <button role="tab" data-tab="insp" class="on" aria-selected="true" aria-controls="panelInsp">属性</button>
+          <button role="tab" data-tab="ai" aria-selected="false" aria-controls="panelAI">AI</button>
+          <button role="tab" data-tab="pipe" aria-selected="false" aria-controls="panelPipe">渲染</button>
         </div>
-        <div class="panel" id="panelInsp"></div>
-        <div class="panel" id="panelAI" hidden></div>
-        <div class="panel" id="panelPipe" hidden></div>
-        <div class="panel" id="panelLogs" hidden></div>
+        <div class="panel" id="panelInsp" role="tabpanel"></div>
+        <div class="panel" id="panelAI" role="tabpanel" hidden></div>
+        <div class="panel" id="panelPipe" role="tabpanel" hidden></div>
       </aside>
+
+      <button id="edgeLeft" class="edge-handle left" aria-label="展开左栏" data-tip="展开左栏" hidden><svg class="ic ic-sm" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-chevron-right"/></svg></button>
+      <button id="edgeRight" class="edge-handle right" aria-label="展开右栏" data-tip="展开右栏" hidden><svg class="ic ic-sm" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-chevron-left"/></svg></button>
     </main>
 
+    <div id="splitTimeline" class="splitter row" role="separator" aria-orientation="horizontal" aria-label="调整时间轴高度（双击恢复默认）"></div>
     <footer id="timeline"></footer>
+
+    <footer id="statusbar">
+      <div class="sb-left">
+        <span id="sbConn" class="sb-conn warn" data-tip="引擎连接"><span class="dot"></span><span class="sb-text">连接中</span></span>
+        <span id="sbBlender" class="badge" data-tip="Blender">Blender</span>
+        <span id="sbFfmpeg" class="badge" data-tip="ffmpeg">ffmpeg</span>
+        <span id="sbAI" class="badge" data-tip="AI">AI</span>
+      </div>
+      <div id="sbRender" class="sb-render" hidden>
+        <span id="sbRenderText" class="mono"></span>
+        <span class="progress"><span id="sbRenderBar" class="bar"></span></span>
+        <button id="sbRenderCancel" class="icon-btn mini" aria-label="取消渲染" data-tip="取消渲染"><svg class="ic ic-sm" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-x"/></svg></button>
+      </div>
+      <div class="sb-right">
+        <span id="projMeta" class="mono"></span>
+        <button id="btnLogs" class="btn ghost mini" aria-pressed="false" aria-controls="logDrawer" data-tip="日志&#10;.vdm/logs 运行日志"><svg class="ic ic-sm" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-terminal"/></svg><span>日志</span><span id="logCount" class="badge badge-warn" hidden></span></button>
+      </div>
+    </footer>
+
+    <section id="logDrawer" aria-label="日志" hidden>
+      <button id="logDrawerClose" class="icon-btn mini" aria-label="收起日志" data-tip="收起日志" data-kbd="Esc"><svg class="ic ic-sm" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-x"/></svg></button>
+      <div class="panel" id="panelLogs"></div>
+    </section>
+
     <div id="toasts"></div>
     <div id="ctxMenu" class="ctx-menu" hidden></div>
 

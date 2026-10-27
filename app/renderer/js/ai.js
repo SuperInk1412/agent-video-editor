@@ -1,20 +1,11 @@
-// AI panel: talk to the DSH-TUI agent, stream its run, interrupt it.
-const h = (tag, attrs = {}, ...children) => {
-  const n = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (v == null || v === false) continue;
-    if (k === 'class') n.className = v;
-    else if (k.startsWith('on')) n.addEventListener(k.slice(2).toLowerCase(), v);
-    else if (k === 'value') n.value = v;
-    else if (k === 'checked') n.checked = !!v;
-    else n.setAttribute(k, v);
-  }
-  for (const c of children.flat()) {
-    if (c == null) continue;
-    n.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
-  }
-  return n;
-};
+// AI panel: talk to the DSH-TUI agent, stream its run, interrupt it (docs/DESIGN.md §1.4).
+import { h, icon } from './ui.js';
+
+const EXAMPLES = [
+  '把标题改成「锈梦」，字号加大，加一点辉光',
+  '这段节奏太闷，每 2 拍闪一下白',
+  '给这个分镜加一句字幕，放在底部',
+];
 
 export class AgentPanel {
   constructor(root, opts) {
@@ -24,54 +15,105 @@ export class AgentPanel {
     this.available = true;
     this.log = [];
     this.current = null;
+    this._stick = true; // auto-scroll while the user is at the bottom
     this._render();
   }
 
   setState({ available, running }) {
-    if (this.available !== available) { this.available = available; this._render(); }
+    this.available = available;
     this.running = running;
     this._syncButtons();
   }
 
   _render() {
     this.root.innerHTML = '';
-    this.statusEl = h('div', { class: 'agent-status' });
-    this.root.appendChild(h('div', { class: 'panel-head' },
-      h('div', { class: 'panel-title' }, 'AI 副驾'),
+    this.root.classList.add('agent-panel');
+
+    this.dotEl = h('span', { class: 'agent-dot', 'aria-hidden': 'true' });
+    this.statusEl = h('span', { class: 'agent-status' });
+    this.root.appendChild(h('div', { class: 'agent-head' },
+      this.dotEl,
+      h('span', { class: 'agent-title' }, 'AI 副驾'),
       this.statusEl,
     ));
 
+    this.logEl = h('div', { class: 'agent-stream', role: 'log', 'aria-live': 'polite' });
+    this.logEl.addEventListener('scroll', () => {
+      const el = this.logEl;
+      this._stick = el.scrollTop + el.clientHeight >= el.scrollHeight - 8;
+    });
+    this.root.appendChild(this.logEl);
+
+    const chip = (label, tip) => {
+      const b = h('button', { class: 'chip on', 'aria-pressed': 'true', 'data-tip': tip }, label);
+      b.addEventListener('click', () => {
+        const on = b.classList.toggle('on');
+        b.setAttribute('aria-pressed', on ? 'true' : 'false');
+      });
+      return b;
+    };
+    this.chipSeg = chip('当前分镜', '把选中的分镜段作为上下文');
+    this.chipSel = chip('选中元素', '把选中的元素作为上下文');
+    this.chipFrames = chip('截 3 帧给 AI 看', '在分镜段内截 3 帧预览画面一起发给 AI');
+
     this.task = h('textarea', {
       class: 'agent-task', rows: 3,
-      placeholder: '让 AI 改这一段，例如：\n· 把标题改成「锈梦」，字号加大，加一点辉光\n· 这段节奏太闷，每 2 拍闪一下白\n· 给这个分镜加一句字幕，放在底部',
+      placeholder: '让 AI 改这一段…',
+      'aria-label': '给 AI 的任务',
     });
-    this.root.appendChild(this.task);
+    this.task.addEventListener('input', () => this._grow());
+    this.task.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        if (!this.running) this._run();
+      }
+    });
 
-    this.chips = h('div', { class: 'chips' });
-    this.chipSeg = h('button', { class: 'chip on', onclick: () => { this.chipSeg.classList.toggle('on'); } }, '当前分镜');
-    this.chipSel = h('button', { class: 'chip on', onclick: () => { this.chipSel.classList.toggle('on'); } }, '选中元素');
-    this.chipFrames = h('button', { class: 'chip on', onclick: () => { this.chipFrames.classList.toggle('on'); } }, '截 3 帧给 AI 看');
-    this.chips.append(this.chipSeg, this.chipSel, this.chipFrames);
-    this.root.appendChild(this.chips);
+    this.btnRun = h('button', { class: 'agent-send', 'data-kbd': 'Ctrl+Enter' });
+    this.btnRun.addEventListener('click', () => (this.running ? this._stop() : this._run()));
 
-    this.btnRun = h('button', { class: 'primary grow', onclick: () => this._run() }, '▶ 让 AI 改');
-    this.btnStop = h('button', { class: 'danger', onclick: () => this._stop() }, '■ 打断');
-    this.root.appendChild(h('div', { class: 'row-btns' }, this.btnRun, this.btnStop));
-
-    this.logEl = h('div', { class: 'agent-log' });
-    this.root.appendChild(this.logEl);
+    this.root.appendChild(h('div', { class: 'agent-composer' },
+      h('div', { class: 'chips agent-chips' }, this.chipSeg, this.chipSel, this.chipFrames),
+      this.task,
+      h('div', { class: 'agent-send-row' },
+        h('span', { class: 'agent-kbd-hint' }, h('kbd', {}, 'Ctrl'), h('kbd', {}, 'Enter'), ' 发送'),
+        this.btnRun,
+      ),
+    ));
     this._syncButtons();
     this._renderLog();
+    this._grow();
+  }
+
+  /** textarea grows from 3 to 8 rows with its content */
+  _grow() {
+    const ta = this.task;
+    if (!ta) return;
+    const cs = getComputedStyle(ta);
+    const line = parseFloat(cs.lineHeight) || 20;
+    const pad = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0)
+      + (parseFloat(cs.borderTopWidth) || 0) + (parseFloat(cs.borderBottomWidth) || 0);
+    ta.style.height = 'auto';
+    const min = line * 3 + pad, max = line * 8 + pad;
+    const want = Math.min(max, Math.max(min, ta.scrollHeight + (parseFloat(cs.borderTopWidth) || 0) + (parseFloat(cs.borderBottomWidth) || 0)));
+    ta.style.height = `${want}px`;
+    ta.style.overflowY = ta.scrollHeight + 2 > max ? 'auto' : 'hidden';
   }
 
   _syncButtons() {
     if (!this.btnRun) return;
-    this.btnRun.disabled = this.running || !this.available;
-    this.btnStop.disabled = !this.running;
+    const b = this.btnRun;
+    b.replaceChildren(icon(this.running ? 'stop' : 'send', 'ic-sm'), this.running ? '停止' : '发送');
+    b.className = `agent-send${this.running ? ' danger' : ''}`;
+    b.disabled = !this.running && !this.available;
+    b.dataset.tip = this.running ? '打断 AI' : this.available ? '发送任务' : '没有 DSH-TUI：AI 不可用';
+    if (this.running) b.removeAttribute('data-kbd'); else b.dataset.kbd = 'Ctrl+Enter';
     this.task.disabled = this.running;
     if (this.statusEl) {
-      this.statusEl.textContent = !this.available ? 'DSH-TUI 未找到' : this.running ? '运行中…' : '就绪';
-      this.statusEl.className = `agent-status ${!this.available ? 'bad' : this.running ? 'busy' : 'ok'}`;
+      const st = !this.available ? 'bad' : this.running ? 'busy' : 'ok';
+      this.statusEl.textContent = !this.available ? '未找到 DSH-TUI' : this.running ? '运行中…' : '就绪';
+      this.statusEl.className = `agent-status ${st}`;
+      this.dotEl.className = `agent-dot ${st}`;
     }
   }
 
@@ -92,8 +134,9 @@ export class AgentPanel {
     }
     this.log = [];
     this.current = null;
+    this._stick = true;
     this._renderLog();
-    this._push({ kind: 'system', text: `▶ 任务：${task}` });
+    this._push({ kind: 'task', text: task });
     try {
       const r = await fetch('/api/agent', {
         method: 'POST',
@@ -112,7 +155,7 @@ export class AgentPanel {
       if (!r.ok) throw new Error(j.error || 'agent failed');
       this.running = true;
       this._syncButtons();
-      this._push({ kind: 'system', text: `会话 ${j.runId} · ${frames.length} 帧上下文已生成` });
+      this._push({ kind: 'meta', text: `会话 ${j.runId} · ${frames.length} 帧上下文已生成` });
     } catch (e) {
       this._push({ kind: 'error', text: e.message });
       this.opts.toast?.(`AI 启动失败: ${e.message}`, 'error');
@@ -121,7 +164,7 @@ export class AgentPanel {
 
   async _stop() {
     await fetch('/api/agent/cancel', { method: 'POST' });
-    this._push({ kind: 'system', text: '■ 已打断' });
+    this._push({ kind: 'system', text: '已打断' });
   }
 
   handleEvent(ev) {
@@ -129,7 +172,12 @@ export class AgentPanel {
     if (ev.type === 'proposal') {
       if (ev.error) this._push({ kind: 'error', text: `提议应用失败: ${ev.error}` });
       else if (ev.applied) {
-        this._push({ kind: 'system', text: `✓ 已应用 ${ev.applied.changed.length} 处修改 (rev ${ev.applied.rev})${ev.applied.note ? ' · ' + ev.applied.note : ''}` });
+        const nOps = ev.proposal?.ops?.length;
+        this._push({
+          kind: 'ops',
+          title: nOps != null ? `应用 ${nOps} 个操作` : '已应用改动',
+          text: `已应用 ${ev.applied.changed.length} 处修改 · rev ${ev.applied.rev}${ev.applied.note ? ' · ' + ev.applied.note : ''}`,
+        });
       } else this._push({ kind: 'meta', text: '收到改动提议' });
       return;
     }
@@ -138,7 +186,7 @@ export class AgentPanel {
     if (ev.type === 'exit') {
       this.running = false;
       this._syncButtons();
-      this._push({ kind: 'system', text: `■ 结束 (code ${ev.code}) · ${ev.seconds?.toFixed(1)}s${ev.stderr ? '\n' + ev.stderr : ''}` });
+      this._push({ kind: 'system', text: `结束 (code ${ev.code}) · ${ev.seconds?.toFixed(1)}s`, detail: ev.stderr || '' });
       return;
     }
     if (ev.type !== 'agent') return;
@@ -157,7 +205,7 @@ export class AgentPanel {
       return;
     }
     if (e.type === 'status') {
-      if (e.phase === 'turn_start') this._push({ kind: 'step', text: `── 第 ${e.turn} 轮 ──` });
+      if (e.phase === 'turn_start') this._push({ kind: 'step', text: `第 ${e.turn} 轮` });
       if (e.phase === 'step_end' && e.usage) this._push({ kind: 'meta', text: `tokens ${e.usage.totalTokens}` });
       if (e.phase === 'turn_end' && e.reason?.kind === 'completed') this.current = null;
       return;
@@ -166,7 +214,7 @@ export class AgentPanel {
     // tools / anything else the runtime emits
     const label = e.type || e.kind || 'event';
     const detail = e.text || e.name || e.tool || e.message || JSON.stringify(e).slice(0, 160);
-    this._push({ kind: 'tool', text: `⚙ ${label}  ${String(detail).slice(0, 200)}` });
+    this._push({ kind: 'tool', title: String(label), text: String(detail).slice(0, 200) });
   }
 
   _append(kind, text) {
@@ -189,12 +237,56 @@ export class AgentPanel {
     this._renderLog();
   }
 
+  _entry(e) {
+    switch (e.kind) {
+      case 'task':
+        return h('div', { class: 'msg msg-task' }, h('div', { class: 'msg-label' }, '你的任务'), h('div', { class: 'msg-text' }, e.text));
+      case 'say':
+        return h('div', { class: 'msg msg-say' }, e.text);
+      case 'think': {
+        const n = h('div', { class: `msg msg-think${e.open ? ' open' : ''}`, role: 'button', tabindex: '0', 'aria-expanded': e.open ? 'true' : 'false' },
+          h('div', { class: 'msg-think-head' }, icon(e.open ? 'chevron-down' : 'chevron-right', 'ic-sm'), '思考中…'),
+          e.open ? h('div', { class: 'msg-think-body' }, e.text) : null);
+        const toggle = () => { e.open = !e.open; this._renderLog(); };
+        n.addEventListener('click', toggle);
+        n.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); toggle(); } });
+        return n;
+      }
+      case 'tool':
+      case 'ops':
+        return h('div', { class: `msg msg-card msg-${e.kind}` },
+          h('div', { class: 'msg-card-head' }, icon(e.kind === 'ops' ? 'check' : 'terminal', 'ic-sm'), h('span', {}, e.title || '')),
+          e.text ? h('div', { class: 'msg-card-text' }, e.text) : null);
+      case 'error':
+        return h('div', { class: 'msg msg-error' }, icon('alert', 'ic-sm'), h('span', {}, e.text));
+      case 'step':
+        return h('div', { class: 'msg msg-step' }, h('span', {}, e.text));
+      default: // system / meta
+        return h('div', { class: `msg msg-${e.kind === 'system' ? 'system' : 'meta'}` },
+          h('div', {}, e.text),
+          e.detail ? h('pre', { class: 'msg-card-text' }, e.detail) : null);
+    }
+  }
+
+  _renderEmpty() {
+    return h('div', { class: 'agent-empty' },
+      icon('sparkles'),
+      h('div', { class: 'empty-title' }, '让 AI 改这一段'),
+      h('div', { class: 'empty-text' }, '写一句要改什么，或从下面挑一条'),
+      h('div', { class: 'agent-suggest' }, ...EXAMPLES.map((t) => h('button', {
+        class: 'agent-suggest-item',
+        onclick: () => { this.task.value = t; this._grow(); this.task.focus(); },
+      }, t))));
+  }
+
   _renderLog() {
     if (!this.logEl) return;
-    this.logEl.innerHTML = '';
-    for (const e of this.log) {
-      this.logEl.appendChild(h('div', { class: `log-line ${e.kind}` }, e.text));
-    }
-    this.logEl.scrollTop = this.logEl.scrollHeight;
+    const el = this.logEl;
+    const keep = el.scrollTop;
+    el.innerHTML = '';
+    if (!this.log.length) { el.appendChild(this._renderEmpty()); return; }
+    for (const e of this.log) el.appendChild(this._entry(e));
+    if (this._stick) el.scrollTop = el.scrollHeight;
+    else el.scrollTop = keep;
   }
 }

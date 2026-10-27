@@ -16,6 +16,7 @@ import {
 } from '/core/curves.js';
 import { retimePathSpan } from '/core/camera.js';
 import { cameraRef, keyframeRef } from '/core/selection.js';
+import { h, icon, token } from './ui.js';
 
 const el = (tag, cls, html) => {
   const n = document.createElement(tag);
@@ -25,6 +26,26 @@ const el = (tag, cls, html) => {
 };
 
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+
+// Canvas colors come from the design tokens (DESIGN.md §3); `alpha` tints one.
+const C = (name) => token(name);
+function alpha(color, a) {
+  const c = String(color || '').trim();
+  let m = /^#([0-9a-f]{3})$/i.exec(c);
+  if (m) {
+    const [r, g, b] = m[1].split('').map((x) => parseInt(x + x, 16));
+    return `rgba(${r},${g},${b},${a})`;
+  }
+  m = /^#([0-9a-f]{6})/i.exec(c);
+  if (m) {
+    const n = parseInt(m[1], 16);
+    return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+  }
+  m = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)/i.exec(c);
+  if (m) return `rgba(${m[1]},${m[2]},${m[3]},${a})`;
+  return c;
+}
+const canvasFont = () => `11px ${token('--font-ui') || 'system-ui, sans-serif'}`;
 
 const PATH_LABELS = {
   path: '飞行轨迹',
@@ -88,8 +109,9 @@ export class CurvePanel {
     });
     this.rangeEl = el('div', 'cp-range', '');
     this.presetEl = el('div', 'cp-preset', '');
-    const close = el('button', 'cp-close', '×');
-    close.title = '关闭 (F2 / Esc)';
+    const close = h('button', {
+      type: 'button', class: 'cp-close icon-btn mini', 'aria-label': '关闭', 'data-tip': '关闭', 'data-kbd': 'F2 / Esc',
+    }, icon('x', 'ic-sm'));
     close.onclick = () => this.close();
     head.append(this.titleEl, this.pathSel, this.rangeEl, this.presetEl, el('div', 'cp-spacer'), close);
 
@@ -452,7 +474,7 @@ export class CurvePanel {
     const ctx = cv.getContext('2d');
     const w = cv.width, h = cv.height;
     ctx.clearRect(0, 0, w, h);
-    ctx.strokeStyle = ready ? '#17d9ff' : '#45566a';
+    ctx.strokeStyle = ready ? C('--accent') : C('--text-disabled');
     ctx.lineWidth = 1.5;
     const curve = ready ? presetCurve(id) : null;
     const range = curve ? curveRange(curve) : [0, 1];
@@ -468,7 +490,7 @@ export class CurvePanel {
     ctx.stroke();
     if (!ready) {
       ctx.setLineDash([2, 2]);
-      ctx.strokeStyle = '#33414f';
+      ctx.strokeStyle = C('--border-strong');
       ctx.beginPath(); ctx.moveTo(5, h - 5); ctx.lineTo(w - 5, 5); ctx.stroke();
       ctx.setLineDash([]);
     }
@@ -495,7 +517,7 @@ export class CurvePanel {
   _geo() {
     const L = this._layout();
     const tl = this.getTimeline();
-    const gutter = tl?._gutter?.() || 360;
+    const gutter = tl?._gutter?.() || 340;
     const pps = tl?.pps || 60;
     const scroll = tl?.scroll?.scrollLeft || 0;
     const plotLeft = Math.max(0, gutter - scroll);
@@ -578,7 +600,7 @@ export class CurvePanel {
     const tl = this.getTimeline();
     const px = g.xOf(tl?.time ?? 0);
     if (px <= g.plotLeft || px >= g.plotRight) return;
-    ctx.strokeStyle = '#ff5c7a';
+    ctx.strokeStyle = C('--playhead');
     ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(px, g.top); ctx.lineTo(px, g.bottom); ctx.stroke();
   }
@@ -597,10 +619,10 @@ export class CurvePanel {
       const x1 = g.xOf(Math.min(seg.to, view1));
       if (x1 <= x0) continue;
       ctx.fillStyle = this._segmentCurve(seg)
-        ? 'rgba(23,217,255,0.06)'
-        : 'rgba(255,209,102,0.045)';
+        ? alpha(C('--accent'), 0.06)
+        : alpha(C('--edit'), 0.045);
       ctx.fillRect(x0, g.top, Math.max(1, x1 - x0), g.bottom - g.top);
-      ctx.strokeStyle = 'rgba(23,217,255,0.22)';
+      ctx.strokeStyle = alpha(C('--accent'), 0.22);
       ctx.lineWidth = 1;
       for (const x of [x0, x1]) {
         ctx.beginPath(); ctx.moveTo(x + 0.5, g.top); ctx.lineTo(x + 0.5, g.bottom); ctx.stroke();
@@ -624,7 +646,7 @@ export class CurvePanel {
         if (s === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
       }
       const active = this._isSelectedSegment(span);
-      ctx.strokeStyle = active ? '#17d9ff' : 'rgba(23,217,255,.38)';
+      ctx.strokeStyle = active ? C('--accent') : alpha(C('--accent'), 0.38);
       ctx.lineWidth = active ? 2.2 : 1.4;
       ctx.stroke();
     }
@@ -639,8 +661,8 @@ export class CurvePanel {
       const x0 = g.xOf(Math.max(seg.from, view0));
       const x1 = g.xOf(Math.min(seg.to, view1));
       if (x1 - x0 < 44) continue;
-      ctx.fillStyle = 'rgba(255,209,102,.55)';
-      ctx.font = '10px system-ui, sans-serif';
+      ctx.fillStyle = alpha(C('--edit'), 0.55);
+      ctx.font = canvasFont();
       ctx.fillText('未应用', (x0 + x1) / 2 - 15, g.top + 14);
     }
 
@@ -651,7 +673,7 @@ export class CurvePanel {
       const on = this._isSelectedKey(key.t);
       if (on) {
         ctx.setLineDash([3, 4]);
-        ctx.strokeStyle = 'rgba(255,209,102,.4)';
+        ctx.strokeStyle = alpha(C('--edit'), 0.4);
         ctx.beginPath(); ctx.moveTo(x, g.top); ctx.lineTo(x, g.bottom); ctx.stroke();
         ctx.setLineDash([]);
       }
@@ -659,7 +681,7 @@ export class CurvePanel {
       ctx.save();
       ctx.translate(x, g.bottom);
       ctx.rotate(Math.PI / 4);
-      ctx.fillStyle = on ? '#ffd166' : 'rgba(150,170,190,.5)';
+      ctx.fillStyle = on ? C('--edit') : alpha(C('--text-2'), 0.5);
       ctx.fillRect(-r, -r, r * 2, r * 2);
       ctx.restore();
     }
@@ -675,7 +697,7 @@ export class CurvePanel {
         const origin = this._handleOriginSpan(g, span, handle);
         if (origin) {
           ctx.setLineDash([3, 4]);
-          ctx.strokeStyle = 'rgba(150,175,200,0.3)';
+          ctx.strokeStyle = alpha(C('--text-2'), 0.3);
           ctx.beginPath(); ctx.moveTo(origin.x, origin.y); ctx.lineTo(hp.x, hp.y); ctx.stroke();
           ctx.setLineDash([]);
         }
@@ -683,9 +705,9 @@ export class CurvePanel {
           && this.drag?.span === span;
         ctx.beginPath();
         ctx.arc(hp.x, hp.y, active ? 8 : 6, 0, Math.PI * 2);
-        ctx.fillStyle = '#f4fbff';
+        ctx.fillStyle = C('--text-1');
         ctx.fill();
-        ctx.strokeStyle = '#8fd8ef';
+        ctx.strokeStyle = C('--accent-hover');
         ctx.lineWidth = 1.5;
         ctx.stroke();
       }
@@ -700,23 +722,23 @@ export class CurvePanel {
     const ctx = this.canvas.getContext('2d');
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, W, H);
-    ctx.fillStyle = '#0c1118';
+    ctx.fillStyle = C('--surface-0');
     ctx.fillRect(0, 0, W, H);
 
     // value grid + labels (window depends on the curve's overshoot)
-    ctx.font = '10px system-ui, sans-serif';
+    ctx.font = canvasFont();
     const [vMin, vMax] = g.range;
     const tick = this._tickStep(vMax - vMin);
     for (let v = Math.ceil(vMin / tick) * tick; v <= vMax + 1e-9; v += tick) {
       const value = Math.abs(v) < 1e-9 ? 0 : v;
       const y = g.yOf(value);
-      ctx.strokeStyle = '#19222f';
+      ctx.strokeStyle = C('--border-subtle');
       ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(g.plotLeft, y + 0.5); ctx.lineTo(W - g.rightPad, y + 0.5); ctx.stroke();
-      ctx.fillStyle = '#5f7288';
+      ctx.fillStyle = C('--text-3');
       ctx.fillText(value.toFixed(tick < 1 ? 2 : 1), 8, y + 3);
     }
-    ctx.strokeStyle = 'rgba(60,80,100,0.55)';
+    ctx.strokeStyle = C('--border-strong');
     ctx.setLineDash([3, 4]);
     for (const edge of [0, 1]) {
       if (edge <= vMin || edge >= vMax) continue;
@@ -724,7 +746,7 @@ export class CurvePanel {
       ctx.beginPath(); ctx.moveTo(g.plotLeft, y + 0.5); ctx.lineTo(W - g.rightPad, y + 0.5); ctx.stroke();
     }
     ctx.setLineDash([]);
-    ctx.fillStyle = '#4c5d71';
+    ctx.fillStyle = C('--text-3');
     ctx.fillText('进度', 8, 12);
 
     // time ticks (same time→x mapping as the timeline)
@@ -736,9 +758,9 @@ export class CurvePanel {
     for (let t = firstTick; t <= viewEnd + 1e-9; t += step) {
       const x = g.xOf(t);
       if (x < g.plotLeft || x > W - g.rightPad) continue;
-      ctx.strokeStyle = '#141c27';
+      ctx.strokeStyle = C('--border-subtle');
       ctx.beginPath(); ctx.moveTo(x, g.top); ctx.lineTo(x, g.bottom); ctx.stroke();
-      ctx.fillStyle = '#55697f';
+      ctx.fillStyle = C('--text-3');
       const label = step >= 1 ? `${Math.round(t * 100) / 100}s` : `${t.toFixed(2)}s`;
       ctx.fillText(label, x + 3, H - 7);
     }
@@ -759,7 +781,7 @@ export class CurvePanel {
       const x1 = g.xOf(t1);
       const curve = isActive ? this.curve : normalizeCurve(seg.a?.curve);
       if (isActive) {
-        ctx.fillStyle = 'rgba(23,217,255,0.05)';
+        ctx.fillStyle = alpha(C('--accent'), 0.05);
         ctx.fillRect(x0, g.top, Math.max(1, x1 - x0), g.bottom - g.top);
       }
       const span = Math.max(1e-6, seg.to - seg.from);
@@ -771,10 +793,10 @@ export class CurvePanel {
         const y = g.yOf(sampleCurve(curve, u));
         if (s === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
       }
-      ctx.strokeStyle = isActive ? '#17d9ff' : 'rgba(23,217,255,0.4)';
+      ctx.strokeStyle = isActive ? C('--accent') : alpha(C('--accent'), 0.4);
       ctx.lineWidth = isActive ? 2.2 : 1.4;
       ctx.stroke();
-      ctx.fillStyle = isActive ? '#dff6ff' : '#6f8ea6';
+      ctx.fillStyle = isActive ? C('--text-1') : C('--text-3');
       for (const [x, y] of [[g.xOf(seg.from), g.bottom], [g.xOf(seg.to), g.top]]) {
         if (x < g.plotLeft - 6 || x > W - g.rightPad + 6) continue;
         ctx.save();
@@ -797,21 +819,21 @@ export class CurvePanel {
         const origin = this._handleOrigin(seg, g, handle);
         if (origin) {
           ctx.setLineDash([3, 4]);
-          ctx.strokeStyle = 'rgba(150,175,200,0.35)';
+          ctx.strokeStyle = alpha(C('--text-2'), 0.35);
           ctx.beginPath(); ctx.moveTo(origin.x, origin.y); ctx.lineTo(hp.x, hp.y); ctx.stroke();
           ctx.setLineDash([]);
         }
         ctx.setLineDash([3, 4]);
-        ctx.strokeStyle = 'rgba(160,180,200,0.32)';
+        ctx.strokeStyle = alpha(C('--text-2'), 0.32);
         ctx.beginPath(); ctx.moveTo(g.plotLeft, hp.y); ctx.lineTo(W - g.rightPad, hp.y); ctx.stroke();
         ctx.beginPath(); ctx.moveTo(hp.x, g.top); ctx.lineTo(hp.x, g.bottom); ctx.stroke();
         ctx.setLineDash([]);
         const active = this.drag?.handle?.id === handle.id;
         ctx.beginPath();
         ctx.arc(hp.x, hp.y, active ? 9.5 : 8, 0, Math.PI * 2);
-        ctx.fillStyle = '#f4fbff';
+        ctx.fillStyle = C('--text-1');
         ctx.fill();
-        ctx.strokeStyle = '#8fd8ef';
+        ctx.strokeStyle = C('--accent-hover');
         ctx.lineWidth = 1.5;
         ctx.stroke();
       }
