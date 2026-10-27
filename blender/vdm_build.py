@@ -14,6 +14,7 @@ import bisect
 import bpy
 import json
 import math
+import struct
 import os
 import numpy as np
 
@@ -548,6 +549,32 @@ FONT_MAP = {
 }
 
 
+def font_bbox_em(path):
+    """Height of the font's head-table bbox in em (ttf/otf; ttc uses its first face).
+
+    Blender sizes FONT curves so that this bbox height equals `size`; the
+    viewport (CSS) sizes the em. Multiplying by this keeps `size` = em height.
+    """
+    try:
+        with open(path, 'rb') as f:
+            data = f.read()
+        base = 0
+        if data[:4] == b'ttcf':
+            base = struct.unpack('>I', data[12:16])[0]
+        n = struct.unpack('>H', data[base + 4:base + 6])[0]
+        for i in range(n):
+            rec = base + 12 + 16 * i
+            if data[rec:rec + 4] == b'head':
+                off = struct.unpack('>I', data[rec + 8:rec + 12])[0]
+                upm = struct.unpack('>H', data[off + 18:off + 20])[0]
+                ymin, ymax = struct.unpack('>hh', data[off + 38:off + 40] + data[off + 42:off + 44])
+                if upm and ymax > ymin:
+                    return (ymax - ymin) / float(upm)
+    except (OSError, struct.error, IndexError):
+        pass
+    return 1.0
+
+
 def resolve_font(style):
     fp = style.get('fontPath')
     if fp and os.path.exists(fp):
@@ -893,10 +920,13 @@ class SceneBuilder:
         font_path = resolve_font(style)
         cu = bpy.data.curves.new(f'{el["id"]}_txt', 'FONT')
         cu.body = str(st0['text'] or ' ')
-        cu.size = float(st0['size'])
+        # style.size is the em size in project pixels (CSS / preview.js); Blender
+        # sizes a font by its head bbox, so convert (same rule as vdm_objects.py)
+        em = font_bbox_em(font_path) if font_path else 1.0
+        cu.size = float(st0['size']) * em
         cu.align_x = {'left': 'LEFT', 'right': 'RIGHT'}.get(style.get('align', 'center'), 'CENTER')
         cu.align_y = 'CENTER'
-        cu.space_line = float(style.get('lineHeight') or 1.18)
+        cu.space_line = float(style.get('lineHeight') or 1.18) / em
         cu.space_character = 1.0 + float(style.get('letterSpacing') or 0) / max(1.0, float(st0['size']))
         if font_path:
             try:
@@ -907,6 +937,29 @@ class SceneBuilder:
         obj = self.add_object(cu, mat, el['id'])
         obj.location.z = self.layer_px * z
         obj.scale = (1, 1, 1)
+        obj['vdm_em'] = em
+        # Preview semantics (preview.js text layers): the text box is centred on
+        # the element position and `align` only aligns lines inside the box.
+        # Blender anchors LEFT / RIGHT text at the origin, so shift it back by the
+        # box centre; the shift scales with the size (style.size can be keyed).
+        # Vertically, the preview centres the line box (textBaseline 'middle');
+        # CJK / Latin glyphs sit centred in the em box, so centre on the glyph
+        # bbox here rather than on Blender's own CENTER metric.
+        obj['vdm_center_per_size'] = 0.0
+        obj['vdm_vcenter_per_size'] = 0.0
+        try:
+            bpy.context.scene.view_layers[0].update()
+            xs = [v[0] for v in obj.bound_box]
+            ys = [v[1] for v in obj.bound_box]
+            if cu.align_x != 'CENTER':
+                c = (min(xs) + max(xs)) / 2.0
+                cu.offset_x = -c
+                obj['vdm_center_per_size'] = c / max(1e-6, float(cu.size))
+            cy = (min(ys) + max(ys)) / 2.0
+            cu.offset_y = -cy
+            obj['vdm_vcenter_per_size'] = cy / max(1e-6, float(cu.size))
+        except Exception:
+            pass
         return obj, nodes
 
     def build_media(self, el, style, st0, z, src_path, sequence=None):
@@ -1086,7 +1139,13 @@ class SceneBuilder:
                 obj.scale = (s, s, 1)
                 try:
                     obj.data.body = str(st['text']) if st['text'] is not None else ''
-                    obj.data.size = float(st['size'])
+                    obj.data.size = float(st['size']) * float(obj.get('vdm_em', 1.0))
+                    k = float(obj.get('vdm_center_per_size', 0.0))
+                    if k:
+                        obj.data.offset_x = -k * obj.data.size
+                    kv = float(obj.get('vdm_vcenter_per_size', 0.0))
+                    if kv:
+                        obj.data.offset_y = -kv * obj.data.size
                 except Exception:
                     pass
             else:
@@ -1119,7 +1178,13 @@ class SceneBuilder:
                 shadow_obj.scale = (s, s, 1)
                 try:
                     shadow_obj.data.body = str(st['text'] or '')
-                    shadow_obj.data.size = float(st['size'])
+                    shadow_obj.data.size = float(st['size']) * float(obj.get('vdm_em', 1.0))
+                    k = float(obj.get('vdm_center_per_size', 0.0))
+                    if k:
+                        shadow_obj.data.offset_x = -k * shadow_obj.data.size
+                    kv = float(obj.get('vdm_vcenter_per_size', 0.0))
+                    if kv:
+                        shadow_obj.data.offset_y = -kv * shadow_obj.data.size
                 except Exception:
                     pass
 

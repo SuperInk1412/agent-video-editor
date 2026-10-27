@@ -15,7 +15,7 @@ import struct
 import bpy
 from mathutils import Matrix, Vector
 
-from vdm_build import plane_mesh, textured_material, flat_material, resolve_font
+from vdm_build import plane_mesh, textured_material, flat_material, resolve_font, font_bbox_em as _font_bbox_em
 
 FITS = ('contain', 'cover', 'stretch')
 
@@ -52,32 +52,6 @@ def _png_size(path):
     except OSError:
         pass
     return 0, 0
-
-
-def _font_bbox_em(path):
-    """Height of the font's head-table bbox in em (ttf/otf; ttc uses its first face).
-
-    Blender sizes FONT curves so that this bbox height equals `size`; the
-    viewport (CSS) sizes the em. Multiplying by this keeps `size` = em height.
-    """
-    try:
-        with open(path, 'rb') as f:
-            data = f.read()
-        base = 0
-        if data[:4] == b'ttcf':
-            base = struct.unpack('>I', data[12:16])[0]
-        n = struct.unpack('>H', data[base + 4:base + 6])[0]
-        for i in range(n):
-            rec = base + 12 + 16 * i
-            if data[rec:rec + 4] == b'head':
-                off = struct.unpack('>I', data[rec + 8:rec + 12])[0]
-                upm = struct.unpack('>H', data[off + 18:off + 20])[0]
-                ymin, ymax = struct.unpack('>hh', data[off + 38:off + 40] + data[off + 42:off + 44])
-                if upm and ymax > ymin:
-                    return (ymax - ymin) / float(upm)
-    except (OSError, struct.error, IndexError):
-        pass
-    return 1.0
 
 
 def _resolve(root, src):
