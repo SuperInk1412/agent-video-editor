@@ -69,6 +69,7 @@ export async function buildAudioMix({ dir, project, from = 0, to = null } = {}) 
   const filters = [];
   const labels = [];
   for (const el of clips) {
+    if (el.visible === false) continue;
     const src = String(el.src || '');
     if (!src) continue;
     const abs = path.isAbsolute(src) ? src : path.join(root, src);
