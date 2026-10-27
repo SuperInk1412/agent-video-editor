@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 import fss from 'node:fs';
 import path from 'node:path';
 import { normalizeProject, validateProject } from './schema.js';
+import { ensureSpace } from './space.js';
 
 export const PROJECT_FILE = 'project.vdm.json';
 export const VDM_DIR = '.vdm';
@@ -61,6 +62,9 @@ export async function loadProject(dir) {
   }
   const project = JSON.parse(raw);
   normalizeProject(project);
+  // Every project is 3D: a former 2D project gets the empty world and the
+  // default camera when it is opened (docs/DESIGN-UNIFIED-SPACE.md §7).
+  ensureSpace(project);
   return project;
 }
 
