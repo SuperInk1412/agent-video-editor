@@ -623,6 +623,30 @@ def _build_city_geometry(scene, city):
 
 # ---------------------------------------------------------------- 2D layer
 
+def _embed_elements(scene, opts):
+    """The project's 2D elements as planes in the world (unified space).
+
+    The 2D SceneBuilder (same eval_element as 2D projects) builds them in pixel
+    units under a screen rig: the rig sits at the screen-plane centre
+    (height / 200 m, bottom edge on the ground) and scales 1/100, so a pixel is
+    a centimetre and transform.z moves an element toward the camera."""
+    path = opts.get('project')
+    if not path or not os.path.exists(path):
+        return None
+    with open(path, 'r', encoding='utf-8') as f:
+        project = json.load(f)
+    if not any(e.get('visible') is not False for e in project.get('elements') or []):
+        return None
+    h = float((project.get('meta') or {}).get('height') or 1080)
+    rig = bpy.data.objects.new('VDM_Screen', None)
+    rig.location = (0.0, h / 200.0, 0.0)
+    rig.scale = (0.01, 0.01, 0.01)
+    scene.collection.objects.link(rig)
+    with bpy.context.temp_override(scene=scene):
+        SceneBuilder(project, opts).build(scene=scene, embed=rig)
+    return rig
+
+
 def _build_overlay(opts):
     """The project's 2D elements as a transparent scene ('VDM_2D'), or None.
 
@@ -735,6 +759,9 @@ def build_shot_scene(shot, opts):
         bg.inputs[0].default_value = (sky[0], sky[1], sky[2], 1.0)
         bg.inputs[1].default_value = 1.0
         scene.render.film_transparent = True
+        # flat motion graphics: the 2D path's sharper pixel filter (1.2 softens
+        # type edges; measured against projects/miku-swiss golden frames)
+        scene.render.filter_size = 0.8
     else:
         wnt.links.new(ramp.outputs['Color'], bg.inputs[0])
         bg.inputs[1].default_value = max(0.9, float(city.get('ambient', 0.3)) * 2.4)
@@ -767,8 +794,11 @@ def build_shot_scene(shot, opts):
 
     # compositor: same post chain as the 2D path + depth fog
     meta = {'fx': shot.get('fx') or {}}
-    overlay = None if opts.get('_no_overlay') else _build_overlay(opts)
+    # 2D elements: planes in the world on the screen plane (single camera); the
+    # multi-camera path still lays them over the picture (see _build_overlay)
+    if not opts.get('_no_overlay'):
+        _embed_elements(scene, opts)
     build_compositor(scene, meta, os.path.join(opts['root'], '.vdm', 'cache', 'comp'),
-                     fog=city.get('fog'), overlay=overlay,
+                     fog=city.get('fog'),
                      backdrop=city.get('sky') if city.get('empty') else None)
     return scene

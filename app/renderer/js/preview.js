@@ -10,11 +10,24 @@ in vec2 a_pos;
 in vec2 a_uv;
 uniform mat3 u_mat;
 uniform vec2 u_res;
+// World mode (2D elements in the unified space, docs/DESIGN-UNIFIED-SPACE.md):
+// canvas pixels -> project pixels -> metres on the screen plane at depth u_z,
+// then the 3D camera. u_px2w = (canvas centre x, y, canvas px per project px,
+// screen-plane centre height in metres).
+uniform float u_world;
+uniform mat4 u_vp;
+uniform vec4 u_px2w;
+uniform float u_z;
 out vec2 v_uv;
 void main(){
   vec3 p = u_mat * vec3(a_pos, 1.0);
-  vec2 ndc = vec2(p.x / u_res.x * 2.0 - 1.0, 1.0 - p.y / u_res.y * 2.0);
-  gl_Position = vec4(ndc, 0.0, 1.0);
+  if (u_world > 0.5) {
+    vec2 q = (p.xy - u_px2w.xy) / u_px2w.z;
+    gl_Position = u_vp * vec4(q.x / 100.0, u_px2w.w - q.y / 100.0, u_z, 1.0);
+  } else {
+    vec2 ndc = vec2(p.x / u_res.x * 2.0 - 1.0, 1.0 - p.y / u_res.y * 2.0);
+    gl_Position = vec4(ndc, 0.0, 1.0);
+  }
   v_uv = a_uv;
 }`;
 
@@ -649,9 +662,15 @@ export class Preview {
     // ---- scene pass ----
     const cams = this._cameraLayers();
     const is3d = !!(this.scene3d.city && cams.length);
-    const layers = [];
+    const layers = this.computeLayers(t);
     this.layers = layers;
     if (is3d) {
+      // 2D elements are flat planes in the world: Scene3D calls back after its
+      // own objects with the camera's view-projection, so they are drawn in the
+      // editor view, every camera layer and every fisheye face alike.
+      this.scene3d.onElements = layers.length
+        ? (vp, camPos) => this._drawLayers(layers, W, H, { vp, camPos, meta: p.meta })
+        : null;
       if (this.editMode) {
         // Editing keeps the free editor camera; the camera stack is a shot
         // preview feature. The path gizmo projects with this same camera.
@@ -662,26 +681,56 @@ export class Preview {
       } else {
         this._drawCameraStack(p, t, W, H, cams);
       }
-    }
-    // 2D elements: the whole picture in a 2D project; in a 3D project they sit
-    // on top of the 3D picture, before the post chain (Blender: the VDM_2D
-    // overlay scene, alpha-overed after the fog).
-    layers.push(...this.computeLayers(t));
-    if (!is3d || layers.length) {
+      this.scene3d.onElements = null;
+    } else {
+      // no world loaded yet: the flat 2D path
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.sceneFBO.fb);
       gl.viewport(0, 0, W, H);
-      if (is3d) {
-        gl.disable(gl.DEPTH_TEST);
-      } else {
-        const bg = hexRgb(p.meta.background || '#000000');
-        gl.clearColor(bg[0], bg[1], bg[2], 1);
-        gl.clear(gl.COLOR_BUFFER_BIT);
-      }
-      gl.enable(gl.BLEND);
-      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-      gl.bindVertexArray(this.vao);
+      const bg = hexRgb(p.meta.background || '#000000');
+      gl.clearColor(bg[0], bg[1], bg[2], 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      this._drawLayers(layers, W, H, null);
+    }
 
-      for (const layer of layers) {
+    const fx = p.meta.fx || {};
+    const bloom = clamp(Number(fx.bloom) || 0, 0, 3);
+    this._postAndComposite(p, t, W, H, fx, bloom);
+  }
+
+  /**
+   * 2D element layers. `world` = {vp, camPos, meta} draws them as planes in the
+   * 3D space (depth-tested against the 3D objects, no depth writes, far to
+   * near; equal depth keeps the layer order); null draws them flat on screen.
+   */
+  _drawLayers(layers, W, H, world) {
+    const gl = this.gl;
+    let list = layers;
+    if (world) {
+      const cyW = (Number(world.meta?.height) || 1080) / 200;
+      const S = W / (Number(world.meta?.width) || 1920);
+      const c = world.camPos;
+      const dist = (L) => {
+        const x = (L.st.x || 0) / 100, y = cyW - (L.st.y || 0) / 100, z = L.st.z || 0;
+        return Math.hypot(x - c[0], y - c[1], z - c[2]);
+      };
+      list = layers.map((L, i) => ({ L, i, d: dist(L) }))
+        .sort((a, b) => (Math.abs(a.d - b.d) > 1e-6 ? b.d - a.d : a.i - b.i))
+        .map((e) => e.L);
+      for (const pr of [this.prog.tex, this.prog.shape]) {
+        gl.useProgram(pr.program);
+        gl.uniform1f(pr.u.u_world, 1);
+        gl.uniformMatrix4fv(pr.u.u_vp, false, world.vp);
+        gl.uniform4f(pr.u.u_px2w, W / 2, H / 2, S, cyW);
+      }
+      gl.enable(gl.DEPTH_TEST);
+      gl.depthFunc(gl.LEQUAL);
+      gl.depthMask(false);
+    }
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.bindVertexArray(this.vao);
+    {
+      for (const layer of list) {
         const b = BLEND[layer.blend] || BLEND.normal;
         b(gl);
         if (layer.kind === 'tex') {
@@ -689,6 +738,7 @@ export class Preview {
           gl.useProgram(pr.program);
           gl.uniformMatrix3fv(pr.u.u_mat, false, layer.M);
           gl.uniform2f(pr.u.u_res, W, H);
+          if (world) gl.uniform1f(pr.u.u_z, layer.st.z || 0);
           gl.uniform4fv(pr.u.u_uv, new Float32Array(layer.uv));
           gl.uniform1f(pr.u.u_opacity, layer.st.opacity);
           gl.uniform1f(pr.u.u_glow, layer.st.glow || layer.el.fx?.glow || 0);
@@ -701,6 +751,7 @@ export class Preview {
           gl.useProgram(pr.program);
           gl.uniformMatrix3fv(pr.u.u_mat, false, layer.M);
           gl.uniform2f(pr.u.u_res, W, H);
+          if (world) gl.uniform1f(pr.u.u_z, layer.st.z || 0);
           gl.uniform4fv(pr.u.u_color, new Float32Array(layer.color));
           gl.uniform2f(pr.u.u_size, layer.w, layer.h);
           gl.uniform1f(pr.u.u_radius, layer.radius);
@@ -710,9 +761,19 @@ export class Preview {
       }
       gl.bindVertexArray(null);
     }
+    if (world) {
+      for (const pr of [this.prog.tex, this.prog.shape]) {
+        gl.useProgram(pr.program);
+        gl.uniform1f(pr.u.u_world, 0); // the same programs draw flat debug blits
+      }
+      // hand the 3D renderer its state back (the fisheye clears depth per face)
+      gl.depthMask(true);
+      gl.disable(gl.BLEND);
+    }
+  }
 
-    const fx = p.meta.fx || {};
-    const bloom = clamp(Number(fx.bloom) || 0, 0, 3);
+  _postAndComposite(p, t, W, H, fx, bloom) {
+    const gl = this.gl;
 
     // ---- bloom chain ----
     if (bloom > 0.001) {

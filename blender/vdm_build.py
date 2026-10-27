@@ -19,6 +19,9 @@ import numpy as np
 
 # ---------------------------------------------------------------- utilities
 
+PX_PER_M = 100.0  # core/scene.js: 100 px = 1 m
+
+
 def srgb_to_linear(c):
     return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
 
@@ -395,6 +398,7 @@ def eval_element(el, t, meta):
     st = {
         'x': float(g('transform.x', tr.get('x', 0)) or 0),
         'y': float(g('transform.y', tr.get('y', 0)) or 0),
+        'z': float(g('transform.z', tr.get('z', 0)) or 0),
         'scale': float(g('transform.scale', tr.get('scale', 1)) or 1),
         'rotation': float(g('transform.rotation', tr.get('rotation', 0)) or 0),
         'opacity': float(g('transform.opacity', tr.get('opacity', 1)) or 0),
@@ -901,7 +905,7 @@ class SceneBuilder:
                 pass
         mat, nodes = flat_material(f'{el["id"]}_mat', st0['color'], st0['opacity'])
         obj = self.add_object(cu, mat, el['id'])
-        obj.location.z = 0.002 * z
+        obj.location.z = self.layer_px * z
         obj.scale = (1, 1, 1)
         return obj, nodes
 
@@ -917,7 +921,7 @@ class SceneBuilder:
             mat, nodes = flat_material(f'{el["id"]}_mat', '#ff00aa', st0['opacity'])
             mesh = plane_mesh(f'{el["id"]}_mesh', self.W, self.H)
             obj = self.add_object(mesh, mat, el['id'])
-            obj.location.z = 0.002 * z
+            obj.location.z = self.layer_px * z
             return obj, nodes, None
 
         fit = style.get('fit', 'cover')
@@ -936,7 +940,7 @@ class SceneBuilder:
             iu.use_auto_refresh = True
             nodes['tex']['vdm_frames'] = int(sequence['count'])
         obj = self.add_object(mesh, mat, el['id'])
-        obj.location.z = 0.002 * z
+        obj.location.z = self.layer_px * z
         return obj, nodes, nodes['tex']
 
     def build_shape(self, el, style, st0, z):
@@ -946,17 +950,27 @@ class SceneBuilder:
         mesh = disc_mesh(f'{el["id"]}_mesh', w, h) if kind == 'ellipse' else plane_mesh(f'{el["id"]}_mesh', w, h)
         mat, nodes = flat_material(f'{el["id"]}_mat', st0['color'] if el['type'] == 'text' else style.get('fill', '#ffffff'), st0['opacity'])
         obj = self.add_object(mesh, mat, el['id'])
-        obj.location.z = 0.002 * z
+        obj.location.z = self.layer_px * z
         return obj, nodes
 
     # -- main --------------------------------------------------------------
-    def build(self, scene=None, overlay=False):
+    def build(self, scene=None, overlay=False, embed=None):
         """Build the 2D project. With `scene` given, build into that scene instead
         of resetting the file (the caller makes it bpy.context.scene); `overlay`
         renders on a transparent film without world or compositor (the 2D layer
-        of a 3D shot, see vdm_city.py)."""
+        of a multi-camera 3D shot, see vdm_city.py). `embed` is an object (the
+        screen rig) in an existing 3D scene: the elements are parented to it and
+        nothing else of the scene is touched (unified space)."""
         if scene is None:
             scene = reset_scene()
+        # pixels between layers along the depth axis; in a perspective 3D scene
+        # EEVEE sorts blended objects by distance, so give the layers 0.1 mm
+        self.layer_px = 0.01 if embed is not None else 0.002
+        if embed is None:
+            self._setup_scene(scene, overlay)
+        return self._build_elements(scene, overlay, embed)
+
+    def _setup_scene(self, scene, overlay):
         scene.render.engine = 'BLENDER_EEVEE'
         scene.render.resolution_x = int(round(self.W * self.opts.get('scale', 1.0)))
         scene.render.resolution_y = int(round(self.H * self.opts.get('scale', 1.0)))
@@ -988,6 +1002,8 @@ class SceneBuilder:
         scene.frame_start = 1
         scene.frame_end = max(1, int(round(duration * self.fps)))
 
+    def _build_elements(self, scene, overlay, embed):
+        before = set(scene.objects)
         # layer order: stable by z then start
         elements = sorted(self.p.get('elements', []), key=lambda e: (e.get('z', 0), e.get('start', 0)))
 
@@ -1017,6 +1033,11 @@ class SceneBuilder:
             obj.hide_render = True
             self.updaters.append(self.make_updater(el, obj, nodes, tex, z, style))
 
+        if embed is not None:
+            for ob in scene.objects:
+                if ob not in before and ob is not embed:
+                    ob.parent = embed
+
         def on_frame(scn, depsgraph=None):
             t = (scn.frame_current - 1) / self.fps
             for u in self.updaters:
@@ -1025,7 +1046,7 @@ class SceneBuilder:
         bpy.app.handlers.frame_change_pre.append(on_frame)
         on_frame(scene, None)
 
-        if not overlay:
+        if not overlay and embed is None:
             build_compositor(scene, self.meta, os.path.join(self.cache, 'comp'))
         return scene
 
@@ -1057,7 +1078,8 @@ class SceneBuilder:
             obj.hide_render = False
             obj.location.x = st['x']
             obj.location.y = -st['y']
-            obj.location.z = 0.002 * z
+            # layer offset + the element's own depth (metres -> pixel units)
+            obj.location.z = self.layer_px * z + st['z'] * PX_PER_M
             obj.rotation_euler = (0, 0, math.radians(st['rotation']))
             s = st['scale']
             if is_text:

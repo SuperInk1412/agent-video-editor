@@ -82,6 +82,8 @@ export function evalElement(el, t, meta = {}) {
   const out = {
     x: Number(get('transform.x', base.x ?? 0)),
     y: Number(get('transform.y', base.y ?? 0)),
+    // depth in metres toward the camera (unified space, docs/DESIGN-UNIFIED-SPACE.md)
+    z: Number(get('transform.z', base.z ?? 0)),
     scale: Number(get('transform.scale', base.scale ?? 1)),
     rotation: Number(get('transform.rotation', base.rotation ?? 0)),
     opacity: Number(get('transform.opacity', base.opacity ?? 1)),

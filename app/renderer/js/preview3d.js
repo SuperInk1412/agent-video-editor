@@ -510,6 +510,8 @@ export class Scene3D {
     gl.drawArraysInstanced(gl.TRIANGLES, 0, 36, this.count);
     gl.bindVertexArray(null);
     this._drawObjects(project, time, camPos, vp, city);
+    // 2D elements as world planes (set by preview.js for the current frame)
+    if (this.onElements) this.onElements(vp, camPos);
   }
 
   /** One draw per timeline element; opaque first, then alpha-blended. */
