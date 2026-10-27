@@ -640,9 +640,12 @@ def _val(ng, v):
     return n.outputs[0]
 
 
-def build_compositor(scene, meta, cache_dir, fog=None, overlay=None):
+def build_compositor(scene, meta, cache_dir, fog=None, overlay=None, backdrop=None):
     """Post chain for `scene`. `overlay` is an optional transparent scene (the
-    2D layer of a 3D shot) alpha-overed after the fog and before the post fx."""
+    2D layer of a 3D shot) alpha-overed after the fog and before the post fx.
+    `backdrop` (linear RGB) is for a transparent film (the empty world): fog only
+    touches rendered pixels, then the picture goes over this flat colour, the
+    same as the viewport's clear colour."""
     fx = meta.get('fx') or {}
     w, h = scene.render.resolution_x, scene.render.resolution_y
     os.makedirs(cache_dir, exist_ok=True)
@@ -673,6 +676,13 @@ def build_compositor(scene, meta, cache_dir, fog=None, overlay=None):
         mul.operation = 'MULTIPLY'
         mul.inputs[1].default_value = max(0.05, min(3.0, strength))
         ng.links.new(rl.outputs['Mist'], mul.inputs[0])
+        if backdrop is not None:
+            # the background has mist = 1; keep the fog on the objects only
+            only = ng.nodes.new('ShaderNodeMath')
+            only.operation = 'MULTIPLY'
+            ng.links.new(mul.outputs[0], only.inputs[0])
+            ng.links.new(rl.outputs['Alpha'], only.inputs[1])
+            mul = only
         rgb = ng.nodes.new('CompositorNodeRGB')
         rgb.outputs[0].default_value = (fogc[0], fogc[1], fogc[2], 1.0)
         mixf = ng.nodes.new('ShaderNodeMix')
@@ -682,6 +692,14 @@ def build_compositor(scene, meta, cache_dir, fog=None, overlay=None):
         ng.links.new(rgb.outputs[0], mixf.inputs[7])
         ng.links.new(mul.outputs[0], mixf.inputs[0])
         chain = mixf.outputs[2]
+
+    if backdrop is not None:
+        bgc = ng.nodes.new('CompositorNodeRGB')
+        bgc.outputs[0].default_value = (backdrop[0], backdrop[1], backdrop[2], 1.0)
+        under = ng.nodes.new('CompositorNodeAlphaOver')
+        ng.links.new(bgc.outputs[0], under.inputs['Background'])
+        ng.links.new(chain, under.inputs['Foreground'])
+        chain = under.outputs[0]
 
     if overlay is not None:
         orl = ng.nodes.new('CompositorNodeRLayers')

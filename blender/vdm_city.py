@@ -589,6 +589,38 @@ def _build_multi_camera_scene(shot, opts):
     return master
 
 
+def _build_city_geometry(scene, city):
+    """Ground plane, merged towers and neon (skipped for an empty world)."""
+    # ground
+    span = max(4000.0, (city['bounds']['x1'] - city['bounds']['x0']) * 3.0)
+    gm = bpy.data.meshes.new('ground')
+    gm.from_pydata([(-span, 0, -span), (span, 0, -span), (span, 0, span), (-span, 0, span)], [], [(0, 1, 2, 3)])
+    gm.update()
+    gobj = bpy.data.objects.new('ground', gm)
+    gobj.data.materials.append(_ground_material('ground', city.get('ground', {})))
+    scene.collection.objects.link(gobj)
+
+    # buildings (one merged mesh)
+    verts, faces, uvs, colors, seeds = [], [], [], [], []
+    for b in city['buildings']:
+        _add_box(verts, faces, uvs, colors, seeds,
+                 b['x'], b['y'], b['z'], b['w'], b['h'], b['d'], b['tint'], b['seed'])
+    bmesh = _mesh_from(verts, faces, uvs, colors, seeds, 'city')
+    bobj = bpy.data.objects.new('city', bmesh)
+    bobj.data.materials.append(_window_material('windows', city))
+    scene.collection.objects.link(bobj)
+
+    # neons (one merged emissive mesh)
+    nverts, nfaces, nuvs, ncolors, nseeds = [], [], [], [], []
+    for n in city['neons']:
+        _add_box(nverts, nfaces, nuvs, ncolors, nseeds,
+                 n['x'], n['y'], n['z'], n['w'], n['h'], n['d'], n['color'], n['seed'])
+    nmesh = _mesh_from(nverts, nfaces, nuvs, ncolors, nseeds, 'neon')
+    nobj = bpy.data.objects.new('neon', nmesh)
+    nobj.data.materials.append(_neon_material('neon', city.get('neonGlow', 6.0)))
+    scene.collection.objects.link(nobj)
+
+
 # ---------------------------------------------------------------- 2D layer
 
 def _build_overlay(opts):
@@ -695,8 +727,17 @@ def build_shot_scene(shot, opts):
     mid = ramp.color_ramp.elements.new(0.18)
     mid.color = (fogc[0] * 0.7, fogc[1] * 0.75, fogc[2] * 0.9, 1.0)
     wnt.links.new(sepz.outputs['Z'], ramp.inputs[0])
-    wnt.links.new(ramp.outputs['Color'], bg.inputs[0])
-    bg.inputs[1].default_value = max(0.9, float(city.get('ambient', 0.3)) * 2.4)
+    if city.get('empty'):
+        # Empty world: one flat background colour, like the viewport's clear
+        # (a migrated 2D project keeps its background exactly). The film is
+        # transparent and the compositor lays the picture over that colour, so
+        # the fog only touches the user's objects (see build_compositor).
+        bg.inputs[0].default_value = (sky[0], sky[1], sky[2], 1.0)
+        bg.inputs[1].default_value = 1.0
+        scene.render.film_transparent = True
+    else:
+        wnt.links.new(ramp.outputs['Color'], bg.inputs[0])
+        bg.inputs[1].default_value = max(0.9, float(city.get('ambient', 0.3)) * 2.4)
     wnt.links.new(bg.outputs[0], wout.inputs['Surface'])
     scene.world = world
 
@@ -712,34 +753,8 @@ def build_shot_scene(shot, opts):
     sun.rotation_euler = (math.radians(64), 0.0, math.radians(38))
     scene.collection.objects.link(sun)
 
-    # ground
-    span = max(4000.0, (city['bounds']['x1'] - city['bounds']['x0']) * 3.0)
-    gm = bpy.data.meshes.new('ground')
-    gm.from_pydata([(-span, 0, -span), (span, 0, -span), (span, 0, span), (-span, 0, span)], [], [(0, 1, 2, 3)])
-    gm.update()
-    gobj = bpy.data.objects.new('ground', gm)
-    gobj.data.materials.append(_ground_material('ground', city.get('ground', {})))
-    scene.collection.objects.link(gobj)
-
-    # buildings (one merged mesh)
-    verts, faces, uvs, colors, seeds = [], [], [], [], []
-    for b in city['buildings']:
-        _add_box(verts, faces, uvs, colors, seeds,
-                 b['x'], b['y'], b['z'], b['w'], b['h'], b['d'], b['tint'], b['seed'])
-    bmesh = _mesh_from(verts, faces, uvs, colors, seeds, 'city')
-    bobj = bpy.data.objects.new('city', bmesh)
-    bobj.data.materials.append(_window_material('windows', city))
-    scene.collection.objects.link(bobj)
-
-    # neons (one merged emissive mesh)
-    nverts, nfaces, nuvs, ncolors, nseeds = [], [], [], [], []
-    for n in city['neons']:
-        _add_box(nverts, nfaces, nuvs, ncolors, nseeds,
-                 n['x'], n['y'], n['z'], n['w'], n['h'], n['d'], n['color'], n['seed'])
-    nmesh = _mesh_from(nverts, nfaces, nuvs, ncolors, nseeds, 'neon')
-    nobj = bpy.data.objects.new('neon', nmesh)
-    nobj.data.materials.append(_neon_material('neon', city.get('neonGlow', 6.0)))
-    scene.collection.objects.link(nobj)
+    if not city.get('empty'):
+        _build_city_geometry(scene, city)
 
     # timeline elements (emissive boxes with baked per-frame transforms)
     _build_objects(scene, shot, opts.get('root'))
@@ -754,5 +769,6 @@ def build_shot_scene(shot, opts):
     meta = {'fx': shot.get('fx') or {}}
     overlay = None if opts.get('_no_overlay') else _build_overlay(opts)
     build_compositor(scene, meta, os.path.join(opts['root'], '.vdm', 'cache', 'comp'),
-                     fog=city.get('fog'), overlay=overlay)
+                     fog=city.get('fog'), overlay=overlay,
+                     backdrop=city.get('sky') if city.get('empty') else None)
     return scene
