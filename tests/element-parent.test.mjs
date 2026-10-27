@@ -94,3 +94,24 @@ test('element-parent: validation, re-parenting and persistence', () => {
   applyOp(q, { op: 'elementParent', id, parent: null, t: 3 });
   assert.equal(q.elements.find((e) => e.id === id).parent, undefined, 'parent null = unparent');
 });
+
+test('element-parent: @live follows whichever camera is live (stays on screen across a switch)', async () => {
+  const { LIVE_CAMERA } = await import('../core/hierarchy.js');
+  const { p, cam, id } = rig();
+  applyOp(p, { op: 'elementParent', id, parent: LIVE_CAMERA, t: 0 });
+  assert.equal(p.elements.find((e) => e.id === id).parent.id, '@live');
+  const live = (t) => project(p, LIVE_CAMERA, t, centre(p, p.elements.find((e) => e.id === id), t));
+  const at0 = live(0);
+  for (const t of [1, 2.5]) {
+    const s = live(t);
+    near(s[0], at0[0], 1e-5, `screen x at ${t}`);
+    near(s[1], at0[1], 1e-5, `screen y at ${t}`);
+  }
+  // a second camera somewhere else becomes the live one: still the same screen spot
+  applyOp(p, { op: 'addCamera', camera: { path: [{ t: 0, pos: [-8, 3, 12], look: [4, 6, -3] }] } });
+  assert.notEqual(p.activeCameraId, cam);
+  const s = live(1.5);
+  near(s[0], at0[0], 1e-5, 'after the switch x');
+  near(s[1], at0[1], 1e-5, 'after the switch y');
+  assert.throws(() => applyOp(normalizeProject(createProject({ title: 'x' })), { op: 'elementParent', id: 'nope', parent: LIVE_CAMERA }), /no (camera|element)/);
+});

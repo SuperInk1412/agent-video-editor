@@ -457,17 +457,31 @@ export function applyHierarchyOp(p, op, api) {
 // The camera basis uses the renderers' convention (right = f × +Y, up = right × f,
 // then roll), so a screen-locked element does not drift against the picture.
 
+/**
+ * Parent id meaning "whichever camera is live at t" (evalCamera's current-shot
+ * rule): a subtitle bound to it stays put on screen across camera cuts.
+ */
+export const LIVE_CAMERA = '@live';
+
 /** Camera by id (stack or legacy alias). */
 export function findCamera(project, id) {
-  if (!id) return null;
+  if (!id || id === LIVE_CAMERA) return null;
   return (project?.cameras || []).find((c) => c.id === id) || (project?.camera?.id === id ? project.camera : null);
 }
 
+const hasAnyCamera = (project) => (Array.isArray(project?.cameras) && project.cameras.length > 0) || !!project?.camera;
+
 /** World frame of camera `id` at t: { pos, basis: [right, up, forward] } or null. */
 export function cameraFrame(project, id, t) {
-  const cam = findCamera(project, id);
-  if (!cam) return null;
-  const c = evalCamera({ ...project, camera: cam, cameras: [cam], activeCameraId: cam.id }, t);
+  let c;
+  if (id === LIVE_CAMERA) {
+    if (!hasAnyCamera(project)) return null;
+    c = evalCamera(project, t);
+  } else {
+    const cam = findCamera(project, id);
+    if (!cam) return null;
+    c = evalCamera({ ...project, camera: cam, cameras: [cam], activeCameraId: cam.id }, t);
+  }
   let f = V.sub(c.look, c.pos);
   if (V.len(f) < 1e-9) f = [0, 0, -1];
   f = V.norm(f);
@@ -535,7 +549,7 @@ export function applyElementParentOp(p, op, api) {
   const t = roundT(op.t);
   if (op.op === 'elementParent' && op.parent) {
     const camId = String(op.parent);
-    if (!findCamera(p, camId)) fail(`no camera ${camId}`);
+    if (camId === LIVE_CAMERA ? !hasAnyCamera(p) : !findCamera(p, camId)) fail(`no camera ${camId}`);
     if (el.parent) applyElementParentOp(p, { op: 'elementUnparent', id: el.id, t }, api);
     const f = cameraFrame(p, camId, t);
     // depth of the element's plane along the bind view axis (for the render-time pull-in)
