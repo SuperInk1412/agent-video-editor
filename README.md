@@ -146,7 +146,13 @@ alpha-over，画面变换和透明度逐帧写进 strip，所以预览和最终�
 面向镜头/落地；旋转球、ease 和速度曲线留在右侧检查器。
 字段与 ops 细节见 `docs/SPEC-OBJECTS.md`。
 
-视口和 Blender 共用 `core/scene.js::objectPose()`，`engine/shot.js` 把逐帧变换烘进 shot 包，
+**父子集**：选中子元素时，视口里的选中框、轴向手柄和运动轨迹按**世界位置**画；拖动子元素也按
+世界位移换算回它自己的本地 `pivot`，不会跳。时间轴里的中心点/位置/缩放仍是**本地值**，带黄色
+`本` 徽标；镜头下方会显示父级链和世界坐标。选中父级时子级显示淡轮廓和连线；删除有子级的父级
+会弹确认框，可选择“只删父级（当前帧子级保位）”或“父子一起删”。
+
+视口和 Blender 共用同一套求值：没有父级时是 `core/scene.js::objectPose()`，有父级时再叠
+`core/hierarchy.js::worldPose()`；`engine/shot.js` 把逐帧世界变换烘进 shot 包，
 `blender/vdm_city.py` 按同一组位置/旋转/缩放建盒子。
 
 ## 三条设计原则

@@ -53,6 +53,18 @@ const M3 = {
   mul: (a, b) => a.map((row) => [0, 1, 2].map((c) => row[0] * b[0][c] + row[1] * b[1][c] + row[2] * b[2][c])),
   apply: (m, v) => [V.dot(m[0], v), V.dot(m[1], v), V.dot(m[2], v)],
   diag: (d) => [[d[0], 0, 0], [0, d[1], 0], [0, 0, d[2]]],
+  /** Inverse of a 3x3 row-major matrix; null when it is singular. */
+  inv: (m) => {
+    const [[a, b, c], [d, e, f], [g, h, i]] = m;
+    const det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+    if (!Number.isFinite(det) || Math.abs(det) < 1e-12) return null;
+    const s = 1 / det;
+    return [
+      [(e * i - f * h) * s, (c * h - b * i) * s, (b * f - c * e) * s],
+      [(f * g - d * i) * s, (a * i - c * g) * s, (c * d - a * f) * s],
+      [(d * h - e * g) * s, (b * g - a * h) * s, (a * e - b * d) * s],
+    ];
+  },
 };
 
 /** Rotation matrix scaled toward identity: angle · w around the same axis. */
@@ -178,6 +190,32 @@ export function parentMap(src, obj, t, cache = null, depth = 0) {
 
 export const mapPoint = (m, x) => V.add(m.c, M3.apply(m.L, V.sub(x, m.p0)));
 export const mapVector = (m, v) => M3.apply(m.L, v);
+
+/** Inverse of mapPoint: world point -> the child's local point. */
+export function inverseMapPoint(m, x) {
+  if (!m) return vec3(x).slice();
+  const inv = M3.inv(m.L);
+  if (!inv) return vec3(x).slice();
+  return V.add(m.p0, M3.apply(inv, V.sub(vec3(x), m.c)));
+}
+
+/** Inverse of mapVector: world direction -> the child's local direction. */
+export function inverseMapVector(m, v) {
+  if (!m) return vec3(v).slice();
+  const inv = M3.inv(m.L);
+  if (!inv) return vec3(v).slice();
+  return M3.apply(inv, vec3(v));
+}
+
+/** Local point of `obj` (at t) that lands at world point x. */
+export function toLocalPoint(src, obj, t, x) {
+  return inverseMapPoint(parentMap(src, obj, t), x);
+}
+
+/** Local direction of `obj` (at t) that lands at world direction v. */
+export function toLocalVector(src, obj, t, v) {
+  return inverseMapVector(parentMap(src, obj, t), v);
+}
 
 /** Orthonormal basis (basisFromDir convention) from transformed forward + up. */
 function rebasis(m, basis) {

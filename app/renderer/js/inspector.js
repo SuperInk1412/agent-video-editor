@@ -397,7 +397,7 @@ export class Inspector {
       onEnd: () => { this._ballDragging = false; },
       onChange: (d) => this._commit(`${id}:dir`, { op: 'objectKey', id, path: 'dir', t: tNow(), v: d }, 90),
     });
-    this.root.appendChild(this._section('朝向（球面）',
+    this.root.appendChild(this._section(`朝向（球面${obj.parent?.id ? ' · 本地' : ''}）`,
       ballHost,
       this._field({
         label: '绕轴自转°', value: Math.round(pose.roll * 10) / 10, step: 1,

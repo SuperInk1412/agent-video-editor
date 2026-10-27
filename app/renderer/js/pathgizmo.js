@@ -2,7 +2,7 @@
 // Draws on a transparent canvas sitting on top of the WebGL stage; the stage
 // owns pointer events, this module only knows how to draw and hit-test.
 import { evalCamera, pathPos, cameraTransform } from '/core/camera.js';
-import { objectPose } from '/core/scene.js';
+import { worldPose, childrenOf, parentIdOf } from '/core/hierarchy.js';
 
 const CYAN = '#17d9ff';
 const YELLOW = '#ffd166';
@@ -33,6 +33,11 @@ export class PathGizmo {
     if (!stage) return;
     this.canvas.width = stage.width;
     this.canvas.height = stage.height;
+  }
+
+  /** World pose of a scene object (parent chain included). */
+  _worldPose(obj, time) {
+    return worldPose(this.opts.project(), obj, time);
   }
 
   get scale() {
@@ -362,7 +367,7 @@ export class PathGizmo {
 
   /** Eight world corners of a timeline element at time t. */
   objectCorners(obj, time) {
-    const pose = objectPose(obj, time);
+    const pose = this._worldPose(obj, time);
     const g = obj.geom && typeof obj.geom === 'object' ? obj.geom : {};
     const hx = 0.5 * Math.max(0.001, Number(g.w) || 2) * Math.abs(pose.scale[0] || 1);
     const hy = 0.5 * Math.max(0.001, Number(g.h) || 2) * Math.abs(pose.scale[1] || 1);
@@ -384,8 +389,71 @@ export class PathGizmo {
     return out;
   }
 
+  /** Editor-only locator for an empty: three short world-space bars, no box. */
+  _emptyMarker(ctx, obj, time, color, label) {
+    const k = this.scale;
+    const pose = this._worldPose(obj, time);
+    const c = this.project(pose.worldPos);
+    if (!c) return;
+    const s = (Math.abs(pose.scale[0]) + Math.abs(pose.scale[1]) + Math.abs(pose.scale[2])) / 3 || 1;
+    const arm = 1.2 * s;
+    const axes = [pose.basis.right, pose.basis.up, pose.basis.forward];
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    for (const a of axes) {
+      const p0 = this.project([pose.worldPos[0] - a[0] * arm, pose.worldPos[1] - a[1] * arm, pose.worldPos[2] - a[2] * arm]);
+      const p1 = this.project([pose.worldPos[0] + a[0] * arm, pose.worldPos[1] + a[1] * arm, pose.worldPos[2] + a[2] * arm]);
+      if (!p0 || !p1) continue;
+      ctx.moveTo(p0[0], p0[1]);
+      ctx.lineTo(p1[0], p1[1]);
+    }
+    ctx.stroke();
+    ctx.fillStyle = color;
+    ctx.fillRect(c[0] - 2, c[1] - 2, 4, 4);
+    if (label) {
+      ctx.font = `${10.5 * k}px ui-monospace, monospace`;
+      ctx.fillText(label, c[0] + 8 * k, c[1] - 8 * k);
+    }
+  }
+
+  /** Dashed leaders between the selected object and its parent/direct children. */
+  _kinLines(ctx, project, active, time) {
+    const objs = project.scene?.objects || [];
+    const live = (o) => time >= (Number(o.start) || 0) - 1e-6 && time < (Number(o.start) || 0) + (Number(o.duration) || 0) - 1e-6;
+    const targets = [];
+    const pid = parentIdOf(active);
+    if (pid) {
+      const p = objs.find((o) => o.id === pid);
+      if (p && live(p)) targets.push(p);
+    }
+    for (const id of childrenOf(project, active.id)) {
+      const c = objs.find((o) => o.id === id);
+      if (c && live(c)) targets.push(c);
+    }
+    if (!targets.length) return;
+    const from = this.project(this._worldPose(active, time).worldPos);
+    if (!from) return;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,209,102,.28)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 4]);
+    for (const t of targets) {
+      const p = this.project(this._worldPose(t, time).worldPos);
+      if (!p) continue;
+      ctx.beginPath();
+      ctx.moveTo(from[0], from[1]);
+      ctx.lineTo(p[0], p[1]);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(255,209,102,.5)';
+      ctx.fillRect(p[0] - 1.7, p[1] - 1.7, 3.4, 3.4);
+    }
+    ctx.restore();
+  }
+
   /** Projected wireframe for the selected/hovered element. */
   _objectBox(ctx, obj, time, color, label) {
+    if (obj.type === 'empty') { this._emptyMarker(ctx, obj, time, color, label); return; }
     const k = this.scale;
     const pts = this.objectCorners(obj, time).map((c) => this.project(c));
     if (pts.some((p) => !p)) return;
@@ -418,6 +486,11 @@ export class PathGizmo {
     const hover = objs.find((o) => o.id === this.objHover && live(o));
     if (hover && hover !== active) this._objectBox(ctx, hover, time, 'rgba(23,217,255,.55)', null);
     if (active) {
+      this._kinLines(ctx, project, active, time);
+      for (const id of childrenOf(project, active.id)) {
+        const child = objs.find((o) => o.id === id);
+        if (child && live(child)) this._objectBox(ctx, child, time, 'rgba(255,209,102,.18)', null);
+      }
       this._objectMotion(ctx, active, time);
       this._objectBox(ctx, active, time, 'rgba(255,209,102,.95)', active.name || active.id);
       this._objectAxes(ctx, active, time);
@@ -446,7 +519,7 @@ export class PathGizmo {
 
   /** X/Y/Z arrows at the selected element's pivot (drag one to move on that axis). */
   _objectAxes(ctx, obj, time) {
-    const pose = objectPose(obj, time);
+    const pose = this._worldPose(obj, time);
     const p0 = this.project(pose.pivot);
     if (!p0) return;
     const k = this.scale;
@@ -488,7 +561,7 @@ export class PathGizmo {
     const time = this.opts.time();
     const start = Number(obj.start) || 0;
     if (time < start - 1e-6 || time >= start + (Number(obj.duration) || 0)) return null;
-    const pose = objectPose(obj, time);
+    const pose = this._worldPose(obj, time);
     const p0 = this.project(pose.pivot);
     if (!p0) return null;
     const k = this.scale;
@@ -515,13 +588,13 @@ export class PathGizmo {
     const n = 96;
     for (let i = 0; i <= n; i++) {
       const t = start + (end - start) * (i / n);
-      const pose = objectPose(obj, t);
+      const pose = this._worldPose(obj, t);
       pts.push({ t, world: pose.worldPos, s: this.project(pose.worldPos) });
     }
     const keys = (obj.tracks?.pivot || [])
       .map((k, i) => {
         if (!Array.isArray(k.v)) return null;
-        const pose = objectPose(obj, k.t);
+        const pose = this._worldPose(obj, k.t);
         return { index: i, t: k.t, v: k.v, world: pose.worldPos, s: this.project(pose.worldPos) };
       })
       .filter(Boolean);
@@ -552,7 +625,7 @@ export class PathGizmo {
       ctx.strokeRect(-3.4, -3.4, 6.8, 6.8);
       ctx.restore();
     }
-    const pose = objectPose(obj, time);
+    const pose = this._worldPose(obj, time);
     const s = this.project(pose.worldPos);
     if (s) {
       ctx.fillStyle = '#fff';
@@ -571,11 +644,11 @@ export class PathGizmo {
     let best = null;
     for (const [i, key] of (obj.tracks?.pivot || []).entries()) {
       if (!Array.isArray(key.v) || Math.abs(key.t - time) > 0.05) continue;
-      const pose = objectPose(obj, key.t);
+      const pose = this._worldPose(obj, key.t);
       const p = this.project(pose.worldPos);
       if (!p) continue;
       const d = Math.hypot(p[0] - sx / k, p[1] - sy / k);
-      if (d <= 11 && (!best || d < best.d)) best = { index: i, t: key.t, world: pose.worldPos, d };
+      if (d <= 11 && (!best || d < best.d)) best = { index: i, t: key.t, world: pose.worldPos, pivot: pose.pivot, d };
     }
     return best;
   }

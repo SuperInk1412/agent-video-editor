@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { applyOp, OP_KINDS } from '../core/ops.js';
 import { createProject, normalizeProject } from '../core/schema.js';
 import { objectPose } from '../core/scene.js';
-import { worldPose, ancestors, childrenOf, wouldCycle, HIERARCHY_OP_KINDS, MAX_DEPTH } from '../core/hierarchy.js';
+import { worldPose, ancestors, childrenOf, wouldCycle, HIERARCHY_OP_KINDS, MAX_DEPTH, toLocalPoint, toLocalVector } from '../core/hierarchy.js';
 import { bakeObjects } from '../engine/shot.js';
 
 const fresh = () => normalizeProject(createProject({ title: 'hier', duration: 10 }));
@@ -62,6 +62,17 @@ test('hierarchy: child follows position and rotation', () => {
   near(w.worldPos, [15, 0, 0], 1e-6, 'pos');
   near(w.basis.forward, [1, 0, 0], 1e-6, 'forward');
   assert.equal(w.parentId, parent);
+});
+
+test('hierarchy: world points and directions can be mapped back to the child', () => {
+  const { p, parent, child } = rig();
+  applyOp(p, { op: 'objectParent', id: child, parent, t: 0 });
+  const w = pose(p, child, 2);
+  near(toLocalPoint(p, obj(p, child), 2, w.pivot), [0, 0, -5], 1e-6, 'pivot');
+  near(toLocalPoint(p, obj(p, child), 2, [15, 2, 0]), [0, 2, -5], 1e-6, 'offset point');
+  near(toLocalVector(p, obj(p, child), 2, [1, 0, 0]), [0, 0, -1], 1e-6, 'forward');
+  const parentless = add(p, { id: 'ob_free', type: 'solid', pivot: [1, 2, 3] });
+  near(toLocalPoint(p, obj(p, parentless), 2, [4, 5, 6]), [4, 5, 6], 1e-6, 'no parent');
 });
 
 test('hierarchy: inherit switches', () => {

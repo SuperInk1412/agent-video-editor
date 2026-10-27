@@ -10,7 +10,7 @@ import { LogPanel } from './logs.js';
 import { ProjectsPanel } from './projects.js';
 import { evalCamera, pathPos, cameraTransform } from '/core/camera.js';
 import { curveSegments } from '/core/curves.js';
-import { objectPose } from '/core/scene.js';
+import { worldPose, toLocalPoint, toLocalVector, ancestors, childrenOf } from '/core/hierarchy.js';
 import { sampleTrack } from '/core/time.js';
 import {
   emptySelection, normalizeSelection, selectOne, cameraRef, objectRef, elementRef, splitRef,
@@ -270,6 +270,7 @@ function select(sel = {}) {
   timeline.setSelection(S.selection);
   inspector.render(S.project, S.selection, S.time);
   updateOverlay();
+  updateSelectionInfo();
 }
 
 // ---------------------------------------------------------------- value curve
@@ -388,6 +389,22 @@ function updateOverlay() {
   box.style.height = `${r.h * scale}px`;
   const el = S.project.elements.find((e) => e.id === r.id);
   box.dataset.label = `${el?.name || r.id}`;
+}
+
+/** Selected 3D object: parent breadcrumb + world position (+ child count). */
+function updateSelectionInfo() {
+  const node = $('#selInfo');
+  if (!node) return;
+  const obj = (S.project?.scene?.objects || []).find((o) => o.id === S.selection.objectId);
+  if (!obj) { node.hidden = true; node.textContent = ''; return; }
+  const chain = ancestors(S.project, obj.id).reverse().map((o) => o.name || o.id);
+  const path = [...chain, obj.name || obj.id].join(' › ');
+  const pose = worldPose(S.project, obj, S.time);
+  const world = pose.worldPos.map((v) => (Math.round(Number(v) * 100) / 100).toFixed(2)).join(', ');
+  const kids = childrenOf(S.project, obj.id).length;
+  node.hidden = false;
+  node.textContent = `${path} · 世界 ${world}${kids ? ` · ${kids} 子级` : ''}`;
+  node.title = obj.parent?.id ? '手柄和轨迹按世界位置显示；时间轴属性仍是本地值' : '';
 }
 
 function fitStage() {
@@ -795,11 +812,123 @@ async function boot() {
       return copy.id;
     });
   };
+
+  /** Delete a scene object; a parent asks how to treat its direct children. */
+  const requestObjectDelete = (o) => {
+    if (!o) return;
+    const kids = childrenOf(S.project, o.id);
+    const descendants = [];
+    const walk = (id, depth = 1) => {
+      for (const cid of childrenOf(S.project, id)) {
+        descendants.push({ id: cid, depth });
+        walk(cid, depth + 1);
+      }
+    };
+    walk(o.id);
+    const name = o.name || o.id;
+    if (!kids.length) {
+      if (confirm(`删除 ${name}?`)) op({ op: 'objectRemove', id: o.id });
+      return;
+    }
+    const at = Math.round(S.time * 1000) / 1000;
+    const modal = document.createElement('div');
+    modal.className = 'modal';
+    const card = document.createElement('div');
+    card.className = 'modal-card del-dialog';
+    const head = document.createElement('div');
+    head.className = 'modal-head';
+    const title = document.createElement('div');
+    const strong = document.createElement('strong');
+    strong.textContent = `删除父级「${name}」`;
+    const hint = document.createElement('span');
+    hint.className = 'hint';
+    hint.textContent = `当前 ${at.toFixed(2)}s`;
+    title.append(strong, hint);
+    const close = document.createElement('button');
+    close.className = 'mini';
+    close.textContent = '×';
+    close.title = '关闭';
+    head.append(title, close);
+
+    const body = document.createElement('div');
+    body.className = 'del-body';
+    const desc = document.createElement('div');
+    desc.textContent = `它有 ${descendants.length} 个后代元素：`;
+    const list = document.createElement('div');
+    list.className = 'del-list';
+    const objs = S.project.scene?.objects || [];
+    for (const kid of descendants) {
+      const row = document.createElement('div');
+      row.textContent = `${'— '.repeat(kid.depth - 1)}${objs.find((x) => x.id === kid.id)?.name || kid.id}`;
+      list.append(row);
+    }
+    const note = document.createElement('div');
+    note.className = 'hint';
+    note.textContent = '只删父级会先在当前播放头保住直接子元素的位置；父级有动画时，其它时刻会按子元素自己的动画走。';
+    body.append(desc, list, note);
+
+    const foot = document.createElement('div');
+    foot.className = 'modal-foot del-foot';
+    const keep = document.createElement('button');
+    keep.textContent = `只删父级（${kids.length} 子级保位）`;
+    keep.title = '直接子元素在当前帧保持画面位置';
+    const all = document.createElement('button');
+    all.className = 'danger';
+    all.textContent = `父子一起删（${descendants.length + 1}）`;
+    const cancel = document.createElement('button');
+    cancel.className = 'mini';
+    cancel.textContent = '取消';
+    const spacer = document.createElement('span');
+    spacer.className = 'spacer';
+    foot.append(keep, all, spacer, cancel);
+    card.append(head, body, foot);
+    modal.append(card);
+    document.body.append(modal);
+
+    let settled = false;
+    const finish = (mode) => {
+      if (settled) return;
+      settled = true;
+      modal.remove();
+      window.removeEventListener('keydown', onKey, true);
+      if (mode === 'keep') {
+        const ops = kids.map((id) => ({ op: 'objectUnparent', id, t: at }));
+        ops.push({ op: 'objectRemove', id: o.id });
+        op(...ops).then((j) => {
+          if (j) {
+            select({});
+            toast(`已删除父级；${kids.length} 个直接子元素在当前帧保位`, 'success');
+          }
+        });
+      } else if (mode === 'all') {
+        const ops = descendants.map((k) => ({ op: 'objectRemove', id: k.id }));
+        ops.push({ op: 'objectRemove', id: o.id });
+        op(...ops).then((j) => {
+          if (j) { select({}); toast(`已删除「${name}」及 ${descendants.length} 个后代元素`, 'success'); }
+        });
+      }
+    };
+    const onKey = (e) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      finish('cancel');
+    };
+    window.addEventListener('keydown', onKey, true);
+    close.onclick = () => finish('cancel');
+    cancel.onclick = () => finish('cancel');
+    keep.onclick = () => finish('keep');
+    all.onclick = () => finish('all');
+    modal.addEventListener('pointerdown', (e) => { if (e.target === modal) finish('cancel'); });
+    cancel.focus();
+  };
+
   const elementMenu = (id, x, y) => {
     const o = (S.project.scene?.objects || []).find((ob) => ob.id === id);
     if (!o) return;
+    const kidsCount = childrenOf(S.project, id).length;
     const at = Math.round(S.time * 1000) / 1000;
-    const pose = objectPose(o, S.time);
+    const pose = worldPose(S.project, o, S.time);
     const cam = (S.editMode && S.editCam) ? S.editCam : evalCamera(S.project, S.time);
     showContextMenu(x, y, [
       { label: '选中元素', run: () => select({ objectId: id }) },
@@ -808,21 +937,24 @@ async function boot() {
         run: () => {
           const d = [cam.pos[0] - pose.worldPos[0], cam.pos[1] - pose.worldPos[1], cam.pos[2] - pose.worldPos[2]];
           const l = Math.hypot(d[0], d[1], d[2]) || 1;
-          op({ op: 'objectKey', id, path: 'dir', t: at, v: d.map((v) => v / l) });
+          const local = toLocalVector(S.project, o, at, d.map((v) => v / l));
+          op({ op: 'objectKey', id, path: 'dir', t: at, v: local });
         },
       },
       {
         label: '落地（在播放头打位置键）',
         run: () => {
           const h = Number(o.geom?.h) || 2;
-          op({ op: 'objectKey', id, path: 'pivot', t: at, v: [pose.pivot[0], h / 2, pose.pivot[2]] });
+          const worldPivot = [pose.pivot[0], h / 2, pose.pivot[2]];
+          const local = toLocalPoint(S.project, o, at, worldPivot);
+          op({ op: 'objectKey', id, path: 'pivot', t: at, v: local.map((v) => Math.round(v * 100) / 100) });
         },
       },
       { label: '复制（含关键帧）', run: () => { duplicateObject(o); } },
       { sep: true },
       {
-        label: '删除元素', danger: true,
-        run: () => { if (confirm(`删除 ${o.name || o.id}?`)) op({ op: 'objectRemove', id }); },
+        label: kidsCount ? `删除父级…（${kidsCount} 子级）` : '删除元素', danger: true,
+        run: () => requestObjectDelete(o),
       },
     ]);
   };
@@ -1293,10 +1425,11 @@ async function boot() {
         select({ objectId: obj.id });
         const ac = preview.scene3d.lastCam;
         const normal = ac ? v3norm(v3sub(ac.look, ac.pos)) : [0, 0, -1];
+        const pose = worldPose(S.project, obj, okey.t);
         drag = {
           kind: 'objkey', id: obj.id, index: okey.index, keyT: okey.t,
-          normal, hit: okey.world, pivot0: key.v.slice(), pivot: key.v.slice(),
-          x: cx, y: cy, moved: false,
+          normal, hit: okey.world, world0: pose.pivot.slice(),
+          pivot: key.v.slice(), backup: JSON.stringify(obj), x: cx, y: cy, moved: false,
         };
         try { canvas.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
         gizmo.draw();
@@ -1317,7 +1450,7 @@ async function boot() {
           gizmo.axisHover = ax.axis;
           drag = {
             kind: 'objaxis', id: obj.id, axis: axisVec, p0: ax.pivot.slice(),
-            s0, pivot: ax.pivot.slice(), x: cx, y: cy, moved: false,
+            s0, pivot: ax.pivot.slice(), backup: JSON.stringify(obj), x: cx, y: cy, moved: false,
           };
           try { canvas.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
           gizmo.draw();
@@ -1334,11 +1467,11 @@ async function boot() {
       if (obj) {
         const ac = preview.scene3d.lastCam;
         const normal = ac ? v3norm(v3sub(ac.look, ac.pos)) : [0, 0, -1];
-        const pose = objectPose(obj, S.time);
+        const pose = worldPose(S.project, obj, S.time);
         drag = {
           kind: 'object', id: obj.id, normal, hit: pick.point,
-          pivot0: pose.pivot.slice(), pivot: pose.pivot.slice(),
-          x: cx, y: cy, moved: false,
+          world0: pose.pivot.slice(), pivot: pose.pivot.slice(),
+          backup: JSON.stringify(obj), x: cx, y: cy, moved: false,
         };
         try { canvas.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
         gizmo.draw();
@@ -1442,17 +1575,20 @@ async function boot() {
       if (Math.abs(cx - drag.x) + Math.abs(cy - drag.y) < 3) return;
       const w = preview.scene3d.planeHit(sx, sy, drag.hit, drag.normal);
       if (!w) return;
-      drag.pivot = snap3([
-        r2(drag.pivot0[0] + w[0] - drag.hit[0]),
-        r2(drag.pivot0[1] + w[1] - drag.hit[1]),
-        r2(drag.pivot0[2] + w[2] - drag.hit[2]),
-      ], e);
       const obj = (S.project.scene?.objects || []).find((o) => o.id === drag.id);
-      const key = obj?.tracks?.pivot?.[drag.index];
+      if (!obj) return;
+      const target = snap3([
+        r2(drag.world0[0] + w[0] - drag.hit[0]),
+        r2(drag.world0[1] + w[1] - drag.hit[1]),
+        r2(drag.world0[2] + w[2] - drag.hit[2]),
+      ], e);
+      drag.pivot = toLocalPoint(S.project, obj, drag.keyT, target).map(r2);
+      const key = obj.tracks?.pivot?.[drag.index];
       if (key) key.v = drag.pivot.slice();
       drag.moved = true;
       preview.render(S.time);
       gizmo.draw();
+      updateSelectionInfo();
       timeline?.setTime(S.time);
       return;
     }
@@ -1461,16 +1597,19 @@ async function boot() {
       const s = axisClosestS(preview.scene3d.ray(sx, sy), drag.p0, drag.axis);
       if (s == null) return;
       const delta = s - drag.s0;
-      drag.pivot = snap3([
+      const obj = (S.project.scene?.objects || []).find((o) => o.id === drag.id);
+      if (!obj) return;
+      const target = snap3([
         r2(drag.p0[0] + drag.axis[0] * delta),
         r2(drag.p0[1] + drag.axis[1] * delta),
         r2(drag.p0[2] + drag.axis[2] * delta),
       ], e);
-      const obj = (S.project.scene?.objects || []).find((o) => o.id === drag.id);
-      if (obj) setLiveKey(obj, 'pivot', drag.pivot);
+      drag.pivot = toLocalPoint(S.project, obj, S.time, target).map(r2);
+      setLiveKey(obj, 'pivot', drag.pivot);
       drag.moved = true;
       preview.render(S.time);
       gizmo.draw();
+      updateSelectionInfo();
       timeline?.setTime(S.time);
       return;
     }
@@ -1478,16 +1617,19 @@ async function boot() {
       if (Math.abs(cx - drag.x) + Math.abs(cy - drag.y) < 3) return;
       const w = preview.scene3d.planeHit(sx, sy, drag.hit, drag.normal);
       if (!w) return;
-      drag.pivot = snap3([
-        r2(drag.pivot0[0] + w[0] - drag.hit[0]),
-        r2(drag.pivot0[1] + w[1] - drag.hit[1]),
-        r2(drag.pivot0[2] + w[2] - drag.hit[2]),
-      ], e);
       const obj = (S.project.scene?.objects || []).find((o) => o.id === drag.id);
-      if (obj) setLiveKey(obj, 'pivot', drag.pivot);
+      if (!obj) return;
+      const target = snap3([
+        r2(drag.world0[0] + w[0] - drag.hit[0]),
+        r2(drag.world0[1] + w[1] - drag.hit[1]),
+        r2(drag.world0[2] + w[2] - drag.hit[2]),
+      ], e);
+      drag.pivot = toLocalPoint(S.project, obj, S.time, target).map(r2);
+      setLiveKey(obj, 'pivot', drag.pivot);
       drag.moved = true;
       preview.render(S.time);
       gizmo.draw();
+      updateSelectionInfo();
       timeline?.setTime(S.time);
       return;
     }
@@ -1553,7 +1695,24 @@ async function boot() {
     }
   };
   canvas.addEventListener('pointerup', endDrag);
-  canvas.addEventListener('pointercancel', () => { drag = null; });
+  function cancelObjectDrag() {
+    const d = drag;
+    if (!d?.backup) return false;
+    drag = null;
+    const obj = (S.project?.scene?.objects || []).find((o) => o.id === d.id);
+    if (obj) {
+      const back = JSON.parse(d.backup);
+      for (const k of Object.keys(obj)) delete obj[k];
+      Object.assign(obj, back);
+    }
+    preview.render(S.time);
+    timeline?.render(true);
+    inspector?.render(S.project, S.selection, S.time);
+    gizmo.draw();
+    updateSelectionInfo();
+    return true;
+  }
+  canvas.addEventListener('pointercancel', () => { cancelObjectDrag(); drag = null; });
 
   // double-click a handle to drop it back to the automatic Catmull tangent
   canvas.addEventListener('dblclick', (e) => {
@@ -1578,8 +1737,10 @@ async function boot() {
 
   // keyboard
   window.addEventListener('keydown', (e) => {
+    if (document.querySelector('.modal:not([hidden])')) return;
     // F2 works even while a value field is focused (it is not a text key).
     if (e.key === 'F2') { e.preventDefault(); toggleCurvePanel(); return; }
+    if (e.key === 'Escape' && drag && cancelObjectDrag()) { e.preventDefault(); return; }
     if (/INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
     S.keys.add(e.code);
     if (e.key === 'Tab') { e.preventDefault(); setEditMode(!S.editMode); return; }
@@ -1624,9 +1785,8 @@ async function boot() {
       if (S.selection.elementId) { e.preventDefault(); op({ op: 'removeElement', id: S.selection.elementId }); S.selection.elementId = null; }
       else if (S.selection.objectId) {
         e.preventDefault();
-        const id = S.selection.objectId;
-        S.selection.objectId = null;
-        op({ op: 'objectRemove', id });
+        const obj = (S.project?.scene?.objects || []).find((o) => o.id === S.selection.objectId);
+        if (obj) requestObjectDelete(obj);
       }
     } else if (e.key === 's' && !e.ctrlKey) {
       if (S.selection.elementId) {
@@ -1719,6 +1879,7 @@ async function boot() {
       preview.render(S.time);
       gizmo?.draw();
       updateOverlay();
+      updateSelectionInfo();
     }
     requestAnimationFrame(loop);
   };

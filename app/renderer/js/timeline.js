@@ -8,6 +8,7 @@
 // property's keyframes.
 import { timecode } from '/core/time.js';
 import { objectPose } from '/core/scene.js';
+import { childrenOf } from '/core/hierarchy.js';
 import { pathPos, cameraTransform, cameraParamValue } from '/core/camera.js';
 import {
   emptySelection, normalizeSelection, selectOne, addSelection, toggleSelection,
@@ -953,7 +954,23 @@ export class Timeline {
     name.textContent = o.name || o.id;
     name.title = '双击重命名';
     name.addEventListener('dblclick', () => this._inlineName(name, o));
-    const kind = el('span', 'tl-objkind', '3D');
+    if (o.parent?.id) {
+      const p = (this.project?.scene?.objects || []).find((x) => x.id === o.parent.id);
+      const link = el('span', 'tl-objparent', '↳');
+      link.title = `父级：${p?.name || o.parent.id}`;
+      g.append(caret, eye, dot, link, name);
+    } else {
+      g.append(caret, eye, dot, name);
+    }
+    const kind = el('span', 'tl-objkind', o.type === 'empty' ? '空' : '3D');
+    const kids = childrenOf(this.project, o.id).length;
+    if (kids) {
+      const badge = el('span', 'tl-objkids', `${kids} 子级`);
+      badge.title = '直接子元素数量';
+      g.append(kind, badge);
+    } else {
+      g.append(kind);
+    }
     const more = el('button', 'tl-objmore', '⋯');
     more.title = '元素操作';
     more.addEventListener('click', (e) => {
@@ -961,7 +978,7 @@ export class Timeline {
       const r = more.getBoundingClientRect();
       this.onElementMenu?.(o.id, e.clientX || r.left, (e.clientY || r.bottom) + 2);
     });
-    g.append(caret, eye, dot, name, kind, more);
+    g.append(more);
 
     const track = el('div', 'tl-track');
     const block = el('div', 'blk ob');
@@ -1152,7 +1169,14 @@ export class Timeline {
     row.dataset.path = path;
     const g = el('div', 'tl-gutter');
     g.dataset.obj = o.id;
-    g.appendChild(el('span', 'tl-plabel', label));
+    const lab = el('span', 'tl-plabel');
+    if (o.parent?.id) {
+      const local = el('span', 'tl-plocal', '本');
+      local.title = '本地值（相对父级）';
+      lab.append(local);
+    }
+    lab.append(document.createTextNode(label));
+    g.appendChild(lab);
     const inputs = [];
     for (const ax of AX) {
       const { box, inp } = this._numBox(ax, ax.toUpperCase());
@@ -1475,9 +1499,16 @@ export class Timeline {
   _paintSelection() {
     this.inner.querySelectorAll('.blk.sel').forEach((n) => n.classList.remove('sel'));
     this.inner.querySelectorAll('.tl-objhead.sel, .tl-prop.sel, .tl-camposrow.sel').forEach((n) => n.classList.remove('sel'));
+    this.inner.querySelectorAll('.tl-objhead.kin').forEach((n) => n.classList.remove('kin'));
     if (this.objectId) {
       this.inner.querySelector(`.blk.ob[data-obj="${this.objectId}"]`)?.classList.add('sel');
       this.inner.querySelector(`.tl-objhead[data-obj="${this.objectId}"]`)?.classList.add('sel');
+      const obj = this._obj(this.objectId);
+      const kin = new Set(childrenOf(this.project, this.objectId));
+      if (obj?.parent?.id) kin.add(obj.parent.id);
+      for (const id of kin) {
+        this.inner.querySelector(`.tl-objhead[data-obj="${id}"]`)?.classList.add('kin');
+      }
       if (this.propSel && this.propSel.objId === this.objectId) {
         this.inner.querySelector(`.tl-prop[data-obj="${this.propSel.objId}"][data-path="${this.propSel.path}"]`)?.classList.add('sel');
       }

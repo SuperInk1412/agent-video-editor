@@ -165,6 +165,10 @@ body.look-mode #stageBox { box-shadow: 0 0 0 2px rgba(255,209,102,.65), 0 0 30px
 #selBox::after { content: attr(data-label); position: absolute; left: -1px; top: -20px; font-size: 10px; padding: 1px 6px; background: var(--accent); color: #001018; border-radius: 3px 3px 0 0; }
 #stageBar { display: flex; justify-content: space-between; align-items: center; padding: 5px 14px 8px; font-size: 11.5px; color: var(--dim); }
 #stageTime { color: var(--dim); }
+.sel-info {
+  color: #9fd6ec; font-size: 10.5px; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; max-width: 44vw; margin: 0 10px;
+}
 
 /* ---------------- timeline ---------------- */
 #timeline { border-top: 1px solid var(--line); background: #0a0d12; overflow: hidden; }
@@ -226,6 +230,9 @@ body.look-mode #stageBox { box-shadow: 0 0 0 2px rgba(255,209,102,.65), 0 0 30px
 .tl-objhead.sel { background: #0e1820; }
 .tl-objhead.sel .tl-gutter { background: #0e1820; }
 .tl-objhead.sel .tl-track { background: #0e1820; }
+.tl-objhead.kin { background: rgba(255,209,102,.055); }
+.tl-objhead.kin .tl-gutter { background: rgba(255,209,102,.04); }
+.tl-objhead.kin .tl-track { background: rgba(255,209,102,.035); }
 .tl-objtoggle {
   width: 18px; height: 18px; padding: 0; border: 0; background: transparent;
   color: var(--dim); font-size: 10px; cursor: pointer; flex: 0 0 18px;
@@ -242,6 +249,11 @@ body.look-mode #stageBox { box-shadow: 0 0 0 2px rgba(255,209,102,.65), 0 0 30px
 .tl-objkind {
   margin-left: auto; font-size: 9px; color: var(--accent); border: 1px solid #1d4a5c;
   background: #0d2029; border-radius: 8px; padding: 0 5px; flex: 0 0 auto;
+}
+.tl-objparent { color: #ffd166; font-size: 10px; flex: 0 0 auto; }
+.tl-objkids {
+  font-size: 9px; color: var(--dim); border: 1px solid var(--line);
+  border-radius: 8px; padding: 0 4px; flex: 0 0 auto;
 }
 .tl-objmore {
   width: 20px; height: 20px; padding: 0; border: 1px solid transparent;
@@ -261,6 +273,11 @@ body.look-mode #stageBox { box-shadow: 0 0 0 2px rgba(255,209,102,.65), 0 0 30px
   gap: 4px; padding: 0 9px; align-items: center;
 }
 .tl-plabel { color: #8b97a8; font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; }
+.tl-plocal {
+  display: inline-block; margin-right: 3px; color: #ffd166;
+  border: 1px solid #5d4a1f; border-radius: 3px;
+  font-size: 8px; line-height: 11px; padding: 0 2px;
+}
 .tl-num {
   display: flex; align-items: center; gap: 2px; min-width: 0; height: 22px;
   background: #0b0e14; border: 1px solid var(--line); border-radius: 4px; padding: 0 3px;
@@ -503,6 +520,15 @@ body.look-mode #stageBox { box-shadow: 0 0 0 2px rgba(255,209,102,.65), 0 0 30px
 .modal-head .hint { margin-left: 10px; font-size: 11px; color: var(--dim); }
 .modal-foot { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-top: 1px solid #1a2230; }
 .modal-foot .spacer { flex: 1; }
+.del-dialog { width: min(560px, calc(100vw - 48px)); }
+.del-body { padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; color: #cfdcea; font-size: 12px; }
+.del-list {
+  max-height: 150px; overflow: auto; padding: 6px 9px;
+  background: #0a1018; border: 1px solid #1c2838; border-radius: 6px;
+}
+.del-list div { padding: 2px 0; color: #dceaf7; }
+.del-foot button.danger { color: #ff8b8b; border-color: #5a2d34; }
+.del-foot button.danger:hover { background: #2a1216; border-color: #7a3b45; }
 .proj-list { overflow: auto; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
 .proj-row {
   display: grid; grid-template-columns: 1fr auto; gap: 4px 12px;
