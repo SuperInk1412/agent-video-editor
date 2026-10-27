@@ -3,6 +3,9 @@
 import { evalCamera } from '/core/camera.js';
 import { poseMatrix } from '/core/scene.js';
 import { worldPose } from '/core/hierarchy.js';
+import {
+  isText, mediaSpec, textSpec, fitPlane, mediaUrl, isFontFile, videoTime, MEDIA_TYPES,
+} from '/core/objects-media.js';
 
 const VERT = `#version 300 es
 in vec3 a_corner;
@@ -127,6 +130,52 @@ void main(){
   fragColor = vec4(srgb(lin), u_alpha);
 }`;
 
+// Image / video / text planes: unit quad, picture sampled as sRGB (-> linear),
+// self-lit like Blender's emission material, same Mist-style fog.
+const PLANE_VERT = `#version 300 es
+in vec3 a_corner;
+uniform mat4 u_viewProj;
+uniform mat4 u_model;
+uniform vec4 u_uv;      // u0 v0 u1 v1
+uniform vec2 u_shift;   // quad offset in quad units (text alignment)
+out vec3 v_world;
+out vec2 v_uv;
+void main(){
+  vec2 q = a_corner.xy + u_shift;
+  vec4 w = u_model * vec4(q, 0.0, 1.0);
+  v_world = w.xyz;
+  v_uv = mix(u_uv.xy, u_uv.zw, a_corner.xy + 0.5);
+  gl_Position = u_viewProj * w;
+}`;
+
+const PLANE_FRAG = `#version 300 es
+precision highp float;
+in vec3 v_world;
+in vec2 v_uv;
+out vec4 fragColor;
+uniform sampler2D u_tex;
+uniform vec3 u_cam;
+uniform float u_emissive;
+uniform float u_alpha;
+uniform vec3 u_fogColor;
+uniform float u_fogStart;
+uniform float u_fogDepth;
+uniform float u_fogStrength;
+vec3 srgb(vec3 c){
+  c = max(c, vec3(0.0));
+  return mix(1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, c * 12.92, step(c, vec3(0.0031308)));
+}
+void main(){
+  vec4 t = texture(u_tex, v_uv);
+  vec3 lin = t.rgb * u_emissive;
+  float dist = length(v_world - u_cam);
+  float fog = clamp((dist - u_fogStart) / max(1.0, u_fogDepth), 0.0, 1.0) * u_fogStrength;
+  lin = mix(lin, u_fogColor, clamp(fog, 0.0, 0.96));
+  float a = t.a * u_alpha;
+  if (a < 0.003) discard;
+  fragColor = vec4(srgb(lin), a);
+}`;
+
 // Fisheye composite: sample a world-space cubemap with equidistant rays, so a
 // horizontal fov of 180..360 keeps working like Blender's FISHEYE_EQUIDISTANT.
 const FISH_VERT = `#version 300 es
@@ -192,6 +241,7 @@ function hexRgb(c) {
 }
 
 const DRAWABLE = new Set(['solid', 'shape', 'text', 'image', 'video', 'container']);
+const TEXT_PX = 128; // raster size of one em for text planes
 // Empties are editor-only: a three-bar cross locator (never baked for Blender).
 const LOCATOR_ARM = 1.2;
 const LOCATOR_BAR = 0.06;
@@ -354,6 +404,34 @@ export class Scene3D {
     gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
     gl.bindVertexArray(null);
 
+    // ---- image / video / text planes ----
+    this.planeProg = gl.createProgram();
+    gl.attachShader(this.planeProg, compile(gl, gl.VERTEX_SHADER, PLANE_VERT));
+    gl.attachShader(this.planeProg, compile(gl, gl.FRAGMENT_SHADER, PLANE_FRAG));
+    gl.bindAttribLocation(this.planeProg, 0, 'a_corner');
+    gl.linkProgram(this.planeProg);
+    if (!gl.getProgramParameter(this.planeProg, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(this.planeProg));
+    this.planeU = {};
+    const pn = gl.getProgramParameter(this.planeProg, gl.ACTIVE_UNIFORMS);
+    for (let i = 0; i < pn; i++) {
+      const info = gl.getActiveUniform(this.planeProg, i);
+      this.planeU[info.name] = gl.getUniformLocation(this.planeProg, info.name);
+    }
+    this.planeVao = gl.createVertexArray();
+    gl.bindVertexArray(this.planeVao);
+    const pb = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, pb);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+      -0.5, -0.5, 0, 0.5, -0.5, 0, 0.5, 0.5, 0, -0.5, -0.5, 0, 0.5, 0.5, 0, -0.5, 0.5, 0,
+    ]), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 12, 0);
+    gl.bindVertexArray(null);
+    this.media = new Map(); // object id -> {key, kind, tex, w, h, ready, video?, canvas?}
+    this.fonts = new Map(); // font file -> css family ('' while loading)
+    this.lastTime = null;
+    this._planeSizes = new Map(); // object id -> last drawn quad size (picking)
+
     this.cube = null;
     this.count = 0;
     this.city = null;
@@ -442,7 +520,9 @@ export class Scene3D {
     if (!objs.length) return;
     const opaque = [];
     const transparent = [];
+    const planes = [];
     const poses = new Map();
+    this._syncVideos(all, time);
     const boxItem = (pose, size) => {
       const { right: r, up: u, forward: f } = pose.basis;
       return {
@@ -463,6 +543,11 @@ export class Scene3D {
         continue;
       }
       if (pose.opacity <= 0.003) continue;
+      if (MEDIA_TYPES.has(obj.type)) {
+        const plane = this._planeItem(obj, pose, camPos);
+        if (plane) planes.push(plane);
+        continue;
+      }
       const size = objectSize(obj, pose);
       const { m, nm } = boxItem(pose, size);
       const col = hexRgb(obj.style?.color || obj.style?.fill || '#8fe0ff');
@@ -495,6 +580,197 @@ export class Scene3D {
       gl.disable(gl.BLEND);
     }
     gl.bindVertexArray(null);
+    if (planes.length) this._drawPlanes(planes, camPos, vp, city);
+  }
+
+  // ---------------------------------------------------------------- media planes
+
+  /** Quad size, uv and texture for an image/video/text object (null until loaded). */
+  _planeItem(obj, pose, camPos) {
+    const a = this._mediaAsset(obj);
+    if (!a || !a.ready) return null;
+    let qw, qh, uv, shift = [0, 0], emissive;
+    if (isText(obj)) {
+      const s = textSpec(obj);
+      qw = (a.w / TEXT_PX) * s.size;
+      qh = (a.h / TEXT_PX) * s.size;
+      uv = [0, 0, 1, 1];
+      // Blender's LEFT/RIGHT alignment anchors the text edge at the origin.
+      shift = [s.align === 'left' ? 0.5 : s.align === 'right' ? -0.5 : 0, 0];
+      emissive = s.emissive;
+    } else {
+      const m = mediaSpec(obj);
+      ({ w: qw, h: qh, uv } = fitPlane(m.fit, a.w, a.h, m.w, m.h, m.uv));
+      emissive = m.emissive;
+    }
+    const { right: r, up: u, forward: f } = pose.basis;
+    const sx = Math.abs(pose.scale[0]) * qw, sy = Math.abs(pose.scale[1]) * qh;
+    const p = pose.worldPos;
+    // local X = -right so the picture reads unmirrored from the front (see objects-media.js)
+    const m = new Float32Array([
+      -r[0] * sx, -r[1] * sx, -r[2] * sx, 0,
+      u[0] * sy, u[1] * sy, u[2] * sy, 0,
+      f[0], f[1], f[2], 0,
+      p[0], p[1], p[2], 1,
+    ]);
+    const alpha = pose.opacity * Math.max(0, Math.min(1, Number(obj.style?.opacity ?? 1)));
+    const dist = Math.hypot(p[0] - camPos[0], p[1] - camPos[1], p[2] - camPos[2]);
+    this._planeSizes.set(obj.id, [sx, sy]);
+    return { m, uv, shift, tex: a.tex, emissive, alpha, dist };
+  }
+
+  _drawPlanes(planes, camPos, vp, city) {
+    const gl = this.gl;
+    const u = this.planeU;
+    planes.sort((a, b) => b.dist - a.dist);
+    gl.useProgram(this.planeProg);
+    gl.uniformMatrix4fv(u.u_viewProj, false, vp);
+    gl.uniform3f(u.u_cam, camPos[0], camPos[1], camPos[2]);
+    gl.uniform3f(u.u_fogColor, city.fog.color[0], city.fog.color[1], city.fog.color[2]);
+    gl.uniform1f(u.u_fogStart, Number(city.fog.start) || 30);
+    gl.uniform1f(u.u_fogDepth, Number(city.fog.depth) || 700);
+    gl.uniform1f(u.u_fogStrength, city.fog.strength == null ? 1 : Number(city.fog.strength));
+    gl.uniform1i(u.u_tex, 0);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindVertexArray(this.planeVao);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.depthMask(false);
+    for (const it of planes) {
+      gl.bindTexture(gl.TEXTURE_2D, it.tex);
+      gl.uniformMatrix4fv(u.u_model, false, it.m);
+      gl.uniform4f(u.u_uv, it.uv[0], it.uv[1], it.uv[2], it.uv[3]);
+      gl.uniform2f(u.u_shift, it.shift[0], it.shift[1]);
+      gl.uniform1f(u.u_emissive, it.emissive);
+      gl.uniform1f(u.u_alpha, it.alpha);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+    }
+    gl.depthMask(true);
+    gl.disable(gl.BLEND);
+    gl.bindVertexArray(null);
+  }
+
+  _newTexture() {
+    const gl = this.gl;
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return tex;
+  }
+
+  /** Upload as sRGB so the shader samples linear colour (like Blender's image colourspace). */
+  _upload(tex, source) {
+    const gl = this.gl;
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    try { gl.texImage2D(gl.TEXTURE_2D, 0, gl.SRGB8_ALPHA8, gl.RGBA, gl.UNSIGNED_BYTE, source); } catch { /* not ready */ }
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  }
+
+  _mediaAsset(obj) {
+    const key = isText(obj) ? `text:${JSON.stringify(textSpec(obj))}` : `${obj.type}:${obj.src || ''}`;
+    let a = this.media.get(obj.id);
+    if (a && a.key === key) {
+      if (a.kind === 'text' && !a.ready) this._rasterText(obj, a);
+      return a;
+    }
+    if (a?.video) { a.video.pause(); a.video.removeAttribute('src'); a.video.load(); }
+    if (a?.tex) this.gl.deleteTexture(a.tex);
+    a = { key, kind: isText(obj) ? 'text' : obj.type, tex: null, w: 0, h: 0, ready: false };
+    this.media.set(obj.id, a);
+    if (a.kind === 'text') {
+      this._rasterText(obj, a);
+    } else if (a.kind === 'image' && obj.src) {
+      const img = new Image();
+      img.decoding = 'async';
+      img.src = mediaUrl(obj.src);
+      img.onload = () => {
+        a.tex = this._newTexture();
+        this._upload(a.tex, img);
+        a.w = img.naturalWidth; a.h = img.naturalHeight; a.ready = true;
+      };
+    } else if (a.kind === 'video' && obj.src) {
+      const v = document.createElement('video');
+      v.src = mediaUrl(obj.src);
+      v.muted = true; v.playsInline = true; v.preload = 'auto'; v.loop = false;
+      v.crossOrigin = 'anonymous';
+      a.video = v;
+      v.addEventListener('loadeddata', () => {
+        a.tex = this._newTexture();
+        a.w = v.videoWidth; a.h = v.videoHeight; a.ready = true;
+      });
+    }
+    return a;
+  }
+
+  /** CSS family for a project font file ('' while it loads). */
+  _fontFamily(font) {
+    if (!isFontFile(font)) return font;
+    if (this.fonts.has(font)) return this.fonts.get(font);
+    this.fonts.set(font, '');
+    const family = `vdm-font-${this.fonts.size}`;
+    const face = new FontFace(family, `url("${mediaUrl(font)}")`);
+    face.load().then((f) => {
+      document.fonts.add(f);
+      this.fonts.set(font, family);
+    }).catch(() => this.fonts.set(font, 'sans-serif'));
+    return '';
+  }
+
+  _rasterText(obj, a) {
+    const s = textSpec(obj);
+    const family = this._fontFamily(s.font);
+    if (!family) return; // wait for the font file
+    const px = TEXT_PX;
+    const lines = s.text.split('\n');
+    const c = a.canvas || (a.canvas = document.createElement('canvas'));
+    const ctx = c.getContext('2d');
+    const font = `${px}px "${family}", sans-serif`;
+    ctx.font = font;
+    ctx.letterSpacing = `${s.tracking * px}px`;
+    const widths = lines.map((l) => ctx.measureText(l).width);
+    const lineH = s.lineHeight * px;
+    const w = Math.max(1, Math.min(8192, Math.ceil(Math.max(...widths, 1))));
+    const h = Math.max(1, Math.ceil(lineH * lines.length));
+    c.width = w; c.height = h;
+    ctx.font = font;
+    ctx.letterSpacing = `${s.tracking * px}px`;
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = s.color;
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = s.align;
+    const x = s.align === 'left' ? 0 : s.align === 'right' ? w : w / 2;
+    lines.forEach((l, i) => ctx.fillText(l, x, lineH * (i + 0.5)));
+    if (!a.tex) a.tex = this._newTexture();
+    this._upload(a.tex, c);
+    a.w = w; a.h = h; a.ready = true;
+  }
+
+  /** Keep video planes on their source time; play along while the timeline plays. */
+  _syncVideos(objs, time) {
+    const dt = this.lastTime == null ? 0 : time - this.lastTime;
+    this.lastTime = time;
+    const playing = dt > 0 && dt < 0.25;
+    for (const obj of objs) {
+      if (obj.type !== 'video') continue;
+      const a = this.media.get(obj.id);
+      if (!a?.video || !a.ready) continue;
+      const v = a.video;
+      const live = objectVisibleAt(obj, time);
+      const want = Math.min(videoTime(obj, time), Math.max(0, (v.duration || 1) - 0.05));
+      if (live && playing) {
+        v.playbackRate = mediaSpec(obj).rate;
+        if (v.paused) v.play().catch(() => {});
+        if (Math.abs(v.currentTime - want) > 0.35) v.currentTime = want;
+      } else {
+        if (!v.paused) v.pause();
+        if (Math.abs(v.currentTime - want) > 0.02) v.currentTime = want;
+      }
+      if (live) this._upload(a.tex, v);
+    }
   }
 
   _drawObject(it) {
@@ -678,7 +954,9 @@ export class Scene3D {
       if (!(DRAWABLE.has(obj.type) || empty) || !objectVisibleAt(obj, time)) continue;
       const pose = worldPose(all, obj, time, poses);
       if (!empty && pose.opacity <= 0.003) continue;
-      const size = empty ? locatorBars(pose).map((b, i) => b[i]) : objectSize(obj, pose);
+      const size = empty ? locatorBars(pose).map((b, i) => b[i])
+        : MEDIA_TYPES.has(obj.type) ? [...(this._planeSizes.get(obj.id) || [1, 1]), 0.05]
+          : objectSize(obj, pose);
       const { right, up, forward } = pose.basis;
       const rel = sub(r.origin, pose.worldPos);
       const o = [dot(rel, right) / size[0], dot(rel, up) / size[1], dot(rel, forward) / size[2]];
