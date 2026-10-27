@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { bakeCameraTrack, cameraLayers, cameraTransform } from '../core/camera.js';
 import { worldPose } from '../core/hierarchy.js';
+import { isPlane, isText, mediaSpec, textSpec, videoFrame } from '../core/objects-media.js';
 import { generateCity, cityHash } from './city.js';
 import { paths } from '../core/store.js';
 
@@ -27,11 +28,14 @@ export function bakeObjects(project, { fps = 24, from = 0, to = null } = {}) {
     const start = Number(o.start) || 0;
     const end = start + (Number(o.duration) || 0);
     const geom = o.geom || {};
-    const g = [
+    // Boxes scale a unit cube to geom; planes keep their own w×h (fitted in
+    // Blender once the picture's size is known); text is built at its real size.
+    const g = isPlane(o) || isText(o) ? [1, 1, 1] : [
       Math.max(0.001, Number(geom.w) || 2),
       Math.max(0.001, Number(geom.h) || 2),
       Math.max(0.001, Number(geom.d) || 2),
     ];
+    const seqCount = Number(o._sequenceCount) || 0;
     const frames = [];
     for (let f = f0; f <= f1; f++) {
       const t = (f - 1) / fps;
@@ -46,6 +50,7 @@ export function bakeObjects(project, { fps = 24, from = 0, to = null } = {}) {
           g[1] * Math.abs(pose.scale[1]) * hidden,
           g[2] * Math.abs(pose.scale[2]) * hidden].map((v) => Math.max(0.0001, r3(v))),
         opacity: live ? Math.round(pose.opacity * 1000) / 1000 : 0,
+        ...(o.type === 'video' ? { vf: videoFrame(o, t, fps, seqCount || Infinity) } : {}),
       });
     }
     out.push({
@@ -54,6 +59,8 @@ export function bakeObjects(project, { fps = 24, from = 0, to = null } = {}) {
       type: o.type,
       color: o.style?.color || o.style?.fill || '#8fe0ff',
       emissive: Math.max(0, Number(o.style?.emissive) || 0),
+      ...(isPlane(o) ? { media: { ...mediaSpec(o), sequence: o._sequenceDir ? { dir: o._sequenceDir, count: seqCount } : null } } : {}),
+      ...(isText(o) ? { text: textSpec(o) } : {}),
       frames,
     });
   }

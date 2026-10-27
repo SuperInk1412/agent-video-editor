@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { paths } from '../core/store.js';
 import { encodeSequence, extractSequence, fileExists, hashOf } from './media.js';
 import { is3D, writeShot } from './shot.js';
+import { prepareObjectSequences } from './media-objects.js';
 import { which } from './which.js';
 
 const execFileP = promisify(execFile);
@@ -75,6 +76,7 @@ export async function prepareSequences(dir, project, { onLog } = {}) {
     }
     el._sequenceDir = seqDir;
   }
+  await prepareObjectSequences(dir, out, { onLog });
   return out;
 }
 
@@ -103,7 +105,8 @@ export async function runJob(dir, job, { onProgress, onLog, signal } = {}) {
   delete payload.projectData;
   // 3D shot: bake city + per-frame camera once, let Blender consume the same package
   if (is3D(job.project)) {
-    const { file } = await writeShot(dir, job.project, { fps: job.project.meta.fps });
+    // the job copy carries the extracted sequences of video planes
+    const { file } = await writeShot(dir, seqProject, { fps: job.project.meta.fps });
     payload.shot = file;
   }
   await fs.writeFile(jobFile, JSON.stringify(payload, null, 2));
