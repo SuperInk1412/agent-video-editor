@@ -62,6 +62,12 @@ async function boot() {
     engine = await startServer({ root, port: Number(process.env.VDM_PORT) || 47100 });
   } catch (e) {
     startupError = e;
+    // --capture is a headless self-check: report on stderr instead of a modal box.
+    if (captureTo) {
+      console.error(`[capture] boot failed: ${e.message} (project: ${root})`);
+      app.exit(1);
+      return;
+    }
     dialog.showErrorBox('VedioMaker 启动失败', `${e.message}\n\n项目目录: ${root}`);
     app.quit();
     return;
