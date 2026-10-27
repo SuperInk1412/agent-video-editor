@@ -104,7 +104,9 @@ export class Timeline {
       this.onSplit?.();
     });
     this.playhead.appendChild(splitBtn);
-    this.inner.append(this.rulerRow, this.sndWrap, this.camHead, this.camsWrap, this.elsWrap, this.playhead);
+    this.playheadLayer = el('div', 'tl-playhead-layer');
+    this.playheadLayer.appendChild(this.playhead);
+    this.inner.append(this.rulerRow, this.sndWrap, this.camHead, this.camsWrap, this.elsWrap);
 
     const hint = el('div', 'tl-hint');
     hint.innerHTML = '<span>▾ 元素 / 相机展开</span><span class="tl-hint-sep">|</span>'
@@ -130,8 +132,53 @@ export class Timeline {
     hint.appendChild(zoomBar);
     this.root.appendChild(hint);
 
+    // Native horizontal scrollbars span the whole footer, including the sticky
+    // 360px property gutter. Draw our own track starting at the gutter so the
+    // scroll range never looks like it belongs to the property editor.
+    this.hscroll = el('div', 'tl-hscroll');
+    this.hthumb = el('div', 'tl-hthumb');
+    this.hscroll.appendChild(this.hthumb);
+    this.root.appendChild(this.hscroll);
+    this.root.appendChild(this.playheadLayer);
+    this.hthumb.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.hthumb.classList.add('drag');
+      const startX = e.clientX;
+      const startScroll = this.scroll.scrollLeft;
+      const track = Math.max(1, this.hscroll.clientWidth);
+      const thumb = Math.max(1, this.hthumb.offsetWidth);
+      const maxThumb = Math.max(1, track - thumb);
+      const maxScroll = Math.max(0, this.scroll.scrollWidth - this.scroll.clientWidth);
+      const move = (ev) => {
+        const x = Math.max(0, Math.min(maxThumb, (ev.clientX - startX) + (startScroll / Math.max(1, maxScroll)) * maxThumb));
+        this.scroll.scrollLeft = maxScroll ? (x / maxThumb) * maxScroll : 0;
+      };
+      const up = () => {
+        this.hthumb.classList.remove('drag');
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', up);
+      };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', up);
+    });
+    this.hscroll.addEventListener('pointerdown', (e) => {
+      if (e.target === this.hthumb) return;
+      e.preventDefault();
+      const r = this.hscroll.getBoundingClientRect();
+      const thumb = Math.max(1, this.hthumb.offsetWidth);
+      const maxThumb = Math.max(1, r.width - thumb);
+      const maxScroll = Math.max(0, this.scroll.scrollWidth - this.scroll.clientWidth);
+      const x = Math.max(0, Math.min(maxThumb, e.clientX - r.left - thumb / 2));
+      this.scroll.scrollLeft = maxScroll ? (x / maxThumb) * maxScroll : 0;
+    });
+
     this.inner.addEventListener('pointerdown', (e) => this._down(e));
-    this.scroll.addEventListener('scroll', () => this.onViewChange?.());
+    this.scroll.addEventListener('scroll', () => {
+      this._syncHScroll();
+      this._syncPlayhead();
+      this.onViewChange?.();
+    });
     this.scroll.addEventListener('wheel', (e) => {
       if (e.ctrlKey) {
         e.preventDefault();
@@ -187,8 +234,10 @@ export class Timeline {
     const dur = this.project?.meta.duration || 12;
     if (this.timeLabel) this.timeLabel.textContent = `${t.toFixed(2)} / ${dur.toFixed(2)}s`;
     const x = this._trackX(t);
-    this.playhead.style.transform = `translateX(${x}px)`;
-    if (this.scroll.scrollLeft > x - 20) this.scroll.scrollLeft = Math.max(0, x - 80);
+    if (this.scroll.scrollLeft > x - this._gutter() - 20) {
+      this.scroll.scrollLeft = Math.max(0, x - this._gutter() - 80);
+    }
+    this._syncPlayhead();
     this._syncProps(true);
   }
 
@@ -220,6 +269,31 @@ export class Timeline {
 
   _gutter() { return 360; }
   _trackX(t) { return this._gutter() + t * this.pps; }
+
+  /** Keep the custom track inset over the scrollable (non-gutter) part. */
+  _syncHScroll() {
+    if (!this.hscroll || !this.hthumb) return;
+    this.hscroll.style.left = `${this._gutter()}px`;
+    const s = this.scroll;
+    const maxScroll = Math.max(0, s.scrollWidth - s.clientWidth);
+    this.hscroll.classList.toggle('off', maxScroll < 1);
+    if (maxScroll < 1) return;
+    const view = Math.max(1, s.clientWidth - this._gutter());
+    const content = Math.max(view, s.scrollWidth - this._gutter());
+    const track = Math.max(1, this.hscroll.clientWidth);
+    const thumb = Math.max(24, Math.min(track, (track * view) / content));
+    const maxThumb = Math.max(1, track - thumb);
+    this.hthumb.style.width = `${thumb}px`;
+    this.hthumb.style.transform = `translateX(${(s.scrollLeft / maxScroll) * maxThumb}px)`;
+  }
+
+  /** The red line belongs to the track; the sticky gutter clips it naturally. */
+  _syncPlayhead() {
+    if (!this.playhead || !this.playheadLayer) return;
+    this.playheadLayer.style.left = `${this._gutter()}px`;
+    const screen = this._trackX(this.time) - this.scroll.scrollLeft;
+    this.playhead.style.transform = `translateX(${screen - this._gutter()}px)`;
+  }
   _timeAt(clientX) {
     const r = this.scroll.getBoundingClientRect();
     const x = clientX - r.left + this.scroll.scrollLeft - this._gutter();
@@ -273,6 +347,8 @@ export class Timeline {
     const dur = p.meta.duration;
     this.inner.style.width = `${this._gutter() + dur * this.pps + 60}px`;
     this.inner.style.minHeight = '100%';
+    this._syncHScroll();
+    this._syncPlayhead();
 
     const objs = Array.isArray(p.scene?.objects) ? p.scene.objects : [];
     const ids = new Set(objs.map((o) => o.id));
