@@ -1,0 +1,99 @@
+/* Design tokens (docs/DESIGN.md §3). The only place colors may be written as literals. */
+:root {
+  /* 3.1 surfaces & text */
+  --bg: #0a0c10;
+  --surface-0: #0d1015;
+  --surface-1: #11151c;
+  --surface-2: #161b24;
+  --surface-3: #1c222d;
+  --surface-4: #232a37;
+  --field: #0b0e13;
+  --border-subtle: #1b212b;
+  --border: #252d3a;
+  --border-strong: #344052;
+  --text-1: #e3e8f0;
+  --text-2: #a3adbd;
+  --text-3: #7a8496;
+  --text-disabled: #4a5363;
+
+  /* 3.2 semantic */
+  --accent: #17d9ff;
+  --accent-hover: #5fe6ff;
+  --accent-bg: rgba(23, 217, 255, .12);
+  --accent-border: rgba(23, 217, 255, .45);
+  --on-accent: #001218;
+  --primary-bg: #0f3443;
+  --primary-bg-hover: #134457;
+  --primary-border: #1f6d88;
+  --primary-text: #a8efff;
+  --playhead: #ff3b6b;
+  --keyframe: #ffd400;
+  --keyframe-bg: rgba(255, 212, 0, .10);      /* added: tinted key / current-key rows */
+  --keyframe-border: rgba(255, 212, 0, .30);  /* added: outline of a lit ◆ button */
+  --edit: #ffd166;
+  --edit-bg: rgba(255, 209, 102, .07);        /* added: move-mode badge, parented rows, local-space tags */
+  --edit-border: rgba(255, 209, 102, .35);    /* added: outline of --edit tags */
+  --ok: #2fd07f;
+  --ok-bg: rgba(47, 208, 127, .12);
+  --warn: #f2a33c;
+  --warn-bg: rgba(242, 163, 60, .12);
+  --danger: #ff4d5e;
+  --danger-bg: #2a1418;
+  --danger-border: #5a2a32;
+  --axis-x: #ff5c7a;
+  --axis-y: #4ade80;
+  --axis-z: #5aa9ff;
+  --focus-ring: 0 0 0 2px rgba(23, 217, 255, .35);
+  --scrim: rgba(4, 6, 10, .72);
+  --sel-row: #0f1b24;      /* added: opaque selected-row tint (sticky timeline gutters can't be translucent) */
+  --canvas-bg: #000;       /* added: letterbox behind the preview canvas (picture, not chrome) */
+
+  /* 3.3 clip type colors: bar / background */
+  --clip-text: #c98a3e;     --clip-text-bg: #231d15;
+  --clip-image: #4f86c6;    --clip-image-bg: #151d29;
+  --clip-video: #3aa07a;    --clip-video-bg: #13221d;
+  --clip-shape: #a15aa8;    --clip-shape-bg: #221824;
+  --clip-audio: #2f9f86;    --clip-audio-bg: #12211d;
+  --clip-camera: #9b7ad8;   --clip-camera-bg: #1d1729;
+  --clip-object: #2aa6c4;   --clip-object-bg: #0f1d24;
+
+  /* 3.4 type */
+  --font-ui: "Inter", "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", "Noto Sans SC", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Mono", "Share Tech Mono", Consolas, "DejaVu Sans Mono", monospace;
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-md: 13px;
+  --fs-lg: 14px;
+  --fs-xl: 16px;
+
+  /* 3.5 spacing, sizes, radii, shadows, layers, motion */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --h-sm: 22px;
+  --h-md: 26px;
+  --h-lg: 30px;
+  --r-sm: 4px;
+  --r-md: 6px;
+  --r-lg: 10px;
+  --r-pill: 999px;
+  --shadow-pop: 0 10px 28px rgba(0, 0, 0, .55);
+  --shadow-modal: 0 24px 64px rgba(0, 0, 0, .6);
+  --z-splitter: 20;
+  --z-dropdown: 40;
+  --z-drawer: 50;
+  --z-modal: 100;
+  --z-menu: 120;
+  --z-toast: 140;
+  --z-tooltip: 150;
+  --dur-fast: 90ms;
+  --dur: 140ms;
+  --dur-slow: 220ms;
+  --ease: cubic-bezier(.2, .7, .2, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --dur-fast: 0ms; --dur: 0ms; --dur-slow: 0ms; }
+}

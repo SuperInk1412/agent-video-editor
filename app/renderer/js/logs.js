@@ -1,18 +1,7 @@
-// Log panel: tail of <project>/.vdm/logs/*.log, live via SSE.
-const h = (tag, attrs = {}, ...children) => {
-  const n = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (v == null || v === false) continue;
-    if (k === 'class') n.className = v;
-    else if (k.startsWith('on')) n.addEventListener(k.slice(2).toLowerCase(), v);
-    else n.setAttribute(k, v);
-  }
-  for (const c of children.flat()) {
-    if (c == null) continue;
-    n.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
-  }
-  return n;
-};
+// Log panel: tail of <project>/.vdm/logs/*.log, live via SSE. Lives in the status-bar log drawer.
+import { h, icon } from './ui.js';
+
+const FILTERS = { all: '全部', warn: '警告+', error: '只看错误' };
 
 export class LogPanel {
   constructor(root, opts = {}) {
@@ -26,27 +15,30 @@ export class LogPanel {
 
   _build() {
     this.root.innerHTML = '';
-    this.root.appendChild(h('div', { class: 'panel-head' },
-      h('div', { class: 'panel-title' }, '运行日志'),
-      h('div', { class: 'panel-sub' }, '.vdm/logs/'),
-    ));
-    this.followBtn = h('button', { class: 'chip on', onclick: () => this._follow() }, '跟随中');
-    this.filterBar = h('div', { class: 'chips' },
-      ...['all', 'warn', 'error'].map((f) => h('button', {
-        class: `chip ${f === 'all' ? 'on' : ''}`, 'data-f': f,
+    this.root.classList.add('log-panel');
+    this.followBtn = h('button', { class: 'mini on', 'aria-pressed': 'true', 'data-tip': '跟随\n每 2 秒重新读取日志', onclick: () => this._follow() }, '跟随中');
+    this.filterBar = h('div', { class: 'seg', role: 'group', 'aria-label': '日志级别' },
+      ...Object.keys(FILTERS).map((f) => h('button', {
+        class: f === 'all' ? 'on' : '', 'data-f': f, 'aria-pressed': f === 'all' ? 'true' : 'false',
         onclick: () => { this.filter = f; this._paint(); this._syncChips(); },
-      }, { all: '全部', warn: '警告+', error: '只看错误' }[f])),
-      h('button', { class: 'chip', onclick: () => this.refresh(true) }, '刷新'),
+      }, FILTERS[f])));
+    this.root.appendChild(h('div', { class: 'log-toolbar' },
+      this.filterBar,
+      h('button', { class: 'icon-btn mini', 'aria-label': '刷新', 'data-tip': '刷新', onclick: () => this.refresh(true) }, icon('refresh', 'ic-sm')),
       this.followBtn,
-    );
-    this.root.appendChild(this.filterBar);
-    this.list = h('div', { class: 'log-list' });
+      h('span', { class: 'log-path mono', 'data-tip': '日志目录\n<项目>/.vdm/logs/' }, '.vdm/logs/'),
+    ));
+    this.list = h('div', { class: 'log-list', role: 'log' });
     this.root.appendChild(this.list);
     this.refresh(true);
   }
 
   _syncChips() {
-    this.filterBar.querySelectorAll('.chip[data-f]').forEach((b) => b.classList.toggle('on', b.dataset.f === this.filter));
+    this.filterBar.querySelectorAll('button[data-f]').forEach((b) => {
+      const on = b.dataset.f === this.filter;
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
   }
 
   _follow() {
@@ -56,6 +48,7 @@ export class LogPanel {
     if (this.followBtn) {
       this.followBtn.textContent = this._following ? '跟随中' : '已暂停';
       this.followBtn.classList.toggle('on', !!this._following);
+      this.followBtn.setAttribute('aria-pressed', this._following ? 'true' : 'false');
     }
   }
 
@@ -86,7 +79,7 @@ export class LogPanel {
     });
     this.list.innerHTML = '';
     if (!rows.length) {
-      this.list.appendChild(h('div', { class: 'hint' }, '暂无日志'));
+      this.list.appendChild(h('div', { class: 'hint log-empty' }, '暂无日志'));
       return;
     }
     for (const r of rows) {

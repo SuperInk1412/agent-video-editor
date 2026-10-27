@@ -1,6 +1,8 @@
 // Speed-curve editor: per-segment timing on a keyframe (`key.speed`), the
 // design's "[u,v] polyline integrated into arc length" control. The widget is
 // display-only; the inspector schedules the ops and keeps the row open.
+// Colours come from the design tokens (docs/DESIGN.md §3) via ui.js token().
+import { token } from './ui.js';
 
 const W = 236;
 const H = 92;
@@ -105,49 +107,64 @@ export class SpeedCurve {
 
   draw() {
     const ctx = this.ctx;
+    const accent = token('--accent');
+    const grid = token('--text-3');
+    const label = token('--text-2');
+    const mono = `11px ${token('--font-mono') || 'monospace'}`;
     ctx.setTransform(2, 0, 0, 2, 0, 0);
+    ctx.globalAlpha = 1;
     ctx.clearRect(0, 0, W, H);
-    ctx.fillStyle = '#0b1016';
+    ctx.fillStyle = token('--field');
     ctx.fillRect(0, 0, W, H);
     // grid: quarters + baseline v=1
-    ctx.strokeStyle = 'rgba(120,170,200,.14)';
+    ctx.save();
+    ctx.strokeStyle = grid;
     ctx.lineWidth = 1;
+    ctx.globalAlpha = 0.18;
     for (const u of [0.25, 0.5, 0.75]) {
       ctx.beginPath(); ctx.moveTo(this._x(u), PAD); ctx.lineTo(this._x(u), H - PAD); ctx.stroke();
     }
-    ctx.strokeStyle = 'rgba(120,170,200,.26)';
+    ctx.globalAlpha = 0.34;
     ctx.beginPath(); ctx.moveTo(PAD, this._y(1)); ctx.lineTo(W - PAD, this._y(1)); ctx.stroke();
-    ctx.fillStyle = 'rgba(140,160,180,.6)';
-    ctx.font = '8px ui-monospace, monospace';
+    ctx.globalAlpha = 0.75;
+    ctx.fillStyle = label;
+    ctx.font = mono;
     ctx.fillText('1.0×', 2, this._y(1) - 2);
+    ctx.restore();
 
     // curve
     const pts = this.points;
     ctx.beginPath();
     ctx.moveTo(this._x(pts[0][0]), this._y(pts[0][1]));
     for (const p of pts.slice(1)) ctx.lineTo(this._x(p[0]), this._y(p[1]));
-    ctx.strokeStyle = '#5ee7ff';
+    ctx.strokeStyle = token('--accent-hover');
     ctx.lineWidth = 1.5;
     ctx.stroke();
     // area fill
     ctx.lineTo(this._x(pts[pts.length - 1][0]), H - PAD);
     ctx.lineTo(this._x(pts[0][0]), H - PAD);
     ctx.closePath();
-    ctx.fillStyle = 'rgba(23,217,255,.08)';
+    ctx.save();
+    ctx.globalAlpha = 0.08;
+    ctx.fillStyle = accent;
     ctx.fill();
+    ctx.restore();
 
     // draggable points
     for (const p of pts) {
       ctx.beginPath();
       ctx.arc(this._x(p[0]), this._y(p[1]), 3.6, 0, Math.PI * 2);
-      ctx.fillStyle = '#ffd166';
+      ctx.fillStyle = token('--edit');
       ctx.fill();
-      ctx.strokeStyle = '#071018';
+      ctx.strokeStyle = token('--bg');
       ctx.lineWidth = 1;
       ctx.stroke();
     }
-    ctx.fillStyle = 'rgba(140,160,180,.55)';
-    ctx.font = '8px ui-monospace, monospace';
+    ctx.save();
+    ctx.globalAlpha = 0.7;
+    ctx.fillStyle = label;
+    ctx.font = mono;
     ctx.fillText('速度曲线（相对值）', PAD, H - 4);
+    ctx.restore();
   }
 }

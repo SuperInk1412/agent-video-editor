@@ -14,6 +14,7 @@ import {
   cameraRef, objectRef, elementRef, propertyRef, keyframeRef, splitRef,
 } from '/core/selection.js';
 import { attachNumberField, readNumber, writeNumber } from './numfield.js';
+import { h, icon, token, prefs } from './ui.js';
 
 const el = (tag, cls, html) => {
   const n = document.createElement(tag);
@@ -22,11 +23,28 @@ const el = (tag, cls, html) => {
   return n;
 };
 
-const TYPE_COLOR = { image: '#3b6ea5', video: '#2f8f6b', text: '#a06a2b', shape: '#8a4b8f', solid: '#666', audio: '#2f8f6b' };
+// Clip-type badge labels; colors come from the --clip-* tokens (badge-* / t-* classes).
+const TYPE_LABEL = { text: '文字', image: '图片', video: '视频', shape: '形状', solid: '色块', audio: '声音' };
 const AX = ['x', 'y', 'z'];
+// Name column (--tl-gutter): default / clamp, persisted as prefs.tlGutter.
+const GUTTER_DEFAULT = 340;
+const GUTTER_MIN = 280;
+const GUTTER_MAX = 480;
+const clampGutter = (w) => Math.round(Math.max(GUTTER_MIN, Math.min(GUTTER_MAX, Number(w) || GUTTER_DEFAULT)));
+// Zoom limits (setZoom / fit) and the toolbar slider's log mapping onto them.
+const ZOOM_MIN = 0.15;
+const ZOOM_MAX = 8;
+const ZOOM_STEPS = 1000;
+const zoomToSlider = (z) => Math.round(((Math.log(z) - Math.log(ZOOM_MIN)) / (Math.log(ZOOM_MAX) - Math.log(ZOOM_MIN))) * ZOOM_STEPS);
+const sliderToZoom = (v) => Math.exp(Math.log(ZOOM_MIN) + (Number(v) / ZOOM_STEPS) * (Math.log(ZOOM_MAX) - Math.log(ZOOM_MIN)));
+// Clips narrower than this hide their right-side meta ("7 关键点", "2.00s").
+const CLIP_META_MIN = 90;
 
 export class Timeline {
-  constructor(root, { onSeek, onSelect, onOp, onPause, onElementMenu, onCameraMenu, onClipMenu, onSplit, onTextEdit } = {}) {
+  constructor(root, {
+    onSeek, onSelect, onOp, onPause, onElementMenu, onCameraMenu, onClipMenu, onSplit, onTextEdit,
+    onToggleCurves, isCurvesOpen,
+  } = {}) {
     this.root = root;
     this.onSeek = onSeek;
     this.onSelect = onSelect;
@@ -37,6 +55,8 @@ export class Timeline {
     this.onClipMenu = onClipMenu;
     this.onSplit = onSplit;
     this.onTextEdit = onTextEdit;
+    this.onToggleCurves = onToggleCurves;
+    this.isCurvesOpen = isCurvesOpen;
     this.project = null;
     this.time = 0;
     this.pool = emptySelection();
@@ -65,12 +85,17 @@ export class Timeline {
     this._objHeads = new Map();
     this._elHeads = new Map();
     this.expandedEls = new Set();
+    this._snapOn = prefs.get('snap', true) !== false;
+    this._gutterW = clampGutter(prefs.get('tlGutter', GUTTER_DEFAULT));
+    this.filterText = '';
     this._build();
     window.addEventListener('resize', () => this._layout());
   }
 
   _build() {
     this.root.classList.add('tl');
+    this.root.style.setProperty('--tl-gutter', `${this._gutterW}px`);
+    this._buildToolbar();
     this.scroll = el('div', 'tl-scroll');
     this.inner = el('div', 'tl-inner');
     this.scroll.appendChild(this.inner);
@@ -79,7 +104,10 @@ export class Timeline {
     this.rulerRow = el('div', 'tl-row tl-ruler');
     this.rulerGutter = el('div', 'tl-gutter');
     this.timeLabel = el('span', 'tl-sub');
-    this.rulerGutter.append(el('span', '', '时间轴'), this.timeLabel);
+    // drag the name column's right edge (ruler row) to resize --tl-gutter
+    const grip = el('div', 'tl-gutter-grip');
+    grip.addEventListener('pointerdown', (e) => this._startGutterDrag(e, grip));
+    this.rulerGutter.append(el('span', '', '时间轴'), this.timeLabel, grip);
     this.rulerTrack = el('div', 'tl-track');
     this.rulerRow.append(this.rulerGutter, this.rulerTrack);
 
@@ -92,9 +120,9 @@ export class Timeline {
     this.sndWrap = el('div', 'tl-snds');
     this.elsWrap = el('div', 'tl-els');
     this.playhead = el('div', 'tl-playhead');
-    const splitBtn = el('button', 'tl-split', '✂');
-    splitBtn.type = 'button';
-    splitBtn.title = '在红线处切开（Ctrl+D）';
+    const splitBtn = h('button', {
+      type: 'button', class: 'tl-split', 'aria-label': '在播放头切开', 'data-tip': '在播放头切开', 'data-kbd': 'Ctrl+D',
+    }, icon('scissors', 'ic-sm'));
     splitBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
     splitBtn.addEventListener('click', (e) => {
       e.preventDefault();
@@ -103,30 +131,6 @@ export class Timeline {
     });
     this.playhead.appendChild(splitBtn);
     this.inner.append(this.rulerRow, this.sndWrap, this.camHead, this.camsWrap, this.elsWrap, this.playhead);
-
-    const hint = el('div', 'tl-hint');
-    hint.innerHTML = '<span>▾ 元素 / 相机展开</span><span class="tl-hint-sep">|</span>'
-      + '<span>U 只看带键属性</span><span class="tl-hint-sep">|</span>'
-      + '<span>组标题三态 ▾ 全部 / ▾• 带键 / ▸ 收起</span><span class="tl-hint-sep">|</span>'
-      + '<span><b>◆</b> 打帧 / 删帧</span><span class="tl-hint-sep">|</span>'
-      + '<span>Ctrl+D 红线切开</span><span class="tl-hint-sep">|</span>'
-      + '<span>Ctrl + 拖标尺缩放</span>';
-
-    // timeline zoom: buttons + Ctrl+wheel + double-click the ruler to fit
-    const zoomBar = el('div', 'tl-zoom');
-    const zOut = el('button', 'tl-zoomb', '−');
-    zOut.title = '缩小时间轴（Ctrl + 滚轮 / Ctrl + 拖标尺）';
-    const zIn = el('button', 'tl-zoomb', '+');
-    zIn.title = '放大时间轴（Ctrl + 滚轮 / Ctrl + 拖标尺）';
-    this._zoomLabel = el('span', 'tl-zoomval', '100%');
-    const zFit = el('button', 'tl-zoomb', '适应');
-    zFit.title = '缩放到整段时长（双击标尺）';
-    zOut.onclick = () => this.zoomBy(0.8);
-    zIn.onclick = () => this.zoomBy(1.25);
-    zFit.onclick = () => this.fit();
-    zoomBar.append(zOut, this._zoomLabel, zIn, zFit);
-    hint.appendChild(zoomBar);
-    this.root.appendChild(hint);
 
     this.inner.addEventListener('pointerdown', (e) => this._down(e));
     this.scroll.addEventListener('scroll', () => this.onViewChange?.());
@@ -141,11 +145,245 @@ export class Timeline {
     this.root.addEventListener('focusout', () => {
       setTimeout(() => {
         if (!this._renderPending) return;
-        if (this.root.contains(document.activeElement)) return;
+        if (this._rowFocused()) return;
         this._renderPending = false;
         this.render(true);
       }, 0);
     }, true);
+    // The 曲线 toggle mirrors the F2 drawer, which lives in this root too and
+    // opens/closes from F2, Esc and its own close button.
+    new MutationObserver((list) => {
+      if (list.some((m) => m.target.classList?.contains('curve-panel'))) this._syncCurvesBtn();
+    }).observe(this.root, { subtree: true, attributes: true, attributeFilter: ['hidden'] });
+  }
+
+  /** Focus inside the rebuilt area (rows / curve drawer), not the toolbar. */
+  _rowFocused(active = document.activeElement) {
+    return !!active && this.root.contains(active) && !this.toolbar.contains(active);
+  }
+
+  // ------------------------------------------------------------ toolbar (DESIGN.md §1.5)
+  _buildToolbar() {
+    const btn = (ic, label, tip, kbd, onClick, extra = {}) => {
+      const b = h('button', {
+        type: 'button', class: 'btn mini ghost tl-tb-btn', 'data-tip': tip, 'data-kbd': kbd, ...extra,
+      }, icon(ic, 'ic-sm'), label ? h('span', {}, label) : null);
+      b.addEventListener('click', onClick);
+      return b;
+    };
+    const iconBtn = (ic, label, kbd, onClick) => {
+      const b = h('button', {
+        type: 'button', class: 'icon-btn mini tl-tb-btn', 'aria-label': label, 'data-tip': label, 'data-kbd': kbd,
+      }, icon(ic, 'ic-sm'));
+      b.addEventListener('click', onClick);
+      return b;
+    };
+
+    this.filterInput = h('input', {
+      type: 'text', class: 'tl-filter-input', placeholder: '筛选图层', 'aria-label': '筛选图层', spellcheck: 'false',
+      autocomplete: 'off',
+    });
+    this.filterCount = h('span', { class: 'tl-filter-count' });
+    this.filterInput.addEventListener('input', () => this._setFilter(this.filterInput.value));
+    this.filterInput.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.filterInput.value = '';
+      this._setFilter('');
+      this.filterInput.blur();
+    });
+    const filter = h('label', { class: 'tl-filter', 'data-tip': '按名称或 ID 筛选图层', 'data-kbd': 'Ctrl+F' },
+      icon('search', 'ic-sm'), this.filterInput, this.filterCount);
+
+    const keyed = btn('keyframe', '仅带键', '只看带关键帧的属性', 'U', () => {
+      if (this.applyKeyedFilter()) return;
+      keyed.classList.remove('shake');
+      void keyed.offsetWidth; // restart the no-op shake
+      keyed.classList.add('shake');
+    });
+    keyed.addEventListener('animationend', () => keyed.classList.remove('shake'));
+    this._snapBtn = btn('magnet', '吸附', '吸附到 0 / 结尾 / 节拍（拖动时按住 Alt 临时关闭）', null,
+      () => this.setSnap(!this._snapOn), { 'aria-pressed': 'false' });
+    const split = btn('scissors', '切开', '在播放头切开', 'Ctrl+D', () => this.onSplit?.());
+    this._curvesBtn = btn('curve', '曲线', '曲线面板', 'F2', () => {
+      this.onToggleCurves?.();
+      this._syncCurvesBtn();
+    }, { 'aria-pressed': 'false' });
+
+    this._zoomRange = h('input', {
+      type: 'range', class: 'tl-zoomrange', min: '0', max: String(ZOOM_STEPS), step: '1',
+      'aria-label': '时间轴缩放', 'data-tip': '时间轴缩放', 'data-kbd': 'Ctrl+滚轮',
+    });
+    this._zoomRange.addEventListener('input', () => this.setZoom(sliderToZoom(this._zoomRange.value)));
+    this._zoomLabel = h('span', { class: 'tl-zoomval' }, '100%');
+    const zOut = iconBtn('zoom-out', '缩小', null, () => this.zoomBy(0.8));
+    const zIn = iconBtn('zoom-in', '放大', null, () => this.zoomBy(1.25));
+    const zFit = btn('fit', '适应', '缩放到整段时长（双击标尺）', null, () => this.fit());
+
+    this.toolbar = h('div', { class: 'tl-toolbar', role: 'toolbar', 'aria-label': '时间轴' },
+      filter, keyed, this._snapBtn, h('span', { class: 'tl-tb-sep', role: 'separator' }), split, this._curvesBtn,
+      h('span', { class: 'tl-tb-spacer' }),
+      zOut, this._zoomRange, zIn, this._zoomLabel, zFit);
+    this.root.appendChild(this.toolbar);
+    this._syncSnapBtn();
+    this._syncZoomUi();
+  }
+
+  /** Focus + select the toolbar filter (Ctrl+F). */
+  focusFilter() {
+    this.filterInput.focus();
+    this.filterInput.select();
+  }
+
+  get snap() { return this._snapOn; }
+
+  setSnap(on) {
+    this._snapOn = !!on;
+    prefs.set('snap', this._snapOn);
+    this._syncSnapBtn();
+  }
+
+  _syncSnapBtn() {
+    this._snapBtn?.setAttribute('aria-pressed', String(this._snapOn));
+  }
+
+  _syncCurvesBtn() {
+    if (!this._curvesBtn) return;
+    const open = this.isCurvesOpen
+      ? !!this.isCurvesOpen()
+      : !!this.root.querySelector(':scope > .curve-panel:not([hidden])');
+    this._curvesBtn.setAttribute('aria-pressed', String(open));
+  }
+
+  _syncZoomUi() {
+    if (this._zoomLabel) this._zoomLabel.textContent = `${Math.round(this.zoom * 100)}%`;
+    if (this._zoomRange) this._zoomRange.value = String(zoomToSlider(this.zoom));
+  }
+
+  _setFilter(text) {
+    this.filterText = String(text || '');
+    this._applyFilter();
+  }
+
+  /**
+   * Hide header rows (camera / 2D / audio / 3D) whose name or id does not
+   * contain the filter text; their expanded property rows follow them and a
+   * section header hides when nothing under it matches.
+   */
+  _applyFilter() {
+    const q = this.filterText.trim().toLowerCase();
+    const rows = [...this.sndWrap.children, this.camHead, ...this.camsWrap.children, ...this.elsWrap.children];
+    let total = 0;
+    let shown = 0;
+    let sec = null;
+    let secHits = 0;
+    let visible = true;
+    const closeSec = () => { if (sec) sec.classList.toggle('tl-filtered', !!q && secHits === 0); };
+    for (const r of rows) {
+      if (r.classList.contains('tl-sechead')) {
+        closeSec();
+        sec = r;
+        secHits = 0;
+        visible = true;
+        continue;
+      }
+      if (r.dataset.filter != null) {
+        total++;
+        visible = !q || r.dataset.filter.includes(q);
+        if (visible) { shown++; secHits++; }
+      }
+      r.classList.toggle('tl-filtered', !visible);
+    }
+    closeSec();
+    if (this.filterCount) this.filterCount.textContent = `${shown} / ${total}`;
+  }
+
+  /**
+   * Scroll a camera / element / object header row into view (vertically) and
+   * its clip start (horizontally). Expansion and selection are untouched.
+   * `ref` is a selection ref ('cam:id' / 'ob:id' / 'el:id', leaf parts ignored)
+   * or { kind: 'element' | 'object' | 'camera', id }. Returns false when the
+   * row is not on screen (unknown id, or hidden by the filter).
+   */
+  reveal(ref) {
+    let kind = null;
+    let id = null;
+    if (ref && typeof ref === 'object') {
+      kind = ref.kind;
+      id = ref.id;
+    } else {
+      const r = splitRef(ref);
+      if (r) {
+        kind = r.type === 'cam' ? 'camera' : r.type === 'ob' ? 'object' : 'element';
+        id = r.id;
+      }
+    }
+    if (!kind || id == null || !this.project) return false;
+    const q = CSS.escape(String(id));
+    const row = kind === 'camera' ? this.inner.querySelector(`.tl-camhead[data-cam="${q}"]`)
+      : kind === 'object' ? this.inner.querySelector(`.tl-objhead[data-obj="${q}"]`)
+        : this.inner.querySelector(`.tl-elhead[data-el="${q}"]`);
+    if (!row || !row.getClientRects().length) return false;
+
+    const sr = this.scroll.getBoundingClientRect();
+    const r = row.getBoundingClientRect();
+    const top = sr.top + (this.rulerRow?.offsetHeight || 26);
+    const bottom = sr.top + this.scroll.clientHeight;
+    if (r.top < top) this.scroll.scrollTop -= (top - r.top) + 4;
+    else if (r.bottom > bottom) this.scroll.scrollTop += (r.bottom - bottom) + 4;
+
+    const item = kind === 'camera' ? this._camById(id) : kind === 'object' ? this._obj(id) : this._element(id);
+    const start = !item ? 0 : kind === 'camera' ? cameraRange(this.project, item).start : (Number(item.start) || 0);
+    const x = this._trackX(start);
+    const viewL = this.scroll.scrollLeft + this._gutter();
+    const viewR = this.scroll.scrollLeft + this.scroll.clientWidth;
+    if (x < viewL + 8 || x > viewR - 40) this.scroll.scrollLeft = Math.max(0, x - this._gutter() - 40);
+    return true;
+  }
+
+  // ------------------------------------------------------------ name column width
+  _setGutterWidth(w) {
+    const next = clampGutter(w);
+    if (next === this._gutterW) return false;
+    this._gutterW = next;
+    this.root.style.setProperty('--tl-gutter', `${next}px`);
+    // lanes are positioned inside .tl-track, so only the content width and the
+    // playhead (absolute in .tl-inner) depend on the gutter
+    if (this.project && this.pps) {
+      this.inner.style.width = `${this._gutter() + this.project.meta.duration * this.pps + 60}px`;
+      this.setTime(this.time);
+    }
+    this.onViewChange?.();
+    return true;
+  }
+
+  /** Public: set the name column width (clamped 280–480) and persist it. */
+  setGutter(w) {
+    this._setGutterWidth(w);
+    prefs.set('tlGutter', this._gutterW);
+  }
+
+  _startGutterDrag(ev, grip) {
+    if (ev.button !== 0) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    const startX = ev.clientX;
+    const startW = this._gutterW;
+    grip.classList.add('dragging');
+    document.body.classList.add('tl-gutter-resizing');
+    const move = (e) => this._setGutterWidth(startW + (e.clientX - startX));
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+      grip.classList.remove('dragging');
+      document.body.classList.remove('tl-gutter-resizing');
+      prefs.set('tlGutter', this._gutterW);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
   }
 
   // ------------------------------------------------------------ state
@@ -192,14 +430,14 @@ export class Timeline {
 
   fit() {
     const w = this.scroll.clientWidth - this._gutter() - 24;
-    this.zoom = Math.max(0.15, Math.min(8, w / Math.max(1, this.project?.meta.duration || 12) / 60));
+    this.zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, w / Math.max(1, this.project?.meta.duration || 12) / 60));
     this._layout();
     this.onViewChange?.();
   }
 
   /** Zoom around `clientX` (defaults to the playhead) and keep that time in place. */
   setZoom(z, clientX = null) {
-    const next = Math.max(0.15, Math.min(8, Number(z) || this.zoom));
+    const next = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, Number(z) || this.zoom));
     if (Math.abs(next - this.zoom) < 1e-6) return;
     const rect = this.scroll.getBoundingClientRect();
     const anchorX = clientX != null
@@ -216,7 +454,7 @@ export class Timeline {
     this.setZoom(this.zoom * factor, clientX);
   }
 
-  _gutter() { return 360; }
+  _gutter() { return this._gutterW; }
   _trackX(t) { return this._gutter() + t * this.pps; }
   _timeAt(clientX) {
     const r = this.scroll.getBoundingClientRect();
@@ -228,18 +466,18 @@ export class Timeline {
     if (!this.project) return;
     if (this._fitOnce) {
       this.pps = Math.max(8, ((this.scroll.clientWidth - this._gutter() - 24) / Math.max(1, this.project.meta.duration)));
-      this.zoom = Math.max(0.15, Math.min(8, this.pps / 60));
+      this.zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, this.pps / 60));
       this._fitOnce = false;
     } else {
       this.pps = 60 * this.zoom;
     }
-    if (this._zoomLabel) this._zoomLabel.textContent = `${Math.round(this.zoom * 100)}%`;
+    this._syncZoomUi();
     this.render(true);
     this.onViewChange?.();
   }
 
   _snap(t) {
-    if (this._noSnap) return t;
+    if (this._noSnap || !this._snapOn) return t;
     const p = this.project;
     const tol = 7 / this.pps;
     const cands = [0, p.meta.duration, ...(p.meta.beats || [])];
@@ -257,7 +495,7 @@ export class Timeline {
     if (!p) return;
     if (!this.pps) { this._layout(); return; }
     const active = document.activeElement;
-    const focusedHere = this.root.contains(active)
+    const focusedHere = this._rowFocused(active)
       && /INPUT|SELECT|TEXTAREA/.test(active?.tagName || '');
     if (focusedHere) {
       // Rebuilding the rows would throw away the focused input (and the caret)
@@ -340,6 +578,7 @@ export class Timeline {
     }
     this._build3D(p, objs);
 
+    this._applyFilter();
     this.setTime(this.time);
     this._paintSelection();
     if (this._scrollTo) {
@@ -453,38 +692,32 @@ export class Timeline {
       this.onCameraMenu?.(cam.id, e.clientX, e.clientY);
     });
 
+    row.dataset.filter = filterKey(cam.name || '相机', cam.id);
     const g = el('div', 'tl-gutter');
     g.dataset.cam = cam.id;
-    const eye = el('button', 'tl-objeye', '◉');
-    eye.title = cam.visible === false ? '显示该相机' : '隐藏该相机（变换仍作用于子集）';
-    if (cam.visible === false) eye.classList.add('off');
+    const eye = eyeButton(cam.visible !== false, '显示该相机', '隐藏该相机（变换仍作用于子集）');
     eye.addEventListener('click', (e) => {
       e.stopPropagation();
       this.onOp?.({ op: 'cameraPatch', id: cam.id, patch: { visible: cam.visible === false } });
     });
-    const caret = el('button', 'tl-objtoggle', open ? '▾' : '▸');
-    caret.title = open ? '折叠相机属性' : '展开相机属性';
+    const caret = caretButton(open, '展开相机属性', '折叠相机属性');
     caret.addEventListener('click', (e) => { e.stopPropagation(); this._toggleCam(cam.id); });
     const dot = el('span', 'tl-camdot');
     const name = el('span', 'tl-objname');
     name.textContent = cam.name || '相机';
-    name.title = '相机';
-    const kind = el('span', 'tl-objkind', 'CAM');
+    const kind = el('span', 'tl-objkind badge badge-camera', '相机');
     g.append(eye, caret, dot, name, kind);
 
     const track = el('div', 'tl-track');
     const block = el('div', 'blk cam');
     block.dataset.cam = cam.id;
     const range = cameraRange(p, cam);
+    const keys = (cam.path || []).length;
     block.style.left = `${range.start * this.pps}px`;
-    block.style.width = `${Math.max(8, range.duration * this.pps)}px`;
-    block.title = `${cam.name || '相机'} · ${range.start.toFixed(2)}–${range.end.toFixed(2)}s`;
-    block.innerHTML = `<span class="blk-name">${escapeHtml(cam.name || '镜头')}</span><span class="blk-meta">${(cam.path || []).length} 关键点</span>`;
-    const hl = el('div', 'handle handle-l');
-    hl.title = '拖动左边界：改开始时间';
-    const hr = el('div', 'handle handle-r');
-    hr.title = '拖动右边界：改结束时间';
-    block.append(hl, hr);
+    setClipWidth(block, Math.max(8, range.duration * this.pps));
+    block.dataset.tip = `${cam.name || '镜头'} · ${keys} 关键点\n${range.start.toFixed(2)}–${range.end.toFixed(2)}s`;
+    block.innerHTML = `<span class="blk-name">${escapeHtml(cam.name || '镜头')}</span><span class="blk-meta">${keys} 关键点</span>`;
+    block.append(...clipHandles());
     block.addEventListener('contextmenu', (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -540,7 +773,7 @@ export class Timeline {
         ns = s;
       }
       block.style.left = `${ns * this.pps}px`;
-      block.style.width = `${Math.max(8, nd * this.pps)}px`;
+      setClipWidth(block, Math.max(8, nd * this.pps));
       block._ns = ns;
       block._nd = nd;
     };
@@ -711,8 +944,8 @@ export class Timeline {
       inputs.push(inp);
       g.appendChild(box);
     }
-    const kf = el('button', 'tl-kf', '◆');
-    kf.title = '在当前时间打点 / 删点';
+    const kf = kfButton();
+    kf.dataset.tip = '在当前时间打点 / 删点';
     kf.addEventListener('click', (e) => { e.stopPropagation(); this._toggleCamKey(); });
     g.appendChild(kf);
     const lane = el('div', 'tl-track');
@@ -762,7 +995,7 @@ export class Timeline {
         d.dataset.path = 'path';
         d.dataset.t = String(t);
         d.style.left = `${t * this.pps}px`;
-        d.title = `位置 · ${t.toFixed(2)}s`;
+        d.dataset.tip = `位置 · ${t.toFixed(2)}s`;
         posRow.lane.appendChild(d);
         return { t, node: d };
       });
@@ -798,7 +1031,7 @@ export class Timeline {
       inputs.push(inp);
       g.appendChild(box);
     }
-    const kf = el('button', 'tl-kf', '◆');
+    const kf = kfButton();
     kf.addEventListener('click', (e) => { e.stopPropagation(); this._toggleCamParamKey(cam.id, path); });
     g.appendChild(kf);
     const lane = el('div', 'tl-track');
@@ -894,7 +1127,7 @@ export class Timeline {
         d.dataset.path = pr.path;
         d.dataset.t = String(t);
         d.style.left = `${t * this.pps}px`;
-        d.title = `${pr.path} · ${t.toFixed(2)}s`;
+        d.dataset.tip = `${pr.path} · ${t.toFixed(2)}s`;
         pr.lane.appendChild(d);
         return { t, node: d };
       });
@@ -932,7 +1165,7 @@ export class Timeline {
     if (badge) g.appendChild(el('span', 'tl-camfish', badge));
     let kf = null;
     if (keyable) {
-      kf = el('button', 'tl-kf', '◆');
+      kf = kfButton();
       kf.addEventListener('click', (e) => { e.stopPropagation(); this._toggleCamParamKey(cam.id, path); });
       g.appendChild(kf);
     }
@@ -970,7 +1203,7 @@ export class Timeline {
     if (badge) g.appendChild(el('span', 'tl-camfish', badge));
     let kf = null;
     if (keyable) {
-      kf = el('button', 'tl-kf', '◆');
+      kf = kfButton();
       kf.addEventListener('click', (e) => { e.stopPropagation(); this._toggleCamParamKey(cam.id, path); });
       g.appendChild(kf);
     }
@@ -999,50 +1232,37 @@ export class Timeline {
     const row = el('div', 'tl-row tl-elhead');
     row.dataset.el = e.id;
     row.classList.toggle('sel', e.id === this.elementId);
+    row.dataset.filter = filterKey(e.name || e.id, e.id);
     const g = el('div', 'tl-gutter');
     g.dataset.el = e.id;
-    const caret = el('button', 'tl-objtoggle', open ? '▾' : '▸');
-    caret.title = open ? '折叠属性' : '展开属性';
+    const caret = caretButton(open, '展开属性', '折叠属性');
     caret.addEventListener('click', (ev) => {
       ev.stopPropagation();
       this._toggleElementExpand(e.id);
     });
-    const eye = el('button', 'tl-objeye', '◉');
-    eye.title = e.visible === false ? '显示' : '隐藏';
-    if (e.visible === false) eye.classList.add('off');
+    const eye = eyeButton(e.visible !== false, '显示', '隐藏');
     eye.addEventListener('click', (ev) => {
       ev.stopPropagation();
       this.onOp?.({ op: 'updateElement', id: e.id, patch: { visible: e.visible === false } });
     });
-    const dot = el('i', 'type-dot');
-    dot.style.background = TYPE_COLOR[e.type] || '#666';
+    const dot = el('i', `type-dot t-${e.type}`);
     const name = el('span', 'tl-objname');
     name.textContent = e.name || e.id;
-    name.title = e.type === 'text' ? '双击时间块或画面编辑文字内容'
+    name.dataset.tip = e.type === 'text' ? '双击时间块或画面编辑文字内容'
       : e.type === 'audio' ? '声音元素：展开可给音量打关键帧' : (e.name || e.id);
-    const kind = el('span', 'tl-objkind', e.type === 'audio' ? 'AUDIO' : '2D');
-    kind.title = e.type === 'audio' ? '声音 / 音乐（不参与画面）' : '画面元素（纵深 z 单位：米）';
+    const kind = el('span', `tl-objkind badge badge-${e.type}`, TYPE_LABEL[e.type] || e.type);
+    kind.dataset.tip = e.type === 'audio' ? '声音 / 音乐（不参与画面）' : '画面元素（纵深 z 单位：米）';
     g.append(caret, eye, dot, name, kind);
 
     const track = el('div', 'tl-track');
     const b = el('div', `blk el t-${e.type}`);
     b.dataset.id = e.id;
     b.style.left = `${(Number(e.start) || 0) * this.pps}px`;
-    b.style.width = `${Math.max(4, (Number(e.duration) || 0) * this.pps)}px`;
-    const label = e.type === 'text'
-      ? String(e.style?.text || '').slice(0, 24)
-      : e.type === 'audio'
-        ? `♪ ${e.name || (e.src || '').split('/').pop() || e.id}`
-        : (e.src || '').split('/').pop();
-    b.innerHTML = `<span class="blk-name">${escapeHtml(label || e.id)}</span>`;
-    const hl = el('div', 'handle handle-l');
-    hl.title = '拖动左边界：改开始时间';
-    const hr = el('div', 'handle handle-r');
-    hr.title = '拖动右边界：改结束时间';
-    b.append(hl, hr);
-    b.style.setProperty('--c', TYPE_COLOR[e.type] || '#666');
-    if (e.type === 'text') b.title = '双击编辑文字内容';
-    if (e.type === 'audio') b.title = '拖动改时间；双击展开音量关键帧';
+    setClipWidth(b, Math.max(4, (Number(e.duration) || 0) * this.pps));
+    const label = elementClipLabel(e);
+    b.innerHTML = `<span class="blk-name">${escapeHtml(label)}</span>`;
+    b.append(...clipHandles());
+    b.dataset.tip = elementClipTip(e, label);
     b.addEventListener('contextmenu', (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
@@ -1099,14 +1319,14 @@ export class Timeline {
     const g = el('div', 'tl-gutter');
     g.dataset.el = e.id;
     const lab = el('span', 'tl-plabel', label);
-    lab.title = title || `${label}${unit ? ` (${unit})` : ''}`;
+    lab.dataset.tip = title || `${label}${unit ? ` (${unit})` : ''}`;
     g.appendChild(lab);
     const { box, inp } = this._numBox(axis, letter);
     box.classList.add('tl-scalar');
     inp.step = String(step);
     if (Number.isFinite(min)) inp.min = String(min);
     if (Number.isFinite(max)) inp.max = String(max);
-    inp.title = `${lab.title} · 无关键帧时改基础值（所有时间），已有键时改当前帧`;
+    inp.dataset.tip = `${lab.dataset.tip} · 无关键帧时改基础值（所有时间），已有键时改当前帧`;
     // Decide once, when editing starts: an unkeyed property keeps editing its
     // base value for the whole gesture. Otherwise a stray key created while a
     // field is focused would silently turn the next keystroke into a keyframe.
@@ -1121,8 +1341,8 @@ export class Timeline {
     });
     inp.addEventListener('blur', () => { this._flush(`${e.id}:${path}`); pr.keyedAtFocus = null; this._syncProps(); });
     g.appendChild(box);
-    const kf = el('button', 'tl-kf', '◆');
-    kf.title = '在当前时间打帧 / 删帧';
+    const kf = kfButton();
+    kf.dataset.tip = '在当前时间打帧 / 删帧';
     kf.addEventListener('click', (ev) => { ev.stopPropagation(); this._toggleElementKey(e.id, path); });
     g.appendChild(kf);
     const lane = el('div', 'tl-track');
@@ -1138,43 +1358,42 @@ export class Timeline {
     const row = el('div', 'tl-row tl-objhead');
     row.dataset.obj = o.id;
     row.classList.toggle('sel', o.id === this.objectId);
+    row.dataset.filter = filterKey(o.name || o.id, o.id);
     const g = el('div', 'tl-gutter');
     g.dataset.obj = o.id;
-    const caret = el('button', 'tl-objtoggle', open ? '▾' : '▸');
-    caret.title = open ? '折叠属性' : '展开属性';
+    const caret = caretButton(open, '展开属性', '折叠属性');
     caret.addEventListener('click', (e) => { e.stopPropagation(); this._toggleExpand(o.id); });
-    const eye = el('button', 'tl-objeye', '◉');
-    eye.title = o.visible === false ? '显示' : '隐藏';
-    if (o.visible === false) eye.classList.add('off');
+    const eye = eyeButton(o.visible !== false, '显示', '隐藏');
     eye.addEventListener('click', (e) => {
       e.stopPropagation();
       this.onOp?.({ op: 'objectPatch', id: o.id, patch: { visible: o.visible === false } });
     });
     const dot = el('span', 'tl-objdot');
-    dot.style.background = o.style?.color || '#17d9ff';
+    dot.style.background = o.style?.color || token('--accent');
     const name = el('span', 'tl-objname');
     name.textContent = o.name || o.id;
-    name.title = '双击重命名';
+    name.dataset.tip = '双击重命名';
     name.addEventListener('dblclick', () => this._inlineName(name, o));
     if (o.parent?.id) {
       const p = (this.project?.scene?.objects || []).find((x) => x.id === o.parent.id);
       const link = el('span', 'tl-objparent', '↳');
-      link.title = `父级：${p?.name || o.parent.id}`;
+      link.dataset.tip = `父级：${p?.name || o.parent.id}`;
       g.append(caret, eye, dot, link, name);
     } else {
       g.append(caret, eye, dot, name);
     }
-    const kind = el('span', 'tl-objkind', o.type === 'empty' ? '空' : '3D');
+    const kind = el('span', 'tl-objkind badge badge-object', o.type === 'empty' ? '空' : '3D');
     const kids = childrenOf(this.project, o.id).length;
     if (kids) {
       const badge = el('span', 'tl-objkids', `${kids} 子级`);
-      badge.title = '直接子元素数量';
+      badge.dataset.tip = '直接子元素数量';
       g.append(kind, badge);
     } else {
       g.append(kind);
     }
-    const more = el('button', 'tl-objmore', '⋯');
-    more.title = '元素操作';
+    const more = h('button', {
+      type: 'button', class: 'tl-objmore', 'aria-label': '元素操作', 'data-tip': '元素操作',
+    }, icon('more', 'ic-sm'));
     more.addEventListener('click', (e) => {
       e.stopPropagation();
       const r = more.getBoundingClientRect();
@@ -1186,13 +1405,10 @@ export class Timeline {
     const block = el('div', 'blk ob');
     block.dataset.obj = o.id;
     block.style.left = `${(Number(o.start) || 0) * this.pps}px`;
-    block.style.width = `${Math.max(4, (Number(o.duration) || 0) * this.pps)}px`;
+    setClipWidth(block, Math.max(4, (Number(o.duration) || 0) * this.pps));
     block.innerHTML = `<span class="blk-name">${escapeHtml(o.name || o.id)}</span><span class="blk-meta">${(Number(o.duration) || 0).toFixed(2)}s</span>`;
-    const hl = el('div', 'handle handle-l');
-    hl.title = '拖动左边界：改开始时间';
-    const hr = el('div', 'handle handle-r');
-    hr.title = '拖动右边界：改结束时间';
-    block.append(hl, hr);
+    block.dataset.tip = `${o.name || o.id} · ${(Number(o.duration) || 0).toFixed(2)}s`;
+    block.append(...clipHandles());
     track.appendChild(block);
     row.append(g, track);
     this.elsWrap.appendChild(row);
@@ -1227,9 +1443,16 @@ export class Timeline {
     return this.sections[key] !== 'collapsed';
   }
 
+  /** Group header state: ▾ all / ▾• keyed only / ▸ collapsed (chevron + keyframe dot). */
   _groupCaret(key) {
     const m = this.sections[key];
-    return m === 'keyed' ? '▾•' : m === 'full' ? '▾' : '▸';
+    const span = el('span', `tl-seccaret${m === 'keyed' ? ' keyed' : ''}`);
+    span.append(icon(m === 'collapsed' ? 'chevron-right' : 'chevron-down', 'ic-sm'));
+    if (m === 'keyed') {
+      span.append(el('i', 'tl-keyed-dot'));
+      span.dataset.tip = '只显示带关键帧的属性（再点一次收起）';
+    }
+    return span;
   }
 
   _camTracked(cam, path) {
@@ -1308,7 +1531,7 @@ export class Timeline {
   _sectionRow(title, key, hint = '') {
     const row = el('div', 'tl-row tl-sect');
     const g = el('div', 'tl-gutter');
-    g.append(el('span', 'tl-seccaret', this._groupCaret(key)), el('span', '', title));
+    g.append(this._groupCaret(key), el('span', '', title));
     if (hint) g.append(el('span', 'tl-sub', hint));
     row.append(g, el('div', 'tl-track'));
     row.addEventListener('click', () => {
@@ -1396,7 +1619,7 @@ export class Timeline {
     const lab = el('span', 'tl-plabel');
     if (o.parent?.id) {
       const local = el('span', 'tl-plocal', '本');
-      local.title = '本地值（相对父级）';
+      local.dataset.tip = '本地值（相对父级）';
       lab.append(local);
     }
     lab.append(document.createTextNode(label));
@@ -1413,8 +1636,8 @@ export class Timeline {
       inputs.push(inp);
       g.appendChild(box);
     }
-    const kf = el('button', 'tl-kf', '◆');
-    kf.title = '在当前时间打帧 / 删帧';
+    const kf = kfButton();
+    kf.dataset.tip = '在当前时间打帧 / 删帧';
     kf.addEventListener('click', (e) => { e.stopPropagation(); this._toggleKey(o.id, path); });
     g.appendChild(kf);
     const lane = el('div', 'tl-track');
@@ -1443,7 +1666,7 @@ export class Timeline {
     });
     inp.addEventListener('blur', () => { this._flush(`${o.id}:opacity`); this._syncProps(); });
     g.appendChild(box);
-    const kf = el('button', 'tl-kf', '◆');
+    const kf = kfButton();
     kf.addEventListener('click', (e) => { e.stopPropagation(); this._toggleKey(o.id, 'opacity'); });
     g.appendChild(kf);
     const lane = el('div', 'tl-track');
@@ -1502,7 +1725,7 @@ export class Timeline {
         d.dataset.path = pr.path;
         d.dataset.t = String(t);
         d.style.left = `${t * this.pps}px`;
-        d.title = `${pr.path} · ${t.toFixed(2)}s`;
+        d.dataset.tip = `${pr.path} · ${t.toFixed(2)}s`;
         pr.lane.appendChild(d);
         return { t, node: d };
       });
@@ -1522,7 +1745,7 @@ export class Timeline {
         d.dataset.path = pr.path;
         d.dataset.t = String(t);
         d.style.left = `${t * this.pps}px`;
-        d.title = `${pr.path} · ${t.toFixed(2)}s`;
+        d.dataset.tip = `${pr.path} · ${t.toFixed(2)}s`;
         pr.lane.appendChild(d);
         return { t, node: d };
       });
@@ -1559,7 +1782,7 @@ export class Timeline {
         const has = track.length > 0 || sub;
         pr.kf.classList.toggle('on', at);
         pr.kf.classList.toggle('has', !at && has);
-        pr.kf.title = at ? '删除这一帧' : has ? `在当前时间打帧（已有 ${track.length} 帧）` : '在当前时间打帧';
+        pr.kf.dataset.tip = at ? '删除这一帧' : has ? `在当前时间打帧（已有 ${track.length} 帧）` : '在当前时间打帧';
       }
       if (pr.kind !== 'geom' && pr.kind !== 'color') this._refreshLane(pr, o);
     }
@@ -1572,7 +1795,7 @@ export class Timeline {
       const has = keys.length > 0;
       pr.kf.classList.toggle('on', at);
       pr.kf.classList.toggle('has', !at && has);
-      pr.kf.title = at ? '删除这一帧' : has ? `在当前时间打帧（已有 ${keys.length} 帧）` : '在当前时间打帧';
+      pr.kf.dataset.tip = at ? '删除这一帧' : has ? `在当前时间打帧（已有 ${keys.length} 帧）` : '在当前时间打帧';
       this._refreshElLane(pr, e);
     }
     const cam = this.project?.camera;
@@ -1583,7 +1806,7 @@ export class Timeline {
       const has = cam.path.length > 0;
       this._camPos.kf.classList.toggle('on', at);
       this._camPos.kf.classList.toggle('has', !at && has);
-      this._camPos.kf.title = at ? '删除这一帧' : has ? `在当前时间打点（已有 ${cam.path.length} 帧）` : '在当前时间打点';
+      this._camPos.kf.dataset.tip = at ? '删除这一帧' : has ? `在当前时间打点（已有 ${cam.path.length} 帧）` : '在当前时间打点';
       this._refreshCamLane();
     }
     for (const pr of this._camPropRows) {
@@ -1602,7 +1825,7 @@ export class Timeline {
         const has = track.length > 0;
         pr.kf.classList.toggle('on', at);
         pr.kf.classList.toggle('has', !at && has);
-        pr.kf.title = at ? '删除这一帧' : has ? `在当前时间打帧（已有 ${track.length} 帧）` : '在当前时间打帧';
+        pr.kf.dataset.tip = at ? '删除这一帧' : has ? `在当前时间打帧（已有 ${track.length} 帧）` : '在当前时间打帧';
       }
       this._refreshCamPropLane(pr, cam);
     }
@@ -1610,35 +1833,33 @@ export class Timeline {
       const o = this._obj(id);
       if (!o) continue;
       if (document.activeElement !== h.name && !h.name.querySelector('input')) h.name.textContent = o.name || o.id;
-      h.eye.classList.toggle('off', o.visible === false);
-      h.eye.title = o.visible === false ? '显示' : '隐藏';
-      h.dot.style.background = o.style?.color || '#17d9ff';
+      setEye(h.eye, o.visible !== false, '显示', '隐藏');
+      h.dot.style.background = o.style?.color || token('--accent');
       h.row.classList.toggle('sel', id === this.objectId);
       const start = Number(o.start) || 0;
       const dur = Number(o.duration) || 0;
       const left = `${start * this.pps}px`;
-      const width = `${Math.max(4, dur * this.pps)}px`;
       if (h.block.style.left !== left) h.block.style.left = left;
-      if (h.block.style.width !== width) h.block.style.width = width;
+      setClipWidth(h.block, Math.max(4, dur * this.pps));
       const nameEl = h.block.querySelector('.blk-name');
       if (nameEl) nameEl.textContent = o.name || o.id;
       const metaEl = h.block.querySelector('.blk-meta');
       if (metaEl) metaEl.textContent = `${dur.toFixed(2)}s`;
+      h.block.dataset.tip = `${o.name || o.id} · ${dur.toFixed(2)}s`;
     }
     for (const [id, h] of this._elHeads) {
       const e = this._element(id);
       if (!e) continue;
       if (document.activeElement !== h.name) h.name.textContent = e.name || e.id;
-      h.eye.classList.toggle('off', e.visible === false);
-      h.eye.title = e.visible === false ? '显示' : '隐藏';
+      setEye(h.eye, e.visible !== false, '显示', '隐藏');
       h.row.classList.toggle('sel', id === this.elementId);
       const left = `${(Number(e.start) || 0) * this.pps}px`;
-      const width = `${Math.max(4, (Number(e.duration) || 0) * this.pps)}px`;
       if (h.block.style.left !== left) h.block.style.left = left;
-      if (h.block.style.width !== width) h.block.style.width = width;
+      setClipWidth(h.block, Math.max(4, (Number(e.duration) || 0) * this.pps));
       const nameEl = h.block.querySelector('.blk-name');
-      const label = e.type === 'text' ? String(e.style?.text || '').slice(0, 24) : (e.src || '').split('/').pop();
-      if (nameEl) nameEl.textContent = label || e.id;
+      const label = elementClipLabel(e);
+      if (nameEl) nameEl.textContent = label;
+      h.block.dataset.tip = elementClipTip(e, label);
     }
   }
 
@@ -1999,6 +2220,7 @@ export class Timeline {
       const band = padded(startClient, lastClient);
       const ids = [];
       this.inner.querySelectorAll('.tl-key[data-t]').forEach((node) => {
+        if (!node.getClientRects().length) return; // hidden by the filter
         const r = node.getBoundingClientRect();
         const cx = (r.left + r.right) / 2;
         const cy = (r.top + r.bottom) / 2;
@@ -2184,7 +2406,7 @@ export class Timeline {
           ns = s;
         }
         objBlk.style.left = `${ns * this.pps}px`;
-        objBlk.style.width = `${nd * this.pps}px`;
+        setClipWidth(objBlk, nd * this.pps);
         objBlk._ns = ns; objBlk._nd = nd;
       };
       const up = (e) => {
@@ -2268,7 +2490,7 @@ export class Timeline {
           ns = s;
         }
         blk.style.left = `${ns * this.pps}px`;
-        blk.style.width = `${nd * this.pps}px`;
+        setClipWidth(blk, nd * this.pps);
         blk._ns = ns; blk._nd = nd;
       };
       const up = (e) => {
@@ -2302,6 +2524,68 @@ export class Timeline {
 }
 
 const round3 = (v) => Math.round(v * 1000) / 1000;
+
+// ------------------------------------------------------------ row / clip helpers
+const filterKey = (name, id) => `${name ?? ''} ${id ?? ''}`.toLowerCase();
+
+function setEye(btn, visible, showTip, hideTip) {
+  btn.classList.toggle('off', !visible);
+  const want = visible ? 'eye' : 'eye-off';
+  if (btn.dataset.icon !== want) {
+    btn.dataset.icon = want;
+    btn.replaceChildren(icon(want, 'ic-sm'));
+  }
+  const tip = visible ? hideTip : showTip;
+  btn.dataset.tip = tip;
+  btn.setAttribute('aria-label', tip);
+  btn.setAttribute('aria-pressed', String(!visible));
+}
+
+function eyeButton(visible, showTip, hideTip) {
+  const b = h('button', { type: 'button', class: 'tl-objeye' });
+  setEye(b, visible, showTip, hideTip);
+  return b;
+}
+
+function caretButton(open, expandTip, collapseTip) {
+  const tip = open ? collapseTip : expandTip;
+  return h('button', {
+    type: 'button', class: 'tl-objtoggle', 'aria-label': tip, 'aria-expanded': String(open), 'data-tip': tip,
+  }, icon(open ? 'chevron-down' : 'chevron-right', 'ic-sm'));
+}
+
+/** ◆ toggle (glyph kept on purpose: keyframe symbol, DESIGN.md §5). */
+function kfButton() {
+  return h('button', { type: 'button', class: 'tl-kf', 'aria-label': '关键帧' }, '◆');
+}
+
+function clipHandles() {
+  return [
+    h('div', { class: 'handle handle-l', 'data-tip': '拖动左边界：改开始时间' }),
+    h('div', { class: 'handle handle-r', 'data-tip': '拖动右边界：改结束时间' }),
+  ];
+}
+
+/** Set a clip's pixel width; narrow clips drop their right-side meta. */
+function setClipWidth(block, px) {
+  const width = `${px}px`;
+  if (block.style.width !== width) block.style.width = width;
+  block.classList.toggle('narrow', px < CLIP_META_MIN);
+}
+
+function elementClipLabel(e) {
+  const file = (e.src || '').split('/').pop();
+  const label = e.type === 'text' ? String(e.style?.text || '').slice(0, 24)
+    : e.type === 'audio' ? (e.name || file)
+      : file;
+  return label || e.id;
+}
+
+function elementClipTip(e, label) {
+  if (e.type === 'text') return `${label}\n双击编辑文字内容`;
+  if (e.type === 'audio') return `${label}\n拖动改时间；双击展开音量关键帧`;
+  return label;
+}
 const round2 = (v) => Math.round(Number(v) * 100) / 100;
 const fmtTick = (t) => (t >= 60 ? `${Math.floor(t / 60)}:${String(Math.round(t % 60)).padStart(2, '0')}` : `${Math.round(t)}s`);
 const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));

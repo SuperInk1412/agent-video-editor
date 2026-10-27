@@ -1,4 +1,6 @@
 // Inspector: edit the selected element down to the details (or project fx when nothing is selected).
+// Layout follows docs/DESIGN.md §1.4: sticky header, collapsible sections, one-line property rows
+// (label | control | ◆) with vector rows, unit suffixes and three-state keyframe buttons.
 import { sampleTrack } from '/core/time.js';
 import { objectPose, sampleChannel } from '/core/scene.js';
 import { ancestors, wouldCycle, STRENGTH_TRACKS } from '/core/hierarchy.js';
@@ -6,29 +8,32 @@ import { MEDIA_TYPES, FITS, ALIGNS, mediaSpec, textSpec } from '/core/objects-me
 import { normalizeWorld } from '/core/world.js';
 import { RotBall } from './rotball.js';
 import { SpeedCurve, SPEED_PRESETS } from './speedcurve.js';
-import { escapeHtml } from './timeline.js';
 import { attachNumberField, readNumber, writeNumber } from './numfield.js';
+import { h, icon, prefs } from './ui.js';
 
 const MOTIONS = ['none', 'in', 'out', 'left', 'right', 'up', 'down', 'drift', 'shake'];
 const FONTS = ['SimHei', 'Microsoft YaHei', 'Arial', 'Impact', 'Bahnschrift', 'Consolas'];
 const EASES = ['linear', 'easeIn', 'easeOut', 'easeInOut', 'smooth', 'outExpo', 'inOutCubic', 'outBack'];
 
-function h(tag, attrs = {}, ...children) {
-  const n = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (v == null || v === false) continue;
-    if (k === 'class') n.className = v;
-    else if (k === 'style') n.style.cssText = v;
-    else if (k.startsWith('on')) n.addEventListener(k.slice(2).toLowerCase(), v);
-    else if (k === 'value') n.value = v;
-    else if (k === 'checked') n.checked = !!v;
-    else n.setAttribute(k, v);
-  }
-  for (const c of children.flat()) {
-    if (c == null) continue;
-    n.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
-  }
-  return n;
+const EL_LABELS = { image: '图片', video: '视频', text: '文字', shape: '形状', solid: '色块', audio: '声音' };
+const OBJ_LABELS = {
+  empty: '空元素', solid: '3D 物体', shape: '3D 形状', text: '3D 文字', image: '3D 图片', video: '3D 视频',
+  camera: '相机', container: '容器', audio: '声音',
+};
+// short names for the keyframe list (full path stays in the hover title)
+const PATH_LABELS = {
+  'transform.x': 'X', 'transform.y': 'Y', 'transform.z': '纵深', 'transform.scale': '缩放',
+  'transform.rotation': '旋转', 'transform.opacity': '不透明度', 'style.size': '字号', 'style.color': '颜色',
+  'style.fill': '填充', 'fx.glow': '辉光', 'audio.volume': '音量', dir: '朝向', roll: '自转',
+};
+const KF_TIP = '打关键帧\nShift+点击 删除当前帧关键帧';
+
+/** '#abc' / 'abc' / '#aabbcc' -> '#aabbcc' (null when not a hex colour) */
+function normHex(v) {
+  const s = String(v ?? '').trim().replace(/^#/, '');
+  if (/^[0-9a-f]{3}$/i.test(s)) return `#${s.split('').map((c) => c + c).join('')}`.toLowerCase();
+  if (/^[0-9a-f]{6}$/i.test(s)) return `#${s}`.toLowerCase();
+  return null;
 }
 
 export class Inspector {
@@ -37,6 +42,8 @@ export class Inspector {
     this.opts = opts;
     this.debounce = new Map();
     this.lastRenderKey = '';
+    this._kfSync = [];
+    this._kind = 'project';
   }
 
   _commit(key, op, delay = 180) {
@@ -63,74 +70,275 @@ export class Inspector {
     this._last = { project, sel, time };
     const active = document.activeElement;
     if (this._ballDragging || this._speedDragging) return;
-    if (this.root.contains(active) && /INPUT|TEXTAREA|SELECT/.test(active?.tagName || '')) return;
+    if (this.root.contains(active) && /INPUT|TEXTAREA|SELECT/.test(active?.tagName || '')) { this._syncKeys(); return; }
     const key = `${project.rev}|${sel?.camera ? 'cam' : ''}|${sel?.elementId}|${sel?.objectId}|${sel?.segmentId}|${Math.round(time * 10)}`;
-    if (key === this.lastRenderKey) return;
+    if (key === this.lastRenderKey) { this._syncKeys(); return; }
     this.lastRenderKey = key;
     this.root.innerHTML = '';
+    this._kfSync = [];
+    this._elId = null;
+    this.root.classList.add('insp');
     const object = (project.scene?.objects || []).find((o) => o.id === sel?.objectId);
     const element = project.elements.find((e) => e.id === sel?.elementId);
     if (object) this._renderObject(project, object, time);
     else if (element) this._renderElement(project, element, time);
     else if (sel?.segmentId) this._renderSegment(project, sel.segmentId);
-    else if (project.camera) this._renderCamera(project, time);
+    else if (sel?.camera && project.camera) this._renderCamera(project, time);
     else this._renderProject(project);
   }
 
-  // ---------- shared bits ----------
-  _section(title, ...kids) {
-    const s = h('div', { class: 'sec' }, h('div', { class: 'sec-title' }, title), ...kids);
-    return s;
+  /** Repaint ◆ states / current-key rows for the playhead without rebuilding the panel. */
+  _syncKeys() {
+    for (const fn of this._kfSync) {
+      try { fn(); } catch { /* stale node */ }
+    }
   }
 
-  _field({ label, value, type = 'number', step = 0.01, min, max, path, kf, options, onChange, placeholder, span = 2, percent = false }) {
+  _refresh() {
+    if (!this._last) return;
+    this.lastRenderKey = '';
+    this.render(this._last.project, this._last.sel, this._last.time);
+  }
+
+  // ---------------------------------------------------------------- header
+  /**
+   * Sticky header: type badge · name (click to rename) · dim id · icon actions.
+   * actions: [{ icon, label, tip, danger, run }]
+   */
+  _header({ type, badge, name, id, onRename, actions = [] }) {
+    const nameBtn = onRename
+      ? h('button', { type: 'button', class: 'insp-name', 'data-tip': '单击改名', 'aria-label': `名称：${name}，单击改名` }, name || '—')
+      : h('span', { class: 'insp-name static', title: name }, name || '—');
+    if (onRename) {
+      nameBtn.addEventListener('click', () => {
+        const input = h('input', { type: 'text', class: 'insp-rename', 'aria-label': '名称', spellcheck: 'false' });
+        input.value = name ?? '';
+        let done = false;
+        const finish = (commit) => {
+          if (done) return;
+          done = true;
+          const v = input.value;
+          if (commit && v.trim() && v !== name) {
+            onRename(v);
+            this._flush();
+            name = v;
+            nameBtn.textContent = v;
+          }
+          if (input.isConnected) input.replaceWith(nameBtn);
+        };
+        input.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+          else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finish(false); }
+        });
+        input.addEventListener('blur', () => finish(true));
+        nameBtn.replaceWith(input);
+        input.focus();
+        input.select();
+      });
+    }
+    const head = h('div', { class: 'insp-head' },
+      h('span', { class: `badge${type ? ` badge-${type}` : ''} insp-kind` }, badge),
+      nameBtn,
+      id ? h('span', { class: 'insp-id', title: id }, id) : null,
+      actions.length ? h('div', { class: 'insp-actions' }, ...actions.map((a) => h('button', {
+        type: 'button', class: `icon-btn${a.danger ? ' danger' : ''}`,
+        'aria-label': a.label, 'data-tip': a.tip || a.label, onclick: a.run,
+      }, icon(a.icon)))) : null,
+    );
+    this.root.appendChild(head);
+    return head;
+  }
+
+  // ---------------------------------------------------------------- sections
+  /** legacy signature: an always-open section keyed by its title */
+  _section(title, ...kids) {
+    return this._sec(title, {}, ...kids);
+  }
+
+  /**
+   * Collapsible section. Collapsed state lives in prefs.sections under
+   * `<objectKind>:<key>` (key defaults to the title).
+   */
+  _sec(title, { key, open = true, count, tag } = {}, ...kids) {
+    const pk = `${this._kind}:${key || title}`;
+    const store = prefs.get('sections', {}) || {};
+    const collapsed = Object.prototype.hasOwnProperty.call(store, pk) ? !!store[pk] : !open;
+    const head = h('div', { class: 'sec-head', role: 'button', tabindex: '0', 'aria-expanded': String(!collapsed) },
+      icon('chevron-down', 'ic-sm sec-chev'),
+      h('span', { class: 'sec-name' }, title),
+      count != null ? h('span', { class: 'sec-count' }, String(count)) : null,
+      tag ? h('span', { class: 'sec-tag' }, tag) : null,
+    );
+    const sec = h('section', { class: `sec${collapsed ? ' collapsed' : ''}`, dataset: { sec: pk } },
+      head, h('div', { class: 'sec-body' }, ...kids));
+    const toggle = () => {
+      const now = !sec.classList.contains('collapsed');
+      sec.classList.toggle('collapsed', now);
+      head.setAttribute('aria-expanded', String(!now));
+      const s = { ...(prefs.get('sections', {}) || {}) };
+      s[pk] = now;
+      prefs.set('sections', s);
+    };
+    head.addEventListener('click', toggle);
+    head.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+    });
+    return sec;
+  }
+
+  // ---------------------------------------------------------------- property rows
+  _row(label, control, kfNode, cls = '') {
+    return h('div', { class: `prop fld${cls ? ` ${cls}` : ''}` },
+      h('label', { title: label }, label), control, kfNode || h('span', { class: 'kf-slot' }));
+  }
+
+  /** ◆ with three states; getState() -> 'none' | 'anim' | 'on' (re-read on every playhead sync). */
+  _kfButton(getState, onKey, onUnkey) {
+    const b = h('button', {
+      type: 'button', class: 'kf-btn', 'aria-label': '打关键帧', 'data-tip': KF_TIP,
+      onclick: (e) => {
+        this._flush();
+        if (e.shiftKey) onUnkey(); else onKey();
+      },
+    });
+    const paint = () => {
+      const s = getState();
+      b.dataset.state = s;
+      b.classList.toggle('on', s === 'on');
+      b.classList.toggle('anim', s === 'anim');
+      b.textContent = s === 'on' ? '◆' : '◇';
+    };
+    paint();
+    this._kfSync.push(paint);
+    return b;
+  }
+
+  /** ◆ for element tracks: keys every path at the playhead (keySet), Shift removes them (keyRemove). */
+  _elKfButton(paths) {
+    return this._kfButton(
+      () => this._elKeyState(paths),
+      () => {
+        const t = Math.round(this.opts.getTime() * 1000) / 1000;
+        for (const path of paths) this.opts.onOp({ op: 'keySet', id: this._elId, path, t, value: this.opts.getTimeValue(path) });
+      },
+      () => {
+        for (const path of paths) {
+          const k = this._keyAtPlayhead(path);
+          if (k) this.opts.onOp({ op: 'keyRemove', id: this._elId, path, t: k.t });
+        }
+      },
+    );
+  }
+
+  _elKeyState(paths) {
+    const el = this._last?.project?.elements.find((e) => e.id === this._elId);
+    if (!el) return 'none';
+    if (paths.some((p) => this._keyAtPlayhead(p))) return 'on';
+    return paths.some((p) => (el.keyframes || []).some((k) => k.path === p)) ? 'anim' : 'none';
+  }
+
+  /** numeric box: optional axis letter / prefix, numfield input, unit suffix */
+  _num({ value, step = 0.01, min, max, percent = false, unit, axis, prefix, placeholder, aria, onChange }) {
+    const input = h('input', { type: 'text', step, min, max, placeholder: placeholder || '', 'aria-label': aria || null });
+    if (percent) { input.dataset.scale = '100'; input.dataset.unit = '%'; }
+    attachNumberField(input);
+    writeNumber(input, value, { force: true });
+    input.addEventListener('input', () => {
+      const v = readNumber(input);
+      if (v == null || !Number.isFinite(v)) return;
+      onChange(v);
+    });
+    input.addEventListener('blur', () => this._flush());
+    const box = h('span', { class: 'nbox' },
+      axis ? h('span', { class: `ax ax-${axis}`, 'aria-hidden': 'true' }, axis.toUpperCase())
+        : prefix ? h('span', { class: 'ax', 'aria-hidden': 'true' }, prefix) : null,
+      input,
+      unit && !percent ? h('span', { class: 'unit', 'aria-hidden': 'true' }, unit) : null);
+    // clicking the axis letter / unit focuses the value
+    box.addEventListener('pointerdown', (e) => {
+      if (e.target === input) return;
+      e.preventDefault();
+      input.focus();
+      input.select();
+    });
+    return box;
+  }
+
+  _field({ label, value, type = 'number', step = 0.01, min, max, path, kf, keyer, options, onChange, placeholder, percent = false, unit }) {
+    const kfNode = keyer ? this._kfButton(keyer.state, keyer.set, keyer.unset)
+      : kf ? this._elKfButton([path]) : null;
+    if (type === 'number') {
+      const box = this._num({ value, step, min, max, percent, unit, placeholder, aria: label, onChange });
+      return this._row(label, box, kfNode);
+    }
+    if (type === 'color') return this._row(label, this._color(label, value, onChange), kfNode);
     let input;
     if (type === 'select') {
-      input = h('select', {}, ...options.map((o) => {
+      input = h('select', { 'aria-label': label }, ...options.map((o) => {
         const v = typeof o === 'string' ? o : o.value;
         const l = typeof o === 'string' ? o : o.label;
         return h('option', { value: v, selected: String(v) === String(value) }, l);
       }));
     } else if (type === 'textarea') {
-      input = h('textarea', { rows: 2, placeholder: placeholder || '' }); input.value = value ?? '';
-    } else if (type === 'color') {
-      input = h('input', { type: 'color', value: value || '#ffffff' });
+      input = h('textarea', { rows: 2, placeholder: placeholder || '', 'aria-label': label }); input.value = value ?? '';
     } else if (type === 'checkbox') {
-      input = h('input', { type: 'checkbox', checked: !!value });
-    } else if (type === 'text') {
-      input = h('input', { type: 'text', placeholder: placeholder || '' });
-      input.value = value ?? '';
+      input = h('input', { type: 'checkbox', checked: !!value, 'aria-label': label });
     } else {
-      // numeric fields: text input + shared scrub/spinner behaviour (numfield.js)
-      input = h('input', { type: 'text', step, min, max, placeholder: placeholder || '' });
-      if (percent) { input.dataset.scale = '100'; input.dataset.unit = '%'; }
-      attachNumberField(input);
-      writeNumber(input, value, { force: true });
+      input = h('input', { type: 'text', placeholder: placeholder || '', 'aria-label': label });
+      input.value = value ?? '';
     }
     const emit = () => {
-      const v = type === 'checkbox' ? input.checked
-        : type === 'number' ? readNumber(input)
-          : input.value;
-      if (v == null || (type === 'number' && !Number.isFinite(v))) return;
+      const v = type === 'checkbox' ? input.checked : input.value;
+      if (v == null) return;
       onChange(v);
     };
-    if (type === 'select') input.addEventListener('change', emit);
-    else if (type === 'checkbox' || type === 'color') input.addEventListener('change', emit);
+    if (type === 'select' || type === 'checkbox') input.addEventListener('change', emit);
     else input.addEventListener('input', emit);
     input.addEventListener('blur', () => this._flush());
+    const control = type === 'checkbox' ? h('span', { class: 'chk' }, input) : input;
+    return this._row(label, control, kfNode, type === 'textarea' ? 'tall' : '');
+  }
 
-    const kfAt = kf ? this._keyAtPlayhead(path) : null;
-    const kfBtn = kf ? h('button', {
-      class: `kf-btn${kfAt ? ' on' : ''}`, title: '在当前时间记录关键帧（Shift+点击删除当前时间的关键帧）',
-      onclick: (e) => {
-        this._flush();
-        if (e.shiftKey) {
-          const k = this._keyAtPlayhead(path);
-          if (k) this.opts.onOp({ op: 'keyRemove', id: this._elId, path, t: k.t });
-        } else this.opts.onOp({ op: 'keySet', id: this._elId, path, t: Math.round(this.opts.getTime() * 1000) / 1000, value: this.opts.getTimeValue(path) });
-      },
-    }, '◆') : null;
-    return h('div', { class: `fld span${span}` }, h('label', {}, label), input, kfBtn);
+  /** 24×24 swatch + hex text, both editing the same value */
+  _color(label, value, onChange) {
+    let cur = value ?? '';
+    const sw = h('input', { type: 'color', class: 'swatch', value: normHex(cur) || '#ffffff', 'aria-label': `${label}（取色）` });
+    const tx = h('input', { type: 'text', class: 'hex', spellcheck: 'false', 'aria-label': `${label}（十六进制）` });
+    tx.value = cur;
+    sw.addEventListener('input', () => { tx.value = sw.value; tx.classList.remove('invalid'); });
+    sw.addEventListener('change', () => { cur = sw.value; tx.value = cur; onChange(cur); });
+    tx.addEventListener('change', () => {
+      const v = normHex(tx.value);
+      if (!v) { tx.classList.add('invalid'); return; }
+      tx.classList.remove('invalid');
+      cur = v;
+      tx.value = v;
+      sw.value = v;
+      onChange(v);
+    });
+    tx.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); tx.blur(); }
+      else if (e.key === 'Escape') { e.preventDefault(); tx.value = cur; tx.classList.remove('invalid'); tx.blur(); }
+    });
+    for (const n of [sw, tx]) n.addEventListener('blur', () => this._flush());
+    return h('span', { class: 'color-ctl' }, sw, tx);
+  }
+
+  /**
+   * Several number boxes on one row (X/Y, start/duration, W/H).
+   * items: [{ axis | prefix, value, step, min, max, unit, percent, onChange, aria }]
+   * keyPaths: element tracks keyed together by the row's ◆.
+   */
+  _vec({ label, items, keyPaths, keyer }) {
+    const kfNode = keyer ? this._kfButton(keyer.state, keyer.set, keyer.unset)
+      : keyPaths ? this._elKfButton(keyPaths) : null;
+    const boxes = items.map((it) => this._num(it));
+    return this._row(label, h('div', { class: `vec vec-${items.length}` }, ...boxes), kfNode);
+  }
+
+  /** read-only value row */
+  _ro(label, text) {
+    return this._row(label, h('div', { class: 'ro', title: text }, text));
   }
 
   /** the selected element's key on `path` within half a frame of the playhead */
@@ -143,33 +351,29 @@ export class Inspector {
     return (el.keyframes || []).find((k) => k.path === path && Math.abs(k.t - t) <= tol) || null;
   }
 
-  _refresh() {
-    if (!this._last) return;
-    this.lastRenderKey = '';
-    this.render(this._last.project, this._last.sel, this._last.time);
-  }
-
+  // ---------------------------------------------------------------- 2D element
   _renderElement(project, el, time) {
     this._elId = el.id;
-    const typeLabel = { image: '图片', video: '视频', text: '文字', shape: '形状', solid: '色块', audio: '声音' }[el.type] || el.type;
-    const head = h('div', { class: 'insp-head' },
-      h('div', { class: 'insp-kind' }, typeLabel),
-      h('div', { class: 'insp-id' }, el.id),
-      h('div', { class: 'insp-actions' },
-        h('button', {
-          class: 'mini', title: '在后面复制一份（放不下时贴着结尾）',
-          onclick: () => {
+    this._kind = el.type;
+    const set = (path, patch) => this._commit(`${el.id}:${path}`, { op: 'updateElement', id: el.id, patch });
+    this._header({
+      type: el.type, badge: EL_LABELS[el.type] || el.type, name: el.name, id: el.id,
+      onRename: (v) => set('name', { name: v }),
+      actions: [
+        {
+          icon: 'copy', label: '复制', tip: '复制\n在后面复制一份（放不下时贴着结尾）',
+          run: () => {
             const start = Math.max(0, Math.min(el.start + el.duration, project.meta.duration - el.duration));
             this.opts.onOp({ op: 'duplicateElement', id: el.id, start: Math.round(start * 1000) / 1000 });
           },
-        }, '复制'),
-        h('button', { class: 'mini danger', onclick: () => { if (confirm(`删除 ${el.name}?`)) this.opts.onOp({ op: 'removeElement', id: el.id }); } }, '删除'),
-      ),
-    );
-    this.root.appendChild(head);
+        },
+        {
+          icon: 'trash', label: '删除', danger: true,
+          run: () => { if (confirm(`删除 ${el.name}?`)) this.opts.onOp({ op: 'removeElement', id: el.id }); },
+        },
+      ],
+    });
 
-    const set = (path, patch) => this._commit(`${el.id}:${path}`, { op: 'updateElement', id: el.id, patch });
-    const setPath = (path) => (v) => this._commit(`${el.id}:${path}`, { op: 'set', id: el.id, path, value: v });
     // Keyable fields show the keyed value at the playhead (before motion presets
     // and fades). Once a property has keys, typing a value keys it at the
     // playhead; otherwise it edits the base value.
@@ -181,48 +385,64 @@ export class Inspector {
       else set(path, patch(v));
     };
 
-    const baseFields = [
-      this._field({ label: '名称', type: 'text', value: el.name, onChange: (v) => set('name', { name: v }) }),
+    const timeRows = [
+      this._vec({
+        label: '开始 / 时长',
+        items: [
+          { value: round(el.start), step: 0.01, min: 0, unit: 's', aria: '开始', onChange: (v) => this._commit(`${el.id}:start`, { op: 'moveElement', id: el.id, start: v }) },
+          { value: round(el.duration), step: 0.01, min: 0.05, unit: 's', aria: '时长', onChange: (v) => this._commit(`${el.id}:dur`, { op: 'moveElement', id: el.id, duration: v }) },
+        ],
+      }),
+    ];
+    if (el.type !== 'audio') {
+      timeRows.push(
+        this._vec({
+          label: '淡入 / 淡出',
+          items: [
+            { value: el.fadeIn || 0, step: 0.05, min: 0, unit: 's', aria: '淡入', onChange: (v) => set('fade', { fadeIn: v }) },
+            { value: el.fadeOut || 0, step: 0.05, min: 0, unit: 's', aria: '淡出', onChange: (v) => set('fade', { fadeOut: v }) },
+          ],
+        }),
+        this._field({ label: '层级 z', value: el.z, step: 1, onChange: (v) => this._commit(`${el.id}:z`, { op: 'moveElement', id: el.id, z: v }) }),
+      );
+    }
+    const baseSec = () => this._sec('基础', { open: false },
       this._field({
         label: '所属分镜', type: 'select', value: el.segment || '', options: [{ value: '', label: '—' }, ...project.segments.map((s) => ({ value: s.id, label: `${s.name} (${s.start.toFixed(1)}s)` }))],
         onChange: (v) => set('segment', { segment: v || null }),
-      }),
-      this._field({ label: '开始 (s)', value: round(el.start), step: 0.01, min: 0, onChange: (v) => this._commit(`${el.id}:start`, { op: 'moveElement', id: el.id, start: v }) }),
-      this._field({ label: '时长 (s)', value: round(el.duration), step: 0.01, min: 0.05, onChange: (v) => this._commit(`${el.id}:dur`, { op: 'moveElement', id: el.id, duration: v }) }),
-    ];
-    if (el.type !== 'audio') {
-      baseFields.push(
-        this._field({ label: '层级 z', value: el.z, step: 1, onChange: (v) => this._commit(`${el.id}:z`, { op: 'moveElement', id: el.id, z: v }) }),
-        this._field({ label: '淡入 (s)', value: el.fadeIn || 0, step: 0.05, min: 0, onChange: (v) => set('fade', { fadeIn: v }) }),
-        this._field({ label: '淡出 (s)', value: el.fadeOut || 0, step: 0.05, min: 0, onChange: (v) => set('fade', { fadeOut: v }) }),
-      );
-    }
-    this.root.appendChild(this._section('基础', ...baseFields));
+      }));
 
     if (el.type === 'audio') {
-      this.root.appendChild(this._section('声音',
-        this._field({ label: '素材', type: 'text', span: 3, value: el.src || '', onChange: (v) => set('src', { src: v }) }),
+      this.root.appendChild(this._sec('时间', {}, ...timeRows));
+      this.root.appendChild(this._sec('声音', {},
+        this._field({ label: '素材', type: 'text', value: el.src || '', onChange: (v) => set('src', { src: v }) }),
         this._field({
           label: '音量', value: round(kv('audio.volume', el.volume ?? 1), 3),
           step: 0.01, min: 0, max: 1, percent: true, kf: true, path: 'audio.volume',
           onChange: edit('audio.volume', (v) => ({ volume: v })),
         }),
-        this._field({ label: '源入点 (s)', value: round(el.srcIn || 0), step: 0.05, min: 0, onChange: (v) => set('srcIn', { srcIn: v }) }),
+        this._field({ label: '源入点', unit: 's', value: round(el.srcIn || 0), step: 0.05, min: 0, onChange: (v) => set('srcIn', { srcIn: v }) }),
         h('div', { class: 'hint' }, '声音也是时间线元素：拖时间块改时长，展开「声音」给音量打关键帧。'),
       ));
+      this.root.appendChild(baseSec());
       return;
     }
 
-    this.root.appendChild(this._section('变换',
-      this._field({ label: 'X', value: round(kv('transform.x', el.transform.x)), kf: true, path: 'transform.x', onChange: edit('transform.x', (v) => ({ transform: { x: v } })) }),
-      this._field({ label: 'Y', value: round(kv('transform.y', el.transform.y)), kf: true, path: 'transform.y', onChange: edit('transform.y', (v) => ({ transform: { y: v } })) }),
-      this._field({ label: '纵深 z (m)', value: round(kv('transform.z', el.transform.z ?? 0), 3), step: 0.05, kf: true, path: 'transform.z', onChange: edit('transform.z', (v) => ({ transform: { z: v } })) }),
+    this.root.appendChild(this._sec('变换', {},
+      this._vec({
+        label: '位置', keyPaths: ['transform.x', 'transform.y'],
+        items: [
+          { axis: 'x', value: round(kv('transform.x', el.transform.x)), unit: 'px', aria: 'X', onChange: edit('transform.x', (v) => ({ transform: { x: v } })) },
+          { axis: 'y', value: round(kv('transform.y', el.transform.y)), unit: 'px', aria: 'Y', onChange: edit('transform.y', (v) => ({ transform: { y: v } })) },
+        ],
+      }),
+      this._field({ label: '纵深 z', unit: 'm', value: round(kv('transform.z', el.transform.z ?? 0), 3), step: 0.05, kf: true, path: 'transform.z', onChange: edit('transform.z', (v) => ({ transform: { z: v } })) }),
       this._field({ label: '缩放', value: round(kv('transform.scale', el.transform.scale), 3), step: 0.01, kf: true, path: 'transform.scale', onChange: edit('transform.scale', (v) => ({ transform: { scale: v } })) }),
-      this._field({ label: '旋转°', value: round(kv('transform.rotation', el.transform.rotation), 2), step: 0.5, kf: true, path: 'transform.rotation', onChange: edit('transform.rotation', (v) => ({ transform: { rotation: v } })) }),
+      this._field({ label: '旋转', unit: '°', value: round(kv('transform.rotation', el.transform.rotation), 2), step: 0.5, kf: true, path: 'transform.rotation', onChange: edit('transform.rotation', (v) => ({ transform: { rotation: v } })) }),
       this._field({ label: '不透明度', value: round(kv('transform.opacity', el.transform.opacity), 3), step: 0.01, min: 0, max: 1, percent: true, kf: true, path: 'transform.opacity', onChange: edit('transform.opacity', (v) => ({ transform: { opacity: v } })) }),
       this._field({ label: '跟随节拍', value: el.punch || 0, step: 0.05, min: 0, max: 2, onChange: (v) => set('punch', { punch: v }) }),
       this._field({
-        label: '贴屏', type: 'checkbox', value: !!el.parent, span: 1,
+        label: '贴屏', type: 'checkbox', value: !!el.parent,
         // screen-locked = parented to the active camera, bound at the playhead (no jump either way)
         onChange: (v) => this.opts.onOp(v
           ? { op: 'elementParent', id: el.id, parent: project.activeCameraId, t: tNow() }
@@ -231,20 +451,13 @@ export class Inspector {
       el.parent ? h('div', { class: 'hint' }, `跟随相机 ${(project.cameras || []).find((c) => c.id === el.parent.id)?.name || el.parent.id}：相机怎么动，它在画面上就停在哪里。取消时元素留在当前位置。`) : null,
     ));
 
-    this.root.appendChild(this._section('运动',
-      this._field({
-        label: '预设', type: 'select', value: el.motion?.type || 'none',
-        options: MOTIONS.map((m) => ({ value: m, label: ({ none: '无', in: '推近', out: '拉远', left: '左移', right: '右移', up: '上移', down: '下移', drift: '漂移', shake: '手持抖动' })[m] })),
-        onChange: (v) => set('motion.type', { motion: { ...el.motion, type: v } }),
-      }),
-      this._field({ label: '幅度', value: el.motion?.amount || 0, step: 0.01, min: 0, max: 1, onChange: (v) => set('motion.amount', { motion: { ...el.motion, amount: v } }) }),
-    ));
+    this.root.appendChild(this._sec('时间', {}, ...timeRows));
 
     if (el.type === 'text') {
-      this.root.appendChild(this._section('文字',
-        this._field({ label: '内容', type: 'textarea', span: 3, value: el.style.text, onChange: (v) => set('style.text', { style: { text: v } }) }),
+      this.root.appendChild(this._sec('文字', {},
+        this._field({ label: '内容', type: 'textarea', value: el.style.text, onChange: (v) => set('style.text', { style: { text: v } }) }),
         this._field({ label: '字体', type: 'select', value: el.style.font, options: FONTS, onChange: (v) => set('style.font', { style: { font: v } }) }),
-        this._field({ label: '字号', value: round(kv('style.size', el.style.size), 1), step: 1, kf: true, path: 'style.size', onChange: edit('style.size', (v) => ({ style: { size: v } })) }),
+        this._field({ label: '字号', unit: 'px', value: round(kv('style.size', el.style.size), 1), step: 1, kf: true, path: 'style.size', onChange: edit('style.size', (v) => ({ style: { size: v } })) }),
         this._field({ label: '颜色', type: 'color', value: el.style.color, onChange: (v) => set('style.color', { style: { color: v } }) }),
         this._field({
           label: '对齐', type: 'select', value: el.style.align, options: [{ value: 'center', label: '居中' }, { value: 'left', label: '左' }, { value: 'right', label: '右' }],
@@ -256,28 +469,42 @@ export class Inspector {
         this._field({ label: '字重', value: el.style.weight || 400, step: 100, onChange: (v) => set('style.w', { style: { weight: v } }) }),
       ));
     } else if (el.type === 'image' || el.type === 'video') {
-      this.root.appendChild(this._section('画面',
+      this.root.appendChild(this._sec('画面', {},
         this._field({
           label: '适配', type: 'select', value: el.style.fit, options: [{ value: 'cover', label: '填满裁剪' }, { value: 'stretch', label: '拉伸' }],
           onChange: (v) => set('style.fit', { style: { fit: v } }),
         }),
-        this._field({ label: '素材', type: 'text', span: 3, value: el.src || '', onChange: (v) => set('src', { src: v }) }),
-        this._field({ label: '源入点 (s)', value: el.srcIn || 0, step: 0.05, onChange: (v) => set('srcIn', { srcIn: v }) }),
+        this._field({ label: '素材', type: 'text', value: el.src || '', onChange: (v) => set('src', { src: v }) }),
+        this._field({ label: '源入点', unit: 's', value: el.srcIn || 0, step: 0.05, onChange: (v) => set('srcIn', { srcIn: v }) }),
       ));
     } else {
-      this.root.appendChild(this._section('形状',
+      this.root.appendChild(this._sec('形状', {},
         this._field({
           label: '类型', type: 'select', value: el.style.shape, options: [{ value: 'rect', label: '矩形' }, { value: 'ellipse', label: '椭圆' }],
           onChange: (v) => set('style.shape', { style: { shape: v } }),
         }),
         this._field({ label: '填充', type: 'color', value: el.style.fill, onChange: (v) => set('style.fill', { style: { fill: v } }) }),
-        this._field({ label: '宽 (px)', value: el.style.w || project.meta.width, step: 10, onChange: (v) => set('style.w', { style: { w: v } }) }),
-        this._field({ label: '高 (px)', value: el.style.h || project.meta.height, step: 10, onChange: (v) => set('style.h', { style: { h: v } }) }),
-        this._field({ label: '圆角', value: el.style.radius || 0, step: 1, onChange: (v) => set('style.r', { style: { radius: v } }) }),
+        this._vec({
+          label: '尺寸',
+          items: [
+            { prefix: 'W', value: el.style.w || project.meta.width, step: 10, unit: 'px', aria: '宽', onChange: (v) => set('style.w', { style: { w: v } }) },
+            { prefix: 'H', value: el.style.h || project.meta.height, step: 10, unit: 'px', aria: '高', onChange: (v) => set('style.h', { style: { h: v } }) },
+          ],
+        }),
+        this._field({ label: '圆角', unit: 'px', value: el.style.radius || 0, step: 1, onChange: (v) => set('style.r', { style: { radius: v } }) }),
       ));
     }
 
-    this.root.appendChild(this._section('效果',
+    this.root.appendChild(this._sec('运动', { open: false },
+      this._field({
+        label: '预设', type: 'select', value: el.motion?.type || 'none',
+        options: MOTIONS.map((m) => ({ value: m, label: ({ none: '无', in: '推近', out: '拉远', left: '左移', right: '右移', up: '上移', down: '下移', drift: '漂移', shake: '手持抖动' })[m] })),
+        onChange: (v) => set('motion.type', { motion: { ...el.motion, type: v } }),
+      }),
+      this._field({ label: '幅度', value: el.motion?.amount || 0, step: 0.01, min: 0, max: 1, onChange: (v) => set('motion.amount', { motion: { ...el.motion, amount: v } }) }),
+    ));
+
+    this.root.appendChild(this._sec('效果', { open: false },
       this._field({ label: '辉光', value: round(kv('fx.glow', el.fx?.glow || 0), 3), step: 0.05, min: 0, max: 2, kf: true, path: 'fx.glow', onChange: edit('fx.glow', (v) => ({ fx: { ...el.fx, glow: v } })) }),
       this._field({
         label: '混合', type: 'select', value: el.style.blend || 'normal',
@@ -287,6 +514,7 @@ export class Inspector {
     ));
 
     this._renderKeyframes(project, el, time);
+    this.root.appendChild(baseSec());
   }
 
   // ---------------------------------------------------------------- 3D object: picture / video / text
@@ -300,20 +528,20 @@ export class Inspector {
     if (obj.type === 'text') {
       const t = textSpec(obj);
       kids.push(
-        this._field({ label: '文字', type: 'textarea', span: 3, value: t.text, onChange: (v) => patch('text', { style: { text: v } }) }),
-        this._field({ label: '字号 m', value: t.size, step: 0.05, min: 0.01, onChange: (v) => patch('size', { style: { size: v } }) }),
+        this._field({ label: '文字', type: 'textarea', value: t.text, onChange: (v) => patch('text', { style: { text: v } }) }),
+        this._field({ label: '字号', unit: 'm', value: t.size, step: 0.05, min: 0.01, onChange: (v) => patch('size', { style: { size: v } }) }),
         this._field({ label: '颜色', type: 'color', value: t.color, onChange: (v) => patch('color', { style: { color: v } }) }),
         this._field({
-          label: '字体', type: 'text', span: 3, value: t.font, placeholder: 'media/fonts/xxx.ttf 或字体名',
+          label: '字体', type: 'text', value: t.font, placeholder: 'media/fonts/xxx.ttf 或字体名',
           onChange: (v) => patch('font', { style: { font: v } }),
         }),
         this._field({
           label: '对齐', type: 'select', value: t.align, options: ALIGNS.map((a) => ({ value: a, label: ALIGN_LABELS[a] })),
           onChange: (v) => patch('align', { style: { align: v } }),
         }),
-        this._field({ label: '字距 em', value: t.tracking, step: 0.01, onChange: (v) => patch('tracking', { style: { tracking: v } }) }),
+        this._field({ label: '字距', unit: 'em', value: t.tracking, step: 0.01, onChange: (v) => patch('tracking', { style: { tracking: v } }) }),
         this._field({ label: '行高', value: t.lineHeight, step: 0.05, min: 0.1, onChange: (v) => patch('lineHeight', { style: { lineHeight: v } }) }),
-        this._field({ label: '厚度 m', value: t.extrude, step: 0.01, min: 0, onChange: (v) => patch('extrude', { style: { extrude: v } }) }),
+        this._field({ label: '厚度', unit: 'm', value: t.extrude, step: 0.01, min: 0, onChange: (v) => patch('extrude', { style: { extrude: v } }) }),
         this._field({ label: '亮度', value: t.emissive, step: 0.05, min: 0, onChange: (v) => patch('emissive', { style: { emissive: v } }) }),
         h('div', { class: 'hint' }, '字号 = 一个字（em）的高度，单位米。厚度只在成片里有，视口里画正面。'),
       );
@@ -321,26 +549,31 @@ export class Inspector {
       const m = mediaSpec(obj);
       kids.push(
         this._field({
-          label: obj.type === 'video' ? '视频' : '图片', type: 'text', span: 3, value: m.src, placeholder: 'media/xxx',
+          label: obj.type === 'video' ? '视频' : '图片', type: 'text', value: m.src, placeholder: 'media/xxx',
           onChange: (v) => patch('src', { src: v }),
         }),
         this._field({
           label: '适配', type: 'select', value: m.fit, options: FITS.map((f) => ({ value: f, label: FIT_LABELS[f] })),
           onChange: (v) => patch('fit', { style: { fit: v } }),
         }),
-        this._field({ label: '框宽 m', value: m.w, step: 0.1, min: 0.01, onChange: (v) => patch('w', { geom: { w: v } }) }),
-        this._field({ label: '框高 m', value: m.h, step: 0.1, min: 0.01, onChange: (v) => patch('h', { geom: { h: v } }) }),
+        this._vec({
+          label: '框尺寸',
+          items: [
+            { prefix: 'W', value: m.w, step: 0.1, min: 0.01, unit: 'm', aria: '框宽', onChange: (v) => patch('w', { geom: { w: v } }) },
+            { prefix: 'H', value: m.h, step: 0.1, min: 0.01, unit: 'm', aria: '框高', onChange: (v) => patch('h', { geom: { h: v } }) },
+          ],
+        }),
         this._field({ label: '亮度', value: m.emissive, step: 0.05, min: 0, onChange: (v) => patch('emissive', { style: { emissive: v } }) }),
       );
       if (obj.type === 'video') {
         kids.push(
-          this._field({ label: '入点 s', value: m.srcIn, step: 0.04, min: 0, onChange: (v) => patch('srcIn', { srcIn: v }) }),
+          this._field({ label: '入点', unit: 's', value: m.srcIn, step: 0.04, min: 0, onChange: (v) => patch('srcIn', { srcIn: v }) }),
           this._field({ label: '速度', value: m.rate, step: 0.05, min: 0.01, onChange: (v) => patch('rate', { rate: v }) }),
         );
       }
       kids.push(h('div', { class: 'hint' }, '正面朝「朝向」所指的方向；从正面看图像不镜像。完整显示会按图片比例缩小到框内。'));
     }
-    return this._section('内容', ...kids);
+    return this._sec('内容', {}, ...kids);
   }
 
   // ---------------------------------------------------------------- 3D object: parent
@@ -356,7 +589,7 @@ export class Inspector {
       .map((o) => ({ value: o.id, label: `${o.name || o.id}${o.type === 'empty' ? ' · 空' : ''}` })));
     const kids = [
       this._field({
-        label: '父级', type: 'select', value: par?.id || '', options, span: 4,
+        label: '父级', type: 'select', value: par?.id || '', options,
         onChange: (v) => this.opts.onOp(v
           ? { op: 'objectParent', id, parent: v, t: tNow() }
           : { op: 'objectUnparent', id, t: tNow() }),
@@ -366,52 +599,56 @@ export class Inspector {
       const inh = par.inherit || {};
       for (const [k, label] of [['pos', '跟随位置'], ['rot', '跟随旋转'], ['scale', '跟随缩放']]) {
         kids.push(this._field({
-          label, type: 'checkbox', value: inh[k] !== false, span: 1,
+          label, type: 'checkbox', value: inh[k] !== false,
           onChange: (v) => reparent({ inherit: { [k]: v } }),
         }));
       }
+      const tol = 0.5 / (project.meta?.fps || 24);
+      const liveTrack = (ch) => {
+        const o = (this._last?.project?.scene?.objects || []).find((x) => x.id === id) || obj;
+        return o.tracks?.[STRENGTH_TRACKS[ch]] || [];
+      };
       for (const [ch, label] of [['rot', '旋转强度'], ['scale', '缩放强度']]) {
         const track = obj.tracks?.[STRENGTH_TRACKS[ch]] || [];
         const v = sampleChannel(track, time, par.strength?.[ch] ?? 1);
-        const tol = 0.5 / (project.meta?.fps || 24);
         const atKey = track.find((k) => Math.abs(k.t - time) <= tol);
-        const fld = this._field({
+        kids.push(this._field({
           label, value: Math.round(Number(v) * 1000) / 1000, step: 0.01, min: 0, max: 1, percent: true,
           // Keyed channel: write a key at the playhead; otherwise change the base strength (re-binds at the playhead).
           onChange: (nv) => this._commit(`${id}:parent.${ch}`, track.length
             ? { op: 'objectParentKey', id, channel: ch, t: tNow(), v: nv }
             : { op: 'objectParent', id, parent: par.id, t: tNow(), strength: { [ch]: nv } }),
-        });
-        fld.appendChild(h('button', {
-          class: `kf-btn${atKey ? ' on' : ''}`, title: '在当前时间记录强度关键帧（Shift+点击删除）',
-          onclick: (e) => {
-            this._flush();
-            this.opts.onOp(e.shiftKey
-              ? { op: 'objectParentUnkey', id, channel: ch, t: atKey ? atKey.t : tNow() }
-              : { op: 'objectParentKey', id, channel: ch, t: tNow(), v: Number(v) });
+          keyer: {
+            state: () => {
+              const tr = liveTrack(ch);
+              if (!tr.length) return 'none';
+              const now = this.opts.getTime();
+              return tr.some((k) => Math.abs(k.t - now) <= tol) ? 'on' : 'anim';
+            },
+            set: () => this.opts.onOp({ op: 'objectParentKey', id, channel: ch, t: tNow(), v: Number(v) }),
+            unset: () => this.opts.onOp({ op: 'objectParentUnkey', id, channel: ch, t: atKey ? atKey.t : tNow() }),
           },
-        }, '◆'));
-        kids.push(fld);
+        }));
       }
       const chain = ancestors(objs, id).map((o) => o.name || o.id).join(' ← ');
       kids.push(h('div', { class: 'hint' }, `层级：${obj.name || id} ← ${chain}。挂上 / 取下 / 改开关都以当前时间为准，不跳位。`));
     } else {
       kids.push(h('div', { class: 'hint' }, '选一个元素当父级（常用「空元素」），之后它怎么动，这个元素就跟着怎么动。'));
     }
-    return this._section('父级', ...kids);
+    return this._sec('父级', {}, ...kids);
   }
 
   // ---------------------------------------------------------------- 3D object
   _renderObject(project, obj, time) {
     const id = obj.id;
+    this._kind = `3d.${obj.type}`;
     const pose = objectPose(obj, time);
     const tNow = () => Math.round(this.opts.getTime() * 1000) / 1000;
     const key = (path, v) => this.opts.onOp({ op: 'objectKey', id, path, t: tNow(), v });
+    const tol = 0.5 / (project.meta?.fps || 24);
+    const liveObj = () => (this._last?.project?.scene?.objects || []).find((o) => o.id === id) || obj;
 
-    this.root.appendChild(h('div', { class: 'insp-head' },
-      h('div', { class: 'insp-kind' }, '3D 元素'),
-      h('div', { class: 'insp-id' }, id),
-    ));
+    this._header({ type: 'object', badge: OBJ_LABELS[obj.type] || '3D 元素', name: obj.name || id, id });
     this.root.appendChild(h('div', { class: 'hint pad' },
       '内容、中心点、位置、缩放、不透明度已移到时间轴左侧：选中元素后点元素行的 ▾ 展开编辑。',
       '复制 / 删除 / 面向镜头 / 落地在元素行的 ⋯ 菜单里。'));
@@ -426,11 +663,25 @@ export class Inspector {
       onEnd: () => { this._ballDragging = false; },
       onChange: (d) => this._commit(`${id}:dir`, { op: 'objectKey', id, path: 'dir', t: tNow(), v: d }, 90),
     });
-    this.root.appendChild(this._section(`朝向（球面${obj.parent?.id ? ' · 本地' : ''}）`,
+    this.root.appendChild(this._sec('朝向', { tag: obj.parent?.id ? '本地' : null },
       ballHost,
       this._field({
-        label: '绕轴自转°', value: Math.round(pose.roll * 10) / 10, step: 1,
+        label: '绕轴自转', unit: '°', value: Math.round(pose.roll * 10) / 10, step: 1,
         onChange: (v) => key('roll', v),
+        keyer: {
+          state: () => {
+            const tr = liveObj().tracks?.roll || [];
+            if (!tr.length) return 'none';
+            const now = this.opts.getTime();
+            return tr.some((k) => Math.abs(k.t - now) <= tol) ? 'on' : 'anim';
+          },
+          set: () => key('roll', Math.round(objectPose(liveObj(), this.opts.getTime()).roll * 1000) / 1000),
+          unset: () => {
+            const now = this.opts.getTime();
+            const k = (liveObj().tracks?.roll || []).find((x) => Math.abs(x.t - now) <= tol);
+            if (k) this.opts.onOp({ op: 'objectUnkey', id, path: 'roll', t: k.t });
+          },
+        },
       }),
       h('div', { class: 'hint' }, '拖球面上的点改朝向（写 dir 关键帧）；旋转球和速度曲线留在检查器，其余基础属性在时间轴左侧。'),
     ));
@@ -445,27 +696,28 @@ export class Inspector {
     }
     rows.sort((a, b) => a.k.t - b.k.t);
     const kfList = h('div', { class: 'kf-list' });
-    if (!rows.length) kfList.appendChild(h('div', { class: 'hint' }, '还没有关键帧：拖动元素或点 ◆。'));
+    if (!rows.length) kfList.appendChild(h('div', { class: 'hint' }, '还没有关键帧：拖动元素或点 ◇。'));
     for (const { path, k } of rows) {
       const open = this._speedOpen && this._speedOpen.id === id
         && this._speedOpen.path === path && Math.abs(this._speedOpen.t - k.t) < 1e-3;
-      const row = h('div', { class: `kf-row ${Math.abs(k.t - time) < 0.05 ? 'at' : ''}`, style: 'grid-template-columns: 46px 1fr 1fr 58px 26px 22px' },
-        h('button', {
-          class: 'kf-t', title: '跳到这个关键帧', style: 'background:none;border:0;color:inherit;cursor:pointer;padding:0;text-align:left',
-          onclick: () => this.opts.onSeek?.(k.t),
-        }, k.t.toFixed(2)),
-        h('span', { class: 'kf-p' }, path),
+      const row = h('div', { class: 'kf-row' },
+        h('button', { type: 'button', class: 'kf-t', 'data-tip': '跳到这个关键帧', onclick: () => this.opts.onSeek?.(k.t) }, k.t.toFixed(2)),
+        h('span', { class: 'kf-p', title: path }, PATH_LABELS[path] || path),
         h('span', { class: 'kf-v' }, Array.isArray(k.v) ? k.v.map((n) => round(n, 2)).join(', ') : String(k.v)),
         h('select', {
-          class: 'kf-ease', title: '到下一关键帧的 ease 预设（该键有速度曲线时被忽略）',
+          class: 'kf-ease', 'aria-label': '缓动', 'data-tip': '缓动\n到下一关键帧的 ease 预设（该键有速度曲线时被忽略）',
           onchange: (e) => this.opts.onOp({ op: 'objectKey', id, path, t: k.t, v: k.v, ease: e.target.value }),
         }, ...EASES.map((x) => h('option', { value: x, selected: (k.ease || 'easeInOut') === x }, x))),
         h('button', {
-          class: `mini ${open ? 'on' : ''}`, title: '编辑这一段的速度曲线',
+          type: 'button', class: `icon-btn mini${open ? ' on' : ''}`, 'aria-label': '速度曲线', 'data-tip': '速度曲线\n编辑这一段的速度曲线',
           onclick: () => { this._speedOpen = open ? null : { id, path, t: k.t }; this._refresh(); },
-        }, '∿'),
-        h('button', { class: 'mini danger', onclick: () => this.opts.onOp({ op: 'objectUnkey', id, path, t: k.t }) }, '×'),
+        }, icon('curve', 'ic-sm')),
+        h('button', {
+          type: 'button', class: 'icon-btn mini danger', 'aria-label': '删除关键帧', 'data-tip': '删除这个关键帧',
+          onclick: () => this.opts.onOp({ op: 'objectUnkey', id, path, t: k.t }),
+        }, icon('trash', 'ic-sm')),
       );
+      this._trackAtRow(row, k.t);
       kfList.appendChild(row);
       if (open) {
         const wrap = h('div', { class: 'speed-wrap' });
@@ -481,61 +733,66 @@ export class Inspector {
         });
         const setPreset = (pts) => this.opts.onOp({ op: 'objectKey', id, path, t: k.t, v: k.v, speed: pts });
         wrap.appendChild(h('div', { class: 'row-btns' },
-          h('button', { class: 'mini', onclick: () => setPreset(SPEED_PRESETS.linear) }, '匀速'),
-          h('button', { class: 'mini', onclick: () => setPreset(SPEED_PRESETS.easeIn) }, '慢入'),
-          h('button', { class: 'mini', onclick: () => setPreset(SPEED_PRESETS.easeOut) }, '慢出'),
-          h('button', { class: 'mini', onclick: () => setPreset(SPEED_PRESETS.punch) }, '冲击'),
-          h('button', { class: 'mini', onclick: () => this.opts.onOp({ op: 'objectKey', id, path, t: k.t, v: k.v, speed: null }) }, '清除'),
+          h('button', { type: 'button', class: 'mini', onclick: () => setPreset(SPEED_PRESETS.linear) }, '匀速'),
+          h('button', { type: 'button', class: 'mini', onclick: () => setPreset(SPEED_PRESETS.easeIn) }, '慢入'),
+          h('button', { type: 'button', class: 'mini', onclick: () => setPreset(SPEED_PRESETS.easeOut) }, '慢出'),
+          h('button', { type: 'button', class: 'mini', onclick: () => setPreset(SPEED_PRESETS.punch) }, '冲击'),
+          h('button', { type: 'button', class: 'mini', onclick: () => this.opts.onOp({ op: 'objectKey', id, path, t: k.t, v: k.v, speed: null }) }, '清除'),
         ));
         kfList.appendChild(wrap);
       }
     }
-    this.root.appendChild(this._section(`关键帧 (${rows.length})`, kfList));
+    this.root.appendChild(this._sec('关键帧', { key: '关键帧', open: false, count: rows.length }, kfList));
+  }
+
+  /** tint a keyframe-list row while the playhead sits on its key (kept in sync between rebuilds) */
+  _trackAtRow(row, t) {
+    const paint = () => row.classList.toggle('at', Math.abs(t - this.opts.getTime()) < 0.05);
+    paint();
+    this._kfSync.push(paint);
   }
 
   _renderKeyframes(project, el, time) {
     const kfs = [...(el.keyframes || [])].sort((a, b) => a.t - b.t);
     const list = h('div', { class: 'kf-list' });
-    if (!kfs.length) list.appendChild(h('div', { class: 'hint' }, '还没有关键帧。点字段右边的 ◆ 在当前时间记录。'));
+    if (!kfs.length) list.appendChild(h('div', { class: 'hint' }, '还没有关键帧。点字段右边的 ◇ 在当前时间记录。'));
     for (const k of kfs) {
       const outside = k.t < el.start - 1e-6 || k.t > el.start + el.duration + 1e-6;
-      list.appendChild(h('div', {
-        class: `kf-row ${Math.abs(k.t - time) < 0.05 ? 'at' : ''} ${outside ? 'outside' : ''}`,
-        title: outside ? '这个关键帧在元素时间范围之外（切分后保留，用来保持动画连续）' : null,
+      const row = h('div', {
+        class: `kf-row${outside ? ' outside' : ''}`,
+        'data-tip': outside ? '这个关键帧在元素时间范围之外（切分后保留，用来保持动画连续）' : null,
       },
-        h('span', { class: 'kf-t', title: '跳到这个关键帧', onclick: () => this.opts.onSeek?.(k.t) }, k.t.toFixed(2) + 's'),
-        h('span', { class: 'kf-p' }, k.path),
-        h('span', { class: 'kf-v' }, String(k.value).slice(0, 14)),
+        h('button', { type: 'button', class: 'kf-t', 'data-tip': '跳到这个关键帧', onclick: () => this.opts.onSeek?.(k.t) }, k.t.toFixed(2) + 's'),
+        h('span', { class: 'kf-p', title: k.path }, PATH_LABELS[k.path] || k.path),
+        h('span', { class: 'kf-v', title: String(k.value) }, String(k.value).slice(0, 14)),
         h('select', {
-          class: 'kf-ease',
+          class: 'kf-ease', 'aria-label': '缓动',
           onchange: (e) => this.opts.onOp({ op: 'keySet', id: el.id, path: k.path, t: k.t, value: k.value, ease: e.target.value }),
         }, ...EASES.map((e) => h('option', { value: e, selected: e === k.ease }, e))),
-        h('button', { class: 'mini', onclick: () => this.opts.onOp({ op: 'keySet', id: el.id, path: k.path, t: round(time), value: k.value, ease: k.ease }) }, '在此'),
-        h('button', { class: 'mini danger', title: '删除这个关键帧', onclick: () => this.opts.onOp({ op: 'keyRemove', id: el.id, path: k.path, t: k.t }) }, '×'),
-      ));
+        h('button', {
+          type: 'button', class: 'icon-btn mini', 'aria-label': '复制到播放头', 'data-tip': '复制到播放头\n在当前时间放一个同值关键帧',
+          onclick: () => this.opts.onOp({ op: 'keySet', id: el.id, path: k.path, t: round(time), value: k.value, ease: k.ease }),
+        }, icon('plus', 'ic-sm')),
+        h('button', {
+          type: 'button', class: 'icon-btn mini danger', 'aria-label': '删除关键帧', 'data-tip': '删除这个关键帧',
+          onclick: () => this.opts.onOp({ op: 'keyRemove', id: el.id, path: k.path, t: k.t }),
+        }, icon('trash', 'ic-sm')),
+      );
+      this._trackAtRow(row, k.t);
+      list.appendChild(row);
     }
-    this.root.appendChild(this._section(`关键帧 (${kfs.length})`, list));
+    this.root.appendChild(this._sec('关键帧', { key: '关键帧', open: false, count: kfs.length }, list));
   }
 
-  _renderCamera(project, time) {
-    const cam = project.camera;
-    this.root.appendChild(h('div', { class: 'insp-head' },
-      h('div', { class: 'insp-kind' }, '镜头'),
-      h('div', { class: 'insp-id' }, `${cam.path.length} 关键点 · FOV ${round(cam.fov, 0)}°`),
-      h('div', { class: 'insp-actions' },
-        h('button', { class: 'mini', onclick: () => this.opts.onRenderAll?.() }, '渲染'),
-      ),
-    ));
-    this.root.appendChild(h('div', { class: 'hint pad' },
-      '相机属性折叠在时间轴相机行里：点行首 ▾ 展开；位置是飞行路径关键帧，中心点 / 画面 / 透明度 / 缩放也能逐帧打点。'));
-
+  // ---------------------------------------------------------------- world (camera view + project view)
+  _worldSection(project, open = true) {
     // normalised: an empty world is stored as little as {source:'none'}
     const w = normalizeWorld(project.world);
     const setW = (patch) => this._commit('world', { op: 'worldSet', patch });
     const empty = w.source === 'none';
     const fog = [
-      this._field({ label: '雾开始 (m)', value: w.fog.start ?? 30, step: 5, min: 0, max: 500, onChange: (v) => setW({ fog: { ...w.fog, start: v } }) }),
-      this._field({ label: '雾深度 (m)', value: w.fog.depth ?? 700, step: 25, min: 10, max: 5000, onChange: (v) => setW({ fog: { ...w.fog, depth: v } }) }),
+      this._field({ label: '雾开始', unit: 'm', value: w.fog.start ?? 30, step: 5, min: 0, max: 500, onChange: (v) => setW({ fog: { ...w.fog, start: v } }) }),
+      this._field({ label: '雾深度', unit: 'm', value: w.fog.depth ?? 700, step: 25, min: 10, max: 5000, onChange: (v) => setW({ fog: { ...w.fog, depth: v } }) }),
       this._field({ label: '雾强度', value: w.fog.strength ?? 1, step: 0.05, min: 0, max: 1, onChange: (v) => setW({ fog: { ...w.fog, strength: v } }) }),
     ];
     const head = [
@@ -547,71 +804,101 @@ export class Inspector {
       this._field({ label: '背景色', type: 'color', value: w.sky, onChange: (v) => setW({ sky: v }) }),
     ];
     if (empty) {
-      this.root.appendChild(this._section('世界', ...head, ...fog,
-        h('div', { class: 'hint' }, '空世界只有背景色和你自己加的元素；编辑视口里的地面网格不进成片。需要城市时把「世界」切到程序化城市。')));
-      return;
+      return this._sec('世界', { open }, ...head, ...fog,
+        h('div', { class: 'hint' }, '空世界只有背景色和你自己加的元素；编辑视口里的地面网格不进成片。需要城市时把「世界」切到程序化城市。'));
     }
-    this.root.appendChild(this._section('世界',
+    return this._sec('世界', { open },
       ...head,
-      this._field({ label: 'seed', value: w.seed, step: 1, onChange: (v) => setW({ seed: v }) }),
-      h('div', { class: 'row-btns' }, h('button', { class: 'mini', onclick: () => setW({ seed: Math.floor(Math.random() * 9999) }) }, '换一座城')),
+      this._row('seed',
+        h('div', { class: 'ctl-with-btn' },
+          this._num({ value: w.seed, step: 1, aria: 'seed', onChange: (v) => setW({ seed: v }) }),
+          h('button', { type: 'button', class: 'mini', onclick: () => setW({ seed: Math.floor(Math.random() * 9999) }) }, '换一座城'))),
       this._field({ label: '航线避让', type: 'select', value: String(!!w.corridor.enabled), options: [{ value: 'true', label: '开' }, { value: 'false', label: '关' }], onChange: (v) => setW({ corridor: { ...w.corridor, enabled: v === 'true' } }) }),
-      this._field({ label: '避让半径 (m)', value: w.corridor.radius, step: 1, min: 0, max: 120, onChange: (v) => setW({ corridor: { ...w.corridor, radius: v } }) }),
+      this._field({ label: '避让半径', unit: 'm', value: w.corridor.radius, step: 1, min: 0, max: 120, onChange: (v) => setW({ corridor: { ...w.corridor, radius: v } }) }),
       h('div', { class: 'hint' }, '航线穿过或擦到的楼会被清掉，换 seed 也不会把塔吊在无人机航线上。'),
-      this._field({ label: '街区 (m)', value: w.grid.block, step: 2, onChange: (v) => setW({ grid: { ...w.grid, block: v } }) }),
-      this._field({ label: '街道 (m)', value: w.grid.street, step: 2, onChange: (v) => setW({ grid: { ...w.grid, street: v } }) }),
+      this._vec({
+        label: '街区 / 街道',
+        items: [
+          { value: w.grid.block, step: 2, unit: 'm', aria: '街区', onChange: (v) => setW({ grid: { ...w.grid, block: v } }) },
+          { value: w.grid.street, step: 2, unit: 'm', aria: '街道', onChange: (v) => setW({ grid: { ...w.grid, street: v } }) },
+        ],
+      }),
       this._field({ label: '密度', value: w.density, step: 0.02, min: 0, max: 1, onChange: (v) => setW({ density: v }) }),
-      this._field({ label: '最低楼高', value: w.height.min, step: 2, onChange: (v) => setW({ height: { ...w.height, min: v } }) }),
-      this._field({ label: '最高楼高', value: w.height.max, step: 5, onChange: (v) => setW({ height: { ...w.height, max: v } }) }),
+      this._vec({
+        label: '楼高',
+        items: [
+          { prefix: '低', value: w.height.min, step: 2, unit: 'm', aria: '最低楼高', onChange: (v) => setW({ height: { ...w.height, min: v } }) },
+          { prefix: '高', value: w.height.max, step: 5, unit: 'm', aria: '最高楼高', onChange: (v) => setW({ height: { ...w.height, max: v } }) },
+        ],
+      }),
       this._field({ label: '亮窗比例', value: w.window.density, step: 0.02, min: 0, max: 1, onChange: (v) => setW({ window: { ...w.window, density: v } }) }),
       this._field({ label: '窗光强度', value: w.window.glow, step: 0.1, onChange: (v) => setW({ window: { ...w.window, glow: v } }) }),
       this._field({ label: '霓虹强度', value: w.neon.glow, step: 0.1, onChange: (v) => setW({ neon: { ...w.neon, glow: v } }) }),
       ...fog,
-    ));
+    );
+  }
+
+  _renderCamera(project, time) {
+    const cam = project.camera;
+    this._kind = 'camera';
+    this._header({
+      type: 'camera', badge: '镜头', name: cam.name || '镜头', id: `${cam.path.length} 关键点 · FOV ${round(cam.fov, 0)}°`,
+      actions: [{ icon: 'film', label: '渲染', tip: '渲染\n从头到尾渲染这个镜头', run: () => this.opts.onRenderAll?.() }],
+    });
+    this.root.appendChild(h('div', { class: 'hint pad' },
+      '相机属性折叠在时间轴相机行里：点行首 ▾ 展开；位置是飞行路径关键帧，中心点 / 画面 / 透明度 / 缩放也能逐帧打点。'));
+    this.root.appendChild(this._worldSection(project, true));
   }
 
   _renderSegment(project, id) {
     const s = project.segments.find((x) => x.id === id);
     if (!s) return;
-    this.root.appendChild(h('div', { class: 'insp-head' },
-      h('div', { class: 'insp-kind' }, '分镜'), h('div', { class: 'insp-id' }, s.id)));
+    this._kind = 'segment';
     const set = (patch) => this._commit(`${s.id}:seg`, { op: 'updateSegment', id: s.id, patch });
-    this.root.appendChild(this._section('分镜',
-      this._field({ label: '名称', type: 'text', value: s.name, onChange: (v) => set({ name: v }) }),
-      this._field({ label: '意图 / 台词', type: 'textarea', span: 3, value: s.intent, onChange: (v) => set({ intent: v }) }),
-      this._field({ label: '开始 (s)', value: round(s.start), onChange: (v) => this._commit(`${s.id}:st`, { op: 'updateSegment', id: s.id, patch: { start: v } }) }),
-      this._field({ label: '时长 (s)', value: round(s.duration), onChange: (v) => this._commit(`${s.id}:du`, { op: 'updateSegment', id: s.id, patch: { duration: v } }) }),
+    this._header({ type: null, badge: '分镜', name: s.name, id: s.id, onRename: (v) => set({ name: v }) });
+    this.root.appendChild(this._sec('分镜', {},
+      this._field({ label: '意图 / 台词', type: 'textarea', value: s.intent, onChange: (v) => set({ intent: v }) }),
+      this._vec({
+        label: '开始 / 时长',
+        items: [
+          { value: round(s.start), unit: 's', aria: '开始', onChange: (v) => this._commit(`${s.id}:st`, { op: 'updateSegment', id: s.id, patch: { start: v } }) },
+          { value: round(s.duration), unit: 's', aria: '时长', onChange: (v) => this._commit(`${s.id}:du`, { op: 'updateSegment', id: s.id, patch: { duration: v } }) },
+        ],
+      }),
       this._field({
         label: '状态', type: 'select', value: s.status, options: ['draft', 'previewed', 'approved'],
         onChange: (v) => set({ status: v }),
       }),
     ));
     const kids = project.elements.filter((e) => e.segment === s.id);
-    this.root.appendChild(this._section(`本段元素 (${kids.length})`,
+    this.root.appendChild(this._sec('本段元素', { key: '本段元素', count: kids.length },
       h('div', { class: 'chip-list' }, ...kids.map((k) => h('button', {
-        class: 'chip', onclick: () => this.opts.onSelect({ elementId: k.id, segmentId: s.id }),
+        type: 'button', class: 'chip', onclick: () => this.opts.onSelect({ elementId: k.id, segmentId: s.id }),
       }, `${k.id} ${k.type === 'text' ? JSON.stringify(String(k.style.text).slice(0, 10)) : ''}`)))));
-    this.root.appendChild(h('div', { class: 'insp-actions wide' },
-      h('button', { class: 'mini', onclick: () => this.opts.onRenderSegment(s.id) }, '渲染本段'),
-      h('button', { class: 'mini', onclick: () => this.opts.onAskAI(s.id) }, '让 AI 改这段'),
+    this.root.appendChild(h('div', { class: 'row-btns insp-foot' },
+      h('button', { type: 'button', class: 'mini', onclick: () => this.opts.onRenderSegment(s.id) }, '渲染本段'),
+      h('button', { type: 'button', class: 'mini', onclick: () => this.opts.onAskAI(s.id) }, '让 AI 改这段'),
     ));
   }
 
   _renderProject(project) {
     const fx = project.meta.fx || {};
-    this.root.appendChild(h('div', { class: 'insp-head' },
-      h('div', { class: 'insp-kind' }, '项目'), h('div', { class: 'insp-id' }, project.meta.title)));
+    this._kind = 'project';
     const setMeta = (path) => (v) => this._commit(`meta:${path}`, { op: 'setMeta', path, value: v });
     const setFx = (k) => (v) => this._commit(`fx:${k}`, { op: 'setFx', fx: { [k]: v } });
+    this._header({
+      type: 'accent', badge: '项目', name: project.meta.title,
+      id: `${project.meta.width}×${project.meta.height} · ${project.meta.fps}fps`,
+      onRename: setMeta('title'),
+    });
 
-    this.root.appendChild(this._section('项目',
-      this._field({ label: '标题', type: 'text', value: project.meta.title, onChange: setMeta('title') }),
-      this._field({ label: '时长 (s)', value: round(project.meta.duration), onChange: setMeta('duration') }),
+    this.root.appendChild(this._sec('项目', {},
+      this._field({ label: '时长', unit: 's', value: round(project.meta.duration), onChange: setMeta('duration') }),
       this._field({ label: '背景色', type: 'color', value: project.meta.background, onChange: setMeta('background') }),
       this._field({ label: '帧率', type: 'text', value: String(project.meta.fps), onChange: setMeta('fps') }),
     ));
 
-    this.root.appendChild(this._section('画面效果',
+    this.root.appendChild(this._sec('画面效果', { open: false },
       this._field({ label: '辉光 bloom', value: fx.bloom, step: 0.05, min: 0, max: 2, onChange: setFx('bloom') }),
       this._field({ label: '色散 ca', value: fx.ca, step: 0.02, min: 0, max: 1, onChange: setFx('ca') }),
       this._field({ label: '颗粒 grain', value: fx.grain, step: 0.01, min: 0, max: 1, onChange: setFx('grain') }),
@@ -622,16 +909,17 @@ export class Inspector {
       this._field({ label: '饱和 saturation', value: fx.saturation, step: 0.02, min: 0, max: 2, onChange: setFx('saturation') }),
     ));
 
-    this.root.appendChild(this._section('音频与节拍',
-      h('div', { class: 'fld span3' }, h('label', {}, '音频'), h('div', { class: 'ro' }, project.meta.audio?.src || '（未设置）')),
-      this._field({ label: '偏移 (s)', value: project.meta.audio?.offset || 0, step: 0.01, onChange: (v) => this._commit('audio:off', { op: 'setMeta', path: 'audio.offset', value: v }) }),
-      this._field({ label: '增益 dB', value: project.meta.audio?.gain || 0, step: 0.5, onChange: (v) => this._commit('audio:gain', { op: 'setMeta', path: 'audio.gain', value: v }) }),
-      h('div', { class: 'fld span3' },
-        h('label', {}, `节拍 ${project.meta.tempo || 0} bpm · ${project.meta.beats.length} 个`),
-        h('div', { class: 'row-btns' },
-          h('button', { class: 'mini', onclick: () => this.opts.analyzeBeats() }, '重新分析节拍'),
-        )),
+    this.root.appendChild(this._sec('音频与节拍', {},
+      this._ro('音频', project.meta.audio?.src || '（未设置）'),
+      this._field({ label: '偏移', unit: 's', value: project.meta.audio?.offset || 0, step: 0.01, onChange: (v) => this._commit('audio:off', { op: 'setMeta', path: 'audio.offset', value: v }) }),
+      this._field({ label: '增益', unit: 'dB', value: project.meta.audio?.gain || 0, step: 0.5, onChange: (v) => this._commit('audio:gain', { op: 'setMeta', path: 'audio.gain', value: v }) }),
+      this._row('节拍',
+        h('div', { class: 'ctl-with-btn' },
+          h('div', { class: 'ro' }, `${project.meta.tempo || 0} bpm · ${project.meta.beats.length} 个`),
+          h('button', { type: 'button', class: 'mini', 'data-tip': '重新分析节拍', onclick: () => this.opts.analyzeBeats() }, '重新分析'))),
     ));
+
+    if (project.camera) this.root.appendChild(this._worldSection(project, true));
 
     this.root.appendChild(h('div', { class: 'hint pad' }, '选中元素后可以逐项编辑；点画面里的元素或时间线里的色块。'));
   }

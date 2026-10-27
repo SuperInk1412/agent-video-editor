@@ -1,20 +1,5 @@
-// Pipeline panel: storyboard -> preview frames -> segment render -> master, all visible.
-const h = (tag, attrs = {}, ...children) => {
-  const n = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (v == null || v === false) continue;
-    if (k === 'class') n.className = v;
-    else if (k.startsWith('on')) n.addEventListener(k.slice(2).toLowerCase(), v);
-    else if (k === 'value') n.value = v;
-    else if (k === 'checked') n.checked = !!v;
-    else n.setAttribute(k, v);
-  }
-  for (const c of children.flat()) {
-    if (c == null) continue;
-    n.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
-  }
-  return n;
-};
+// 渲染 panel (was 流水线): render job, pipeline steps, auto storyboard, artifacts (docs/DESIGN.md §1.4).
+import { h, icon, prefs } from './ui.js';
 
 const STEPS = [
   { id: 'storyboard', label: '分镜', desc: '音乐结构 → 段落 / 意图' },
@@ -22,6 +7,8 @@ const STEPS = [
   { id: 'render', label: '片段渲染', desc: '分段出片，可反复重来' },
   { id: 'master', label: '成片', desc: '整片合并 + 音轨' },
 ];
+
+const ART_ICON = { still: 'photo', render: 'film', video: 'film', ai: 'sparkles', storyboard: 'layers' };
 
 export class PipelinePanel {
   constructor(root, opts) {
@@ -43,43 +30,95 @@ export class PipelinePanel {
     this._paint();
   }
 
+  /** keep the 50% / 100% control in sync with renderActions (top-bar menu) */
+  setScale(v) {
+    const s = Number(v) === 1 ? 1 : 0.5;
+    this.scaleSeg?.querySelectorAll('button').forEach((b) => {
+      const on = Number(b.dataset.scale) === s;
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+  }
+
+  _section(key, title, body, { collapsible = false, collapsed = false } = {}) {
+    const sections = prefs.get('sections', {}) || {};
+    const isCollapsed = collapsible && (sections[`pipe.${key}`] ?? collapsed);
+    const sec = h('div', { class: `sec pipe-sec${isCollapsed ? ' collapsed' : ''}` });
+    const head = h('div', { class: 'sec-head' },
+      collapsible ? icon(isCollapsed ? 'chevron-right' : 'chevron-down', 'ic-sm') : null,
+      h('span', {}, title));
+    if (collapsible) {
+      head.setAttribute('role', 'button');
+      head.setAttribute('tabindex', '0');
+      head.setAttribute('aria-expanded', isCollapsed ? 'false' : 'true');
+      const toggle = () => {
+        const c = sec.classList.toggle('collapsed');
+        head.setAttribute('aria-expanded', c ? 'false' : 'true');
+        head.firstChild.replaceWith(icon(c ? 'chevron-right' : 'chevron-down', 'ic-sm'));
+        const all = { ...(prefs.get('sections', {}) || {}) };
+        all[`pipe.${key}`] = c;
+        prefs.set('sections', all);
+      };
+      head.addEventListener('click', toggle);
+      head.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
+    } else head.classList.add('static');
+    sec.append(head, h('div', { class: 'sec-body' }, body));
+    return sec;
+  }
+
   _build() {
     this.root.innerHTML = '';
-    this.root.appendChild(h('div', { class: 'panel-head' },
-      h('div', { class: 'panel-title' }, '流水线'),
-      h('div', { class: 'panel-sub' }, '每一步都能看见、打断、重来'),
-    ));
-    this.stepsEl = h('div', { class: 'steps' });
-    this.root.appendChild(this.stepsEl);
-    this.artEl = h('div', { class: 'artifacts' });
-    this.root.appendChild(h('div', { class: 'sec-title' }, '产出'), this.artEl);
+    this.root.classList.add('pipe-panel');
+    const ra = this.opts.renderActions;
 
-    this.styleSel = h('select', {},
+    // ① render job
+    this.bar = h('div', { class: 'bar' });
+    this.progress = h('div', { class: 'progress lg', role: 'progressbar', 'aria-valuemin': '0', 'aria-valuemax': '100' }, this.bar);
+    this.frameEl = h('span', { class: 'rj-frames mono' }, '');
+    this.statusEl = h('span', { class: 'rj-status' }, '');
+    this.btnCancel = h('button', { class: 'danger mini', 'data-tip': '取消渲染', onclick: () => this._cancel() }, icon('x', 'ic-sm'), '取消');
+    this.scaleSeg = h('div', { class: 'seg', role: 'group', 'aria-label': '分辨率' },
+      ...[0.5, 1].map((s) => h('button', {
+        'data-scale': String(s), 'data-tip': `渲染分辨率 ${s * 100}%`,
+        onclick: () => { if (ra?.setScale) ra.setScale(s); else this.setScale(s); },
+      }, `${s * 100}%`)));
+    const jobBody = h('div', { class: 'rj' },
+      h('div', { class: 'rj-meta' }, this.frameEl, this.statusEl),
+      this.progress,
+      h('div', { class: 'rj-actions' },
+        h('button', { class: 'mini', 'data-tip': '预览帧\n用 Blender 渲染当前时刻', onclick: () => this._still() }, icon('photo', 'ic-sm'), '预览帧'),
+        h('button', { class: 'mini', 'data-tip': '渲染当前段\n选中的分镜段，否则播放头所在段', onclick: () => this._render('segment') }, icon('film', 'ic-sm'), '渲染当前段'),
+        h('button', { class: 'mini', 'data-tip': '渲染成片\n整片合并 + 音轨', onclick: () => this._render('master') }, icon('film', 'ic-sm'), '渲染成片'),
+        this.btnCancel,
+      ),
+      h('div', { class: 'rj-scale' }, h('span', { class: 'rj-label' }, '分辨率'), this.scaleSeg),
+    );
+    this.root.appendChild(this._section('job', '渲染任务', jobBody));
+
+    // ② pipeline steps
+    this.stepsEl = h('ol', { class: 'stepper' });
+    this.root.appendChild(this._section('steps', '流水线', this.stepsEl));
+
+    // ③ auto storyboard
+    this.styleSel = h('select', { 'aria-label': '风格' },
       h('option', { value: 'neon' }, '霓虹 neon'),
       h('option', { value: 'clean' }, '干净 clean'),
       h('option', { value: 'film' }, '胶片 film'));
-    this.brief = h('textarea', { rows: 3, placeholder: '分镜文案（一行一句，会变成字幕/大字）' });
-    this.root.appendChild(h('div', { class: 'sec' },
-      h('div', { class: 'sec-title' }, '自动分镜'),
-      h('div', { class: 'fld span2' }, h('label', {}, '风格'), this.styleSel),
-      h('div', { class: 'fld span3' }, this.brief),
+    this.brief = h('textarea', { rows: 3, placeholder: '分镜文案（一行一句，会变成字幕/大字）', 'aria-label': '分镜文案' });
+    this.root.appendChild(this._section('plan', '自动分镜', h('div', { class: 'plan' },
+      h('div', { class: 'prop' }, h('label', {}, '风格'), this.styleSel, h('span', {})),
+      this.brief,
       h('div', { class: 'row-btns' },
-        h('button', { class: 'primary', onclick: () => this._plan() }, '生成分镜'),
+        h('button', { class: 'mini', onclick: () => this._plan() }, '生成分镜'),
         h('button', { class: 'mini', onclick: () => this._beats() }, '分析节拍'),
       ),
-    ));
+    ), { collapsible: true, collapsed: false }));
 
-    this.progress = h('div', { class: 'progress' }, h('div', { class: 'bar' }), h('span', { class: 'ptext' }, ''));
-    this.root.appendChild(h('div', { class: 'sec' },
-      h('div', { class: 'sec-title' }, '出片'),
-      this.progress,
-      h('div', { class: 'row-btns' },
-        h('button', { class: 'mini', onclick: () => this._still() }, '当前帧预览'),
-        h('button', { onclick: () => this._render('segment') }, '渲染当前段'),
-        h('button', { class: 'primary', onclick: () => this._render('master') }, '渲染成片'),
-        h('button', { class: 'danger', onclick: () => this._cancel() }, '取消'),
-      ),
-    ));
+    // ④ artifacts
+    this.artEl = h('div', { class: 'artifacts' });
+    this.root.appendChild(this._section('arts', '产出', this.artEl));
+
+    this.setScale(ra?.getScale ? ra.getScale() : this.opts.getRenderScale?.());
     this._paint();
   }
 
@@ -89,38 +128,50 @@ export class PipelinePanel {
     this.stepsEl.innerHTML = '';
     steps.forEach((s, i) => {
       const meta = STEPS.find((x) => x.id === s.id) || {};
-      this.stepsEl.appendChild(h('div', { class: `step s-${s.status}` },
-        h('div', { class: 'step-idx' }, String(i + 1)),
+      const status = s.status || 'todo';
+      this.stepsEl.appendChild(h('li', { class: `step s-${status}` },
+        h('span', { class: 'step-idx' }, status === 'done' ? icon('check', 'ic-sm') : status === 'error' ? icon('alert', 'ic-sm') : String(i + 1)),
         h('div', { class: 'step-body' },
-          h('div', { class: 'step-top' }, h('span', { class: 'step-label' }, s.label), h('span', { class: `step-state ${s.status}` }, stateLabel(s.status))),
-          h('div', { class: 'step-detail' }, s.detail || meta.desc || ''),
+          h('div', { class: 'step-top' }, h('span', { class: 'step-label' }, s.label || meta.label || s.id), h('span', { class: `step-state ${status}` }, stateLabel(status))),
+          h('div', { class: 'step-detail', title: s.detail || meta.desc || '' }, s.detail || meta.desc || ''),
         ),
       ));
     });
 
     const arts = this.state?.pipeline?.artifacts || [];
     this.artEl.innerHTML = '';
-    if (!arts.length) this.artEl.appendChild(h('div', { class: 'hint' }, '还没有产出。先生成分镜，再出预览帧。'));
+    if (!arts.length) this.artEl.appendChild(h('div', { class: 'hint art-empty' }, '还没有产出。先生成分镜，再出预览帧。'));
     for (const a of arts.slice(0, 12)) {
+      const tip = a.detail ? `${a.label}\n${a.detail}` : a.label;
       if (a.kind === 'still' && a.url) {
-        this.artEl.appendChild(h('a', { class: 'art', href: a.url, target: '_blank', title: a.label },
-          h('img', { src: a.url, loading: 'lazy' }),
-          h('span', {}, a.label)));
-      } else if (a.url) {
-        this.artEl.appendChild(h('a', { class: 'art file', href: a.url, target: '_blank' }, '▶ ', a.label));
+        this.artEl.appendChild(h('a', { class: 'art', href: a.url, target: '_blank', 'data-tip': tip },
+          h('img', { src: a.url, loading: 'lazy', alt: '' }),
+          h('span', { class: 'art-label' }, a.label)));
       } else {
-        this.artEl.appendChild(h('div', { class: 'art file' }, a.label));
+        const inner = [h('span', { class: 'art-thumb' }, icon(ART_ICON[a.kind] || 'folder')), h('span', { class: 'art-label' }, a.label)];
+        this.artEl.appendChild(a.url
+          ? h('a', { class: 'art file', href: a.url, target: '_blank', 'data-tip': tip }, inner)
+          : h('div', { class: 'art file', 'data-tip': tip }, inner));
       }
     }
 
     const r = this.render;
-    if (r) {
-      const pct = r.total ? Math.min(100, (r.progress / r.total) * 100) : 0;
-      this.progress.querySelector('.bar').style.width = `${r.running ? pct : r.out ? 100 : 0}%`;
-      this.progress.querySelector('.ptext').textContent = r.running
-        ? `${r.progress}/${r.total} 帧`
-        : r.error ? `失败: ${r.error}` : r.out ? '完成' : '';
-    }
+    const pct = r?.total ? Math.min(100, (r.progress / r.total) * 100) : 0;
+    const width = r?.running ? pct : r?.out ? 100 : 0;
+    this.bar.style.width = `${width}%`;
+    this.progress.setAttribute('aria-valuenow', String(Math.round(width)));
+    this.progress.classList.toggle('is-error', !!(r && !r.running && r.error));
+    this.frameEl.textContent = r?.total ? `帧 ${r.running ? r.progress : r.out ? r.total : r.progress} / ${r.total}` : '帧 – / –';
+    let status = '空闲', cls = '';
+    if (r?.running) {
+      const what = r.kind === 'still' ? '预览帧' : r.kind === 'video' ? `${(r.from ?? 0).toFixed(1)}–${(r.to ?? 0).toFixed(1)}s` : '';
+      status = `渲染中${what ? ' · ' + what : ''} · ${Math.round(pct)}%`; cls = 'running';
+    } else if (r?.error) { status = `失败: ${r.error}`; cls = 'error'; }
+    else if (r?.out) { status = '完成'; cls = 'done'; }
+    this.statusEl.textContent = status;
+    this.statusEl.className = `rj-status ${cls}`;
+    this.statusEl.title = status;
+    this.btnCancel.hidden = !r?.running;
   }
 
   async _plan() {
@@ -142,35 +193,18 @@ export class PipelinePanel {
     this.opts.toast?.(`${j.tempo} bpm · ${j.beats.length} 拍`, 'success');
   }
 
-  async _still() {
-    const t = this.opts.getTime();
-    this.opts.toast?.(`Blender 渲染 ${t.toFixed(2)}s …`);
-    const r = await fetch('/api/still', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ time: t, scale: 0.5 }) });
-    const j = await r.json();
-    if (!r.ok) { this.opts.toast?.(j.error || '渲染失败', 'error'); return; }
-    this.opts.toast?.('预览帧完成', 'success');
+  _still() {
+    const ra = this.opts.renderActions;
+    return ra?.still(this.opts.getTime());
   }
 
-  async _render(mode) {
-    const p = this.opts.getProject();
-    const sel = this.opts.getSelection();
-    let from = 0, to = p.meta.duration;
-    if (mode === 'segment' && sel.segmentId) {
-      const s = p.segments.find((x) => x.id === sel.segmentId);
-      if (s) { from = s.start; to = s.start + s.duration; }
-    }
-    const r = await fetch('/api/render', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ from, to, scale: this.opts.getRenderScale() }),
-    });
-    const j = await r.json();
-    if (!r.ok) this.opts.toast?.(j.error || '渲染启动失败', 'error');
-    else this.opts.toast?.(`开始渲染 ${from.toFixed(1)}–${to.toFixed(1)}s`);
+  _render(mode) {
+    const ra = this.opts.renderActions;
+    return mode === 'segment' ? ra?.segment() : ra?.master();
   }
 
-  async _cancel() {
-    await fetch('/api/render/cancel', { method: 'POST' });
-    this.opts.toast?.('已请求取消渲染');
+  _cancel() {
+    return this.opts.renderActions?.cancel();
   }
 }
 

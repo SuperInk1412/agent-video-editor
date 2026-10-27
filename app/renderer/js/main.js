@@ -8,6 +8,11 @@ import { AgentPanel } from './ai.js';
 import { PipelinePanel } from './pipeline.js';
 import { LogPanel } from './logs.js';
 import { ProjectsPanel } from './projects.js';
+import { AssetsPanel, MEDIA_MIME } from './assets.js';
+import { Outliner } from './outliner.js';
+import { showMenu, hideMenu, initTooltips, icon, prefs } from './ui.js';
+import { initLayout, markTab, Timecode, StatusBar, LogDrawer } from './shell.js';
+import { initCommands, register as registerCommand, dispatch as dispatchCommand, openPalette, openShortcuts } from './commands.js';
 import { evalCamera, pathPos, cameraTransform, cameraRange } from '/core/camera.js';
 import { curveSegments } from '/core/curves.js';
 import { worldPose, toLocalPoint, toLocalVector, ancestors, childrenOf, elementCarrier, carrierMatrix } from '/core/hierarchy.js';
@@ -30,7 +35,7 @@ const S = {
   agentAvailable: false,
   pipeline: null,
   render: null,
-  renderScale: 0.5,
+  renderScale: prefs.get('renderScale', 0.5) === 1 ? 1 : 0.5,
   dpr: Math.min(2, window.devicePixelRatio || 1),
   editMode: false,
   editCam: null,
@@ -39,9 +44,13 @@ const S = {
   keys: new Set(),
   soloCameras: new Set(),
   clipboard: null,
+  loop: !!prefs.get('loop', false),
+  safeArea: !!prefs.get('safeArea', false),
 };
 
 let preview, timeline, inspector, agentPanel, pipelinePanel, logPanel, gizmo, projects, curvePanel;
+let layout, timecodeUI, statusBar, logDrawer; // shell (shell.js)
+let assetsPanel, outliner; // left column (assets.js / outliner.js)
 
 // ---- error reporting: everything lands in .vdm/logs and the 日志 panel ----
 const reportedErrors = new Set();
@@ -103,42 +112,13 @@ function toast(msg, level = 'info') {
 }
 
 // ---------------------------------------------------------------- context menu
+// Items: { label, run, danger, disabled, title, sep, icon, kbd, group } — rendered by ui.js.
 function hideContextMenu() {
-  const m = $('#ctxMenu');
-  if (m) m.hidden = true;
+  hideMenu();
 }
 
 function showContextMenu(x, y, items) {
-  const m = $('#ctxMenu');
-  if (!m || !items?.length) return;
-  m.innerHTML = '';
-  for (const it of items) {
-    if (it.sep) {
-      const d = document.createElement('div');
-      d.className = 'ctx-sep';
-      m.appendChild(d);
-      continue;
-    }
-    const b = document.createElement('button');
-    b.textContent = it.label;
-    if (it.danger) b.classList.add('danger');
-    if (it.disabled) {
-      b.disabled = true;
-      b.title = it.title || '';
-    }
-    b.onclick = () => {
-      if (it.disabled) return;
-      hideContextMenu();
-      it.run?.();
-    };
-    m.appendChild(b);
-  }
-  m.hidden = false;
-  m.style.left = '0px';
-  m.style.top = '0px';
-  const r = m.getBoundingClientRect();
-  m.style.left = `${Math.max(6, Math.min(x, innerWidth - r.width - 8))}px`;
-  m.style.top = `${Math.max(6, Math.min(y, innerHeight - r.height - 8))}px`;
+  showMenu(x, y, items);
 }
 
 window.addEventListener('pointerdown', (e) => {
@@ -203,10 +183,8 @@ function applyProject(p, source) {
   timeline.setSelection(S.selection);
   inspector.render(p, S.selection, S.time);
   curvePanel?.setProject(p);
-  $('#projTitle').textContent = p.meta.title;
-  $('#projMeta').textContent = `${p.meta.width}×${p.meta.height} · ${p.meta.fps}fps · ${p.meta.duration.toFixed(1)}s · rev ${p.rev}`;
-  const editBtn = $('#btnEditMode');
-  if (editBtn) editBtn.hidden = !p.camera;
+  outliner?.render(); assetsPanel?.syncProject();
+  updateProjectMeta(p);
   if (!p.camera && S.editMode) setEditMode(false);
   updateOverlay();
   if (prevDuration !== p.meta.duration || S.time > p.meta.duration) setTime(S.time);
@@ -217,8 +195,7 @@ function setTime(t, { seekAudio = true } = {}) {
   const dur = S.project?.meta.duration || 12;
   S.time = Math.max(0, Math.min(dur, t));
   timeline?.setTime(S.time);
-  $('#timecode').textContent = `${S.time.toFixed(2)}s`;
-  $('#stageTime').textContent = `${S.time.toFixed(2)} / ${dur.toFixed(2)}s`;
+  updateTimecode();
   if (seekAudio && S.playing) preview.setAudioTime(S.time);
   if (!S.playing) inspector.render(S.project, S.selection, S.time);
 }
@@ -231,16 +208,14 @@ function play() {
   S.playFrom = S.time;
   preview.playing = true;
   preview.playAudio(S.time);
-  $('#btnPlay').textContent = '⏸';
-  $('#btnPlay').classList.add('on');
+  setPlayButton(true);
 }
 
 function pause() {
   S.playing = false;
   preview.playing = false;
   preview.pauseAudio();
-  $('#btnPlay').textContent = '▶';
-  $('#btnPlay').classList.remove('on');
+  setPlayButton(false);
 }
 
 function togglePlay() { S.playing ? pause() : play(); }
@@ -279,6 +254,7 @@ function select(sel = {}) {
   }
   timeline.setSelection(S.selection);
   inspector.render(S.project, S.selection, S.time);
+  outliner?.setSelection();
   updateOverlay();
   updateSelectionInfo();
 }
@@ -502,7 +478,7 @@ function closeInlineText(save) {
   if (ui) {
     ui.layer.hidden = true;
     ui.area.value = '';
-    if (ui.hint?.dataset.normal) ui.hint.textContent = ui.hint.dataset.normal;
+    if (ui.hint) ui.hint.textContent = ui.hint.dataset.normal || '';
     ui.area.blur();
   }
   const target = textTarget(state.kind, state.id)?.target || state.target;
@@ -683,20 +659,57 @@ function updateOverlay() {
   label.style.top = `${Math.max(14, top[1] * scale)}px`;
 }
 
-/** Selected 3D object: parent breadcrumb + world position (+ child count). */
+const SEL_TYPE = {
+  text: ['文字', 'text'], image: ['图片', 'image'], video: ['视频', 'video'], shape: ['色块', 'shape'],
+  solid: ['色块', 'solid'], audio: ['声音', 'audio'],
+};
+const OBJ_TYPE = { solid: '3D 物体', empty: '空元素', image: '3D 图片', video: '3D 视频', text: '3D 文字' };
+
+/** Transport selection summary: type badge + name; 3D objects keep path / world position in the tip. */
 function updateSelectionInfo() {
   const node = $('#selInfo');
   if (!node) return;
-  const obj = (S.project?.scene?.objects || []).find((o) => o.id === S.selection.objectId);
-  if (!obj) { node.hidden = true; node.textContent = ''; return; }
-  const chain = ancestors(S.project, obj.id).reverse().map((o) => o.name || o.id);
-  const path = [...chain, obj.name || obj.id].join(' › ');
-  const pose = worldPose(S.project, obj, S.time);
-  const world = pose.worldPos.map((v) => (Math.round(Number(v) * 100) / 100).toFixed(2)).join(', ');
-  const kids = childrenOf(S.project, obj.id).length;
-  node.hidden = false;
-  node.textContent = `${path} · 世界 ${world}${kids ? ` · ${kids} 子级` : ''}`;
-  node.title = obj.parent?.id ? '手柄和轨迹按世界位置显示；时间轴属性仍是本地值' : '';
+  const badge = $('#selType');
+  const name = $('#selName');
+  const show = (label, cls, text, tip = '') => {
+    node.hidden = false;
+    if (badge.textContent !== label) badge.textContent = label;
+    badge.className = `badge ${cls}`;
+    if (name.textContent !== text) name.textContent = text;
+    if (tip) node.dataset.tip = tip; else delete node.dataset.tip;
+  };
+  const p = S.project;
+  const sel = S.selection;
+  const obj = (p?.scene?.objects || []).find((o) => o.id === sel.objectId);
+  if (obj) {
+    const chain = ancestors(p, obj.id).reverse().map((o) => o.name || o.id);
+    const path = [...chain, obj.name || obj.id].join(' › ');
+    const pose = worldPose(p, obj, S.time);
+    const world = pose.worldPos.map((v) => (Math.round(Number(v) * 100) / 100).toFixed(2)).join(', ');
+    const kids = childrenOf(p, obj.id).length;
+    const note = obj.parent?.id ? '\n手柄和轨迹按世界位置显示；时间轴属性仍是本地值' : '';
+    show(OBJ_TYPE[obj.type] || '3D', 'badge-object', obj.name || obj.id, `${path} · 世界 ${world}${kids ? ` · ${kids} 子级` : ''}${note}`);
+    return;
+  }
+  const el = sel.elementId ? (p?.elements || []).find((e) => e.id === sel.elementId) : null;
+  if (el) {
+    const [label, cls] = SEL_TYPE[el.type] || [el.type || '元素', ''];
+    show(label, cls ? `badge-${cls}` : '', el.name || el.id, el.id);
+    return;
+  }
+  const pool = sel.pool;
+  const camIds = pool?.kind === 'element' ? pool.ids.map(splitRef).filter((r) => r?.type === 'cam').map((r) => r.id) : [];
+  const camId = camIds[0] || (sel.camera ? (p?.activeCameraId || p?.camera?.id) : null);
+  const cam = camId ? ((p?.cameras || []).find((c) => c.id === camId) || (p?.camera?.id === camId ? p.camera : null)) : null;
+  if (cam) {
+    show('相机', 'badge-camera', cam.name || cam.id, cam.id);
+    return;
+  }
+  if (pool?.kind === 'keyframe' && pool.ids.length) {
+    show('关键帧', 'badge-accent', `${pool.ids.length} 个`);
+    return;
+  }
+  node.hidden = true;
 }
 
 function fitStage() {
@@ -740,7 +753,6 @@ function axisClosestS(ray, p, a) {
 }
 
 function setEditMode(on) {
-  const btn = $('#btnEditMode');
   if (on && !S.project?.camera) { toast('这个项目没有相机'); return; }
   S.editMode = !!on;
   preview.editMode = S.editMode;
@@ -752,10 +764,7 @@ function setEditMode(on) {
     S.editCam = null;
     preview.editCam = null;
   }
-  if (btn) {
-    btn.classList.toggle('on', S.editMode);
-    btn.textContent = S.editMode ? '镜头视角' : '编辑视口';
-  }
+  document.body.classList.toggle('look-mode', S.editMode);
   setViewMode('select');
   preview.render(S.time);
   gizmo?.draw();
@@ -764,12 +773,7 @@ function setEditMode(on) {
 /** Edit viewport modes: 'select' (pick / drag / context menu) or 'move' (camera). */
 function setViewMode(mode) {
   S.viewMode = mode === 'move' ? 'move' : 'select';
-  const badge = $('#viewMode');
-  if (badge) {
-    badge.hidden = !S.editMode;
-    badge.textContent = S.viewMode === 'move' ? '移动相机 · Alt 切回选择' : '选择 · Alt 切到移动';
-    badge.classList.toggle('move', S.viewMode === 'move');
-  }
+  syncViewControls();
   document.body.classList.toggle('body-move', S.editMode && S.viewMode === 'move');
   const stage = $('#stage');
   if (stage) stage.style.cursor = S.editMode && S.viewMode === 'move' ? 'grab' : 'default';
@@ -844,67 +848,135 @@ function mediaKind(path) {
 /** Pick an image or video from media/ in a small modal (null when cancelled). */
 function pickMedia(kind) {
   const label = kind === 'video' ? '视频' : '图片';
+  const svgIcon = (id, cls = 'ic') => `<svg class="${cls}" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-${id}"/></svg>`;
   return new Promise((resolve) => {
     let settled = false;
+    const opener = document.activeElement;
     const modal = document.createElement('div');
     modal.className = 'modal';
     const card = document.createElement('div');
-    card.className = 'modal-card media-picker';
+    card.className = 'modal-card dlg mpick-card';
+    card.setAttribute('role', 'dialog');
+    card.setAttribute('aria-modal', 'true');
+    card.setAttribute('aria-labelledby', 'mpickTitle');
     const head = document.createElement('div');
     head.className = 'modal-head';
     const title = document.createElement('div');
+    title.className = 'modal-title';
     const strong = document.createElement('strong');
+    strong.id = 'mpickTitle';
     strong.textContent = `选择${label}`;
     const hint = document.createElement('span');
     hint.className = 'hint';
     hint.textContent = '只列出 media/ 里的素材';
     title.append(strong, hint);
     const close = document.createElement('button');
-    close.className = 'mini';
-    close.textContent = '×';
-    close.title = '关闭';
+    close.type = 'button';
+    close.className = 'icon-btn modal-x';
+    close.setAttribute('aria-label', '关闭');
+    close.dataset.tip = '关闭';
+    close.dataset.kbd = 'Esc';
+    close.innerHTML = svgIcon('x');
     head.append(title, close);
     const body = document.createElement('div');
-    body.className = 'media-pick-body';
-    card.append(head, body);
+    body.className = 'dlg-body mpick-body';
+    const searchBox = document.createElement('div');
+    searchBox.className = 'mpick-search';
+    searchBox.innerHTML = svgIcon('search', 'ic ic-sm');
+    const search = document.createElement('input');
+    search.type = 'search';
+    search.placeholder = '按文件名搜索';
+    search.autocomplete = 'off';
+    search.spellcheck = false;
+    search.setAttribute('aria-label', `搜索${label}`);
+    searchBox.append(search);
+    const scroll = document.createElement('div');
+    scroll.className = 'mpick-scroll';
+    body.append(searchBox, scroll);
+    const foot = document.createElement('div');
+    foot.className = 'modal-foot';
+    const footHint = document.createElement('span');
+    footHint.className = 'mpick-foot-hint';
+    footHint.innerHTML = '<kbd>Enter</kbd><span>或双击选择</span>';
+    const spacer = document.createElement('span');
+    spacer.className = 'spacer';
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'btn lg';
+    cancel.textContent = '取消';
+    const ok = document.createElement('button');
+    ok.type = 'button';
+    ok.className = 'btn lg';
+    ok.textContent = '选择';
+    ok.disabled = true;
+    foot.append(footHint, spacer, cancel, ok);
+    card.append(head, body, foot);
     modal.append(card);
     document.body.append(modal);
+
+    let list = [];
+    let cards = []; // [{ m, item }] currently shown
+    let act = -1;
+    const setAct = (i) => {
+      act = i;
+      cards.forEach((c, j) => {
+        c.item.classList.toggle('act', j === i);
+        c.item.setAttribute('aria-selected', j === i ? 'true' : 'false');
+      });
+      if (cards[i]) cards[i].item.scrollIntoView({ block: 'nearest' });
+      ok.disabled = !cards[i];
+    };
 
     const finish = (m) => {
       if (settled) return;
       settled = true;
       modal.remove();
       window.removeEventListener('keydown', onKey, true);
+      if (opener?.isConnected && typeof opener.focus === 'function') opener.focus();
       resolve(m || null);
     };
     const onKey = (e) => {
-      if (e.key !== 'Escape') return;
+      if ([...document.querySelectorAll('.modal:not([hidden])')].pop() !== modal) return;
+      const n = cards.length;
+      const step = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -3, ArrowDown: 3 }[e.key];
+      if (e.key === 'Escape') finish(null);
+      else if (e.key === 'Enter' && !(e.target instanceof HTMLButtonElement)) {
+        const c = cards[act >= 0 ? act : (n === 1 ? 0 : -1)];
+        if (!c) return;
+        finish(c.m);
+      } else if (step && n && !(e.target === search && (e.key === 'ArrowLeft' || e.key === 'ArrowRight'))) {
+        setAct(act < 0 ? 0 : Math.max(0, Math.min(n - 1, act + step)));
+      } else return;
       e.preventDefault();
       e.stopImmediatePropagation();
-      finish(null);
     };
     window.addEventListener('keydown', onKey, true);
     close.onclick = () => finish(null);
+    cancel.onclick = () => finish(null);
+    ok.onclick = () => { if (cards[act]) finish(cards[act].m); };
     modal.addEventListener('pointerdown', (e) => { if (e.target === modal) finish(null); });
 
-    body.innerHTML = '<div class="hint pad">读取素材…</div>';
-    fetch('/api/media').then((r) => r.json()).then((j) => {
-      if (settled) return;
-      const list = (j.media || []).filter((m) => mediaKind(m.path) === kind);
-      body.replaceChildren();
-      if (!list.length) {
-        const empty = document.createElement('div');
-        empty.className = 'hint pad';
-        empty.textContent = `media/ 里还没有${label}。先在左侧「媒体」面板导入。`;
-        body.append(empty);
-        return;
-      }
+    const note = (text) => {
+      const d = document.createElement('div');
+      d.className = 'hint';
+      d.textContent = text;
+      scroll.replaceChildren(d);
+    };
+    const renderGrid = () => {
+      const q = search.value.trim().toLowerCase();
+      const shown = q ? list.filter((m) => String(m.name).toLowerCase().includes(q)) : list;
+      cards = [];
+      act = -1;
+      ok.disabled = true;
+      if (!shown.length) { note(`没有文件名包含「${search.value.trim()}」的${label}`); return; }
       const grid = document.createElement('div');
-      grid.className = 'media-grid media-pick';
-      for (const m of list) {
+      grid.className = 'media-grid mpick-grid';
+      grid.setAttribute('role', 'listbox');
+      shown.forEach((m, i) => {
         const item = document.createElement('div');
         item.className = 'media-card';
         item.title = m.name;
+        item.setAttribute('role', 'option');
         if (kind === 'image') {
           const img = document.createElement('img');
           img.src = `/${m.path}`;
@@ -912,91 +984,77 @@ function pickMedia(kind) {
           img.alt = '';
           item.append(img);
         } else {
-          const icon = document.createElement('div');
-          icon.className = 'fileicon';
-          icon.textContent = '▶';
-          item.append(icon);
+          const fileIcon = document.createElement('div');
+          fileIcon.className = 'fileicon';
+          fileIcon.innerHTML = svgIcon('video');
+          item.append(fileIcon);
         }
         const cap = document.createElement('div');
         cap.className = 'media-cap';
         cap.textContent = m.name;
         item.append(cap);
-        item.onclick = () => finish(m);
+        item.onclick = () => setAct(i);
+        item.ondblclick = () => finish(m);
+        cards.push({ m, item });
         grid.append(item);
+      });
+      scroll.replaceChildren(grid);
+      if (cards.length === 1) setAct(0);
+    };
+    search.addEventListener('input', () => { if (list.length) renderGrid(); });
+    search.focus();
+
+    note('读取素材…');
+    fetch('/api/media').then((r) => r.json()).then((j) => {
+      if (settled) return;
+      list = (j.media || []).filter((m) => mediaKind(m.path) === kind);
+      if (!list.length) {
+        note(`media/ 里还没有${label}。先在左侧「媒体」面板导入。`);
+        return;
       }
-      body.append(grid);
+      renderGrid();
     }).catch((e) => {
       if (settled) return;
-      const err = document.createElement('div');
-      err.className = 'hint pad';
-      err.textContent = `读取失败：${e.message}`;
-      body.replaceChildren(err);
+      note(`读取失败：${e.message}`);
     });
   });
 }
 
-async function renderMedia() {
-  const root = $('#panelMedia');
-  if (!root) return;
-  const j = await fetch('/api/media').then((r) => r.json()).catch(() => ({ media: [] }));
-  S.media = j.media || [];
-  root.innerHTML = '';
-  const head = document.createElement('div');
-  head.className = 'panel-head';
-  head.innerHTML = `<div class="panel-title">媒体 <span class="dim">${S.media.length}</span></div>`;
-  const imp = document.createElement('button'); imp.className = 'mini'; imp.textContent = '导入';
-  const file = document.createElement('input'); file.type = 'file'; file.multiple = true; file.style.display = 'none';
-  imp.onclick = () => file.click();
-  file.onchange = async () => {
-    for (const f of file.files) {
-      await fetch(`/api/upload?name=${encodeURIComponent(f.name)}`, { method: 'POST', body: f });
-    }
-    toast('素材已导入');
-    renderMedia();
-  };
-  head.append(imp, file);
-  root.appendChild(head);
-  const grid = document.createElement('div');
-  grid.className = 'media-grid';
-  for (const m of S.media) {
-    const kind = mediaKind(m.path);
-    const isVid = kind === 'video';
-    const isImg = kind === 'image';
-    const isAud = kind === 'audio';
-    const isTrack = isAud && S.project.meta.audio?.src === m.path;
-    const card = document.createElement('div');
-    card.className = `media-card${isTrack ? ' on' : ''}`;
-    card.title = isAud
-      ? '点击加入时间线；右键设为配乐'
-      : (isImg || isVid ? '点击在播放头处加入时间线' : '不支持的素材类型');
-    card.innerHTML = isImg
-      ? `<img src="/${m.path}" loading="lazy">`
-      : `<div class="fileicon">${isVid ? '▶' : isAud ? '♪' : '?'}</div>`;
-    const cap = document.createElement('div');
-    cap.className = 'media-cap';
-    cap.textContent = isTrack ? `♪ 配乐 · ${m.name}` : m.name;
-    card.appendChild(cap);
-    card.onclick = () => {
-      if (isAud) addAudioAt(m);
-      else if (isImg || isVid) addMediaAt(m, isVid);
-      else toast('只能把图片和视频放进时间线', 'warn');
-    };
-    if (isAud) {
-      card.addEventListener('contextmenu', (e) => {
-        e.preventDefault();
-        showContextMenu(e.clientX, e.clientY, [
-          { label: '加入时间线', run: () => addAudioAt(m) },
-          {
-            label: isTrack ? '当前已是配乐' : '设为配乐（分析节拍）',
-            disabled: isTrack,
-            run: () => setSoundtrack(m),
-          },
-        ]);
-      });
-    }
-    grid.appendChild(card);
-  }
-  root.appendChild(grid);
+/** 资源 panel (assets.js): add a media file to the timeline at time t. */
+function addMediaFile(m, kind, t = S.time) {
+  if (kind === 'audio') return addAudioAt(m, t);
+  if (kind === 'image' || kind === 'video') return addMediaAt(m, kind === 'video', t);
+  toast('只能把图片、视频和声音放进时间线', 'warn');
+  return null;
+}
+
+/** Timeline drop target for cards dragged from the 资源 panel: add at the drop time. */
+function initMediaDrop() {
+  const tl = $('#timeline');
+  const isMedia = (e) => [...(e.dataTransfer?.types || [])].includes(MEDIA_MIME);
+  const clear = () => tl.classList.remove('media-drop');
+  tl.addEventListener('dragover', (e) => {
+    if (!isMedia(e)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    const r = tl.getBoundingClientRect();
+    const x = timeline._trackX(timeline._timeAt(e.clientX)) - (timeline.scroll?.scrollLeft || 0)
+      + ((timeline.scroll?.getBoundingClientRect().left ?? r.left) - r.left);
+    tl.style.setProperty('--drop-x', `${Math.round(x)}px`);
+    tl.classList.add('media-drop');
+  });
+  tl.addEventListener('dragleave', (e) => { if (!tl.contains(e.relatedTarget)) clear(); });
+  window.addEventListener('dragend', clear);
+  tl.addEventListener('drop', (e) => {
+    if (!isMedia(e)) return;
+    e.preventDefault();
+    clear();
+    const path = e.dataTransfer.getData(MEDIA_MIME);
+    const m = (S.media || []).find((x) => x.path === path);
+    if (!m || !S.project) return;
+    const t = Math.round(Math.min(S.project.meta.duration, timeline._timeAt(e.clientX)) * 1000) / 1000;
+    addMediaFile(m, mediaKind(m.path), t);
+  });
 }
 
 async function setSoundtrack(m) {
@@ -1025,7 +1083,7 @@ async function setSoundtrack(m) {
   }
   const j = await op(...ops);
   if (!j) return;
-  renderMedia();
+  assetsPanel?.syncProject();
   toast('已设为配乐，正在分析节拍…');
   try {
     const b = await post('/api/beats', {});
@@ -1205,11 +1263,11 @@ async function pasteClipboard() {
   return j;
 }
 
-function addMediaAt(m, isVid) {
+function addMediaAt(m, isVid, t = S.time) {
   const dur = Math.min(4, S.project.meta.duration);
-  const start = fitStart(S.time, dur);
+  const start = fitStart(t, dur);
   const seg = segmentAt(start);
-  op({
+  return op({
     op: 'addElement',
     element: {
       type: isVid ? 'video' : 'image', src: m.path, start, duration: dur,
@@ -1220,8 +1278,8 @@ function addMediaAt(m, isVid) {
   }).then((j) => { if (j?.changed?.[0]) select({ elementId: j.changed[0] }); });
 }
 
-/** Add a sound file as a normal timeline element at the playhead. */
-function addAudioAt(m) {
+/** Add a sound file as a normal timeline element at the playhead (or time t). */
+function addAudioAt(m, t = S.time) {
   if (!S.project) return null;
   const existing = S.project.elements.find((e) => e.type === 'audio' && e.src === m.path);
   if (existing) {
@@ -1230,7 +1288,7 @@ function addAudioAt(m) {
     return Promise.resolve(existing.id);
   }
   const total = Math.max(0.05, Number(S.project.meta.duration) || 12);
-  const start = Math.max(0, Math.min(total - 0.05, S.time));
+  const start = Math.max(0, Math.min(total - 0.05, t));
   const duration = Math.max(0.05, total - start);
   return op({
     op: 'addElement',
@@ -1246,16 +1304,178 @@ function addAudioAt(m) {
 }
 
 function switchRightTab(name) {
-  document.querySelectorAll('[data-tabs="right"] button').forEach((b) => b.classList.toggle('on', b.dataset.tab === name));
+  // the log list moved to the status-bar drawer; keep the old tab name working
+  if (name === 'logs') { logDrawer?.open(); return; }
+  if (!['insp', 'ai', 'pipe'].includes(name)) name = 'insp';
+  markTab(document.querySelector('[data-tabs="right"]'), name);
   $('#panelInsp').hidden = name !== 'insp';
   $('#panelAI').hidden = name !== 'ai';
   $('#panelPipe').hidden = name !== 'pipe';
-  $('#panelLogs').hidden = name !== 'logs';
-  if (name === 'logs') logPanel?.refresh(true);
+  prefs.set('rightTab', name);
+}
+
+function switchLeftTab(name) {
+  if (!['media', 'layers'].includes(name)) name = 'media';
+  markTab(document.querySelector('[data-tabs="left"]'), name);
+  $('#panelMedia').hidden = name !== 'media';
+  $('#panelLayers').hidden = name !== 'layers';
+  prefs.set('leftTab', name);
+}
+
+// ---------------------------------------------------------------- shell: top bar, stage toolbar, transport
+function updateProjectMeta(p) {
+  const m = p.meta;
+  const meta = `${m.width}×${m.height} · ${m.fps}fps · ${m.duration.toFixed(1)}s · rev ${p.rev}`;
+  $('#projTitle').textContent = m.title;
+  const pb = $('#btnProject');
+  if (pb) pb.dataset.tip = `${m.title || '项目'}\n${meta}`;
+  if (statusBar) statusBar.setMeta(meta); else $('#projMeta').textContent = meta;
+  const sm = $('#stageMeta');
+  if (sm) sm.textContent = `${m.width}×${m.height} · ${m.fps}fps`;
+  const sa = $('#safeArea');
+  if (sa && m.width && m.height) {
+    const W = m.width, H = m.height;
+    sa.setAttribute('viewBox', `0 0 ${W} ${H}`);
+    const r = (k) => [W * (1 - k) / 2, H * (1 - k) / 2, W * k, H * k];
+    const [ax, ay, aw, ah] = r(0.93);
+    const [tx, ty, tw, th] = r(0.90);
+    const set = (el, x, y, w, hh) => { el?.setAttribute('x', x); el?.setAttribute('y', y); el?.setAttribute('width', w); el?.setAttribute('height', hh); };
+    set(sa.querySelector('.sa-action'), ax, ay, aw, ah);
+    set(sa.querySelector('.sa-title'), tx, ty, tw, th);
+    const c = Math.min(W, H) * 0.04;
+    sa.querySelector('.sa-cross')?.setAttribute('d', `M${W / 2 - c} ${H / 2}H${W / 2 + c}M${W / 2} ${H / 2 - c}V${H / 2 + c}`);
+  }
+  updateTimecode();
+  syncViewControls();
+}
+
+/** The one place that writes the transport time readout. */
+function updateTimecode(t = S.time) {
+  timecodeUI?.update(t);
+  const d = $('#tcDuration');
+  const dur = S.project?.meta.duration || 0;
+  const txt = `/ ${formatDuration(dur)}`;
+  if (d && d.textContent !== txt) d.textContent = txt;
+}
+const formatDuration = (sec) => {
+  const cs = Math.max(0, Math.round(sec * 100));
+  return `${String(Math.floor(cs / 6000)).padStart(2, '0')}:${((cs % 6000) / 100).toFixed(2).padStart(5, '0')}`;
+};
+
+function setPlayButton(playing) {
+  const b = $('#btnPlay');
+  if (!b) return;
+  b.classList.toggle('on', playing);
+  b.replaceChildren(icon(playing ? 'pause' : 'play'));
+  b.setAttribute('aria-label', playing ? '暂停' : '播放');
+}
+
+/** Top-bar view segment, stage-toolbar badge / [选择|移动], grid weakening. */
+function syncViewControls() {
+  const seg = $('#viewSeg');
+  if (seg) {
+    seg.hidden = !S.project?.camera;
+    $('#btnViewEdit')?.setAttribute('aria-pressed', S.editMode ? 'true' : 'false');
+    $('#btnViewCam')?.setAttribute('aria-pressed', S.editMode ? 'false' : 'true');
+  }
+  const badge = $('#viewBadge');
+  if (badge) badge.hidden = S.editMode;
+  const vm = $('#viewMode');
+  if (vm) {
+    vm.hidden = !S.editMode;
+    vm.querySelectorAll('[data-mode]').forEach((b) => b.setAttribute('aria-pressed', b.dataset.mode === S.viewMode ? 'true' : 'false'));
+  }
+  syncGridButton();
+}
+
+function setGrid(on) {
+  S.grid = !!on;
+  syncGridButton();
+  gizmo?.draw();
+}
+
+function syncGridButton() {
+  const b = $('#btnGrid');
+  if (!b) return;
+  b.setAttribute('aria-pressed', S.grid ? 'true' : 'false');
+  b.classList.toggle('inactive', !S.editMode);
+  b.dataset.tip = S.editMode ? '网格' : '网格\n只在编辑视口显示（Tab 进入）';
+}
+
+function setSafeArea(on) {
+  S.safeArea = !!on;
+  prefs.set('safeArea', S.safeArea);
+  const sa = $('#safeArea');
+  sa?.toggleAttribute('hidden', !S.safeArea); // SVG: no .hidden property
+  $('#btnSafe')?.setAttribute('aria-pressed', S.safeArea ? 'true' : 'false');
+}
+
+function setLoop(on) {
+  S.loop = !!on;
+  prefs.set('loop', S.loop);
+  const b = $('#btnLoop');
+  if (b) {
+    b.classList.toggle('on', S.loop);
+    b.setAttribute('aria-pressed', S.loop ? 'true' : 'false');
+  }
+}
+
+/** Render actions: one place for the top bar, its ▾ menu, the status bar and __vdm. */
+const renderActions = {
+  async still(t = S.time) {
+    toast(`Blender 渲染 ${t.toFixed(2)}s …`);
+    try { await post('/api/still', { time: t, scale: 1 }); toast('预览帧完成', 'success'); } catch (e) { toast(e.message, 'error'); }
+  },
+  async master() {
+    if (!S.project) return;
+    try { await post('/api/render', { from: 0, to: S.project.meta.duration, scale: S.renderScale }); toast('开始渲染成片'); } catch (e) { toast(e.message, 'error'); }
+  },
+  /** Selected segment, else the segment under the playhead. */
+  async segment() {
+    const p = S.project;
+    if (!p) return;
+    const segs = p.segments || [];
+    const s = segs.find((x) => x.id === S.selection.segmentId)
+      || segs.find((x) => S.time >= x.start && S.time < x.start + x.duration);
+    if (!s) { toast('播放头处没有分镜段', 'warn'); return; }
+    const from = s.start, to = s.start + s.duration;
+    try { await post('/api/render', { from, to, scale: S.renderScale }); toast(`开始渲染 ${from.toFixed(1)}–${to.toFixed(1)}s`); } catch (e) { toast(e.message || '渲染启动失败', 'error'); }
+  },
+  async cancel() {
+    try { await post('/api/render/cancel', {}); toast('已请求取消渲染'); } catch (e) { toast(e.message, 'error'); }
+  },
+  getScale: () => S.renderScale,
+  setScale(v) {
+    S.renderScale = Number(v) === 1 ? 1 : 0.5;
+    prefs.set('renderScale', S.renderScale);
+    pipelinePanel?.setScale?.(S.renderScale);
+    return S.renderScale;
+  },
+};
+
+function renderMenuItems() {
+  const running = !!S.render?.running;
+  return [
+    { group: '分辨率' },
+    { label: '50%', icon: S.renderScale === 0.5 ? 'check' : null, run: () => renderActions.setScale(0.5) },
+    { label: '100%', icon: S.renderScale === 1 ? 'check' : null, run: () => renderActions.setScale(1) },
+    { sep: true },
+    { label: '渲染当前段', icon: 'film', run: () => renderActions.segment() },
+    {
+      label: '取消渲染', icon: 'stop', danger: running, disabled: !running,
+      title: running ? '' : '没有进行中的渲染', run: () => renderActions.cancel(),
+    },
+  ];
 }
 
 // ---------------------------------------------------------------- boot
 async function boot() {
+  initTooltips();
+  // shell first so the grid has its persisted sizes before the first fit
+  layout = initLayout();
+  logDrawer = new LogDrawer({ onOpen: () => { statusBar?.resetLogCount(); logPanel?.refresh(true); } });
+  statusBar = new StatusBar({ onCancelRender: () => renderActions.cancel(), onToggleLogs: () => logDrawer.toggle() });
+  statusBar.setConnection('warn');
   const state = await fetch('/api/state').then((r) => r.json());
   S.project = state.project;
   S.pipeline = state.pipeline;
@@ -1309,31 +1529,40 @@ async function boot() {
       return;
     }
     const at = Math.round(S.time * 1000) / 1000;
+    const opener = document.activeElement;
     const modal = document.createElement('div');
     modal.className = 'modal';
     const card = document.createElement('div');
-    card.className = 'modal-card del-dialog';
+    card.className = 'modal-card dlg del-dialog';
+    card.setAttribute('role', 'dialog');
+    card.setAttribute('aria-modal', 'true');
+    card.setAttribute('aria-labelledby', 'objDelTitle');
     const head = document.createElement('div');
     head.className = 'modal-head';
     const title = document.createElement('div');
+    title.className = 'modal-title';
     const strong = document.createElement('strong');
+    strong.id = 'objDelTitle';
     strong.textContent = `删除父级「${name}」`;
     const hint = document.createElement('span');
     hint.className = 'hint';
     hint.textContent = `当前 ${at.toFixed(2)}s`;
     title.append(strong, hint);
     const close = document.createElement('button');
-    close.className = 'mini';
-    close.textContent = '×';
-    close.title = '关闭';
+    close.type = 'button';
+    close.className = 'icon-btn modal-x';
+    close.setAttribute('aria-label', '关闭');
+    close.dataset.tip = '关闭';
+    close.dataset.kbd = 'Esc';
+    close.innerHTML = '<svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-x"/></svg>';
     head.append(title, close);
 
     const body = document.createElement('div');
-    body.className = 'del-body';
+    body.className = 'dlg-body';
     const desc = document.createElement('div');
     desc.textContent = `它有 ${descendants.length} 个后代元素：`;
     const list = document.createElement('div');
-    list.className = 'del-list';
+    list.className = 'del-list mono';
     const objs = S.project.scene?.objects || [];
     for (const kid of descendants) {
       const row = document.createElement('div');
@@ -1341,24 +1570,28 @@ async function boot() {
       list.append(row);
     }
     const note = document.createElement('div');
-    note.className = 'hint';
+    note.className = 'dlg-note';
     note.textContent = '只删父级会先在当前播放头保住直接子元素的位置；父级有动画时，其它时刻会按子元素自己的动画走。';
     body.append(desc, list, note);
 
     const foot = document.createElement('div');
-    foot.className = 'modal-foot del-foot';
+    foot.className = 'modal-foot';
     const keep = document.createElement('button');
+    keep.type = 'button';
+    keep.className = 'btn lg';
     keep.textContent = `只删父级（${kids.length} 子级保位）`;
-    keep.title = '直接子元素在当前帧保持画面位置';
+    keep.dataset.tip = '直接子元素在当前帧保持画面位置';
     const all = document.createElement('button');
-    all.className = 'danger';
+    all.type = 'button';
+    all.className = 'btn lg danger';
     all.textContent = `父子一起删（${descendants.length + 1}）`;
     const cancel = document.createElement('button');
-    cancel.className = 'mini';
+    cancel.type = 'button';
+    cancel.className = 'btn lg';
     cancel.textContent = '取消';
     const spacer = document.createElement('span');
     spacer.className = 'spacer';
-    foot.append(keep, all, spacer, cancel);
+    foot.append(spacer, cancel, keep, all);
     card.append(head, body, foot);
     modal.append(card);
     document.body.append(modal);
@@ -1369,6 +1602,7 @@ async function boot() {
       settled = true;
       modal.remove();
       window.removeEventListener('keydown', onKey, true);
+      if (opener?.isConnected && typeof opener.focus === 'function') opener.focus();
       if (mode === 'keep') {
         const ops = kids.map((id) => ({ op: 'objectUnparent', id, t: at }));
         ops.push({ op: 'objectRemove', id: o.id });
@@ -1409,9 +1643,10 @@ async function boot() {
     const pose = worldPose(S.project, o, S.time);
     const cam = (S.editMode && S.editCam) ? S.editCam : evalCamera(S.project, S.time);
     showContextMenu(x, y, [
-      { label: '选中元素', run: () => select({ objectId: id }) },
+      { label: '选中元素', icon: 'pointer', run: () => select({ objectId: id }) },
       {
         label: '面向镜头（在播放头打方向键）',
+        icon: 'camera',
         run: () => {
           const d = [cam.pos[0] - pose.worldPos[0], cam.pos[1] - pose.worldPos[1], cam.pos[2] - pose.worldPos[2]];
           const l = Math.hypot(d[0], d[1], d[2]) || 1;
@@ -1421,6 +1656,7 @@ async function boot() {
       },
       {
         label: '落地（在播放头打位置键）',
+        icon: 'keyframe',
         run: () => {
           const h = Number(o.geom?.h) || 2;
           const worldPivot = [pose.pivot[0], h / 2, pose.pivot[2]];
@@ -1428,10 +1664,10 @@ async function boot() {
           op({ op: 'objectKey', id, path: 'pivot', t: at, v: local.map((v) => Math.round(v * 100) / 100) });
         },
       },
-      { label: '复制（含关键帧）', run: () => { duplicateObject(o); } },
+      { label: '复制（含关键帧）', icon: 'copy', run: () => { duplicateObject(o); } },
       { sep: true },
       {
-        label: kidsCount ? `删除父级…（${kidsCount} 子级）` : '删除元素', danger: true,
+        label: kidsCount ? `删除父级…（${kidsCount} 子级）` : '删除元素', danger: true, icon: 'trash', kbd: 'Delete',
         run: () => requestObjectDelete(o),
       },
     ]);
@@ -1547,19 +1783,21 @@ async function boot() {
     showContextMenu(x, y, [
       {
         label: can ? `在播放头切分（${at.toFixed(2)}s）` : '在播放头切分（播放头不在素材内）',
+        icon: 'scissors', kbd: 'S / Ctrl+D',
         disabled: !can,
         title: can ? '快捷键 Ctrl+D / S' : `素材范围 ${el.start.toFixed(2)}–${(el.start + el.duration).toFixed(2)}s`,
         run: () => { splitElementAt(id); },
       },
       { sep: true },
-      { label: '选中素材', run: () => select({ elementId: id }) },
+      { label: '选中素材', icon: 'pointer', run: () => select({ elementId: id }) },
       {
         label: '复制（Ctrl+C）',
+        icon: 'copy', kbd: 'Ctrl+C',
         run: () => { copySelection([id]); },
       },
       {
         label: '删除素材',
-        danger: true,
+        danger: true, icon: 'trash', kbd: 'Delete',
         run: () => {
           if (confirm(`删除 ${el.name || id}?`)) op({ op: 'removeElement', id });
         },
@@ -1574,6 +1812,7 @@ async function boot() {
     showContextMenu(x, y, [
       {
         label: checked ? '✓ 单独查看该相机（们）' : '单独查看该相机（们）',
+        icon: checked ? 'eye-off' : 'eye',
         run: () => {
           if (checked) solo.delete(id); else solo.add(id);
           timeline.setSoloCameras(solo);
@@ -1581,13 +1820,14 @@ async function boot() {
           preview.render(S.time);
         },
       },
-      { label: '激活相机', run: () => { op({ op: 'activateCamera', id }); select({ camera: true }); } },
+      { label: '激活相机', icon: 'camera', run: () => { op({ op: 'activateCamera', id }); select({ camera: true }); } },
       (() => {
         const at = Math.round(S.time * 1000) / 1000;
         const range = cameraRange(S.project, cam);
         const can = at > range.start + 0.02 && at < range.end - 0.02;
         return {
           label: can ? `在播放头切分镜头（${at.toFixed(2)}s）` : '在播放头切分镜头（播放头不在镜头内）',
+          icon: 'scissors', kbd: 'S / Ctrl+D',
           disabled: !can,
           title: can ? '快捷键 S / Ctrl+D' : `镜头范围 ${range.start.toFixed(2)}–${range.end.toFixed(2)}s`,
           run: () => splitCameraAtPlayhead(id),
@@ -1595,7 +1835,7 @@ async function boot() {
       })(),
       { sep: true },
       {
-        label: '删除相机', danger: true,
+        label: '删除相机', danger: true, icon: 'trash',
         run: () => { if (confirm(`删除 ${cam.name || id}?`)) op({ op: 'removeCamera', id }); },
       },
     ]);
@@ -1611,6 +1851,8 @@ async function boot() {
     onClipMenu: (id, x, y) => clipMenu(id, x, y),
     onSplit: () => splitAtPlayhead(),
     onTextEdit: (kind, id, ev) => openTextEditor(kind, id, ev),
+    onToggleCurves: () => toggleCurvePanel(),
+    isCurvesOpen: () => !!curvePanel?.isOpen(),
   });
   timeline.setProject(S.project);
 
@@ -1678,30 +1920,67 @@ async function boot() {
     getSelection: () => S.selection,
     getTime: () => S.time,
     getRenderScale: () => S.renderScale,
+    renderActions,
     toast,
   });
   pipelinePanel.set(state);
 
-  // tabs
+  // tabs (persisted); 图层 (#panelLayers) is filled by the outliner
   document.querySelectorAll('[data-tabs="right"] button').forEach((b) => b.onclick = () => switchRightTab(b.dataset.tab));
-  // the left panel is media-only now: paint it once at boot
-  renderMedia();
+  document.querySelectorAll('[data-tabs="left"] button').forEach((b) => b.onclick = () => switchLeftTab(b.dataset.tab));
+  switchRightTab(prefs.get('rightTab', 'insp'));
+  switchLeftTab(prefs.get('leftTab', 'media'));
+  assetsPanel = new AssetsPanel($('#panelMedia'), {
+    getProject: () => S.project,
+    mediaKind,
+    onAdd: (m, kind) => addMediaFile(m, kind),
+    onSoundtrack: (m) => setSoundtrack(m),
+    onList: (list) => { S.media = list; },
+    menu: (x, y, items) => showContextMenu(x, y, items),
+    toast,
+  });
+  assetsPanel.refresh();
+  outliner = new Outliner($('#panelLayers'), {
+    getProject: () => S.project,
+    getSelection: () => S.selection,
+    getTime: () => S.time,
+    select: (sel) => select(sel),
+    activateCamera: (id) => timeline._activateCamera(id), // same path as a camera row click on the timeline
+    reveal: (ref) => timeline.reveal?.(ref),
+    seek: (t) => { pause(); setTime(t); },
+  });
+  initMediaDrop();
+  statusBar.setCapabilities({ blender: S.blender, ffmpeg: state.ffmpeg, ai: S.agentAvailable });
+  if (S.render) statusBar.setRender(S.render, { initial: true });
 
   // transport
+  timecodeUI = new Timecode($('#timecode'), {
+    getFps: () => S.project?.meta.fps || 24,
+    onSeek: (t) => { pause(); setTime(t); },
+  });
   $('#btnPlay').onclick = togglePlay;
+  $('#btnFirst').onclick = () => { pause(); setTime(0); };
+  $('#btnLast').onclick = () => { pause(); setTime(S.project?.meta.duration || 0); };
+  $('#btnLoop').onclick = () => setLoop(!S.loop);
+  $('#btnHelp').onclick = () => document.dispatchEvent(new CustomEvent('vdm:shortcuts'));
+  setLoop(S.loop);
+  setPlayButton(false);
   $('#btnPrev').onclick = () => { setTime(S.time - 1 / (S.project.meta.fps || 24)); if (S.playing) { S.playFrom = S.time; S.playWall = performance.now(); } };
   $('#btnNext').onclick = () => { setTime(S.time + 1 / (S.project.meta.fps || 24)); if (S.playing) { S.playFrom = S.time; S.playWall = performance.now(); } };
   $('#btnUndo').onclick = async () => { try { const j = await post('/api/undo', {}); applyProject(j.project, 'undo'); } catch (e) { toast('没有可撤销的操作'); } };
   $('#btnRedo').onclick = async () => { try { const j = await post('/api/redo', {}); applyProject(j.project, 'redo'); } catch (e) { toast('没有可重做的操作'); } };
-  $('#btnStill').onclick = async () => {
-    toast(`Blender 渲染 ${S.time.toFixed(2)}s …`);
-    try { const j = await post('/api/still', { time: S.time, scale: 1 }); toast('预览帧完成', 'success'); } catch (e) { toast(e.message, 'error'); }
-  };
-  $('#btnRender').onclick = async () => {
-    try { await post('/api/render', { from: 0, to: S.project.meta.duration, scale: S.renderScale }); toast('开始渲染成片'); } catch (e) { toast(e.message, 'error'); }
-  };
-  $('#renderScale').onchange = (e) => { S.renderScale = Number(e.target.value); };
-  $('#btnEditMode').onclick = () => setEditMode(!S.editMode);
+  $('#btnStill').onclick = () => renderActions.still(S.time);
+  $('#btnRender').onclick = () => renderActions.master();
+  $('#btnRenderMenu').onclick = (e) => showMenu(0, 0, renderMenuItems(), { anchor: e.currentTarget.parentElement });
+  $('#btnViewEdit').onclick = () => { if (!S.editMode) setEditMode(true); };
+  $('#btnViewCam').onclick = () => { if (S.editMode) setEditMode(false); };
+  $('#btnCommand').onclick = () => document.dispatchEvent(new CustomEvent('vdm:command-palette'));
+  // stage toolbar
+  $('#viewMode').querySelectorAll('[data-mode]').forEach((b) => { b.onclick = () => setViewMode(b.dataset.mode); });
+  $('#btnGrid').onclick = () => setGrid(!S.grid);
+  $('#btnSafe').onclick = () => setSafeArea(!S.safeArea);
+  setSafeArea(S.safeArea);
+  syncViewControls();
 
   // Add a 3D element in front of the editing camera, then select it so it can
   // be dragged (which keys its pivot at the playhead). Besides primitives this
@@ -1827,8 +2106,13 @@ async function boot() {
   });
 
   projects = new ProjectsPanel({ toast });
-  $('#btnProject').onclick = () => projects.open();
-  $('#btnRestart').onclick = () => projects.restart();
+  $('#btnProject').onclick = (e) => showMenu(0, 0, [
+    { label: '打开项目…', icon: 'folder', kbd: 'Ctrl+O', run: () => projects.open() },
+    { label: '新建项目…', icon: 'plus', run: () => projects.newProject() },
+    window.vdmDesktop ? { label: '打开文件夹…', icon: 'folder', run: () => projects.browse() } : null,
+    { sep: true },
+    { label: '重启引擎', icon: 'refresh', kbd: 'Ctrl+Shift+R', run: () => projects.restart() },
+  ], { anchor: e.currentTarget });
 
   // ---------- 3D viewport: path nodes, handles, orbit, look ----------
   const stageXY = (e) => {
@@ -2485,84 +2769,344 @@ async function boot() {
     gizmo.draw();
   }, { passive: false });
 
-  // keyboard
-  window.addEventListener('keydown', (e) => {
-    if (document.querySelector('.modal:not([hidden])')) return;
-    // F2 works even while a value field is focused (it is not a text key).
-    if (e.key === 'F2') { e.preventDefault(); toggleCurvePanel(); return; }
-    if (e.key === 'Escape' && drag && cancelObjectDrag()) { e.preventDefault(); return; }
-    if (/INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
-    S.keys.add(e.code);
-    if (e.key === 'Tab') { e.preventDefault(); setEditMode(!S.editMode); return; }
-    if (e.key === 'Alt' && !e.repeat) {
+  // ---------- commands & keyboard (docs/DESIGN.md §7; registry in commands.js) ----------
+  // Registration order = shortcut-sheet order. Key sets are disjoint, so the
+  // order does not change which command a key reaches.
+  initCommands({ toast });
+  const anyCtrl = (e) => !!(e.ctrlKey || e.metaKey);
+  const curFps = () => S.project?.meta.fps || 24;
+  const stepTime = (dt) => { pause(); setTime(S.time + dt); };
+
+  // ↑/↓: the keyframe dots the timeline draws — 2D element `keyframes`, 3D
+  // object tracks, camera path + parameter tracks — of the selection's hosts
+  // (a selected property: only that property), or of everything.
+  const keyTimesForJump = () => {
+    const p = S.project;
+    if (!p) return [];
+    const cams = p.cameras?.length ? p.cameras : (p.camera ? [p.camera] : []);
+    const objs = p.scene?.objects || [];
+    const els = p.elements || [];
+    const times = new Set();
+    const addList = (list) => {
+      for (const k of list || []) if (Number.isFinite(Number(k?.t))) times.add(Math.round(Number(k.t) * 1000) / 1000);
+    };
+    const addTracks = (tracks, path) => {
+      for (const [name, list] of Object.entries(tracks || {})) {
+        if (path == null || name === path || name.startsWith(`${path}.`)) addList(list);
+      }
+    };
+    const addHost = (type, id, path = null) => {
+      if (type === 'el') {
+        addList((els.find((x) => x.id === id)?.keyframes || []).filter((k) => path == null || k.path === path));
+      } else if (type === 'ob') {
+        addTracks(objs.find((x) => x.id === id)?.tracks, path);
+      } else if (type === 'cam') {
+        const c = cams.find((x) => x.id === id) || (p.camera?.id === id ? p.camera : null);
+        if (!c) return;
+        if (path == null || path === 'path') addList(c.path);
+        if (path !== 'path') addTracks(c.tracks, path);
+      }
+    };
+    const pool = S.selection.pool;
+    const refs = (pool?.ids || []).map(splitRef).filter(Boolean);
+    if (refs.length) for (const r of refs) addHost(r.type, r.id, pool.kind === 'property' ? r.path : null);
+    else if (S.selection.elementId) addHost('el', S.selection.elementId);
+    else if (S.selection.objectId) addHost('ob', S.selection.objectId);
+    else if (S.selection.camera && p.camera) addHost('cam', p.camera.id);
+    else {
+      for (const e of els) addHost('el', e.id);
+      for (const o of objs) addHost('ob', o.id);
+      for (const c of cams) addHost('cam', c.id);
+    }
+    return [...times].sort((a, b) => a - b);
+  };
+  const jumpKey = (dir, e) => {
+    // keyboard focus inside the open 3D ▾ menu: arrows move between its items
+    if (e && tool3DMenu && !tool3DMenu.hidden && tool3DMenu.contains(document.activeElement)) {
       e.preventDefault();
-      if (!S.editMode) { toast('先按 Tab 进编辑视口'); return; }
-      setViewMode(S.viewMode === 'select' ? 'move' : 'select');
+      const bs = [...tool3DMenu.querySelectorAll('button')];
+      bs[(bs.indexOf(document.activeElement) + dir + bs.length) % bs.length]?.focus();
       return;
     }
-    if (e.key === 'Escape') {
-      if (curvePanel?.isOpen()) { curvePanel.close(); e.preventDefault(); return; }
-      const menu = $('#ctxMenu');
-      if (menu && !menu.hidden) { hideContextMenu(); return; }
-      if (gizmo?.objSel) { select({ elementId: null, segmentId: null }); return; }
-      if (S.editMode && S.viewMode === 'move') { setViewMode('select'); return; }
-      if (S.editMode) { setEditMode(false); return; }
-    }
-    if (e.key.toLowerCase() === 'g' && !e.ctrlKey && !e.metaKey) { S.grid = !S.grid; gizmo?.draw(); return; }
-    if (e.key.toLowerCase() === 'u' && !e.ctrlKey && !e.metaKey && !e.altKey) {
-      if (timeline?.applyKeyedFilter()) { e.preventDefault(); return; }
-    }
-    const dur = S.project?.meta.duration || 12;
-    const frame = 1 / (S.project?.meta.fps || 24);
-    if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
-    else if (e.key === 'ArrowLeft') { e.preventDefault(); pause(); setTime(S.time - (e.shiftKey ? 1 : frame)); }
-    else if (e.key === 'ArrowRight') { e.preventDefault(); pause(); setTime(S.time + (e.shiftKey ? 1 : frame)); }
-    else if (e.key === 'Home') { pause(); setTime(0); }
-    else if (e.key === 'End') { pause(); setTime(dur); }
-    else if (e.key === 'Delete' || e.key === 'Backspace') {
+    e?.preventDefault();
+    pause();
+    const ts = keyTimesForJump();
+    const t = S.time;
+    const hit = dir > 0 ? ts.find((x) => x > t + 1e-4) : ts.filter((x) => x < t - 1e-4).pop();
+    if (hit != null) setTime(hit);
+  };
+  const hasSelection = () => !!(S.selection.elementId || S.selection.objectId || S.selection.camera || S.selection.pool?.ids?.length);
+
+  // global: tried before the "typing in an input" check
+  registerCommand({
+    id: 'escape.drag', title: '取消拖动', group: '视口', keys: 'Escape', global: true, palette: false, sheet: false,
+    when: () => !!drag,
+    run: (e) => { if (drag && cancelObjectDrag()) { e?.preventDefault(); return; } return false; },
+  });
+
+  // 播放
+  registerCommand({
+    id: 'play.toggle', title: '播放 / 暂停', group: '播放', keys: 'Space', icon: 'play', keywords: 'play pause',
+    match: (e) => e.code === 'Space',
+    run: (e) => { e?.preventDefault(); togglePlay(); },
+  });
+  registerCommand({
+    id: 'play.prevFrame', title: '上一帧', sheetTitle: '上一帧（Shift：后退 1s）', group: '播放', keys: 'ArrowLeft',
+    icon: 'step-back', keywords: 'previous frame step back',
+    match: (e) => e.key === 'ArrowLeft',
+    run: (e) => { e?.preventDefault(); stepTime(-(e?.shiftKey ? 1 : 1 / curFps())); },
+  });
+  registerCommand({
+    id: 'play.nextFrame', title: '下一帧', sheetTitle: '下一帧（Shift：前进 1s）', group: '播放', keys: 'ArrowRight',
+    icon: 'step-fwd', keywords: 'next frame step forward',
+    match: (e) => e.key === 'ArrowRight',
+    run: (e) => { e?.preventDefault(); stepTime(e?.shiftKey ? 1 : 1 / curFps()); },
+  });
+  registerCommand({
+    id: 'play.back1s', title: '后退 1 秒', group: '播放', keys: 'Shift+ArrowLeft', sheet: false, match: false,
+    keywords: 'back second', run: () => stepTime(-1),
+  });
+  registerCommand({
+    id: 'play.fwd1s', title: '前进 1 秒', group: '播放', keys: 'Shift+ArrowRight', sheet: false, match: false,
+    keywords: 'forward second', run: () => stepTime(1),
+  });
+  registerCommand({
+    id: 'play.first', title: '首帧', group: '播放', keys: 'Home', icon: 'skip-start', keywords: 'first start home',
+    match: (e) => e.key === 'Home',
+    run: () => { pause(); setTime(0); },
+  });
+  registerCommand({
+    id: 'play.last', title: '末帧', group: '播放', keys: 'End', icon: 'skip-end', keywords: 'last end',
+    match: (e) => e.key === 'End',
+    run: () => { pause(); setTime(S.project?.meta.duration || 12); },
+  });
+  registerCommand({
+    id: 'play.prevKey', title: '上一个关键帧', sheetTitle: '上一个关键帧（有选中时只看选中对象）', group: '播放', keys: 'ArrowUp',
+    icon: 'keyframe', keywords: 'previous keyframe key',
+    run: (e) => jumpKey(-1, e),
+  });
+  registerCommand({
+    id: 'play.nextKey', title: '下一个关键帧', sheetTitle: '下一个关键帧（有选中时只看选中对象）', group: '播放', keys: 'ArrowDown',
+    icon: 'keyframe', keywords: 'next keyframe key',
+    run: (e) => jumpKey(1, e),
+  });
+  registerCommand({
+    id: 'play.loop', title: '循环播放', group: '播放', keys: 'L', icon: 'repeat', keywords: 'loop repeat',
+    match: (e) => e.key.toLowerCase() === 'l' && !e.ctrlKey && !e.metaKey && !e.altKey,
+    run: () => { setLoop(!S.loop); toast(S.loop ? '循环播放：开' : '循环播放：关'); },
+  });
+
+  // 编辑
+  registerCommand({
+    id: 'edit.undo', title: '撤销', group: '编辑', keys: 'Ctrl+Z', icon: 'undo', keywords: 'undo',
+    match: (e) => anyCtrl(e) && e.key.toLowerCase() === 'z' && !e.shiftKey,
+    run: (e) => { e?.preventDefault(); $('#btnUndo').click(); },
+  });
+  registerCommand({
+    id: 'edit.redo', title: '重做', group: '编辑', keys: 'Ctrl+Shift+Z', icon: 'redo', keywords: 'redo',
+    match: (e) => anyCtrl(e) && e.key.toLowerCase() === 'z' && e.shiftKey,
+    run: (e) => { e?.preventDefault(); $('#btnRedo').click(); },
+  });
+  registerCommand({
+    id: 'edit.copy', title: '复制选中元素', group: '编辑', keys: 'Ctrl+C', icon: 'copy', keywords: 'copy',
+    match: (e) => anyCtrl(e) && e.key.toLowerCase() === 'c' && !window.getSelection()?.toString(),
+    run: (e) => { e?.preventDefault(); copySelection(); },
+  });
+  registerCommand({
+    id: 'edit.paste', title: '粘贴元素', group: '编辑', keys: 'Ctrl+V', keywords: 'paste',
+    match: (e) => anyCtrl(e) && e.key.toLowerCase() === 'v',
+    when: () => (readClipboard() ? true : '剪贴板里没有复制的元素'),
+    run: (e) => { e?.preventDefault(); pasteClipboard(); },
+  });
+  registerCommand({
+    id: 'edit.delete', title: '删除选中', sheetTitle: '删除选中（关键帧选区优先）', group: '编辑', keys: 'Delete / Backspace',
+    icon: 'trash', keywords: 'delete remove',
+    match: (e) => e.key === 'Delete' || e.key === 'Backspace',
+    when: () => ((S.selection.pool?.kind === 'keyframe' && S.selection.pool.ids.length) || S.selection.elementId || S.selection.objectId
+      ? true : '先选中要删除的元素或关键帧'),
+    run: (e) => {
       const pool = S.selection.pool;
       // A keyframe pool wins over the host the key belongs to: Delete removes
       // the selected keyframes, not the whole camera/object.
       if (pool?.kind === 'keyframe' && pool.ids.length) {
         const ops = keyframeDeleteOps(pool.ids, S.project);
         if (ops.length) {
-          e.preventDefault();
+          e?.preventDefault();
           select({});
           op(ops.length === 1 ? ops[0] : { op: 'batch', ops });
         }
         return;
       }
-      if (S.selection.elementId) { e.preventDefault(); op({ op: 'removeElement', id: S.selection.elementId }); S.selection.elementId = null; }
+      if (S.selection.elementId) { e?.preventDefault(); op({ op: 'removeElement', id: S.selection.elementId }); S.selection.elementId = null; }
       else if (S.selection.objectId) {
-        e.preventDefault();
+        e?.preventDefault();
         const obj = (S.project?.scene?.objects || []).find((o) => o.id === S.selection.objectId);
         if (obj) requestObjectDelete(obj);
       }
-    } else if (e.key === 's' && !e.ctrlKey) {
-      if (S.selection.elementId) {
-        e.preventDefault();
-        splitElementAt(S.selection.elementId);
-      } else if (selectedCameraId()) {
-        e.preventDefault();
-        splitCameraAtPlayhead(selectedCameraId());
-      }
-    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
-      e.preventDefault();
-      if (e.shiftKey) $('#btnRedo').click(); else $('#btnUndo').click();
-    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'd') {
-      e.preventDefault();
-      splitAtPlayhead();
-    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') {
-      if (!window.getSelection()?.toString()) {
-        e.preventDefault();
-        copySelection();
-      }
-    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
-      if (readClipboard()) {
-        e.preventDefault();
-        pasteClipboard();
-      }
-    }
+    },
+  });
+  registerCommand({
+    id: 'edit.split', title: '切开选中', sheetTitle: '在播放头切开选中元素 / 相机', group: '编辑', keys: 'S',
+    icon: 'scissors', keywords: 'split cut',
+    match: (e) => e.key === 's' && !e.ctrlKey,
+    when: () => (S.selection.elementId || selectedCameraId() ? true : '先选中元素或相机'),
+    run: (e) => {
+      e?.preventDefault();
+      if (S.selection.elementId) splitElementAt(S.selection.elementId);
+      else splitCameraAtPlayhead(selectedCameraId());
+    },
+  });
+  registerCommand({
+    id: 'edit.splitAll', title: '在播放头切开', sheetTitle: '在播放头切开（无选中时切开所有跨线元素）', group: '编辑', keys: 'Ctrl+D',
+    icon: 'scissors', keywords: 'split cut all playhead',
+    match: (e) => anyCtrl(e) && e.key.toLowerCase() === 'd',
+    run: (e) => { e?.preventDefault(); splitAtPlayhead(); },
+  });
+  registerCommand({ id: 'add.text', title: '新建文字', group: '编辑', icon: 'text', keywords: 'new text add', run: () => $('#toolText').click() });
+  registerCommand({ id: 'add.shape', title: '新建色块', group: '编辑', icon: 'square', keywords: 'new shape solid add', run: () => $('#toolShape').click() });
+  registerCommand({ id: 'add.camera', title: '新建相机', group: '编辑', icon: 'camera', keywords: 'new camera add', run: () => $('#toolCamera').click() });
+  for (const [kind, title, ic, kw] of [
+    ['box', '新建立方体', 'box', 'cube box 3d'], ['cylinder', '新建圆柱', 'cylinder', 'cylinder 3d'],
+    ['empty', '新建空元素', 'empty', 'empty null 3d'], ['image', '新建图片…', 'image', 'image picture 3d'],
+    ['video', '新建视频…', 'video', 'video 3d'], ['text', '新建 3D 文字', 'text', 'text 3d'],
+  ]) {
+    registerCommand({ id: `add.3d.${kind}`, title, group: '编辑', icon: ic, keywords: `new add ${kw}`, run: () => addSceneElement(kind) });
+  }
+  registerCommand({ id: 'edit.deselect', title: '清除选中', group: '编辑', keywords: 'deselect clear selection', when: () => hasSelection() || '没有选中的对象', run: () => select({ elementId: null, segmentId: null }) });
+
+  // 视口
+  registerCommand({
+    id: 'view.toggleEdit', title: '编辑视口 / 镜头视角', group: '视口', keys: 'Tab', icon: 'camera', keywords: 'edit viewport camera view',
+    match: (e) => e.key === 'Tab',
+    run: (e) => { e?.preventDefault(); setEditMode(!S.editMode); },
+  });
+  registerCommand({
+    id: 'view.selectMove', title: '选择 / 移动', sheetTitle: '编辑视口内 选择 / 移动', group: '视口', keys: 'Alt', icon: 'move',
+    keywords: 'select move orbit fly',
+    match: (e) => e.key === 'Alt' && !e.repeat,
+    when: () => S.editMode || '先按 Tab 进编辑视口',
+    keyBlocked: 'toast',
+    run: (e) => { e?.preventDefault(); setViewMode(S.viewMode === 'select' ? 'move' : 'select'); },
+  });
+  registerCommand({
+    id: 'view.fly', title: '移动态飞行', sheetTitle: '移动态飞行（+Shift 加速）', group: '视口', keys: 'W / A / S / D / Q / E',
+    match: false, palette: false,
+  });
+  registerCommand({
+    id: 'view.grid', title: '网格', group: '视口', keys: 'G', icon: 'grid', keywords: 'grid',
+    match: (e) => e.key.toLowerCase() === 'g' && !e.ctrlKey && !e.metaKey,
+    run: () => setGrid(!S.grid),
+  });
+  registerCommand({
+    id: 'view.selectTool', title: '选择工具', group: '视口', keys: 'V', icon: 'pointer', keywords: 'select tool pointer',
+    run: (e) => { e?.preventDefault(); $('#toolSelect').click(); },
+  });
+  registerCommand({
+    id: 'view.addMenu', title: '添加菜单（3D）', sheetTitle: '添加菜单（3D ▾；移动态下不响应）', group: '视口', keys: 'Shift+A', icon: 'cube',
+    keywords: 'add 3d menu new',
+    when: () => !(S.editMode && S.viewMode === 'move') || '移动态下 Shift+A 让给飞行，先按 Alt 回选择',
+    run: (e) => {
+      e?.preventDefault();
+      if (!tool3DMenu) return;
+      tool3DMenu.hidden = false;
+      tool3DMenu.querySelector('button')?.focus();
+    },
+  });
+  registerCommand({ id: 'view.safeArea', title: '安全框', group: '视口', icon: 'safe-frame', keywords: 'safe area frame', run: () => setSafeArea(!S.safeArea) });
+
+  // 时间轴
+  registerCommand({
+    id: 'tl.keyedOnly', title: '只看带键属性', group: '时间轴', keys: 'U', icon: 'filter', keywords: 'keyed filter properties',
+    match: (e) => e.key.toLowerCase() === 'u' && !e.ctrlKey && !e.metaKey && !e.altKey,
+    run: (e) => { if (timeline?.applyKeyedFilter()) { e?.preventDefault(); return; } return false; },
+  });
+  registerCommand({
+    id: 'tl.curves', title: '曲线面板', group: '时间轴', keys: 'F2', icon: 'curve', keywords: 'curve graph editor', global: true,
+    match: (e) => e.key === 'F2',
+    // F2 works even while a value field is focused (it is not a text key).
+    run: (e) => { e?.preventDefault(); toggleCurvePanel(); },
+  });
+  registerCommand({
+    id: 'tl.filter', title: '聚焦时间轴筛选框', group: '时间轴', keys: 'Ctrl+F', icon: 'search', keywords: 'filter find search timeline',
+    run: (e) => { e?.preventDefault(); timeline?.focusFilter?.(); },
+  });
+  registerCommand({
+    id: 'tl.zoom', title: '缩放 / 适应', group: '时间轴', keys: 'Ctrl+滚轮 / Ctrl+拖标尺 / 双击标尺', match: false, palette: false,
+  });
+
+  // 面板
+  registerCommand({
+    id: 'ui.palette', title: '命令面板', group: '面板', keys: 'Ctrl+K', icon: 'command', keywords: 'command palette', global: true, palette: false,
+    run: (e) => { e?.preventDefault(); openPalette(); },
+  });
+  registerCommand({
+    id: 'ui.shortcuts', title: '快捷键速查', group: '面板', keys: '?', icon: 'help', keywords: 'shortcuts keys help',
+    run: (e) => { e?.preventDefault(); openShortcuts(); },
+  });
+  registerCommand({
+    id: 'proj.open', title: '打开项目', group: '面板', keys: 'Ctrl+O', icon: 'folder', keywords: 'open project',
+    match: (e) => anyCtrl(e) && !e.shiftKey && e.key.toLowerCase() === 'o',
+    run: (e) => { e?.preventDefault(); projects.open(); },
+  });
+  registerCommand({ id: 'proj.new', title: '新建项目', group: '面板', icon: 'plus', keywords: 'new project', run: () => projects.newProject() });
+  registerCommand({
+    id: 'proj.browse', title: '打开文件夹', group: '面板', icon: 'folder', keywords: 'open folder browse',
+    when: () => !!window.vdmDesktop || '只有桌面版能打开文件夹', run: () => projects.browse(),
+  });
+  registerCommand({
+    id: 'proj.restart', title: '重启引擎', group: '面板', keys: 'Ctrl+Shift+R', icon: 'refresh', keywords: 'restart engine reload',
+    match: (e) => anyCtrl(e) && e.shiftKey && e.key.toLowerCase() === 'r',
+    run: (e) => { e?.preventDefault(); projects.restart(); },
+  });
+  registerCommand({
+    id: 'ui.escape', title: '逐层退出', sheetTitle: '逐层退出（菜单 → 曲线面板 → 选中 → 移动态 → 编辑视口）', group: '面板', keys: 'Escape',
+    palette: false,
+    match: (e) => e.key === 'Escape',
+    run: (e) => {
+      if (tool3DMenu && !tool3DMenu.hidden) { hideToolMenu(); $('#tool3D')?.focus(); e?.preventDefault(); return; }
+      if (logDrawer?.close()) { e?.preventDefault(); return; }
+      if (curvePanel?.isOpen()) { curvePanel.close(); e?.preventDefault(); return; }
+      const menu = $('#ctxMenu');
+      if (menu && !menu.hidden) { hideContextMenu(); return; }
+      if (gizmo?.objSel) { select({ elementId: null, segmentId: null }); return; }
+      if (S.editMode && S.viewMode === 'move') { setViewMode('select'); return; }
+      if (S.editMode) { setEditMode(false); return; }
+      return false;
+    },
+  });
+  registerCommand({ id: 'render.master', title: '渲染成片', group: '面板', icon: 'film', keywords: 'render export master', run: () => renderActions.master() });
+  registerCommand({ id: 'render.still', title: '预览帧', group: '面板', icon: 'photo', keywords: 'still frame render preview blender', run: () => renderActions.still(S.time) });
+  registerCommand({ id: 'render.segment', title: '渲染当前段', group: '面板', icon: 'film', keywords: 'render segment', run: () => renderActions.segment() });
+  registerCommand({
+    id: 'render.cancel', title: '取消渲染', group: '面板', icon: 'stop', keywords: 'cancel render stop',
+    when: () => !!S.render?.running || '没有进行中的渲染', run: () => renderActions.cancel(),
+  });
+  registerCommand({ id: 'render.scale50', title: '渲染分辨率 50%', group: '面板', keywords: 'render scale resolution half', run: () => renderActions.setScale(0.5) });
+  registerCommand({ id: 'render.scale100', title: '渲染分辨率 100%', group: '面板', keywords: 'render scale resolution full', run: () => renderActions.setScale(1) });
+  registerCommand({ id: 'ui.toggleLeft', title: '切换左栏', group: '面板', icon: 'chevron-left', keywords: 'left sidebar panel collapse', run: () => layout?.setCollapsed('left') });
+  registerCommand({ id: 'ui.toggleRight', title: '切换右栏', group: '面板', icon: 'chevron-right', keywords: 'right sidebar panel collapse', run: () => layout?.setCollapsed('right') });
+  for (const [side, tab, title, ic, kw] of [
+    ['right', 'insp', '属性', 'sliders', 'inspector properties'], ['right', 'ai', 'AI', 'sparkles', 'ai agent chat'],
+    ['right', 'pipe', '渲染', 'film', 'render pipeline'], ['left', 'media', '资源', 'assets', 'media assets'],
+    ['left', 'layers', '图层', 'layers', 'layers outliner'],
+  ]) {
+    registerCommand({
+      id: `tab.${tab}`, title: `切到${title}`, group: '面板', icon: ic, keywords: `tab ${kw}`,
+      run: () => {
+        if (layout?.state?.[`${side}Collapsed`]) layout.setCollapsed(side, false);
+        if (side === 'right') switchRightTab(tab); else switchLeftTab(tab);
+      },
+    });
+  }
+  registerCommand({ id: 'ui.logs', title: '日志', group: '面板', icon: 'terminal', keywords: 'logs log drawer', run: () => logDrawer.toggle() });
+
+  // keyboard
+  window.addEventListener('keydown', (e) => {
+    if (document.querySelector('.modal:not([hidden])')) return;
+    if (dispatchCommand(e, { phase: 'global' })) return;
+    if (/INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
+    S.keys.add(e.code);
+    dispatchCommand(e);
   });
 
   window.addEventListener('keyup', (e) => S.keys.delete(e.code));
@@ -2570,6 +3114,8 @@ async function boot() {
 
   // events
   const es = new EventSource('/api/events');
+  es.addEventListener('open', () => statusBar.setConnection('ok'));
+  es.addEventListener('error', () => statusBar.setConnection(es.readyState === EventSource.CLOSED ? 'danger' : 'warn'));
   es.addEventListener('hello', async () => {
     const latest = await fetch('/api/project').then((response) => response.json()).catch(() => null);
     if (latest?.project) applyProject(latest.project, 'resync');
@@ -2582,20 +3128,31 @@ async function boot() {
     const d = JSON.parse(e.data);
     S.render = d;
     pipelinePanel.setRender(d);
-    $('#renderBadge').hidden = !d.running;
-    if (d.running) $('#renderBadge').textContent = `渲染 ${d.progress}/${d.total}`;
-    if (d.done) { toast('渲染完成', 'success'); $('#renderBadge').hidden = true; }
-    if (d.error) { toast(`渲染失败: ${d.error}`, 'error'); $('#renderBadge').hidden = true; }
+    statusBar.setRender(d);
+    if (d.done) toast('渲染完成', 'success');
+    if (d.error) toast(`渲染失败: ${d.error}`, 'error');
   });
   es.addEventListener('agent', (e) => agentPanel.handleEvent(JSON.parse(e.data)));
   es.addEventListener('pipeline', (e) => { S.pipeline = JSON.parse(e.data); pipelinePanel.set({ pipeline: S.pipeline, render: S.render }); });
   es.addEventListener('toast', (e) => { const d = JSON.parse(e.data); toast(d.message, d.level); });
   es.addEventListener('beats', () => toast('节拍已更新', 'success'));
-  es.addEventListener('log', (e) => { try { logPanel.append(JSON.parse(e.data)); } catch { /* ignore */ } });
+  es.addEventListener('log', (e) => {
+    try {
+      const rec = JSON.parse(e.data);
+      logPanel.append(rec);
+      if (!logDrawer.isOpen()) statusBar.noteLog(rec);
+    } catch { /* ignore */ }
+  });
 
   // resize
   const ro = new ResizeObserver(() => fitStage());
   ro.observe($('#stageWrap'));
+  // splitters resize the timeline without a window resize: re-layout it (and the F2 drawer)
+  const tro = new ResizeObserver(() => {
+    timeline.render(true);
+    if (curvePanel?.isOpen()) curvePanel.draw();
+  });
+  tro.observe($('#timeline'));
   applyProject(S.project, 'boot');
   fitStage();
   setTime(0);
@@ -2611,12 +3168,20 @@ async function boot() {
     last = now;
     if (S.playing) {
       const t = S.playFrom + (now - S.playWall) / 1000;
-      if (t >= (S.project?.meta.duration || 12)) { setTime(S.project.meta.duration); pause(); }
-      else {
+      if (t >= (S.project?.meta.duration || 12)) {
+        if (S.loop) {
+          // wrap to 0 and keep playing
+          S.playFrom = 0;
+          S.playWall = now;
+          S.time = 0;
+          timeline.setTime(0);
+          updateTimecode(0);
+          preview.playAudio(0);
+        } else { setTime(S.project.meta.duration); pause(); }
+      } else {
         S.time = t;
         timeline.setTime(t);
-        $('#timecode').textContent = `${t.toFixed(2)}s`;
-        $('#stageTime').textContent = `${t.toFixed(2)} / ${S.project.meta.duration.toFixed(2)}s`;
+        updateTimecode(t);
       }
     }
     if (S.project && (S.playing || S.editMode || now - lastDraw > 100)) {
@@ -2640,6 +3205,16 @@ async function boot() {
     addElement: addSceneElement,
     pause: () => pause(),
     play: () => play(),
+    renderActions,
+    agentPanel, pipelinePanel, logPanel,
+    layout,
+    statusBar,
+    logDrawer,
+    setLoop: (on) => setLoop(on),
+    setSafeArea: (on) => setSafeArea(on),
+    setGrid: (on) => setGrid(on),
+    switchRightTab: (n) => switchRightTab(n),
+    switchLeftTab: (n) => switchLeftTab(n),
   };
 }
 

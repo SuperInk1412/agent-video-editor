@@ -1,0 +1,128 @@
+/* Left column: media library, media picker grid. */
+.media-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.media-card {
+  border: 1px solid var(--border); border-radius: var(--r-md); overflow: hidden;
+  background: var(--surface-0); cursor: pointer; position: relative;
+}
+.media-card:hover { border-color: var(--accent-border); }
+.media-card.on { border-color: var(--accent); }
+.media-card.on .fileicon { color: var(--accent); }
+.media-card img { width: 100%; height: 74px; object-fit: cover; display: block; }
+.media-card .fileicon { height: 74px; display: grid; place-items: center; font-size: 22px; color: var(--text-3); }
+.media-cap {
+  font-size: var(--fs-xs); color: var(--text-2); padding: 3px 5px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* media picker: reuse the library cards inside the shared modal */
+.media-picker { width: min(680px, calc(100vw - 48px)); }
+.media-pick-body { overflow: auto; padding: 12px; flex: 1; min-height: 0; }
+.media-pick { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.media-pick .media-card img, .media-pick .media-card .fileicon { height: 96px; }
+.media-pick .media-cap { font-size: var(--fs-xs); }
+
+/* ---------------- 资源 panel (#panelMedia.assets, js/assets.js) ---------------- */
+.panel.assets, .panel.outliner {
+  padding: 0; display: flex; flex-direction: column; overflow: hidden; position: relative;
+}
+.asset-head, .ol-head {
+  display: flex; align-items: center; gap: var(--sp-1);
+  padding: var(--sp-2) var(--sp-2) var(--sp-1); flex: 0 0 auto;
+}
+.asset-search { position: relative; flex: 1; min-width: 0; display: block; }
+.asset-search .ic-sm {
+  position: absolute; left: 7px; top: 50%; transform: translateY(-50%);
+  color: var(--text-3); pointer-events: none;
+}
+.asset-search input { padding-left: 26px; font-size: var(--fs-sm); }
+
+.asset-filter { display: flex; margin: var(--sp-1) var(--sp-2) var(--sp-2); flex: 0 0 auto; }
+.asset-filter > button {
+  flex: 1 1 0; min-width: 0; padding: 0 4px; gap: 4px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: var(--fs-sm); white-space: nowrap; overflow: hidden;
+}
+.asset-filter .asset-fc { color: var(--text-3); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
+.asset-filter > button.on .asset-fc { color: var(--text-2); }
+
+.asset-body { flex: 1; min-height: 0; overflow: auto; padding: 0 var(--sp-2) var(--sp-2); }
+.asset-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: var(--sp-2); }
+.asset-none, .ol-none { padding: var(--sp-3) var(--sp-1); color: var(--text-3); font-size: var(--fs-sm); }
+
+.asset-card {
+  position: relative; min-width: 0; cursor: pointer; outline: none;
+  background: var(--surface-0); border: 1px solid var(--border); border-radius: var(--r-md); overflow: hidden;
+  transition: border-color var(--dur-fast) var(--ease);
+}
+.asset-card:hover { border-color: var(--border-strong); }
+.asset-card:focus-visible { box-shadow: var(--focus-ring); }
+.asset-card.sel { border-color: var(--accent-border); background: var(--accent-bg); }
+.asset-card.track { border-color: var(--accent); }
+.asset-card.dragging { opacity: .5; }
+.asset-thumb {
+  position: relative; aspect-ratio: 16 / 9; background: var(--surface-2);
+  display: grid; place-items: center; overflow: hidden;
+}
+.asset-thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+.asset-ic { color: var(--text-3); display: grid; place-items: center; }
+.asset-ic .ic { width: 24px; height: 24px; }
+.asset-badges { position: absolute; left: 4px; top: 4px; display: flex; gap: 2px; pointer-events: none; }
+.asset-add {
+  position: absolute; right: 4px; bottom: 4px; opacity: 0;
+  background: var(--surface-4); color: var(--text-1); border: 1px solid var(--border-strong);
+  transition: opacity var(--dur-fast) var(--ease);
+}
+.asset-add:hover { background: var(--accent-bg); color: var(--accent); border-color: var(--accent-border); }
+.asset-card:hover .asset-add, .asset-card:focus-visible .asset-add, .asset-add:focus-visible { opacity: 1; }
+.asset-name {
+  padding: var(--sp-1) 6px; font-size: var(--fs-xs); color: var(--text-2);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.asset-card.sel .asset-name, .asset-card.track .asset-name { color: var(--text-1); }
+.asset-empty { padding-top: var(--sp-5); }
+
+/* OS file drop layer */
+.asset-drop {
+  position: absolute; inset: var(--sp-2); z-index: var(--z-dropdown);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--sp-2);
+  border: 2px dashed var(--accent); border-radius: var(--r-md);
+  background: var(--accent-bg); color: var(--accent); font-size: var(--fs-md);
+  pointer-events: none;
+}
+.asset-drop .ic { width: 28px; height: 28px; }
+
+/* media dragged over the timeline: outline + a line at the drop time (--drop-x, set by main.js) */
+#timeline.media-drop { box-shadow: inset 0 0 0 1px var(--accent-border); }
+#timeline.media-drop::after {
+  content: ''; position: absolute; top: 0; bottom: 0; left: var(--drop-x, -10px); width: 2px;
+  background: var(--accent); pointer-events: none; z-index: var(--z-dropdown);
+}
+
+/* ---------------- 图层 panel (#panelLayers.outliner, js/outliner.js) ---------------- */
+.ol-body { flex: 1; min-height: 0; overflow: auto; padding: 0 0 var(--sp-2); }
+.ol-group { margin-bottom: 2px; }
+.ol-ghead {
+  display: flex; align-items: center; gap: 6px; width: 100%; height: 24px; padding: 0 var(--sp-2);
+  background: transparent; border: 0; border-radius: 0; color: var(--text-2);
+  font-size: var(--fs-sm); font-weight: 500; text-align: left;
+}
+.ol-ghead:hover { background: var(--surface-2); color: var(--text-1); }
+.ol-ghead .ic-sm { color: var(--text-3); }
+.ol-gcount { margin-left: auto; color: var(--text-3); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
+.ol-row { padding: 0 var(--sp-2) 0 22px; cursor: pointer; }
+.ol-row.sel { border-radius: 0; }
+.ol-ic { display: grid; place-items: center; flex: 0 0 auto; }
+.ol-ic.clip-text { color: var(--clip-text); }
+.ol-ic.clip-image { color: var(--clip-image); }
+.ol-ic.clip-video { color: var(--clip-video); }
+.ol-ic.clip-shape { color: var(--clip-shape); }
+.ol-ic.clip-audio { color: var(--clip-audio); }
+.ol-ic.clip-camera { color: var(--clip-camera); }
+.ol-ic.clip-object { color: var(--clip-object); }
+.ol-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ol-row.off .ol-name { color: var(--text-3); }
+.ol-time {
+  flex: 0 0 auto; margin-left: auto; color: var(--text-3);
+  font: var(--fs-xs) var(--font-mono); font-variant-numeric: tabular-nums;
+}
+.ol-empty { padding-top: var(--sp-5); }

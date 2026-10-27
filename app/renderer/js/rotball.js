@@ -1,6 +1,8 @@
 // Rotation ball: drag a point on a sphere to set an element/object direction.
 // Directions are unit vectors (`dir` tracks); key dots show existing direction
 // keys. The widget is display-only — the inspector owns the op scheduling.
+// Colours come from the design tokens (docs/DESIGN.md §3) via ui.js token().
+import { token } from './ui.js';
 
 const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
@@ -12,7 +14,7 @@ const RIGHT = norm(cross([0, 1, 0], VIEW));
 const UP = cross(VIEW, RIGHT);
 
 const SIZE = 168;
-const R = SIZE * 0.44;
+const R = SIZE * 0.42;
 
 function projectDir(d) {
   return { x: dot(d, RIGHT), y: dot(d, UP), z: dot(d, VIEW) };
@@ -62,8 +64,10 @@ export class RotBall {
 
   _dirAt(e) {
     const r = this.canvas.getBoundingClientRect();
-    let x = ((e.clientX - r.left) / Math.max(1, r.width)) * 2 - 1;
-    let y = 1 - ((e.clientY - r.top) / Math.max(1, r.height)) * 2;
+    // CSS px -> ball units, so the dot stays under the pointer (ball radius R).
+    const k = SIZE / Math.max(1, r.width);
+    let x = ((e.clientX - r.left) * k - SIZE / 2) / R;
+    let y = (SIZE / 2 - (e.clientY - r.top) * k) / R;
     const l = Math.hypot(x, y);
     const max = 0.97;
     if (l > max) { x = (x / l) * max; y = (y / l) * max; }
@@ -79,11 +83,13 @@ export class RotBall {
 
   _pt(d) {
     const p = projectDir(d);
-    return { x: SIZE + p.x * R, y: SIZE - p.y * R, z: p.z };
+    return { x: SIZE / 2 + p.x * R, y: SIZE / 2 - p.y * R, z: p.z };
   }
 
-  _ring(axisA, axisB, color, width = 1) {
+  _ring(axisA, axisB, color, alpha = 1, width = 1) {
     const ctx = this.ctx;
+    ctx.save();
+    ctx.globalAlpha = alpha;
     ctx.strokeStyle = color;
     ctx.lineWidth = width;
     ctx.beginPath();
@@ -93,37 +99,47 @@ export class RotBall {
       const d = [0, 1, 2].map((k) => axisA[k] * Math.cos(a) + axisB[k] * Math.sin(a));
       const p = projectDir(d);
       if (p.z < -0.02) { pen = false; continue; }
-      const x = SIZE + p.x * R;
-      const y = SIZE - p.y * R;
+      const x = SIZE / 2 + p.x * R;
+      const y = SIZE / 2 - p.y * R;
       if (pen) ctx.lineTo(x, y); else { ctx.moveTo(x, y); pen = true; }
     }
     ctx.stroke();
+    ctx.restore();
   }
 
   draw() {
     const ctx = this.ctx;
     const k = 2; // canvas is 2x for sharpness
+    const accent = token('--accent');
+    const accentHi = token('--accent-hover');
+    const edit = token('--edit');
+    const keyframe = token('--keyframe');
+    const outline = token('--bg');
     ctx.setTransform(k, 0, 0, k, 0, 0);
     ctx.clearRect(0, 0, SIZE, SIZE);
+    ctx.globalAlpha = 1;
 
     // ball body
     const bg = ctx.createRadialGradient(SIZE * 0.38, SIZE * 0.3, 8, SIZE * 0.5, SIZE * 0.5, R * 1.2);
-    bg.addColorStop(0, '#132330');
-    bg.addColorStop(1, '#080d13');
+    bg.addColorStop(0, token('--surface-3'));
+    bg.addColorStop(1, token('--field'));
     ctx.fillStyle = bg;
     ctx.beginPath();
     ctx.arc(SIZE / 2, SIZE / 2, R, 0, Math.PI * 2);
     ctx.fill();
-    ctx.strokeStyle = 'rgba(23,217,255,.45)';
+    ctx.save();
+    ctx.globalAlpha = 0.45;
+    ctx.strokeStyle = accent;
     ctx.lineWidth = 1.2;
     ctx.stroke();
+    ctx.restore();
 
     // wireframe great circles
-    this._ring(RIGHT, UP, 'rgba(23,217,255,.16)');
-    this._ring(RIGHT, VIEW, 'rgba(23,217,255,.22)');
-    this._ring(UP, VIEW, 'rgba(23,217,255,.22)');
-    this._ring(norm([0.7, 0, 0.7]), UP, 'rgba(23,217,255,.10)');
-    this._ring(norm([-0.7, 0, 0.7]), UP, 'rgba(23,217,255,.10)');
+    this._ring(RIGHT, UP, accent, 0.16);
+    this._ring(RIGHT, VIEW, accent, 0.22);
+    this._ring(UP, VIEW, accent, 0.22);
+    this._ring(norm([0.7, 0, 0.7]), UP, accent, 0.10);
+    this._ring(norm([-0.7, 0, 0.7]), UP, accent, 0.10);
 
     // existing direction keys
     for (const key of this.keys) {
@@ -136,7 +152,8 @@ export class RotBall {
       ctx.save();
       ctx.translate(px, py);
       ctx.rotate(Math.PI / 4);
-      ctx.fillStyle = at ? '#ffd166' : front ? 'rgba(94,231,255,.9)' : 'rgba(94,231,255,.35)';
+      ctx.globalAlpha = at ? 1 : front ? 0.9 : 0.35;
+      ctx.fillStyle = at ? keyframe : accentHi;
       ctx.fillRect(-2.6, -2.6, 5.2, 5.2);
       ctx.restore();
     }
@@ -146,30 +163,42 @@ export class RotBall {
     const visible = p.z >= 0;
     const px = SIZE / 2 + (p.x - SIZE / 2) * (visible ? 1 : 0.98);
     const py = SIZE / 2 + (p.y - SIZE / 2) * (visible ? 1 : 0.98);
-    ctx.strokeStyle = visible ? 'rgba(255,209,102,.7)' : 'rgba(255,209,102,.25)';
+    ctx.save();
+    ctx.globalAlpha = visible ? 0.7 : 0.25;
+    ctx.strokeStyle = edit;
     ctx.lineWidth = 1.2;
     ctx.beginPath();
     ctx.moveTo(SIZE / 2, SIZE / 2);
     ctx.lineTo(px, py);
     ctx.stroke();
-    ctx.fillStyle = visible ? '#ffd166' : 'rgba(255,209,102,.45)';
+    ctx.restore();
+    ctx.save();
+    ctx.globalAlpha = visible ? 1 : 0.45;
+    ctx.fillStyle = edit;
     ctx.beginPath();
     ctx.arc(px, py, 5, 0, Math.PI * 2);
     ctx.fill();
-    ctx.strokeStyle = '#071018';
+    ctx.restore();
+    ctx.strokeStyle = outline;
     ctx.lineWidth = 1;
     ctx.stroke();
     if (visible) {
-      ctx.strokeStyle = 'rgba(255,209,102,.35)';
+      ctx.save();
+      ctx.globalAlpha = 0.35;
+      ctx.strokeStyle = edit;
       ctx.beginPath();
       ctx.arc(px, py, 9, 0, Math.PI * 2);
       ctx.stroke();
+      ctx.restore();
     }
 
     // caption
-    ctx.fillStyle = 'rgba(160,180,196,.8)';
-    ctx.font = '9px ui-monospace, monospace';
+    ctx.save();
+    ctx.globalAlpha = 0.8;
+    ctx.fillStyle = token('--text-2');
+    ctx.font = `11px ${token('--font-mono') || 'monospace'}`;
     ctx.textAlign = 'center';
     ctx.fillText('拖动 = 朝向', SIZE / 2, SIZE - 4);
+    ctx.restore();
   }
 }
