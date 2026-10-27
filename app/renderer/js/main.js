@@ -1910,11 +1910,24 @@ async function boot() {
     } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
       if (S.clipboard) { e.preventDefault(); pasteElement(S.clipboard); }
     } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'd') {
-      const el = S.project.elements.find((x) => x.id === S.selection.elementId);
-      if (el) {
+      const pool = S.selection.pool;
+      const picked = pool?.kind === 'element'
+        ? pool.ids.map(splitRef).filter((r) => r?.type === 'el').map((r) => r.id)
+        : (S.selection.elementId ? [S.selection.elementId] : []);
+      const ids = [...new Set(picked)];
+      if (ids.length) {
         e.preventDefault();
-        op({ op: 'duplicateElement', id: el.id, start: fitStart(el.start + el.duration, el.duration) })
-          .then((j) => { const id = j?.changed?.[0]; if (id) select({ elementId: id }); });
+        op({ op: 'duplicateElements', ids }).then((j) => {
+          const copies = (j?.changed || []).filter(Boolean);
+          if (!copies.length) return;
+          const copyPool = {
+            kind: 'element',
+            ids: copies.map(elementRef),
+            primary: elementRef(copies[0]),
+          };
+          select({ elementId: copies[0], pool: copyPool });
+          toast(`已复制 ${copies.length} 个元素（放在各自上方）`);
+        });
         return;
       }
       const o = (S.project.scene?.objects || []).find((x) => x.id === S.selection.objectId);

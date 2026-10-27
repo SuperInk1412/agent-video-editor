@@ -8,7 +8,7 @@ import { EXT_OP_KINDS, applyExtOp } from './ops-ext.js';
 
 export const OP_KINDS = [
   'addElement', 'updateElement', 'set', 'removeElement', 'moveElement',
-  'splitElement', 'duplicateElement', 'reorder', 'addSegment', 'updateSegment',
+  'splitElement', 'duplicateElement', 'duplicateElements', 'reorder', 'addSegment', 'updateSegment',
   'removeSegment', 'setMeta', 'setFx', 'keySet', 'keyRemove', 'keyCurve', 'batch',
   'cameraKey', 'cameraRemove', 'cameraSet', 'cameraPath', 'cameraPatch',
   'cameraParamKey', 'cameraParamUnkey', 'worldSet',
@@ -356,6 +356,32 @@ export function applyOp(p, op) {
       shiftTiming(copy, copy.start - src.start);
       p.elements.push(copy);
       return { changed: [copy.id], element: copy };
+    }
+
+    case 'duplicateElements': {
+      // Copy several 2D elements in place, each immediately above its source in
+      // layer order. The whole stack is renumbered so the copies can sit in the
+      // gaps without colliding with existing fractional z values.
+      const wanted = new Set((Array.isArray(op.ids) ? op.ids : [op.id]).filter(Boolean).map(String));
+      if (!wanted.size) fail('duplicateElements needs ids');
+      const ordered = p.elements.slice().sort((a, b) => a.z - b.z || a.start - b.start);
+      const ids = allIds(p);
+      const copies = [];
+      const out = [];
+      for (const el of ordered) {
+        out.push(el);
+        if (!wanted.has(el.id)) continue;
+        const copy = JSON.parse(JSON.stringify(el));
+        copy.id = newId('el', ids);
+        ids.add(copy.id);
+        copy.name = `${el.name || el.id} 副本`;
+        out.push(copy);
+        copies.push(copy);
+      }
+      if (!copies.length) fail('duplicateElements: none of those elements exist');
+      out.forEach((el, i) => { el.z = i; });
+      p.elements = out;
+      return { changed: copies.map((c) => c.id), elements: copies };
     }
 
     case 'moveElement': {

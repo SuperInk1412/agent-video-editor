@@ -112,6 +112,7 @@ export class Timeline {
       + '<span>U 只看带键属性</span><span class="tl-hint-sep">|</span>'
       + '<span>组标题三态 ▾ 全部 / ▾• 带键 / ▸ 收起</span><span class="tl-hint-sep">|</span>'
       + '<span><b>◆</b> 打帧 / 删帧</span><span class="tl-hint-sep">|</span>'
+      + '<span>Ctrl+D 复制到上层</span><span class="tl-hint-sep">|</span>'
       + '<span>Ctrl + 拖标尺缩放</span>';
 
     // timeline zoom: buttons + Ctrl+wheel + double-click the ruler to fit
@@ -1020,13 +1021,20 @@ export class Timeline {
     inp.step = String(step);
     if (Number.isFinite(min)) inp.min = String(min);
     if (Number.isFinite(max)) inp.max = String(max);
-    inp.title = lab.title;
-    inp.addEventListener('focus', () => this.onPause?.());
+    inp.title = `${lab.title} · 无关键帧时改基础值（所有时间），已有键时改当前帧`;
+    // Decide once, when editing starts: an unkeyed property keeps editing its
+    // base value for the whole gesture. Otherwise a stray key created while a
+    // field is focused would silently turn the next keystroke into a keyframe.
+    const pr = { elId: e.id, path, input: inp, kf: null, lane: null, row, sig: '', keyedAtFocus: null };
+    inp.addEventListener('focus', () => {
+      this.onPause?.();
+      pr.keyedAtFocus = this._elTrack(e, path).length > 0;
+    });
     inp.addEventListener('input', () => {
       this._editTimes.set(`${e.id}:${path}`, round3(this.time));
       this._schedule(`${e.id}:${path}`, () => this._commitElementNum(e.id, path));
     });
-    inp.addEventListener('blur', () => { this._flush(`${e.id}:${path}`); this._syncProps(); });
+    inp.addEventListener('blur', () => { this._flush(`${e.id}:${path}`); pr.keyedAtFocus = null; this._syncProps(); });
     g.appendChild(box);
     const kf = el('button', 'tl-kf', '◆');
     kf.title = '在当前时间打帧 / 删帧';
@@ -1034,7 +1042,9 @@ export class Timeline {
     g.appendChild(kf);
     const lane = el('div', 'tl-track');
     row.append(g, lane);
-    this._elPropRows.push({ elId: e.id, path, input: inp, kf, lane, row, sig: '' });
+    pr.kf = kf;
+    pr.lane = lane;
+    this._elPropRows.push(pr);
     return row;
   }
 
@@ -1605,7 +1615,8 @@ export class Timeline {
     if (path === 'transform.opacity') v = Math.max(0, Math.min(1, v));
     if (path === 'transform.scale') v = Math.max(0, v);
     const t = this._editTimes.get(`${elId}:${path}`) ?? round3(this.time);
-    if (this._elTrack(e, path).length) {
+    const keyed = pr.keyedAtFocus ?? this._elTrack(e, path).length > 0;
+    if (keyed) {
       this.onOp?.({ op: 'keySet', id: elId, path, t, value: v });
       return;
     }
