@@ -405,6 +405,44 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
         return json(res, 200, { root: projectRoot, projects: list });
       }
 
+      if (pathname === '/api/projects/delete' && req.method === 'POST') {
+        const body = await readBody(req);
+        const raw = String(body.dir || '').trim();
+        if (!raw) return json(res, 400, { error: '缺少项目目录' });
+        const dir = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(APP_DIR, raw);
+        const projectsDir = path.resolve(APP_DIR, 'projects');
+        let realDir = '';
+        let realBase = '';
+        try {
+          realDir = await fsp.realpath(dir);
+          realBase = await fsp.realpath(projectsDir);
+        } catch {
+          return json(res, 404, { error: '项目目录不存在' });
+        }
+        const rel = path.relative(realBase, realDir);
+        if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) {
+          return json(res, 403, { error: '只能删除 projects/ 下的项目' });
+        }
+        let currentReal = path.resolve(projectRoot);
+        try { currentReal = await fsp.realpath(projectRoot); } catch { /* keep resolved */ }
+        const same = process.platform === 'win32'
+          ? realDir.toLowerCase() === currentReal.toLowerCase()
+          : realDir === currentReal;
+        const currentInside = path.relative(realDir, currentReal);
+        const containsCurrent = currentInside === '' || (!currentInside.startsWith('..') && !path.isAbsolute(currentInside));
+        if (same || containsCurrent) {
+          return json(res, 409, { error: '不能删除当前打开的项目，请先切换到其他项目' });
+        }
+        if (!(await projectExists(realDir))) return json(res, 404, { error: '这个目录不是项目' });
+        try {
+          await fsp.rm(realDir, { recursive: true, force: false });
+        } catch (e) {
+          return json(res, 500, { error: `删除失败：${e.message}` });
+        }
+        log.info('project deleted', { dir: realDir, by: body.by || 'ui' });
+        return json(res, 200, { ok: true, dir: realDir });
+      }
+
       // ---------------- project mutations ----------------
       if (pathname === '/api/ops' && req.method === 'POST') {
         const body = await readBody(req);

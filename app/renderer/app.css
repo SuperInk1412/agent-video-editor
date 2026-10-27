@@ -549,6 +549,12 @@ body.look-mode #stageBox { box-shadow: 0 0 0 2px rgba(255,209,102,.65), 0 0 30px
 .proj-row .pr-dir { font-size: 10.5px; color: var(--dim2); font-family: var(--mono); grid-column: 1; }
 .proj-row .pr-meta { grid-row: 1 / span 2; grid-column: 2; align-self: center; font-size: 10.5px; color: var(--dim); white-space: nowrap; }
 .proj-row .badge-cam { font-size: 9.5px; padding: 1px 5px; border-radius: 3px; background: #1a2b3a; color: #8fd6ef; border: 1px solid #2b4a5e; }
+.proj-row .proj-del {
+  margin-left: auto; padding: 1px 7px; font-size: 10px;
+  color: #ff9aa5; border-color: #5a2d34; background: #1b1013;
+}
+.proj-row .proj-del:hover:not(:disabled) { background: #2a1216; border-color: #7a3b45; }
+.proj-row .proj-del:disabled { opacity: .38; color: var(--dim2); border-color: var(--line); background: transparent; }
 .newproj-card { width: min(620px, calc(100vw - 48px)); }
 .newproj-body { padding: 14px 16px; }
 .newproj-grid {

@@ -208,9 +208,94 @@ export class ProjectsPanel {
         <div class="pr-title">${escapeHtml(p.title)}${p.current ? '<span class="badge-cam">当前</span>' : ''}${p.camera ? '<span class="badge-cam">3D 相机</span>' : ''}</div>
         <div class="pr-dir">${escapeHtml(p.dir)}</div>
         <div class="pr-meta">rev ${p.rev} · ${p.width}×${p.height} · ${Number(p.duration || 0).toFixed(1)}s</div>`;
+      const del = document.createElement('button');
+      del.className = 'mini danger proj-del';
+      del.textContent = '删除';
+      del.title = p.current ? '当前打开的项目不能删除，请先切换到其他项目' : '删除这个项目目录';
+      del.disabled = !!p.current;
+      del.onclick = (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        this.deleteProject(p);
+      };
+      row.querySelector('.pr-title').append(del);
       row.onclick = () => this.choose(p);
       this.list.appendChild(row);
     }
+  }
+
+  /** Delete a non-current project folder after an explicit confirmation. */
+  deleteProject(p) {
+    if (p.current) {
+      this.toast?.('当前项目不能删除，请先切换到其他项目', 'warn');
+      return;
+    }
+    const modal = document.createElement('div');
+    modal.className = 'modal';
+    const card = document.createElement('div');
+    card.className = 'modal-card del-dialog';
+    const head = document.createElement('div');
+    head.className = 'modal-head';
+    const title = document.createElement('div');
+    title.innerHTML = `<strong>删除项目</strong><span class="hint">不可撤销</span>`;
+    head.appendChild(title);
+    const body = document.createElement('div');
+    body.className = 'del-body';
+    body.innerHTML = `<div>确定删除「<b>${escapeHtml(p.title)}</b>」？</div>
+      <div class="del-list">${escapeHtml(p.dir)}</div>
+      <div>整个目录都会从磁盘删除，包括素材、渲染结果和项目文件。这个操作不能撤销。</div>`;
+    const foot = document.createElement('div');
+    foot.className = 'modal-foot del-foot';
+    const spacer = document.createElement('span');
+    spacer.className = 'spacer';
+    const cancel = document.createElement('button');
+    cancel.className = 'mini';
+    cancel.textContent = '取消';
+    const ok = document.createElement('button');
+    ok.className = 'mini danger';
+    ok.textContent = '删除项目';
+    foot.append(spacer, cancel, ok);
+    card.append(head, body, foot);
+    modal.appendChild(card);
+    document.body.appendChild(modal);
+
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      modal.remove();
+      window.removeEventListener('keydown', onKey, true);
+    };
+    const onKey = (e) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      finish();
+    };
+    window.addEventListener('keydown', onKey, true);
+    cancel.onclick = finish;
+    cancel.focus();
+    modal.addEventListener('pointerdown', (e) => { if (e.target === modal) finish(); });
+    ok.onclick = async () => {
+      ok.disabled = true;
+      ok.textContent = '删除中…';
+      try {
+        const res = await fetch('/api/projects/delete', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ dir: p.dir }),
+        });
+        const j = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(j.error || `删除失败 (${res.status})`);
+        finish();
+        this.toast?.(`已删除项目：${p.title}`, 'success');
+        await this.open();
+      } catch (e) {
+        ok.disabled = false;
+        ok.textContent = '删除项目';
+        this.toast?.(String(e?.message || e), 'error');
+      }
+    };
   }
 
   async choose(p) {
