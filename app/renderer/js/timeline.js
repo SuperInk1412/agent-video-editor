@@ -307,16 +307,6 @@ export class Timeline {
       tick.appendChild(lab);
       this.rulerTrack.appendChild(tick);
     }
-    if (p.camera) {
-      for (const k of p.camera.path) {
-        const tag = el('div', 'tl-camkey');
-        tag.style.left = `${k.t * this.pps}px`;
-        tag.title = `相机关键点 ${k.t.toFixed(2)}s`;
-        tag.dataset.t = String(k.t);
-        tag.addEventListener('dblclick', (ev) => { ev.stopPropagation(); this.onSeek?.(k.t); });
-        this.rulerTrack.appendChild(tag);
-      }
-    }
     for (const b of (p.meta.beats || [])) {
       const bt = el('div', 'tl-beat');
       bt.style.left = `${b * this.pps}px`;
@@ -1515,12 +1505,125 @@ export class Timeline {
     return true;
   }
 
+  /** Ruler-only scrub: the time axis is the only place that seeks. */
+  _startScrub(ev) {
+    const seek = (e) => {
+      this._noSnap = e.altKey;
+      this.onSeek?.(this._snap(this._timeAt(e.clientX)));
+    };
+    seek(ev);
+    const move = (e) => seek(e);
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  }
+
+  /**
+   * Drag a box over the lower lanes to select keyframe diamonds. This replaces
+   * the old "empty lane click scrubs" behaviour; the ruler is now the only
+   * seek surface. A click without movement clears the keyframe pool.
+   */
+  _startMarquee(ev) {
+    const startClient = { x: ev.clientX, y: ev.clientY };
+    let lastClient = { ...startClient };
+    const box = el('div', 'tl-marquee');
+    box.hidden = true;
+    this.inner.appendChild(box);
+    let moved = false;
+
+    // A mostly-horizontal drag still needs a visible band around its row.
+    const padded = (a, b) => {
+      const left = Math.min(a.x, b.x);
+      const right = Math.max(a.x, b.x);
+      let top = Math.min(a.y, b.y);
+      let bottom = Math.max(a.y, b.y);
+      if (bottom - top < 18) {
+        const mid = (top + bottom) / 2;
+        top = mid - 9;
+        bottom = mid + 9;
+      }
+      if (right - left < 8) {
+        const mid = (left + right) / 2;
+        left = mid - 4;
+        right = mid + 4;
+      }
+      return { left, right, top, bottom };
+    };
+
+    const update = (e) => {
+      lastClient = { x: e.clientX, y: e.clientY };
+      const rect = this.inner.getBoundingClientRect();
+      const band = padded(startClient, lastClient);
+      box.style.left = `${band.left - rect.left}px`;
+      box.style.top = `${band.top - rect.top}px`;
+      box.style.width = `${band.right - band.left}px`;
+      box.style.height = `${band.bottom - band.top}px`;
+      if (!moved && Math.hypot(e.clientX - startClient.x, e.clientY - startClient.y) > 3) {
+        moved = true;
+        box.hidden = false;
+      }
+    };
+
+    const up = () => {
+      window.removeEventListener('pointermove', update);
+      window.removeEventListener('pointerup', up);
+      box.remove();
+      if (!moved) {
+        this.pool = emptySelection();
+        this.cameraSel = false;
+        this.objectId = null;
+        this.elementId = null;
+        this.segmentId = null;
+        this.propSel = null;
+        this.onSelect?.({ elementId: null, segmentId: null, objectId: null, camera: false, pool: this.pool });
+        this._paintSelection();
+        return;
+      }
+      const band = padded(startClient, lastClient);
+      const ids = [];
+      this.inner.querySelectorAll('.tl-key[data-t]').forEach((node) => {
+        const r = node.getBoundingClientRect();
+        const cx = (r.left + r.right) / 2;
+        const cy = (r.top + r.bottom) / 2;
+        if (cx < band.left || cx > band.right || cy < band.top || cy > band.bottom) return;
+        let ref = null;
+        if (node.dataset.cam) ref = keyframeRef(cameraRef(node.dataset.cam), node.dataset.path || 'path', Number(node.dataset.t));
+        else if (node.dataset.obj) ref = keyframeRef(objectRef(node.dataset.obj), node.dataset.path, Number(node.dataset.t));
+        else if (node.dataset.id && node.dataset.path) ref = keyframeRef(elementRef(node.dataset.id), node.dataset.path, Number(node.dataset.t));
+        if (ref && !ids.includes(ref)) ids.push(ref);
+      });
+      this.pool = ids.length
+        ? normalizeSelection({ kind: 'keyframe', ids, primary: ids[0] })
+        : emptySelection();
+      this.cameraSel = false;
+      this.objectId = null;
+      this.elementId = null;
+      this.segmentId = null;
+      this.propSel = null;
+      this.onSelect?.({ elementId: null, segmentId: null, objectId: null, camera: false, pool: this.pool });
+      this._paintSelection();
+    };
+
+    window.addEventListener('pointermove', update);
+    window.addEventListener('pointerup', up);
+  }
+
   _down(ev) {
     if (ev.button !== 0) return;
     const target = ev.target;
     // controls / fields handle themselves (focus, clicks)
     if (/INPUT|TEXTAREA|SELECT/.test(target.tagName || '') || target.closest('button')) return;
     if (target.closest('.tl-sect')) return;
+    // Only the time ruler seeks; the rows below are selection surfaces.
+    if (target.closest('.tl-ruler')) {
+      if (target.closest('.tl-gutter')) return;
+      ev.preventDefault();
+      this._startScrub(ev);
+      return;
+    }
     ev.preventDefault();
     this._noSnap = ev.altKey;
     const blk = target.closest?.('.blk');
@@ -1535,7 +1638,6 @@ export class Timeline {
       this.cameraSel = true;
       this.elementId = null; this.segmentId = null; this.objectId = null;
       this.onSelect?.({ camera: true, pool: this.pool });
-      this.onSeek?.(t);
       this._paintSelection();
       return;
     }
@@ -1548,7 +1650,6 @@ export class Timeline {
       this.elementId = null; this.segmentId = null; this.cameraSel = false;
       this.propSel = { objId: key.dataset.obj, path: key.dataset.path };
       this.onSelect?.({ objectId: this.objectId, pool: this.pool });
-      this.onSeek?.(t);
       this._paintSelection();
       return;
     }
@@ -1632,7 +1733,7 @@ export class Timeline {
       this._activateCamera(blk.dataset.cam);
       return;
     }
-    // camera property labels (the lane itself still scrubs)
+    // camera property labels (the lane below is for marquee selection, not scrubbing)
     if (target.closest?.('.tl-camprop .tl-gutter')) {
       const row = target.closest('.tl-camprop');
       const camId = row.dataset.cam || this._activeCameraId();
@@ -1708,31 +1809,9 @@ export class Timeline {
       return;
     }
 
-    // Clicking empty track space clears the pool, then scrubs. This is the
-    // required reset before a keyframe-only marquee (B) can start.
-    if (this.pool.kind) {
-      this.pool = emptySelection();
-      this.cameraSel = false;
-      this.objectId = null;
-      this.elementId = null;
-      this.propSel = null;
-      this.onSelect?.({ elementId: null, segmentId: null, pool: this.pool });
-      this._paintSelection();
-    }
-
-    // scrub anywhere on the tracks
-    const t = this._snap(this._timeAt(ev.clientX));
-    this.onSeek?.(t);
-    const move = (e) => {
-      this._noSnap = e.altKey;
-      this.onSeek?.(this._snap(this._timeAt(e.clientX)));
-    };
-    const up = () => {
-      window.removeEventListener('pointermove', move);
-      window.removeEventListener('pointerup', up);
-    };
-    window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', up);
+    // Clicking empty space below the ruler never seeks; drag to box-select
+    // keyframe diamonds, or click to clear the current pool.
+    if (target.closest('.tl-track')) this._startMarquee(ev);
   }
 }
 
