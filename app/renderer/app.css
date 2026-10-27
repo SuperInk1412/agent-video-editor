@@ -186,6 +186,17 @@ body.look-mode #stageBox { box-shadow: 0 0 0 2px rgba(255,209,102,.65), 0 0 30px
 #timeline { border-top: 1px solid var(--line); background: #0a0d12; overflow: hidden; }
 .tl { height: 100%; display: flex; flex-direction: column; }
 .tl-scroll { flex: 1; min-height: 0; overflow: auto; }
+.tl-scroll::-webkit-scrollbar:horizontal { height: 0; }
+.tl-hscroll {
+  position: absolute; left: 360px; right: 9px; bottom: 20px; height: 9px;
+  z-index: 20; background: #0a0d12; border-top: 1px solid #10161f;
+}
+.tl-hscroll.off { display: none; }
+.tl-hthumb {
+  position: absolute; top: 2px; bottom: 2px; left: 0; min-width: 24px;
+  border-radius: 5px; background: #222a37; cursor: grab;
+}
+.tl-hthumb:hover, .tl-hthumb.drag { background: #344154; }
 .tl-hint {
   flex: 0 0 20px; display: flex; align-items: center; gap: 14px; padding: 0 10px;
   background: #0b0f15; border-top: 1px solid #232a38; color: #5a6474; font-size: 10px;
@@ -205,6 +216,8 @@ body.look-mode #stageBox { box-shadow: 0 0 0 2px rgba(255,209,102,.65), 0 0 30px
 .tl-sub { margin-left: auto; font-size: 10px; color: var(--dim2); flex: 0 0 auto; }
 .tl-track { position: relative; flex: 1; min-width: 0; }
 .tl-tick { position: absolute; top: 0; bottom: 0; width: 1px; background: #1a2230; }
+.tl-tick.major { background: #223044; }
+.tl-tick.minor { top: 14px; background: #141c28; }
 .tl-ticklabel { position: absolute; left: 4px; top: 5px; font-size: 10px; color: var(--dim2); font-family: var(--mono); white-space: nowrap; }
 .tl-beat { position: absolute; bottom: 0; height: 6px; width: 1px; background: #2a3d4a; }
 .tl-camrow { height: 30px; }
@@ -355,6 +368,10 @@ body.look-mode #stageBox { box-shadow: 0 0 0 2px rgba(255,209,102,.65), 0 0 30px
 .handle:hover::after { background: #fff; }
 .handle-l { left: 0; }
 .handle-r { right: 0; }
+.tl-playhead-layer {
+  position: absolute; left: 360px; right: 0; top: 0; bottom: 20px;
+  overflow: hidden; pointer-events: none; z-index: 8;
+}
 .tl-playhead { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--accent2); pointer-events: none; z-index: 8; box-shadow: 0 0 10px rgba(255,59,107,.5); }
 .tl-playhead::before { content: ''; position: absolute; top: 0; left: -5px; border: 6px solid transparent; border-top-color: var(--accent2); }
 .tl-split {
