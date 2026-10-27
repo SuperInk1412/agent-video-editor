@@ -715,7 +715,10 @@ const fitStart = (t, dur) => Math.round(Math.max(0, Math.min(t, S.project.meta.d
 async function add2DElement(kind) {
   if (!S.project) return null;
   const len = Math.min(3, S.project.meta.duration);
-  const start = fitStart(S.time, len);
+  // Use the playhead time exactly. Rounding to milliseconds could move the
+  // start just past the playhead (e.g. 2.0167 -> 2.017), so the new element
+  // would not appear until the user scrubbed forward.
+  const start = Math.max(0, Math.min(S.time, S.project.meta.duration - len));
   const base = {
     start, duration: len, segment: segmentAt(start)?.id || null,
     transform: { x: 0, y: 0, scale: 1, rotation: 0, opacity: 1 }, fadeIn: 0.2, fadeOut: 0.2,
