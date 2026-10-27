@@ -8,6 +8,32 @@
   <link rel="stylesheet" href="/app/renderer/app.css">
 </head>
 <body>
+  <svg class="icon-sprite" aria-hidden="true">
+    <symbol id="i-box" viewBox="0 0 16 16">
+      <path d="M8 2.2 13 5v6l-5 2.8L3 11V5z"/><path d="M3 5l5 2.8L13 5M8 7.8v6"/>
+    </symbol>
+    <symbol id="i-cylinder" viewBox="0 0 16 16">
+      <ellipse cx="8" cy="4" rx="4.5" ry="1.8"/><path d="M3.5 4v7.8c0 1 2 1.9 4.5 1.9s4.5-.9 4.5-1.9V4"/>
+    </symbol>
+    <symbol id="i-pen" viewBox="0 0 16 16">
+      <path d="m3 13 2.4-.5 7.1-7.1-2-2-7.1 7.1z"/><path d="m9.4 4.5 2 2"/>
+    </symbol>
+    <symbol id="i-empty" viewBox="0 0 16 16">
+      <rect x="3.2" y="3.2" width="9.6" height="9.6" rx="1" stroke-dasharray="2 2"/>
+      <path d="M8 1.4v3.2M8 11.4v3.2M1.4 8h3.2M11.4 8h3.2"/><circle cx="8" cy="8" r="0.8"/>
+    </symbol>
+    <symbol id="i-image" viewBox="0 0 16 16">
+      <rect x="2.2" y="3.2" width="11.6" height="9.6" rx="1"/>
+      <circle cx="5.8" cy="6.4" r="1"/><path d="m3 11 3.1-3 2.3 2 1.8-1.8L13 11"/>
+    </symbol>
+    <symbol id="i-video" viewBox="0 0 16 16">
+      <rect x="2.2" y="3.2" width="11.6" height="9.6" rx="1"/>
+      <path d="m6.8 6 3.1 2-3.1 2z" fill="currentColor" stroke="none"/>
+    </symbol>
+    <symbol id="i-text" viewBox="0 0 16 16">
+      <path d="M3 4h10M8 4v9M5.8 13h4.4"/>
+    </symbol>
+  </svg>
   <div id="app">
     <header id="top">
       <div class="brand"><span class="logo">◆</span> <b>VedioMaker</b> <span class="ver">0.1</span></div>
@@ -15,11 +41,18 @@
         <button id="toolSelect" class="tool on" title="选择工具 (V)">↖</button>
         <button id="toolCamera" class="tool" title="新建相机（当前视口机位）">▣</button>
         <div class="tool-wrap">
-          <button id="tool3D" class="tool" title="新建 3D 物体（长按选择）">▦</button>
+          <button id="tool3D" class="tool" title="新建 3D 物体 / 图片 / 视频 / 文字">▦</button>
           <div id="tool3DMenu" class="tool-menu" hidden>
-            <button data-primitive="box">立方体</button>
-            <button data-primitive="cylinder">圆柱</button>
-            <button data-primitive="pen">钢笔</button>
+            <div class="tool-menu-label">3D 物体</div>
+            <button data-primitive="box"><svg class="mi" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-box"/></svg><span>立方体</span></button>
+            <button data-primitive="cylinder"><svg class="mi" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-cylinder"/></svg><span>圆柱</span></button>
+            <button data-primitive="pen"><svg class="mi" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-pen"/></svg><span>钢笔</span></button>
+            <div class="tool-menu-sep"></div>
+            <div class="tool-menu-label">场景元素</div>
+            <button data-add="empty" title="只做变换和父级，不进成片"><svg class="mi" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-empty"/></svg><span>空元素</span></button>
+            <button data-add="image" title="从 media/ 里选择图片"><svg class="mi" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-image"/></svg><span>图片…</span></button>
+            <button data-add="video" title="从 media/ 里选择视频"><svg class="mi" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-video"/></svg><span>视频…</span></button>
+            <button data-add="text" title="带厚度的 3D 文字"><svg class="mi" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-text"/></svg><span>3D 文字</span></button>
           </div>
         </div>
         <span class="tool-sep"></span>

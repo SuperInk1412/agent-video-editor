@@ -483,7 +483,9 @@ def _make_camera_scene(base, layer, shot, opts, engine):
     s.frame_end = base.frame_end
     s.render.film_transparent = False
     for ob in list(base.objects):
-        if ob.type in {'MESH', 'LIGHT'}:
+        # FONT objects are the 3D text planes; without them the per-camera
+        # scene renders the city but drops every text object.
+        if ob.type in {'MESH', 'LIGHT', 'FONT'}:
             try:
                 # Copy the object (sharing mesh/light data) rather than linking
                 # one datablock into several scenes: each scene strip gets a

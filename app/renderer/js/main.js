@@ -520,6 +520,112 @@ function commitCameraPath() {
 }
 
 // ---------------------------------------------------------------- panels
+const MEDIA_KIND_RE = [
+  ['image', /\.(png|jpe?g|webp|gif|avif)$/i],
+  ['video', /\.(mp4|webm|mov|m4v)$/i],
+  ['audio', /\.(m4a|mp3|wav|flac|ogg|aac|opus)$/i],
+];
+
+/** 'image' | 'video' | 'audio' | null from a media/ path. */
+function mediaKind(path) {
+  const p = String(path || '');
+  return MEDIA_KIND_RE.find(([, re]) => re.test(p))?.[0] || null;
+}
+
+/** Pick an image or video from media/ in a small modal (null when cancelled). */
+function pickMedia(kind) {
+  const label = kind === 'video' ? '视频' : '图片';
+  return new Promise((resolve) => {
+    let settled = false;
+    const modal = document.createElement('div');
+    modal.className = 'modal';
+    const card = document.createElement('div');
+    card.className = 'modal-card media-picker';
+    const head = document.createElement('div');
+    head.className = 'modal-head';
+    const title = document.createElement('div');
+    const strong = document.createElement('strong');
+    strong.textContent = `选择${label}`;
+    const hint = document.createElement('span');
+    hint.className = 'hint';
+    hint.textContent = '只列出 media/ 里的素材';
+    title.append(strong, hint);
+    const close = document.createElement('button');
+    close.className = 'mini';
+    close.textContent = '×';
+    close.title = '关闭';
+    head.append(title, close);
+    const body = document.createElement('div');
+    body.className = 'media-pick-body';
+    card.append(head, body);
+    modal.append(card);
+    document.body.append(modal);
+
+    const finish = (m) => {
+      if (settled) return;
+      settled = true;
+      modal.remove();
+      window.removeEventListener('keydown', onKey, true);
+      resolve(m || null);
+    };
+    const onKey = (e) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      finish(null);
+    };
+    window.addEventListener('keydown', onKey, true);
+    close.onclick = () => finish(null);
+    modal.addEventListener('pointerdown', (e) => { if (e.target === modal) finish(null); });
+
+    body.innerHTML = '<div class="hint pad">读取素材…</div>';
+    fetch('/api/media').then((r) => r.json()).then((j) => {
+      if (settled) return;
+      const list = (j.media || []).filter((m) => mediaKind(m.path) === kind);
+      body.replaceChildren();
+      if (!list.length) {
+        const empty = document.createElement('div');
+        empty.className = 'hint pad';
+        empty.textContent = `media/ 里还没有${label}。先在左侧「媒体」面板导入。`;
+        body.append(empty);
+        return;
+      }
+      const grid = document.createElement('div');
+      grid.className = 'media-grid media-pick';
+      for (const m of list) {
+        const item = document.createElement('div');
+        item.className = 'media-card';
+        item.title = m.name;
+        if (kind === 'image') {
+          const img = document.createElement('img');
+          img.src = `/${m.path}`;
+          img.loading = 'lazy';
+          img.alt = '';
+          item.append(img);
+        } else {
+          const icon = document.createElement('div');
+          icon.className = 'fileicon';
+          icon.textContent = '▶';
+          item.append(icon);
+        }
+        const cap = document.createElement('div');
+        cap.className = 'media-cap';
+        cap.textContent = m.name;
+        item.append(cap);
+        item.onclick = () => finish(m);
+        grid.append(item);
+      }
+      body.append(grid);
+    }).catch((e) => {
+      if (settled) return;
+      const err = document.createElement('div');
+      err.className = 'hint pad';
+      err.textContent = `读取失败：${e.message}`;
+      body.replaceChildren(err);
+    });
+  });
+}
+
 async function renderMedia() {
   const root = $('#panelMedia');
   if (!root) return;
@@ -544,9 +650,10 @@ async function renderMedia() {
   const grid = document.createElement('div');
   grid.className = 'media-grid';
   for (const m of S.media) {
-    const isVid = /\.(mp4|webm|mov)$/i.test(m.path);
-    const isImg = /\.(png|jpe?g|webp|gif)$/i.test(m.path);
-    const isAud = /\.(m4a|mp3|wav|flac|ogg|aac|opus)$/i.test(m.path);
+    const kind = mediaKind(m.path);
+    const isVid = kind === 'video';
+    const isImg = kind === 'image';
+    const isAud = kind === 'audio';
     const isTrack = isAud && S.project.meta.audio?.src === m.path;
     const card = document.createElement('div');
     card.className = `media-card${isTrack ? ' on' : ''}`;
@@ -890,11 +997,17 @@ async function boot() {
   $('#btnEditMode').onclick = () => setEditMode(!S.editMode);
 
   // Add a 3D element in front of the editing camera, then select it so it can
-  // be dragged (which keys its pivot at the playhead).
-  const addSceneElement = async (primitive = 'box') => {
+  // be dragged (which keys its pivot at the playhead). Besides primitives this
+  // creates empty / image / video / 3D-text scene objects.
+  const addSceneElement = async (kind = 'box') => {
     if (!S.project) return null;
     if (!S.project.world) { toast('这个项目没有 3D 世界，先给它一个城市/背景', 'error'); return null; }
-    if (primitive === 'pen') { toast('钢笔建模工具下一步接', 'warn'); return null; }
+    if (kind === 'pen') { toast('钢笔建模工具下一步接', 'warn'); return null; }
+    let media = null;
+    if (kind === 'image' || kind === 'video') {
+      media = await pickMedia(kind);
+      if (!media) return null;
+    }
     if (!S.editMode) setEditMode(true);
     const c = S.editCam || evalCamera(S.project, S.time);
     const fwd = v3norm(v3sub(c.look, c.pos));
@@ -904,23 +1017,56 @@ async function boot() {
     // stagger new elements so they do not stack at the same spot
     const ox = ((n - 1) % 3 - 1) * 9;
     const oy = -Math.floor((n - 1) / 3) * 5;
-    const base = [c.pos[0] + fwd[0] * 30, c.pos[1] + fwd[1] * 30, c.pos[2] + fwd[2] * 30];
+    const dist = kind === 'image' || kind === 'video' ? 26 : kind === 'text' ? 24 : 30;
+    const base = [c.pos[0] + fwd[0] * dist, c.pos[1] + fwd[1] * dist, c.pos[2] + fwd[2] * dist];
     const pivot = base.map((v, i) => Math.round((v + right[i] * ox + up[i] * oy) * 100) / 100);
     const id = `ob_${Date.now().toString(36)}`;
-    const label = primitive === 'cylinder' ? '圆柱' : '立方体';
-    const geom = primitive === 'cylinder' ? { w: 4, h: 6, d: 4 } : { w: 8, h: 4, d: 0.5 };
-    const j = await op({
-      op: 'objectAdd',
-      object: {
-        id, type: 'solid', name: `${label} ${n}`, primitive,
-        pivot, geom,
+    const labels = { box: '立方体', cylinder: '圆柱', empty: '空元素', image: '图片', video: '视频', text: '3D 文字' };
+    const label = labels[kind] || '立方体';
+    // Images/text are single-sided: turn their front towards the camera that
+    // is placing them, otherwise the viewport/Blender show a mirrored back.
+    const facing = { dir: fwd.map((v) => -v), roll: 0 };
+    const common = { id, name: `${label} ${n}`, pivot, start: 0, duration: S.project.meta.duration };
+    let object;
+    if (kind === 'empty') {
+      object = { ...common, type: 'empty', geom: { w: 1, h: 1, d: 1 } };
+    } else if (kind === 'image' || kind === 'video') {
+      object = {
+        ...common, type: kind, name: media.name, src: media.path, srcIn: 0, rate: 1, rot: facing,
+        geom: { w: 10, h: 5.6, d: 0.1 },
+        style: { fit: 'contain', uv: [0, 0, 1, 1], emissive: 1, opacity: 1 },
+      };
+    } else if (kind === 'text') {
+      object = {
+        ...common, type: 'text', geom: { w: 4, h: 2, d: 0.2 }, rot: facing,
+        style: {
+          text: '新文字', size: 2.4, color: '#ffffff', font: 'SimHei', align: 'center',
+          tracking: 0, lineHeight: 1.2, extrude: 0.08, emissive: 1,
+        },
+      };
+    } else {
+      object = {
+        ...common,
+        type: 'solid', primitive: kind,
+        geom: kind === 'cylinder' ? { w: 4, h: 6, d: 4 } : { w: 8, h: 4, d: 0.5 },
         style: { color: '#17d9ff', emissive: 1 },
-        start: 0, duration: S.project.meta.duration,
-      },
-    });
+      };
+    }
+    const j = await op({ op: 'objectAdd', object });
     if (!j) return null;
     select({ objectId: id });
-    toast(`已添加${label}；拖动它会在当前时间打位置关键帧`, 'success');
+    switchRightTab('insp');
+    if (kind === 'text') {
+      const ta = $('#panelInsp textarea');
+      if (ta) { ta.focus(); ta.select(); }
+    }
+    const tips = {
+      empty: '已添加空元素；可把其它元素挂到它下面',
+      image: '已添加图片平面；检查器「内容」里可换素材和适配',
+      video: '已添加视频平面；检查器「内容」里可换素材、入点和速度',
+      text: '已添加 3D 文字；检查器「内容」里可改文字、字号和字体',
+    };
+    toast(tips[kind] || `已添加${label}；拖动它会在当前时间打位置关键帧`, 'success');
     return id;
   };
 
@@ -962,7 +1108,8 @@ async function boot() {
     if (tool3DMenu) tool3DMenu.hidden = !tool3DMenu.hidden;
   };
   tool3DMenu?.querySelectorAll('button').forEach((b) => {
-    b.onclick = () => { hideToolMenu(); addSceneElement(b.dataset.primitive); };
+    const kind = b.dataset.primitive || b.dataset.add;
+    b.onclick = () => { hideToolMenu(); addSceneElement(kind); };
   });
   document.addEventListener('pointerdown', (e) => {
     if (!e.target.closest?.('.tool-wrap')) hideToolMenu();

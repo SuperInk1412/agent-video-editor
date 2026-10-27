@@ -75,18 +75,31 @@ textarea { resize: vertical; line-height: 1.4; }
 .toolbar .tool:hover { color: var(--text); background: #161d28; border-color: var(--line); }
 .toolbar .tool.on { color: var(--accent); background: #0d2029; border-color: #1d4a5c; }
 .tool-wrap { position: relative; }
+.icon-sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
 .toolbar .tool-sep { width: 1px; height: 18px; margin: 0 4px; background: var(--line); }
 .tool-menu {
-  position: absolute; left: 0; top: 34px; z-index: 30; min-width: 108px; padding: 4px;
+  position: absolute; left: 0; top: 34px; z-index: 30; min-width: 148px; padding: 4px;
   background: #0f1622; border: 1px solid #26364b; border-radius: 6px;
   box-shadow: 0 10px 28px rgba(0,0,0,.55);
 }
 .tool-menu[hidden] { display: none; }
+.tool-menu-label {
+  padding: 5px 9px 3px; color: var(--dim2); font-size: 10px;
+  letter-spacing: .5px; user-select: none;
+}
+.tool-menu-sep { height: 1px; margin: 4px 6px; background: #1d2838; }
 .tool-menu button {
-  display: block; width: 100%; text-align: left; background: none; border: 0;
-  color: #d6e6f5; font-size: 12px; padding: 6px 9px; border-radius: 4px;
+  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+  background: none; border: 0; color: #d6e6f5; font-size: 12px;
+  padding: 6px 9px; border-radius: 4px;
 }
 .tool-menu button:hover { background: #1a2738; }
+.tool-menu .mi {
+  width: 14px; height: 14px; flex: 0 0 auto; opacity: .72;
+  fill: none; stroke: currentColor; stroke-width: 1.35;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+.tool-menu button:hover .mi { opacity: 1; color: var(--accent); }
 .proj { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
 #projTitle { font-weight: 600; white-space: nowrap; }
 #projMeta { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -135,6 +148,12 @@ main { display: grid; grid-template-columns: 272px minmax(0, 1fr) 356px; min-hei
 .media-card img { width: 100%; height: 74px; object-fit: cover; display: block; }
 .media-card .fileicon { height: 74px; display: grid; place-items: center; font-size: 22px; color: var(--dim); }
 .media-cap { font-size: 10.5px; color: var(--dim); padding: 3px 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* media picker: reuse the library cards inside the shared modal */
+.media-picker { width: min(680px, calc(100vw - 48px)); }
+.media-pick-body { overflow: auto; padding: 12px; flex: 1; min-height: 0; }
+.media-pick { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.media-pick .media-card img, .media-pick .media-card .fileicon { height: 96px; }
+.media-pick .media-cap { font-size: 11px; }
 
 /* ---------------- stage ---------------- */
 #stageWrap { flex: 1; display: grid; place-items: center; min-height: 0; padding: 14px; }
