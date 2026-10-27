@@ -12,6 +12,7 @@ import {
   ensureProjectDirs, projectExists, withLock, PROJECT_FILE,
 } from '../core/store.js';
 import { normalizeProject, createProject } from '../core/schema.js';
+import { ensureSpace } from '../core/space.js';
 import { applyOps } from '../core/ops.js';
 import { probeMedia, mimeOf, fileExists } from './media.js';
 import { renderStill, renderVideo, blenderVersion, findBlender } from './blender.js';
@@ -359,6 +360,7 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
           fps, width, height, duration,
           background: /^#[0-9a-f]{6}$/i.test(String(body.background || '')) ? body.background : '#05070d',
         });
+        ensureSpace(project);
         try {
           await saveProject(dir, project, { by: 'ui' });
         } catch (e) {

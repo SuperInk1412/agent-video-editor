@@ -11,6 +11,7 @@ import { ProjectsPanel } from './projects.js';
 import { evalCamera, pathPos, cameraTransform } from '/core/camera.js';
 import { curveSegments } from '/core/curves.js';
 import { worldPose, toLocalPoint, toLocalVector, ancestors, childrenOf } from '/core/hierarchy.js';
+import { defaultCamera } from '/core/space.js';
 import { sampleTrack } from '/core/time.js';
 import {
   emptySelection, normalizeSelection, selectOne, cameraRef, objectRef, elementRef, splitRef,
@@ -196,8 +197,6 @@ function applyProject(p, source) {
   $('#projMeta').textContent = `${p.meta.width}×${p.meta.height} · ${p.meta.fps}fps · ${p.meta.duration.toFixed(1)}s · rev ${p.rev}`;
   const editBtn = $('#btnEditMode');
   if (editBtn) editBtn.hidden = !p.camera;
-  const addBtn = $('#btnAddElement');
-  if (addBtn) addBtn.hidden = !p.world || !p.camera;
   if (!p.camera && S.editMode) setEditMode(false);
   updateOverlay();
 }
@@ -1136,7 +1135,6 @@ async function boot() {
   // creates empty / image / video / 3D-text scene objects.
   const addSceneElement = async (kind = 'box') => {
     if (!S.project) return null;
-    if (!S.project.world) { toast('这个项目没有 3D 世界，先给它一个城市/背景', 'error'); return null; }
     if (kind === 'pen') { toast('钢笔建模工具下一步接', 'warn'); return null; }
     let media = null;
     if (kind === 'image' || kind === 'video') {
@@ -1207,10 +1205,15 @@ async function boot() {
 
   const createCamera = async () => {
     if (!S.project) return null;
-    const view = (S.editMode && S.editCam)
+    let view = (S.editMode && S.editCam)
       || (S.project.camera ? evalCamera(S.project, S.time) : null)
       || preview.scene3d.lastCam;
-    if (!view) { toast('没有可用视角，先建一个 3D 世界', 'error'); return null; }
+    if (!view) {
+      // Unified space guarantees a default camera on load/create, but keep a
+      // stable fallback for an old in-memory project.
+      const dc = defaultCamera(S.project.meta);
+      view = { pos: dc.path[0].pos.slice(), look: dc.path[0].look.slice(), fov: dc.fov, roll: 0 };
+    }
     const rnd = (v) => Math.round(v * 100) / 100;
     const at = Math.round(S.time * 1000) / 1000;
     const cam = {
