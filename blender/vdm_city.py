@@ -14,7 +14,7 @@ import os
 from mathutils import Matrix, Vector, Quaternion
 
 from vdm_build import (
-    reset_scene, hex_rgba, build_compositor, set_menu, srgb_to_linear,
+    reset_scene, hex_rgba, build_compositor, set_menu, srgb_to_linear, SceneBuilder,
 )
 
 
@@ -567,7 +567,7 @@ def _build_multi_camera_scene(shot, opts):
     base_shot.pop('cameraLayers', None)
     base_shot['camera'] = layers[0].get('camera') or shot.get('camera') or []
     base_shot['cameraCfg'] = layers[0].get('cameraCfg') or shot.get('cameraCfg') or {}
-    base = build_shot_scene(base_shot, opts)
+    base = build_shot_scene(base_shot, dict(opts, _no_overlay=True))
     fisheye = any(
         any(float(e.get('fov', 62.0)) >= 180.0 for e in (layer.get('camera') or []))
         for layer in layers
@@ -578,7 +578,35 @@ def _build_multi_camera_scene(shot, opts):
     # Use standalone camera scenes for every layer so each VSE strip has its
     # own camera, engine and render settings.
     scenes = [_make_camera_scene(base, layer, shot, opts, engine) for layer in layers]
-    return _build_master(base, scenes, layers, shot, opts)
+    master = _build_master(base, scenes, layers, shot, opts)
+    # 2D elements: one more scene strip on top of the camera layers
+    ov = _build_overlay(opts)
+    if ov is not None:
+        ov.frame_start = master.frame_start
+        ov.frame_end = master.frame_end
+        st = master.sequence_editor.strips.new_scene('2d', ov, len(scenes) + 1, master.frame_start)
+        st.blend_type = 'ALPHA_OVER'
+    return master
+
+
+# ---------------------------------------------------------------- 2D layer
+
+def _build_overlay(opts):
+    """The project's 2D elements as a transparent scene ('VDM_2D'), or None.
+
+    Built by the 2D SceneBuilder (same evaluation as 2D projects) into its own
+    scene; the shot composites it over the 3D picture."""
+    path = opts.get('project')
+    if not path or not os.path.exists(path):
+        return None
+    with open(path, 'r', encoding='utf-8') as f:
+        project = json.load(f)
+    if not any(e.get('visible') is not False for e in project.get('elements') or []):
+        return None
+    ov = bpy.data.scenes.new('VDM_2D')
+    with bpy.context.temp_override(scene=ov):
+        SceneBuilder(project, opts).build(scene=ov, overlay=True)
+    return ov
 
 
 # ---------------------------------------------------------------- scene
@@ -724,6 +752,7 @@ def build_shot_scene(shot, opts):
 
     # compositor: same post chain as the 2D path + depth fog
     meta = {'fx': shot.get('fx') or {}}
+    overlay = None if opts.get('_no_overlay') else _build_overlay(opts)
     build_compositor(scene, meta, os.path.join(opts['root'], '.vdm', 'cache', 'comp'),
-                     fog=city.get('fog'))
+                     fog=city.get('fog'), overlay=overlay)
     return scene

@@ -640,7 +640,9 @@ def _val(ng, v):
     return n.outputs[0]
 
 
-def build_compositor(scene, meta, cache_dir, fog=None):
+def build_compositor(scene, meta, cache_dir, fog=None, overlay=None):
+    """Post chain for `scene`. `overlay` is an optional transparent scene (the
+    2D layer of a 3D shot) alpha-overed after the fog and before the post fx."""
     fx = meta.get('fx') or {}
     w, h = scene.render.resolution_x, scene.render.resolution_y
     os.makedirs(cache_dir, exist_ok=True)
@@ -680,6 +682,20 @@ def build_compositor(scene, meta, cache_dir, fog=None):
         ng.links.new(rgb.outputs[0], mixf.inputs[7])
         ng.links.new(mul.outputs[0], mixf.inputs[0])
         chain = mixf.outputs[2]
+
+    if overlay is not None:
+        orl = ng.nodes.new('CompositorNodeRLayers')
+        try:
+            orl.scene = overlay
+            orl.layer = overlay.view_layers[0].name
+        except Exception:
+            pass
+        over = ng.nodes.new('CompositorNodeAlphaOver')
+        # Blender 5 orders the inputs Background, Foreground, Factor; link by
+        # name. Render results are premultiplied, so Straight Alpha stays off.
+        ng.links.new(chain, over.inputs['Background'])
+        ng.links.new(orl.outputs['Image'], over.inputs['Foreground'])
+        chain = over.outputs[0]
 
     # grade ---------------------------------------------------------------
     cb = ng.nodes.new('CompositorNodeColorBalance')
@@ -916,8 +932,13 @@ class SceneBuilder:
         return obj, nodes
 
     # -- main --------------------------------------------------------------
-    def build(self):
-        scene = reset_scene()
+    def build(self, scene=None, overlay=False):
+        """Build the 2D project. With `scene` given, build into that scene instead
+        of resetting the file (the caller makes it bpy.context.scene); `overlay`
+        renders on a transparent film without world or compositor (the 2D layer
+        of a 3D shot, see vdm_city.py)."""
+        if scene is None:
+            scene = reset_scene()
         scene.render.engine = 'BLENDER_EEVEE'
         scene.render.resolution_x = int(round(self.W * self.opts.get('scale', 1.0)))
         scene.render.resolution_y = int(round(self.H * self.opts.get('scale', 1.0)))
@@ -928,7 +949,9 @@ class SceneBuilder:
         scene.render.image_settings.color_mode = 'RGB'
         scene.render.image_settings.compression = 15
         scene.render.filter_size = 0.8
-        scene.render.film_transparent = False
+        scene.render.film_transparent = bool(overlay)
+        if overlay:
+            scene.render.image_settings.color_mode = 'RGBA'
         scene.view_settings.view_transform = 'Standard'
         scene.view_settings.look = 'None'
         scene.view_settings.exposure = 0
@@ -939,7 +962,8 @@ class SceneBuilder:
         except Exception:
             pass
 
-        make_world(scene, self.meta.get('background', '#05070d'))
+        if not overlay:
+            make_world(scene, self.meta.get('background', '#05070d'))
         make_camera(scene, self.W, self.H)
 
         duration = float(self.meta.get('duration') or 12)
@@ -983,7 +1007,8 @@ class SceneBuilder:
         bpy.app.handlers.frame_change_pre.append(on_frame)
         on_frame(scene, None)
 
-        build_compositor(scene, self.meta, os.path.join(self.cache, 'comp'))
+        if not overlay:
+            build_compositor(scene, self.meta, os.path.join(self.cache, 'comp'))
         return scene
 
     def make_updater(self, el, obj, nodes, tex, z, style):
