@@ -1063,6 +1063,9 @@ class SceneBuilder:
         for idx, el in enumerate(elements):
             if el.get('visible') is False:
                 continue
+            # sound clips have no picture: they are mixed by ffmpeg, never drawn
+            if el['type'] == 'audio':
+                continue
             style = el.get('style') or {}
             z = el.get('z', 0) + idx * 0.001
             st0 = eval_element(el, el['start'], self.meta)
