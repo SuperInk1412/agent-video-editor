@@ -20,6 +20,7 @@ import {
 } from '/core/selection.js';
 
 const $ = (s) => document.querySelector(s);
+const FLY_KEYS = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE']);
 const S = {
   project: null,
   time: 0,
@@ -2586,6 +2587,10 @@ async function boot() {
     if (e.key === 'Escape' && drag && cancelObjectDrag()) { e.preventDefault(); return; }
     if (/INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
     S.keys.add(e.code);
+    // In fly mode WASD/QE belong to the editor camera. Without this, S also
+    // falls through to the global "split at playhead" shortcut, and key repeat
+    // spews a toast for every failed split.
+    if (S.editMode && S.viewMode === 'move' && FLY_KEYS.has(e.code)) return;
     if (e.key === 'Tab') { e.preventDefault(); setEditMode(!S.editMode); return; }
     if (e.key === 'Alt' && !e.repeat) {
       e.preventDefault();
