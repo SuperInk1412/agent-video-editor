@@ -26,7 +26,7 @@ const TYPE_COLOR = { image: '#3b6ea5', video: '#2f8f6b', text: '#a06a2b', shape:
 const AX = ['x', 'y', 'z'];
 
 export class Timeline {
-  constructor(root, { onSeek, onSelect, onOp, onPause, onElementMenu, onCameraMenu, onClipMenu, onSplit, onTextEdit } = {}) {
+  constructor(root, { onSeek, onSelect, onOp, onPause, onElementMenu, onCameraMenu, onClipMenu, onSplit, onTextEdit, sourceDuration, onSourceLimit } = {}) {
     this.root = root;
     this.onSeek = onSeek;
     this.onSelect = onSelect;
@@ -37,6 +37,8 @@ export class Timeline {
     this.onClipMenu = onClipMenu;
     this.onSplit = onSplit;
     this.onTextEdit = onTextEdit;
+    this.sourceDuration = sourceDuration;
+    this.onSourceLimit = onSourceLimit;
     this.project = null;
     this.time = 0;
     this.pool = emptySelection();
@@ -994,6 +996,16 @@ export class Timeline {
     return row;
   }
 
+  _elementLabel(e) {
+    const label = e.type === 'text'
+      ? String(e.style?.text || '').slice(0, 24)
+      : e.type === 'audio'
+        ? `♪ ${e.name || (e.src || '').split('/').pop() || e.id}`
+        : (e.src || '').split('/').pop();
+    const loopMark = e.loop && (e.type === 'video' || e.type === 'audio') ? '↻ ' : '';
+    return `${loopMark}${label || e.id}`;
+  }
+
   _elementGroup(e, host = this.elsWrap) {
     const open = this.expandedEls.has(e.id);
     const row = el('div', 'tl-row tl-elhead');
@@ -1029,12 +1041,7 @@ export class Timeline {
     b.dataset.id = e.id;
     b.style.left = `${(Number(e.start) || 0) * this.pps}px`;
     b.style.width = `${Math.max(4, (Number(e.duration) || 0) * this.pps)}px`;
-    const label = e.type === 'text'
-      ? String(e.style?.text || '').slice(0, 24)
-      : e.type === 'audio'
-        ? `♪ ${e.name || (e.src || '').split('/').pop() || e.id}`
-        : (e.src || '').split('/').pop();
-    b.innerHTML = `<span class="blk-name">${escapeHtml(label || e.id)}</span>`;
+    b.innerHTML = `<span class="blk-name">${escapeHtml(this._elementLabel(e))}</span>`;
     const hl = el('div', 'handle handle-l');
     hl.title = '拖动左边界：改开始时间';
     const hr = el('div', 'handle handle-r');
@@ -1043,6 +1050,9 @@ export class Timeline {
     b.style.setProperty('--c', TYPE_COLOR[e.type] || '#666');
     if (e.type === 'text') b.title = '双击编辑文字内容';
     if (e.type === 'audio') b.title = '拖动改时间；双击展开音量关键帧';
+    if (e.loop && (e.type === 'video' || e.type === 'audio')) {
+      b.title = `${b.title ? `${b.title}；` : ''}循环播放，长度可超过素材本身`;
+    }
     b.addEventListener('contextmenu', (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
@@ -1637,8 +1647,7 @@ export class Timeline {
       if (h.block.style.left !== left) h.block.style.left = left;
       if (h.block.style.width !== width) h.block.style.width = width;
       const nameEl = h.block.querySelector('.blk-name');
-      const label = e.type === 'text' ? String(e.style?.text || '').slice(0, 24) : (e.src || '').split('/').pop();
-      if (nameEl) nameEl.textContent = label || e.id;
+      if (nameEl) nameEl.textContent = this._elementLabel(e);
     }
   }
 
@@ -2248,6 +2257,10 @@ export class Timeline {
         : target.classList.contains('handle-r') ? 'r' : 'move';
       const t0 = this._timeAt(ev.clientX);
       const orig = { start: item.start, duration: item.duration };
+      const srcIn = Math.max(0, Number(item.srcIn) || 0);
+      const rawSource = (item.type === 'video' || item.type === 'audio')
+        ? Number(this.sourceDuration?.(item)) : NaN;
+      const sourceLimit = !item.loop && Number.isFinite(rawSource) && rawSource > 0 ? rawSource : null;
       let moved = false;
       const downX = ev.clientX, downY = ev.clientY;
 
@@ -2257,19 +2270,32 @@ export class Timeline {
         const t = this._timeAt(e.clientX);
         const dt = t - t0;
         let ns = orig.start, nd = orig.duration;
+        let hitSource = false;
         if (mode === 'move') {
           ns = Math.max(0, this._snap(orig.start + dt));
         } else if (mode === 'r') {
           const end = this._snap(orig.start + orig.duration + dt);
           nd = Math.max(0.08, end - orig.start);
+          if (sourceLimit) {
+            const maxDur = Math.max(0.08, sourceLimit - srcIn);
+            if (nd > maxDur + 1e-9) { nd = maxDur; hitSource = true; }
+          }
         } else {
-          const s = Math.min(orig.start + orig.duration - 0.08, Math.max(0, this._snap(orig.start + dt)));
+          let s = Math.min(orig.start + orig.duration - 0.08, Math.max(0, this._snap(orig.start + dt)));
+          if (sourceLimit) {
+            const minStart = Math.max(0, orig.start - srcIn);
+            if (s < minStart) { s = minStart; hitSource = true; }
+          }
           nd = Math.max(0.08, orig.start + orig.duration - s);
+          if (sourceLimit) {
+            const maxDur = Math.max(0.08, sourceLimit - (srcIn + (s - orig.start)));
+            if (nd > maxDur + 1e-9) { nd = maxDur; hitSource = true; }
+          }
           ns = s;
         }
         blk.style.left = `${ns * this.pps}px`;
         blk.style.width = `${nd * this.pps}px`;
-        blk._ns = ns; blk._nd = nd;
+        blk._ns = ns; blk._nd = nd; blk._sourceHit = hitSource;
       };
       const up = (e) => {
         window.removeEventListener('pointermove', move);
@@ -2278,6 +2304,8 @@ export class Timeline {
           if (!(e?.detail > 1 && item.type === 'text')) this._toggleElementExpand(id);
           return;
         }
+        const hitSource = !!blk._sourceHit && moved;
+        if (hitSource) this.onSourceLimit?.(mode === 'l' ? 'start' : 'end');
         const ns = blk._ns, nd = blk._nd;
         if (ns == null || (Math.abs(ns - orig.start) < 1e-4 && Math.abs(nd - orig.duration) < 1e-4)) return;
         this.onOp?.({ op: 'moveElement', id, start: round3(ns), duration: round3(nd) });

@@ -81,6 +81,7 @@ export async function buildAudioMix({ dir, project, from = 0, to = null } = {}) 
     if (!(b > a + 1e-6)) continue;
     const srcIn = Math.max(0, num(el.srcIn, 0) + (a - clipStart));
     const len = b - a;
+    if (el.loop) args.push('-stream_loop', '-1');
     args.push('-ss', String(t3(srcIn)), '-t', String(t3(len)), '-i', abs);
     const delay = Math.max(0, Math.round((a - start) * 1000));
     const label = `a${labels.length}`;

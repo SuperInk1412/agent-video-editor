@@ -236,6 +236,29 @@ function findSeg(p, id) {
 
 const t3 = (t) => Math.round(t * 1000) / 1000;
 
+/** Source length recorded when a video/audio element was added, if known. */
+function mediaSourceLength(el) {
+  const n = Number(el?.meta?.sourceDuration);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
+ * A video/audio clip is a window into a finite source. Without `loop`, the
+ * window must stay inside [0, sourceDuration]; the timeline also clamps the
+ * drag, this is the last line of defence for CLI/agent edits and old data.
+ */
+function clampMediaLength(el, minDuration = 1 / 120) {
+  if (!el || el.loop || (el.type !== 'video' && el.type !== 'audio')) return false;
+  const source = mediaSourceLength(el);
+  if (!source) return false;
+  const srcIn = Math.max(0, Number(el.srcIn) || 0);
+  const max = Math.max(minDuration, source - srcIn);
+  if (!(Number(el.duration) > max + 1e-9)) return false;
+  el.duration = t3(max);
+  return true;
+}
+
+
 /** Keyframe times are absolute: moving an element carries its animation along. */
 function shiftTiming(el, dt) {
   if (!dt) return;
@@ -520,6 +543,7 @@ export function applyOp(p, op) {
         motion: { type: 'none', amount: 0, dir: 'in', ...(el.motion || {}) },
         keyframes: Array.isArray(el.keyframes) ? el.keyframes : [],
         visible: el.visible !== false,
+        loop: el.loop === true,
         fadeIn: el.fadeIn ?? 0,
         fadeOut: el.fadeOut ?? 0,
         punch: el.punch ?? 0,
@@ -535,6 +559,7 @@ export function applyOp(p, op) {
       }
       if (!(full.duration > 0)) fail('element duration must be > 0');
       if (full.type === 'audio' && !full.src) fail('audio element needs src');
+      clampMediaLength(full);
       if (full.segment && !p.segments.some((s) => s.id === full.segment)) fail(`unknown segment ${full.segment}`);
       p.elements.push(full);
       p.elements.sort((a, b) => a.z - b.z || a.start - b.start);
@@ -550,7 +575,12 @@ export function applyOp(p, op) {
       if (Object.hasOwn(patch, 'id')) fail('element id is immutable');
       const next = deepMerge(el, patch);
       if (next.segment && !p.segments.some((s) => s.id === next.segment)) fail(`unknown segment ${next.segment}`);
+      const srcChanged = Object.hasOwn(patch, 'src') && String(patch.src ?? '') !== String(el.src ?? '');
       Object.keys(next).forEach((k) => { el[k] = next[k]; });
+      // A recorded source length belongs to the old file; drop it unless the
+      // caller supplies a new one with the same patch.
+      if (srcChanged && !Object.hasOwn(patch.meta || {}, 'sourceDuration') && el.meta) delete el.meta.sourceDuration;
+      clampMediaLength(el);
       if (next.z !== undefined) p.elements.sort((a, b) => a.z - b.z || a.start - b.start);
       changed.push(el.id);
       return { changed, element: el };
@@ -582,6 +612,7 @@ export function applyOp(p, op) {
       if (!Number.isFinite(copy.start)) fail('duplicateElement start must be a number');
       copy.z = src.z + 0.5;
       shiftTiming(copy, copy.start - src.start);
+      clampMediaLength(copy);
       p.elements.push(copy);
       return { changed: [copy.id], element: copy };
     }
@@ -620,6 +651,7 @@ export function applyOp(p, op) {
         if (carry) shiftTiming(el, dt);
         else if (el.type === 'video' || el.type === 'audio') el.srcIn = t3(Math.max(0, (Number(el.srcIn) || 0) + dt));
       }
+      clampMediaLength(el);
       changed.push(el.id);
       return { changed, element: el };
     }

@@ -40,6 +40,19 @@ test('creating a project over HTTP starts from unified space', async (t) => {
   assert.equal((await loadProject(dir)).cameras.length, 1, 'the file on disk is already 3D');
 });
 
+test('audio elements (including loop) pass the shared HTTP op contract', async (t) => {
+  const { post } = await setup(t);
+  const response = await post('api/ops', { ops: [{
+    op: 'addElement',
+    element: { type: 'audio', src: 'media/song.m4a', start: 0, duration: 2, loop: true, volume: 0.5 },
+  }] });
+  assert.equal(response.status, 200, JSON.stringify(await response.clone().json()));
+  const project = (await response.json()).project;
+  const audio = project.elements.find((el) => el.type === 'audio');
+  assert.equal(audio.loop, true);
+  assert.equal(audio.duration, 2);
+});
+
 test('HTTP blocks sibling traversal, symlinks, foreign origins and malformed URL encoding', async (t) => {
   const { root, service } = await setup(t);
   await fs.mkdir(path.join(root, 'media-private'));

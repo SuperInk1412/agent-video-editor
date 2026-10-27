@@ -64,16 +64,18 @@ export async function probeMedia(file) {
 }
 
 /** Extract a video element's source range to a PNG sequence at project fps/size (cover-cropped). */
-export async function extractSequence({ src, outDir, srcIn = 0, duration, fps, width, height, fit = 'cover', onLog, signal }) {
+export async function extractSequence({ src, outDir, srcIn = 0, duration, fps, width, height, fit = 'cover', loop = false, onLog, signal }) {
   const ffmpeg = await findBin('ffmpeg');
   await fs.mkdir(outDir, { recursive: true });
   const args = [
     '-y', '-hide_banner', '-loglevel', 'error',
-    '-ss', String(Math.max(0, srcIn)), '-t', String(duration), '-i', src,
+  ];
+  if (loop) args.push('-stream_loop', '-1');
+  args.push('-ss', String(Math.max(0, srcIn)), '-t', String(duration), '-i', src,
     '-vf', fit === 'stretch' ? `fps=${fps},scale=${width}:${height}`
       : `fps=${fps},scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}`,
     '-start_number', '0', path.join(outDir, 'f_%05d.png'),
-  ];
+  );
   await runProcess(ffmpeg, args, { signal, onLog });
   const files = (await fs.readdir(outDir)).filter((f) => f.endsWith('.png')).sort();
   return { dir: outDir, count: files.length, first: files[0] ? path.join(outDir, files[0]) : null };

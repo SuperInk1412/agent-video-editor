@@ -11,7 +11,7 @@ const parentChannel = { enum: ['rot', 'scale'] };
 const parentStrength = { type: 'object', properties: { rot: number, scale: number }, additionalProperties: false };
 const property = { ...string, description: 'Dotted property path. 2D positions are project pixels, y down; 3D positions are metres, y up.' };
 const definitions = {
-  addElement: [{ element: { ...object, required: ['type'], properties: { type: { enum: ELEMENT_TYPES }, start: time, duration: { type: 'number', exclusiveMinimum: 0 } } } }, ['element']],
+  addElement: [{ element: { ...object, required: ['type'], properties: { type: { enum: ELEMENT_TYPES }, start: time, duration: { type: 'number', exclusiveMinimum: 0 }, loop: { type: 'boolean' } } } }, ['element']],
   updateElement: [{ id: string, patch: object }, ['id', 'patch']],
   set: [{ id: string, path: property, value: {} }, ['id', 'path', 'value']],
   removeElement: [{ id: string }, ['id']],

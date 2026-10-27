@@ -26,6 +26,7 @@ const S = {
   playing: false,
   selection: { segmentId: null, elementId: null, objectId: null, camera: false, pool: emptySelection() },
   media: [],
+  sourceDurations: new Map(),
   blender: null,
   agentAvailable: false,
   pipeline: null,
@@ -100,6 +101,54 @@ function toast(msg, level = 'info') {
   $('#toasts').appendChild(t);
   toastTimer.push(setTimeout(() => { t.classList.add('out'); setTimeout(() => t.remove(), 260); }, level === 'error' ? 5200 : 2600));
   if (toastTimer.length > 8) toastTimer.shift();
+}
+
+// ---------------------------------------------------------------- media length
+// The timeline needs a synchronous source length while an edge is being
+// dragged. New clips record it in meta, old ones are probed once; the preview's
+// HTML media duration is a useful fallback while ffprobe is unavailable.
+function sourceDurationOf(el) {
+  if (!el || (el.type !== 'video' && el.type !== 'audio')) return null;
+  const cached = S.sourceDurations.get(el.src);
+  if (Number.isFinite(cached) && cached > 0) return cached;
+  const live = preview?.sourceDuration?.(el);
+  if (Number.isFinite(live) && live > 0) {
+    S.sourceDurations.set(el.src, live);
+    return live;
+  }
+  const recorded = Number(el.meta?.sourceDuration);
+  if (Number.isFinite(recorded) && recorded > 0) {
+    S.sourceDurations.set(el.src, recorded);
+    return recorded;
+  }
+  return null;
+}
+
+async function probeSourceDuration(src) {
+  if (!src) return null;
+  const cached = S.sourceDurations.get(src);
+  if (Number.isFinite(cached) && cached > 0) return cached;
+  try {
+    const res = await fetch(`/api/probe?src=${encodeURIComponent(src)}`);
+    if (!res.ok) return null;
+    const info = await res.json();
+    const duration = Number(info.duration);
+    if (Number.isFinite(duration) && duration > 0) {
+      S.sourceDurations.set(src, duration);
+      return duration;
+    }
+  } catch { /* ffprobe is optional; the HTML player may still know */ }
+  return null;
+}
+
+function warmSourceDurations(p) {
+  const seen = new Set();
+  for (const el of p?.elements || []) {
+    if (el.type !== 'video' && el.type !== 'audio') continue;
+    if (!el.src || seen.has(el.src)) continue;
+    seen.add(el.src);
+    if (!S.sourceDurations.has(el.src)) void probeSourceDuration(el.src);
+  }
 }
 
 // ---------------------------------------------------------------- context menu
@@ -193,6 +242,7 @@ function applyProject(p, source) {
   }
   if (gizmo) gizmo.objSel = S.selection.objectId || null;
   preview.setProject(p);
+  warmSourceDurations(p);
   if (S.soloCameras) {
     const ids = new Set((p.cameras || []).map((c) => c.id));
     for (const id of [...S.soloCameras]) if (!ids.has(id)) S.soloCameras.delete(id);
@@ -1005,6 +1055,8 @@ async function setSoundtrack(m) {
   const gain = Number(prev.gain) || 0;
   const volume = Math.max(0, Math.min(1, 10 ** (gain / 20)));
   const total = Math.max(0.05, Number(S.project.meta.duration) || 12);
+  const sourceDuration = await probeSourceDuration(m.path);
+  const songDuration = sourceDuration ? Math.max(0.05, Math.min(total, sourceDuration)) : total;
   const current = (S.project.elements || []);
   const song = current.find((e) => e.type === 'audio' && e.meta?.fromSoundtrack)
     || current.find((e) => e.type === 'audio' && e.src === m.path);
@@ -1013,13 +1065,19 @@ async function setSoundtrack(m) {
     { op: 'setMeta', path: 'audioMigrated', value: true },
   ];
   if (song) {
-    ops.push({ op: 'updateElement', id: song.id, patch: { src: m.path, name: m.name, start: 0, duration: total, srcIn: 0, volume } });
+    ops.push({
+      op: 'updateElement', id: song.id,
+      patch: {
+        src: m.path, name: m.name, start: 0, duration: songDuration, srcIn: 0, volume,
+        ...(sourceDuration ? { meta: { ...(song.meta || {}), sourceDuration } } : {}),
+      },
+    });
   } else {
     ops.push({
       op: 'addElement',
       element: {
-        type: 'audio', name: m.name, src: m.path, start: 0, duration: total,
-        srcIn: 0, volume, meta: { fromSoundtrack: true },
+        type: 'audio', name: m.name, src: m.path, start: 0, duration: songDuration,
+        srcIn: 0, volume, meta: { fromSoundtrack: true, ...(sourceDuration ? { sourceDuration } : {}) },
       },
     });
   }
@@ -1205,8 +1263,11 @@ async function pasteClipboard() {
   return j;
 }
 
-function addMediaAt(m, isVid) {
-  const dur = Math.min(4, S.project.meta.duration);
+async function addMediaAt(m, isVid) {
+  if (!S.project) return null;
+  const sourceDuration = isVid ? await probeSourceDuration(m.path) : null;
+  const maxDur = sourceDuration ? Math.max(0.05, sourceDuration) : Infinity;
+  const dur = Math.max(0.05, Math.min(4, S.project.meta.duration, maxDur));
   const start = fitStart(S.time, dur);
   const seg = segmentAt(start);
   op({
@@ -1216,31 +1277,37 @@ function addMediaAt(m, isVid) {
       segment: seg?.id || null, transform: { x: 0, y: 0, scale: 1, rotation: 0, opacity: 1 },
       style: { fit: 'cover' }, motion: { type: 'in', amount: 0.08 },
       fadeIn: 0.2, fadeOut: 0.2,
+      meta: sourceDuration ? { sourceDuration } : {},
     },
   }).then((j) => { if (j?.changed?.[0]) select({ elementId: j.changed[0] }); });
 }
 
 /** Add a sound file as a normal timeline element at the playhead. */
-function addAudioAt(m) {
+async function addAudioAt(m) {
   if (!S.project) return null;
   const existing = S.project.elements.find((e) => e.type === 'audio' && e.src === m.path);
   if (existing) {
     select({ elementId: existing.id });
     toast('这段声音已经在时间线里了', 'info');
-    return Promise.resolve(existing.id);
+    return existing.id;
   }
+  const sourceDuration = await probeSourceDuration(m.path);
   const total = Math.max(0.05, Number(S.project.meta.duration) || 12);
   const start = Math.max(0, Math.min(total - 0.05, S.time));
-  const duration = Math.max(0.05, total - start);
+  const wanted = Math.max(0.05, total - start);
+  const duration = sourceDuration ? Math.min(wanted, Math.max(0.05, sourceDuration)) : wanted;
   return op({
     op: 'addElement',
     element: {
       type: 'audio', name: m.name, src: m.path, start, duration, srcIn: 0, volume: 1,
+      meta: sourceDuration ? { sourceDuration } : {},
     },
   }).then((j) => {
     if (!j) return null;
     if (j.changed?.[0]) select({ elementId: j.changed[0] });
-    toast(`声音已加入时间线：${m.name}`, 'success');
+    toast(sourceDuration && wanted > duration + 1e-6
+      ? `声音已加入时间线：${m.name}（已按素材长度截到 ${duration.toFixed(2)}s，右键可开启循环）`
+      : `声音已加入时间线：${m.name}`, 'success');
     return j.changed?.[0] || null;
   });
 }
@@ -1539,11 +1606,28 @@ async function boot() {
 
   /** Split one media element at the playhead and keep the right half selected. */
   const splitElementAt = (id) => splitAtPlayhead([id]);
+  const toggleElementLoop = async (el) => {
+    const loop = el.loop !== true;
+    const patch = { loop };
+    const source = sourceDurationOf(el) || await probeSourceDuration(el.src);
+    if (source) {
+      patch.meta = { ...(el.meta || {}), sourceDuration: source };
+      if (!loop) {
+        const max = Math.max(0.08, source - Math.max(0, Number(el.srcIn) || 0));
+        if (el.duration > max + 1e-6) {
+          patch.duration = Math.round(max * 1000) / 1000;
+          toast('已关闭循环，长度收回到素材结尾', 'info');
+        }
+      }
+    }
+    op({ op: 'updateElement', id: el.id, patch });
+  };
   const clipMenu = (id, x, y) => {
     const el = S.project?.elements?.find((e) => e.id === id);
     if (!el) return;
     const at = Math.round(S.time * 1000) / 1000;
     const can = at > el.start + 0.02 && at < el.start + el.duration - 0.02;
+    const isMedia = el.type === 'video' || el.type === 'audio';
     showContextMenu(x, y, [
       {
         label: can ? `在播放头切分（${at.toFixed(2)}s）` : '在播放头切分（播放头不在素材内）',
@@ -1557,6 +1641,11 @@ async function boot() {
         label: '复制（Ctrl+C）',
         run: () => { copySelection([id]); },
       },
+      ...(isMedia ? [{
+        label: el.loop ? '✓ 开启循环' : '开启循环',
+        title: el.loop ? '关闭后长度最多到素材结尾' : '允许把长度拉到素材结尾之后，循环播放',
+        run: () => toggleElementLoop(el),
+      }] : []),
       {
         label: '删除素材',
         danger: true,
@@ -1609,6 +1698,10 @@ async function boot() {
     onElementMenu: (id, x, y) => elementMenu(id, x, y),
     onCameraMenu: (id, x, y) => cameraMenu(id, x, y),
     onClipMenu: (id, x, y) => clipMenu(id, x, y),
+    sourceDuration: (el) => sourceDurationOf(el),
+    onSourceLimit: (side) => toast(side === 'start'
+      ? '左边界不能早于素材开头'
+      : '已到素材结尾；右键该素材勾选「开启循环」后可继续拉长', 'info'),
     onSplit: () => splitAtPlayhead(),
     onTextEdit: (kind, id, ev) => openTextEditor(kind, id, ev),
   });
