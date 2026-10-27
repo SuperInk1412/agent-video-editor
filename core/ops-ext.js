@@ -16,7 +16,9 @@
 // Ops added here obey the same rules as core ops: mutate the project in place,
 // return the ids that changed, and stay deterministic.
 
-export const EXT_OP_KINDS = [];
+import { HIERARCHY_OP_KINDS, applyHierarchyOp } from './hierarchy.js';
+
+export const EXT_OP_KINDS = [...HIERARCHY_OP_KINDS];
 
 /**
  * @param {object} project
@@ -25,9 +27,6 @@ export const EXT_OP_KINDS = [];
  * @returns {{changed: string[]}|null}
  */
 export function applyExtOp(project, op, api) {
-  switch (op?.op) {
-    // case 'exampleOp': { ... return { changed: [...] }; }
-    default:
-      return null;
-  }
+  if (HIERARCHY_OP_KINDS.includes(op?.op)) return applyHierarchyOp(project, op, api);
+  return null;
 }
