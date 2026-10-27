@@ -1,12 +1,11 @@
-// Timeline: ruler + camera stack + 3D element rows. Segments still live in the
-// project (AI / pipeline use them) but no longer get a lane here.
+// Timeline: ruler + camera stack + 2D and 3D element rows. Segments still live
+// in the project (AI / pipeline use them) but no longer get a lane here.
 // Element rows expand in place: the left column edits the element's properties
 // and the right lanes show per-property keyframes, all on the same row grid.
-// The camera is an element too: its attributes are folded inside the camera
-// row. The transform group has one row per property (center, path position,
-// picture pivot/offset, opacity, scale); each lane's diamonds are that
-// property's keyframes.
-import { timecode } from '/core/time.js';
+// 2D rows expose the transform in pixels and metres (transform.z is depth);
+// 3D rows expose the parent/world transform. The camera is an element too:
+// its attributes are folded inside the camera row.
+import { timecode, sampleTrack } from '/core/time.js';
 import { objectPose } from '/core/scene.js';
 import { childrenOf } from '/core/hierarchy.js';
 import { pathPos, cameraTransform, cameraParamValue } from '/core/camera.js';
@@ -57,11 +56,15 @@ export class Timeline {
     };
     this.propSel = null;
     this._autoObj = null;
+    this._autoEl = null;
     this._scrollTo = null;
     this._pending = new Map();
     this._editTimes = new Map();
     this._propRows = [];
+    this._elPropRows = [];
     this._objHeads = new Map();
+    this._elHeads = new Map();
+    this.expandedEls = new Set();
     this._anyPointerDown = false;
     this._pendingRender = false;
     // Expanding the timeline resizes the stage; if the user is dragging an
@@ -162,6 +165,7 @@ export class Timeline {
 
   setSelection(sel) {
     const prev = this.objectId;
+    const prevEl = this.elementId;
     this.pool = normalizeSelection(sel?.pool || (
       sel?.camera && this._activeCameraId() ? selectOne('element', cameraRef(this._activeCameraId()))
         : sel?.objectId ? selectOne('element', objectRef(sel.objectId))
@@ -173,7 +177,9 @@ export class Timeline {
     this.objectId = sel?.objectId || null;
     this.cameraSel = !!sel?.camera;
     const id = this.objectId;
+    const elId = this.elementId;
     if (!id) this._autoObj = null;
+    if (!elId) this._autoEl = null;
     let force = false;
     if (id && id !== this._autoObj && !this.expanded.has(id)) {
       this.expanded.add(id);
@@ -183,7 +189,15 @@ export class Timeline {
     } else if (id && id !== prev) {
       force = true;
     }
-    if (id !== prev) this.propSel = null;
+    if (elId && elId !== this._autoEl && !this.expandedEls.has(elId)) {
+      this.expandedEls.add(elId);
+      this._autoEl = elId;
+      this._scrollTo = `el:${elId}`;
+      force = true;
+    } else if (elId && elId !== prevEl) {
+      force = true;
+    }
+    if (id !== prev || elId !== prevEl) this.propSel = null;
     if (force) {
       if (this._anyPointerDown) {
         this._pendingRender = true;
@@ -257,7 +271,8 @@ export class Timeline {
 
   _updateHeight() {
     const app = document.querySelector('#app');
-    const open = (!!this.camOpenId && !!this.project?.camera) || this.expanded.size > 0;
+    const open = (!!this.camOpenId && !!this.project?.camera)
+      || this.expanded.size > 0 || this.expandedEls.size > 0;
     if (app) app.classList.toggle('tl-expanded', open);
   }
 
@@ -298,6 +313,8 @@ export class Timeline {
     const objs = Array.isArray(p.scene?.objects) ? p.scene.objects : [];
     const ids = new Set(objs.map((o) => o.id));
     for (const id of [...this.expanded]) if (!ids.has(id)) this.expanded.delete(id);
+    const elIds = new Set(p.elements.map((e) => e.id));
+    for (const id of [...this.expandedEls]) if (!elIds.has(id)) this.expandedEls.delete(id);
 
     // ruler
     this.rulerTrack.innerHTML = '';
@@ -334,32 +351,19 @@ export class Timeline {
     // v2 (2D) element lanes, then the 3D objects
     this.elsWrap.innerHTML = '';
     this._propRows = [];
+    this._elPropRows = [];
     this._objHeads = new Map();
+    this._elHeads = new Map();
     const els = [...p.elements].sort((a, b) => b.z - a.z);
-    for (const e of els) {
-      const row = el('div', 'tl-row tl-elrow');
-      const g = el('div', 'tl-gutter');
-      g.innerHTML = `<i class="type-dot" style="background:${TYPE_COLOR[e.type] || '#666'}"></i><span title="${escapeHtml(e.name)}">${escapeHtml(e.name || e.id)}</span>`;
-      g.dataset.id = e.id;
-      const track = el('div', 'tl-track');
-      const b = el('div', `blk el t-${e.type}`);
-      b.dataset.id = e.id;
-      b.style.left = `${e.start * this.pps}px`;
-      b.style.width = `${Math.max(4, e.duration * this.pps)}px`;
-      const label = e.type === 'text' ? String(e.style.text || '').slice(0, 24) : (e.src || '').split('/').pop();
-      b.innerHTML = `<span class="blk-name">${escapeHtml(label || e.id)}</span>`;
-      b.appendChild(el('div', 'handle handle-l'));
-      b.appendChild(el('div', 'handle handle-r'));
-      b.style.setProperty('--c', TYPE_COLOR[e.type] || '#666');
-      b.addEventListener('contextmenu', (ev) => {
-        ev.preventDefault();
-        ev.stopPropagation();
-        this.onClipMenu?.(e.id, ev.clientX, ev.clientY);
-      });
-      track.appendChild(b);
-      row.append(g, track);
-      this.elsWrap.appendChild(row);
+    if (els.length) {
+      const head = el('div', 'tl-row tl-sechead');
+      head.append(
+        el('div', 'tl-gutter', `<span>元素 · 2D</span><span class="tl-sub">${els.length} 个</span>`),
+        el('div', 'tl-track'),
+      );
+      this.elsWrap.appendChild(head);
     }
+    for (const e of els) this._elementGroup(e);
     this._build3D(p, objs);
 
     this.setTime(this.time);
@@ -932,6 +936,108 @@ export class Timeline {
     return row;
   }
 
+  _elementGroup(e) {
+    const open = this.expandedEls.has(e.id);
+    const row = el('div', 'tl-row tl-elhead');
+    row.dataset.el = e.id;
+    row.classList.toggle('sel', e.id === this.elementId);
+    const g = el('div', 'tl-gutter');
+    g.dataset.el = e.id;
+    const caret = el('button', 'tl-objtoggle', open ? '▾' : '▸');
+    caret.title = open ? '折叠属性' : '展开属性';
+    caret.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      this._toggleElementExpand(e.id);
+    });
+    const eye = el('button', 'tl-objeye', '◉');
+    eye.title = e.visible === false ? '显示' : '隐藏';
+    if (e.visible === false) eye.classList.add('off');
+    eye.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      this.onOp?.({ op: 'updateElement', id: e.id, patch: { visible: e.visible === false } });
+    });
+    const dot = el('i', 'type-dot');
+    dot.style.background = TYPE_COLOR[e.type] || '#666';
+    const name = el('span', 'tl-objname');
+    name.textContent = e.name || e.id;
+    name.title = e.name || e.id;
+    const kind = el('span', 'tl-objkind', '2D');
+    kind.title = '画面元素（纵深 z 单位：米）';
+    g.append(caret, eye, dot, name, kind);
+
+    const track = el('div', 'tl-track');
+    const b = el('div', `blk el t-${e.type}`);
+    b.dataset.id = e.id;
+    b.style.left = `${(Number(e.start) || 0) * this.pps}px`;
+    b.style.width = `${Math.max(4, (Number(e.duration) || 0) * this.pps)}px`;
+    const label = e.type === 'text' ? String(e.style?.text || '').slice(0, 24) : (e.src || '').split('/').pop();
+    b.innerHTML = `<span class="blk-name">${escapeHtml(label || e.id)}</span>`;
+    b.appendChild(el('div', 'handle handle-l'));
+    b.appendChild(el('div', 'handle handle-r'));
+    b.style.setProperty('--c', TYPE_COLOR[e.type] || '#666');
+    b.addEventListener('contextmenu', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      this.onClipMenu?.(e.id, ev.clientX, ev.clientY);
+    });
+    track.appendChild(b);
+    row.append(g, track);
+    this.elsWrap.appendChild(row);
+    this._elHeads.set(e.id, { row, g, eye, name, dot, block: b });
+
+    if (!open) return;
+    this.elsWrap.appendChild(this._sectionRow('变换', 'transform', 'px / m'));
+    if (this.sections.transform === 'collapsed') return;
+    const mode = this.sections.transform;
+    const show = (path) => mode === 'full' || this._elTrack(e, path).length > 0;
+    if (show('transform.x')) this.elsWrap.appendChild(this._elementNumRow(e, 'transform.x', 'X', { step: 0.1, axis: 'x', letter: 'X', unit: 'px' }));
+    if (show('transform.y')) this.elsWrap.appendChild(this._elementNumRow(e, 'transform.y', 'Y', { step: 0.1, axis: 'y', letter: 'Y', unit: 'px' }));
+    if (show('transform.z')) {
+      this.elsWrap.appendChild(this._elementNumRow(e, 'transform.z', '纵深 z', {
+        step: 0.05, axis: 'd', letter: '', unit: 'm', title: '纵深 z (m)，正值朝相机；在播放头打帧',
+      }));
+    }
+    if (show('transform.scale')) this.elsWrap.appendChild(this._elementNumRow(e, 'transform.scale', '缩放', { step: 0.01, axis: 'd', letter: '', unit: '×', min: 0 }));
+    if (show('transform.rotation')) this.elsWrap.appendChild(this._elementNumRow(e, 'transform.rotation', '旋转°', { step: 0.5, axis: 'd', letter: '', unit: '°' }));
+    if (show('transform.opacity')) {
+      this.elsWrap.appendChild(this._elementNumRow(e, 'transform.opacity', '不透明度', {
+        step: 0.01, axis: 'd', letter: '', unit: '', min: 0, max: 1,
+      }));
+    }
+  }
+
+  _elementNumRow(e, path, label, { step = 0.1, axis = 'd', letter = '', unit = '', min, max, title } = {}) {
+    const row = el('div', 'tl-row tl-prop tl-elprop');
+    row.dataset.el = e.id;
+    row.dataset.path = path;
+    const g = el('div', 'tl-gutter');
+    g.dataset.el = e.id;
+    const lab = el('span', 'tl-plabel', label);
+    lab.title = title || `${label}${unit ? ` (${unit})` : ''}`;
+    g.appendChild(lab);
+    const { box, inp } = this._numBox(axis, letter);
+    box.classList.add('tl-scalar');
+    inp.step = String(step);
+    if (Number.isFinite(min)) inp.min = String(min);
+    if (Number.isFinite(max)) inp.max = String(max);
+    inp.title = lab.title;
+    inp.addEventListener('focus', () => this.onPause?.());
+    inp.addEventListener('input', () => {
+      this._editTimes.set(`${e.id}:${path}`, round3(this.time));
+      this._schedule(`${e.id}:${path}`, () => this._commitElementNum(e.id, path));
+    });
+    inp.addEventListener('blur', () => { this._flush(`${e.id}:${path}`); this._syncProps(); });
+    g.appendChild(box);
+    const kf = el('button', 'tl-kf', '◆');
+    kf.title = '在当前时间打帧 / 删帧';
+    kf.addEventListener('click', (ev) => { ev.stopPropagation(); this._toggleElementKey(e.id, path); });
+    g.appendChild(kf);
+    const lane = el('div', 'tl-track');
+    row.append(g, lane);
+    this._elPropRows.push({ elId: e.id, path, input: inp, kf, lane, row, sig: '' });
+    return row;
+  }
+
   _objectGroup(o) {
     const open = this.expanded.has(o.id);
     const row = el('div', 'tl-row tl-objhead');
@@ -1062,6 +1168,17 @@ export class Timeline {
       this.sections.content = 'collapsed';
       this.sections.transform = objects.some((r) => this._objGroupKeyed(this._obj(r.id), 'transform'))
         ? 'keyed' : 'collapsed';
+      this.render(true);
+      return true;
+    }
+    const elements = refs.filter((r) => r.type === 'el');
+    if (elements.length) {
+      for (const r of elements) this.expandedEls.add(r.id);
+      this.sections.transform = elements.some((r) => {
+        const e = this._element(r.id);
+        return ['transform.x', 'transform.y', 'transform.z', 'transform.scale', 'transform.rotation', 'transform.opacity']
+          .some((p) => this._elTrack(e, p).length > 0);
+      }) ? 'keyed' : 'collapsed';
       this.render(true);
       return true;
     }
@@ -1234,6 +1351,24 @@ export class Timeline {
     return (this.project?.scene?.objects || []).find((o) => o.id === id) || null;
   }
 
+  _element(id) {
+    return (this.project?.elements || []).find((e) => e.id === id) || null;
+  }
+
+  _elTrack(e, path) {
+    return (e?.keyframes || [])
+      .filter((k) => k.path === path && Number.isFinite(Number(k.t)))
+      .sort((a, b) => Number(a.t) - Number(b.t));
+  }
+
+  /** Base / keyed value of a 2D element property (no motion presets or fades). */
+  _elValue(e, path, t) {
+    const prop = path.slice(path.lastIndexOf('.') + 1);
+    let base = path.startsWith('transform.') ? e?.transform?.[prop] : undefined;
+    if (base == null) base = (prop === 'scale' || prop === 'opacity') ? 1 : 0;
+    return sampleTrack(e?.keyframes, path, t, Number(base));
+  }
+
   _propKeys(o, path) {
     const tracks = o.tracks || {};
     const out = new Set();
@@ -1257,6 +1392,26 @@ export class Timeline {
       pr.keys = keys.map((t) => {
         const d = el('div', 'tl-key');
         d.dataset.obj = o.id;
+        d.dataset.path = pr.path;
+        d.dataset.t = String(t);
+        d.style.left = `${t * this.pps}px`;
+        d.title = `${pr.path} · ${t.toFixed(2)}s`;
+        pr.lane.appendChild(d);
+        return { t, node: d };
+      });
+    }
+    for (const k of pr.keys || []) k.node.classList.toggle('at', Math.abs(k.t - this.time) < 5e-4);
+  }
+
+  _refreshElLane(pr, e) {
+    const keys = this._elTrack(e, pr.path).map((k) => Math.round(Number(k.t) * 1000) / 1000);
+    const sig = keys.join(',');
+    if (sig !== pr.sig) {
+      pr.sig = sig;
+      pr.lane.innerHTML = '';
+      pr.keys = keys.map((t) => {
+        const d = el('div', 'tl-key');
+        d.dataset.el = e.id;
         d.dataset.path = pr.path;
         d.dataset.t = String(t);
         d.style.left = `${t * this.pps}px`;
@@ -1300,6 +1455,18 @@ export class Timeline {
         pr.kf.title = at ? '删除这一帧' : has ? `在当前时间打帧（已有 ${track.length} 帧）` : '在当前时间打帧';
       }
       if (pr.kind !== 'geom' && pr.kind !== 'color') this._refreshLane(pr, o);
+    }
+    for (const pr of this._elPropRows) {
+      const e = this._element(pr.elId);
+      if (!e) continue;
+      set(pr.input, this._elValue(e, pr.path, t));
+      const keys = this._elTrack(e, pr.path);
+      const at = keys.some((k) => Math.abs(Number(k.t) - t) < 1e-3);
+      const has = keys.length > 0;
+      pr.kf.classList.toggle('on', at);
+      pr.kf.classList.toggle('has', !at && has);
+      pr.kf.title = at ? '删除这一帧' : has ? `在当前时间打帧（已有 ${keys.length} 帧）` : '在当前时间打帧';
+      this._refreshElLane(pr, e);
     }
     const cam = this.project?.camera;
     if (this._camPos && cam) {
@@ -1350,6 +1517,21 @@ export class Timeline {
       if (nameEl) nameEl.textContent = o.name || o.id;
       const metaEl = h.block.querySelector('.blk-meta');
       if (metaEl) metaEl.textContent = `${dur.toFixed(2)}s`;
+    }
+    for (const [id, h] of this._elHeads) {
+      const e = this._element(id);
+      if (!e) continue;
+      if (document.activeElement !== h.name) h.name.textContent = e.name || e.id;
+      h.eye.classList.toggle('off', e.visible === false);
+      h.eye.title = e.visible === false ? '显示' : '隐藏';
+      h.row.classList.toggle('sel', id === this.elementId);
+      const left = `${(Number(e.start) || 0) * this.pps}px`;
+      const width = `${Math.max(4, (Number(e.duration) || 0) * this.pps)}px`;
+      if (h.block.style.left !== left) h.block.style.left = left;
+      if (h.block.style.width !== width) h.block.style.width = width;
+      const nameEl = h.block.querySelector('.blk-name');
+      const label = e.type === 'text' ? String(e.style?.text || '').slice(0, 24) : (e.src || '').split('/').pop();
+      if (nameEl) nameEl.textContent = label || e.id;
     }
   }
 
@@ -1414,6 +1596,36 @@ export class Timeline {
     this.onOp?.({ op: 'objectKey', id: objId, path, t, v });
   }
 
+  _commitElementNum(elId, path) {
+    const pr = this._elPropRows.find((x) => x.elId === elId && x.path === path);
+    const e = this._element(elId);
+    if (!pr || !e) return;
+    let v = readNumber(pr.input);
+    if (!Number.isFinite(v)) return;
+    if (path === 'transform.opacity') v = Math.max(0, Math.min(1, v));
+    if (path === 'transform.scale') v = Math.max(0, v);
+    const t = this._editTimes.get(`${elId}:${path}`) ?? round3(this.time);
+    if (this._elTrack(e, path).length) {
+      this.onOp?.({ op: 'keySet', id: elId, path, t, value: v });
+      return;
+    }
+    const key = path.slice(path.lastIndexOf('.') + 1);
+    this.onOp?.({ op: 'updateElement', id: elId, patch: { transform: { [key]: v } } });
+  }
+
+  _toggleElementKey(elId, path) {
+    const e = this._element(elId);
+    if (!e) return;
+    this.onPause?.();
+    const t = round3(this.time);
+    const keys = this._elTrack(e, path);
+    if (keys.some((k) => Math.abs(Number(k.t) - t) < 1e-3)) {
+      this.onOp?.({ op: 'keyRemove', id: elId, path, t });
+      return;
+    }
+    this.onOp?.({ op: 'keySet', id: elId, path, t, value: this._elValue(e, path, t) });
+  }
+
   _schedule(key, fn) {
     this._flush(key);
     const timer = setTimeout(() => {
@@ -1438,7 +1650,18 @@ export class Timeline {
       this.expanded.add(id);
       this._scrollTo = id;
     }
-    this._autoObj = this.expanded.has(id) ? id : this._autoObj;
+    this._autoObj = this.expanded.has(id) ? id : null;
+    this.render(true);
+  }
+
+  _toggleElementExpand(id) {
+    if (this.expandedEls.has(id)) {
+      this.expandedEls.delete(id);
+    } else {
+      this.expandedEls.add(id);
+      this._scrollTo = `el:${id}`;
+    }
+    this._autoEl = this.expandedEls.has(id) ? id : null;
     this.render(true);
   }
 
@@ -1465,12 +1688,23 @@ export class Timeline {
 
   _scrollObject(id) {
     const camId = this.camOpenId || this._activeCameraId();
-    const row = id === 'camera'
-      ? (camId ? this.inner.querySelector(`.tl-camhead[data-cam="${camId}"]`) : null)
-      : this.inner.querySelector(`.tl-objhead[data-obj="${id}"]`);
+    const elId = String(id).startsWith('el:') ? String(id).slice(3) : null;
+    const row = elId
+      ? this.inner.querySelector(`.tl-elhead[data-el="${elId}"]`)
+      : id === 'camera'
+        ? (camId ? this.inner.querySelector(`.tl-camhead[data-cam="${camId}"]`) : null)
+        : this.inner.querySelector(`.tl-objhead[data-obj="${id}"]`);
     if (!row) return;
     const r = row.getBoundingClientRect();
     const sr = this.scroll.getBoundingClientRect();
+    if (elId) {
+      // Auto-expanding a 2D element: put its header just below the sticky
+      // ruler so the property rows below it are visible too, not just the
+      // header (aligning to the scroll top hides it under the ruler).
+      const rulerH = this.rulerRow?.offsetHeight || 26;
+      this.scroll.scrollTop = Math.max(0, this.scroll.scrollTop + (r.top - sr.top) - rulerH - 4);
+      return;
+    }
     if (r.top < sr.top) this.scroll.scrollTop -= (sr.top - r.top) + 4;
     else if (r.bottom > sr.bottom) this.scroll.scrollTop += (r.bottom - sr.bottom) + 8;
   }
@@ -1485,21 +1719,23 @@ export class Timeline {
     if (pool.kind === 'element') {
       this.inner.querySelectorAll('.tl-camhead[data-cam], .blk.cam[data-cam]').forEach((n) => mark(n, cameraRef(n.dataset.cam)));
       this.inner.querySelectorAll('.tl-objhead[data-obj], .blk.ob[data-obj]').forEach((n) => mark(n, objectRef(n.dataset.obj)));
-      this.inner.querySelectorAll('.blk.el[data-id]').forEach((n) => mark(n, elementRef(n.dataset.id)));
+      this.inner.querySelectorAll('.tl-elhead[data-el], .blk.el[data-id]').forEach((n) => mark(n, elementRef(n.dataset.el || n.dataset.id)));
     } else if (pool.kind === 'property') {
       this.inner.querySelectorAll('.tl-prop[data-obj][data-path]').forEach((n) => mark(n, propertyRef(objectRef(n.dataset.obj), n.dataset.path)));
+      this.inner.querySelectorAll('.tl-elprop[data-el][data-path]').forEach((n) => mark(n, propertyRef(elementRef(n.dataset.el), n.dataset.path)));
       this.inner.querySelectorAll('.tl-camprop[data-cam][data-path]').forEach((n) => mark(n, propertyRef(cameraRef(n.dataset.cam), n.dataset.path)));
     } else if (pool.kind === 'keyframe') {
       this.inner.querySelectorAll('.tl-key[data-t]').forEach((n) => {
         if (n.dataset.cam) mark(n, keyframeRef(cameraRef(n.dataset.cam), n.dataset.path || 'path', n.dataset.t));
         else if (n.dataset.obj) mark(n, keyframeRef(objectRef(n.dataset.obj), n.dataset.path, n.dataset.t));
+        else if (n.dataset.el) mark(n, keyframeRef(elementRef(n.dataset.el), n.dataset.path, n.dataset.t));
       });
     }
   }
 
   _paintSelection() {
     this.inner.querySelectorAll('.blk.sel').forEach((n) => n.classList.remove('sel'));
-    this.inner.querySelectorAll('.tl-objhead.sel, .tl-prop.sel, .tl-camposrow.sel').forEach((n) => n.classList.remove('sel'));
+    this.inner.querySelectorAll('.tl-objhead.sel, .tl-elhead.sel, .tl-prop.sel, .tl-camposrow.sel').forEach((n) => n.classList.remove('sel'));
     this.inner.querySelectorAll('.tl-objhead.kin').forEach((n) => n.classList.remove('kin'));
     if (this.objectId) {
       this.inner.querySelector(`.blk.ob[data-obj="${this.objectId}"]`)?.classList.add('sel');
@@ -1516,6 +1752,10 @@ export class Timeline {
     }
     if (this.elementId) {
       this.inner.querySelector(`.blk.el[data-id="${this.elementId}"]`)?.classList.add('sel');
+      this.inner.querySelector(`.tl-elhead[data-el="${this.elementId}"]`)?.classList.add('sel');
+      if (this.propSel && this.propSel.elId === this.elementId) {
+        this.inner.querySelector(`.tl-elprop[data-el="${this.propSel.elId}"][data-path="${this.propSel.path}"]`)?.classList.add('sel');
+      }
     }
     if (this.cameraSel) {
       const camId = this._activeCameraId();
@@ -1703,8 +1943,21 @@ export class Timeline {
       this._paintSelection();
       return;
     }
+    const elKeyEl = target.closest?.('.tl-key[data-el]');
+    if (elKeyEl) {
+      const t = Number(elKeyEl.dataset.t);
+      const id = elKeyEl.dataset.el;
+      const ref = keyframeRef(elementRef(id), elKeyEl.dataset.path, t);
+      if (!this._pickPool('keyframe', ref, ev)) return;
+      this.elementId = id;
+      this.objectId = null; this.segmentId = null; this.cameraSel = false;
+      this.propSel = { elId: id, path: elKeyEl.dataset.path };
+      this.onSelect?.({ elementId: id, pool: this.pool });
+      this._paintSelection();
+      return;
+    }
     const key = target.closest?.('.tl-key');
-    if (key) {
+    if (key && key.dataset.obj) {
       const t = Number(key.dataset.t);
       const ref = keyframeRef(objectRef(key.dataset.obj), key.dataset.path, t);
       if (!this._pickPool('keyframe', ref, ev)) return;
@@ -1715,7 +1968,20 @@ export class Timeline {
       this._paintSelection();
       return;
     }
-    const propGutter = target.closest?.('.tl-prop .tl-gutter');
+    const elPropGutter = target.closest?.('.tl-elprop[data-el] .tl-gutter');
+    if (elPropGutter) {
+      const pr = elPropGutter.closest('.tl-elprop');
+      const id = pr.dataset.el;
+      const ref = propertyRef(elementRef(id), pr.dataset.path);
+      if (!this._pickPool('property', ref, ev)) return;
+      this.elementId = id;
+      this.objectId = null; this.segmentId = null; this.cameraSel = false;
+      this.propSel = { elId: id, path: pr.dataset.path };
+      this.onSelect?.({ elementId: id, pool: this.pool });
+      this._paintSelection();
+      return;
+    }
+    const propGutter = target.closest?.('.tl-prop[data-obj] .tl-gutter');
     if (propGutter) {
       const pr = propGutter.closest('.tl-prop');
       const id = pr.dataset.obj;
@@ -1732,6 +1998,18 @@ export class Timeline {
     const camHead = target.closest?.('.tl-camhead[data-cam]');
     if (camHead) {
       this._startCameraDrag(camHead.dataset.cam, ev.clientY, camHead);
+      return;
+    }
+    // 2D element header: select without moving the clip
+    const elHead = target.closest?.('.tl-elhead[data-el]');
+    if (elHead && !target.closest?.('.blk.el')) {
+      const id = elHead.dataset.el;
+      this.elementId = id;
+      this._pickPool('element', elementRef(id), ev);
+      this.objectId = null; this.segmentId = null; this.cameraSel = false;
+      this.propSel = null;
+      this.onSelect?.({ elementId: id, pool: this.pool });
+      this._paintSelection();
       return;
     }
     const objHead = target.closest?.('.tl-objhead');
@@ -1821,6 +2099,8 @@ export class Timeline {
       const id = blk.dataset.id;
       this.elementId = id;
       this._pickPool('element', elementRef(id), ev);
+      this.objectId = null; this.segmentId = null; this.cameraSel = false;
+      this.propSel = null;
       this.onSelect?.({ elementId: id, segmentId: this.project.elements.find((e) => e.id === id)?.segment || null, pool: this.pool });
       this._paintSelection();
 

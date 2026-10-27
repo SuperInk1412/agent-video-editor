@@ -233,6 +233,14 @@ body.look-mode #stageBox { box-shadow: 0 0 0 2px rgba(255,209,102,.65), 0 0 30px
 .tl-objhead.kin { background: rgba(255,209,102,.055); }
 .tl-objhead.kin .tl-gutter { background: rgba(255,209,102,.04); }
 .tl-objhead.kin .tl-track { background: rgba(255,209,102,.035); }
+/* 2D elements: same expandable header row, without 3D parenting chrome. */
+.tl-elhead { height: 30px; background: #0b1017; }
+.tl-elhead .tl-track { background: #0b1017; }
+.tl-elhead .tl-gutter { gap: 5px; color: var(--text); }
+.tl-elhead.sel { background: #0e1820; }
+.tl-elhead.sel .tl-gutter { background: #0e1820; }
+.tl-elhead.sel .tl-track { background: #0e1820; }
+.tl-elhead .tl-objkind { background: #17121f; border-color: #45305c; color: #d6b8ff; }
 .tl-objtoggle {
   width: 18px; height: 18px; padding: 0; border: 0; background: transparent;
   color: var(--dim); font-size: 10px; cursor: pointer; flex: 0 0 18px;
