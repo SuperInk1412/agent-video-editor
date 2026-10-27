@@ -716,20 +716,11 @@ export class Preview {
     if (world) {
       const cyW = (Number(world.meta?.height) || 1080) / 200;
       const S = W / (Number(world.meta?.width) || 1920);
-      // Depth ALONG the view axis (clip w = view-space depth), not the distance
-      // to the centre: elements on one plane facing the camera have the same
-      // depth however far from the centre they sit, so the layer order holds
-      // (a full-frame backdrop must not jump in front of everything).
-      const vp = world.vp;
-      const depth = (L) => {
-        let w = [(L.st.x || 0) / 100, cyW - (L.st.y || 0) / 100, L.st.z || 0];
-        if (L.carry) {
-          const m = L.carry;
-          w = [0, 1, 2].map((i) => m[i] * w[0] + m[4 + i] * w[1] + m[8 + i] * w[2] + m[12 + i]);
-        }
-        return vp[3] * w[0] + vp[7] * w[1] + vp[11] * w[2] + vp[15];
-      };
-      list = layers.map((L, i) => ({ L, i, d: depth(L) }))
+      // Order by the distance from the camera to each element's PLANE: elements
+      // on one plane keep their layer order from any viewing angle (a
+      // full-frame backdrop stays behind the type even when the editor camera
+      // looks at the canvas obliquely); only different planes sort far to near.
+      list = layers.map((L, i) => ({ L, i, d: this._planeDist(L, world.camPos, cyW) }))
         .sort((a, b) => (Math.abs(a.d - b.d) > 1e-4 ? b.d - a.d : a.i - b.i))
         .map((e) => e.L);
       for (const pr of [this.prog.tex, this.prog.shape]) {
@@ -897,24 +888,33 @@ export class Preview {
     return out;
   }
 
+  /**
+   * Distance from the camera to a layer's plane (world-mode draw order and
+   * picking). Elements on one plane share the key from any viewing angle, so
+   * their layer order holds; only different planes sort by depth.
+   */
+  _planeDist(L, camPos, cyW) {
+    let w = [(L.st.x || 0) / 100, cyW - (L.st.y || 0) / 100, L.st.z || 0];
+    let n = [0, 0, 1];
+    if (L.carry) {
+      const m = L.carry;
+      w = [0, 1, 2].map((i) => m[i] * w[0] + m[4 + i] * w[1] + m[8 + i] * w[2] + m[12 + i]);
+      n = [m[8], m[9], m[10]];
+    }
+    const c = camPos || [0, cyW, 20];
+    return Math.abs((c[0] - w[0]) * n[0] + (c[1] - w[1]) * n[1] + (c[2] - w[2]) * n[2]);
+  }
+
   /** canvas-space hit test -> topmost element id */
   hitTest(cx, cy, t) {
     const layers = (this.layers && this.layersAt === t) ? this.layers : this.computeLayers(t);
     if (this._worldMode && this.scene3d?.lastVP) {
       const meta = this.project?.meta || {};
       const cyW = (Number(meta.height) || 1080) / 200;
-      const vp = this.scene3d.lastVP;
-      // Match _drawLayers: compare depth along the view axis, not distance to
-      // the centre, so a full-frame backdrop cannot win over everything.
-      const depth = (L) => {
-        let w = [(L.st.x || 0) / 100, cyW - (L.st.y || 0) / 100, L.st.z || 0];
-        if (L.carry) {
-          const m = L.carry;
-          w = [0, 1, 2].map((i) => m[i] * w[0] + m[4 + i] * w[1] + m[8 + i] * w[2] + m[12 + i]);
-        }
-        return vp[3] * w[0] + vp[7] * w[1] + vp[11] * w[2] + vp[15];
-      };
-      const list = layers.map((L, i) => ({ L, i, d: depth(L) }))
+      const camPos = this.scene3d.lastCam?.pos || [0, cyW, 20];
+      // Same key as _drawLayers (distance to each element's plane): the
+      // nearest plane wins, and on one plane the top layer wins.
+      const list = layers.map((L, i) => ({ L, i, d: this._planeDist(L, camPos, cyW) }))
         .sort((a, b) => (Math.abs(a.d - b.d) > 1e-4 ? a.d - b.d : b.i - a.i));
       for (const { L } of list) {
         const poly = this._layerCorners(L);
