@@ -37,9 +37,14 @@ const hexRgb = (h) => {
 export function generateCity(worldInput, { path = null } = {}) {
   const w = normalizeWorld(worldInput);
   const rng = mulberry32(w.seed | 0);
-  const { nx, nz, block, street } = w.grid;
-  const spanX = nx * (block + street);
-  const spanZ = nz * (block + street);
+  // An empty world keeps the same shape (sky, fog, light, empty lists) so the
+  // viewport, the bake and Blender never branch on missing fields.
+  const empty = w.source === 'none';
+  const { block, street } = w.grid;
+  const nx = empty ? 0 : w.grid.nx;
+  const nz = empty ? 0 : w.grid.nz;
+  const spanX = empty ? 100 : nx * (block + street);
+  const spanZ = empty ? 100 : nz * (block + street);
   const buildings = [];
   const neons = [];
   const palette = w.palette.map(hexRgb);
@@ -126,6 +131,8 @@ export function generateCity(worldInput, { path = null } = {}) {
 
   return {
     hash: cityHash(w, path),
+    source: w.source,
+    empty,
     seed: w.seed,
     bounds: { x0: -spanX / 2, x1: spanX / 2, z0: -spanZ / 2, z1: spanZ / 2 },
     grid: { ...w.grid },

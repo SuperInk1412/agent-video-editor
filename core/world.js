@@ -1,5 +1,10 @@
 // World defaults + normalisation (shared by core, engine and the viewport).
 // Keeping this in core keeps the schema free of engine imports.
+// `source`: 'procedural' (the generated city) or 'none' (an empty world: sky,
+// fog and light only — every project starts like this, see
+// docs/DESIGN-UNIFIED-SPACE.md). Other fields still normalise for 'none' so
+// switching to a city later keeps the user's parameters.
+export const WORLD_SOURCES = ['procedural', 'none'];
 export const DEFAULT_WORLD = {
   source: 'procedural',
   seed: 2077,
@@ -25,6 +30,7 @@ export function normalizeWorld(w) {
   return {
     ...d,
     ...src,
+    source: WORLD_SOURCES.includes(src.source) ? src.source : d.source,
     grid: { ...d.grid, ...(src.grid || {}) },
     height: { ...d.height, ...(src.height || {}) },
     window: { ...d.window, ...(src.window || {}) },
