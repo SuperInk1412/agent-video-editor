@@ -280,13 +280,48 @@ export class Timeline {
     const elIds = new Set(p.elements.map((e) => e.id));
     for (const id of [...this.expandedEls]) if (!elIds.has(id)) this.expandedEls.delete(id);
 
-    // ruler
+    // ruler: labels adapt to the zoom, and once a frame is wide enough the
+    // minor ticks switch from seconds to exact frame boundaries. Frame counts
+    // are used (not accumulated seconds) so ticks never drift at 24/30/60 fps.
     this.rulerTrack.innerHTML = '';
-    const step = this.pps > 90 ? 1 : this.pps > 40 ? 2 : this.pps > 18 ? 5 : 10;
-    for (let t = 0; t <= dur + 0.001; t += step) {
-      const tick = el('div', 'tl-tick');
+    const fps = Math.max(1, Math.round(Number(p.meta.fps) || 24));
+    const pxPerFrame = this.pps / fps;
+    const totalFrames = Math.max(0, Math.floor(dur * fps + 1e-6));
+    const NICE_FRAMES = [1, 2, 3, 5, 6, 10, 12, 15, 20, 24, 30, 48, 60, 90, 120, 150, 240, 300, 600, 1200, 1800, 3600, 7200, 18000, 36000];
+    const atLeast = (minPx) => NICE_FRAMES.find((n) => n * pxPerFrame >= minPx) || NICE_FRAMES[NICE_FRAMES.length - 1];
+    let minorFrames = pxPerFrame >= 6 ? 1
+      : pxPerFrame >= 3 ? 2
+        : pxPerFrame >= 1.5 ? 5
+          : pxPerFrame >= 0.75 ? 10
+            : atLeast(7);
+    let majorFrames = atLeast(68);
+    if (totalFrames / majorFrames > 2000) {
+      majorFrames = NICE_FRAMES.find((n) => n >= majorFrames && totalFrames / n <= 2000)
+        || Math.ceil(totalFrames / 2000);
+    }
+    minorFrames = Math.min(minorFrames, majorFrames);
+    // A very long timeline at a high zoom must not create tens of thousands of
+    // nodes; widen the minor grid until the count is bounded.
+    if (totalFrames / minorFrames > 4000) {
+      minorFrames = NICE_FRAMES.find((n) => n >= minorFrames && totalFrames / n <= 4000)
+        || Math.ceil(totalFrames / 4000);
+    }
+    const majorSet = new Set();
+    for (let f = 0; f <= totalFrames; f += majorFrames) majorSet.add(f);
+    if (minorFrames < majorFrames) {
+      for (let f = 0; f <= totalFrames; f += minorFrames) {
+        if (majorSet.has(f)) continue;
+        const tick = el('div', 'tl-tick minor');
+        tick.style.left = `${(f / fps) * this.pps}px`;
+        this.rulerTrack.appendChild(tick);
+      }
+    }
+    const useTimecode = majorFrames < fps;
+    for (const f of majorSet) {
+      const t = f / fps;
+      const tick = el('div', 'tl-tick major');
       tick.style.left = `${t * this.pps}px`;
-      const lab = el('span', 'tl-ticklabel', step >= 1 ? fmtTick(t) : timecode(t, p.meta.fps));
+      const lab = el('span', 'tl-ticklabel', useTimecode ? timecode(t, fps) : fmtTick(t));
       tick.appendChild(lab);
       this.rulerTrack.appendChild(tick);
     }

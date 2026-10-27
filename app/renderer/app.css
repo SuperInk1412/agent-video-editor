@@ -205,6 +205,8 @@ body.look-mode #stageBox { box-shadow: 0 0 0 2px rgba(255,209,102,.65), 0 0 30px
 .tl-sub { margin-left: auto; font-size: 10px; color: var(--dim2); flex: 0 0 auto; }
 .tl-track { position: relative; flex: 1; min-width: 0; }
 .tl-tick { position: absolute; top: 0; bottom: 0; width: 1px; background: #1a2230; }
+.tl-tick.major { background: #223044; }
+.tl-tick.minor { top: 14px; background: #141c28; }
 .tl-ticklabel { position: absolute; left: 4px; top: 5px; font-size: 10px; color: var(--dim2); font-family: var(--mono); white-space: nowrap; }
 .tl-beat { position: absolute; bottom: 0; height: 6px; width: 1px; background: #2a3d4a; }
 .tl-camrow { height: 30px; }
