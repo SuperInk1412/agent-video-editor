@@ -202,6 +202,14 @@ export class Inspector {
       this._field({ label: '旋转°', value: round(kv('transform.rotation', el.transform.rotation), 2), step: 0.5, kf: true, path: 'transform.rotation', onChange: edit('transform.rotation', (v) => ({ transform: { rotation: v } })) }),
       this._field({ label: '不透明度', value: round(kv('transform.opacity', el.transform.opacity), 3), step: 0.01, min: 0, max: 1, percent: true, kf: true, path: 'transform.opacity', onChange: edit('transform.opacity', (v) => ({ transform: { opacity: v } })) }),
       this._field({ label: '跟随节拍', value: el.punch || 0, step: 0.05, min: 0, max: 2, onChange: (v) => set('punch', { punch: v }) }),
+      this._field({
+        label: '贴屏', type: 'checkbox', value: !!el.parent, span: 1,
+        // screen-locked = parented to the active camera, bound at the playhead (no jump either way)
+        onChange: (v) => this.opts.onOp(v
+          ? { op: 'elementParent', id: el.id, parent: project.activeCameraId, t: tNow() }
+          : { op: 'elementUnparent', id: el.id, t: tNow() }),
+      }),
+      el.parent ? h('div', { class: 'hint' }, `跟随相机 ${(project.cameras || []).find((c) => c.id === el.parent.id)?.name || el.parent.id}：相机怎么动，它在画面上就停在哪里。取消时元素留在当前位置。`) : null,
     ));
 
     this.root.appendChild(this._section('运动',

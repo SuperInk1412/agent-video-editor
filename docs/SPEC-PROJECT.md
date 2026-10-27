@@ -117,6 +117,10 @@ Blender 侧这些效果由合成器节点组 `VDM_Composite` 完成。节点组�
 - 预览：2D 图层在 Scene3D 画完自己的物体后，用同一个视图投影矩阵画进世界（编辑视口、相机分层、鱼眼同样适用）。
 - Blender（单相机路径）：2D 构建器（同一套 `eval_element`）把元素建进 3D 场景，挂在 `VDM_Screen` 支架下（位于画面平面中心、缩放 1/100）；
   空世界用 0.8 的像素滤镜（与 2D 一致）。
+- **贴屏（以相机为父）**：`el.parent = { id: <相机 id>, kind: 'camera', bind: { pos, basis } }`，ops `elementParent {id, parent, t}` /
+  `elementUnparent {id, t}`（`core/hierarchy.js`，经 ops-ext 注册）。绑定时不动；之后元素随相机的刚体运动（位置 + 旋转）一起动，在画面上保持原位；
+  变焦（fov）仍会改变它的大小。取消时元素中心留在原处（x / y / z 及其关键帧平移，旋转不回写）。预览在 VERT 里乘 `u_carry`，
+  Blender 用逐帧烘焙的 `shot.elementCarriers` 驱动 `VDM_Carry_<id>` 空物体。检查器 2D 元素「贴屏」开关绑定到当前激活相机。
 - **已知限制**：多相机分层（VSE）路径仍把 2D 元素作为贴屏层叠在最上面（不产生视差）；预览里点选 2D 元素仍按画面坐标命中，相机移动后会有偏差。
 
 ## ops（唯一的写入口）
