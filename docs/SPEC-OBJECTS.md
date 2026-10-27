@@ -92,11 +92,52 @@ vdm ops '{"op":"objectRemove","id":"ob_1"}'
 - `objectUnkey`：删该时刻的键；轨道空了就删轨道。
 - 撤销/重做走引擎的快照历史，所有 ops 通用。
 
+## 父子（空元素）
+
+`core/hierarchy.js`。任何元素都能挂到另一个元素下；`empty`（空元素）是专门当父级用的纯变换元素，
+视口里画成黄色三杠十字，不进成片。
+
+```json
+"parent": {
+  "id": "ob_rig",
+  "inherit":  { "pos": true, "rot": true, "scale": true },
+  "strength": { "rot": 1, "scale": 1 },
+  "bind": { "pos": [x, y, z], "basis": [[right], [up], [forward]], "scale": [sx, sy, sz] }
+}
+```
+
+- **子元素自己的数值不变**：挂上时只记下父级当时的世界坐标系（`bind`），之后父级相对这一刻的运动带着子元素走。
+  所以挂上不跳位，时间轴上子元素的中心点/位置/缩放仍是它自己的数值（父级空间里的本地值）。
+- 求值：`x' = c + L·(x − bind.pos)`；`c` = 父级当前位置（`pos` 关掉时用 `bind.pos`）；
+  `L = Rd^w · B·diag(k)·Bᵀ`，`Rd` = 父级相对绑定时的旋转（`rot` 关掉时为单位阵），`w` = 旋转强度；
+  `k = 1 + (父级缩放 / bind.scale − 1) · 缩放强度`（`scale` 关掉时为 1）。父级的坐标系 = 几何中心 + 朝向基 + 缩放。
+- 强度 0..1，可打关键帧：轨道 `parent.rot` / `parent.scale`（标量，支持 `ease`）。
+- 多级父子逐级组合，最多 32 级；成环拒绝。父级被 `objectRemove` 删掉后，子元素回到自己的数值（会跳位，见限制）。
+- 不跟随：透明度、颜色等非变换属性。
+
+Ops（`core/ops-ext.js` 分发，`OP_KINDS` 已包含）：
+
+```bash
+vdm ops '{"op":"objectAdd","object":{"id":"ob_rig","type":"empty","pivot":[0,40,-300]}}'
+vdm ops '{"op":"objectParent","id":"ob_1","parent":"ob_rig","t":2}'                       # 以 t 时刻为准绑定，不跳位
+vdm ops '{"op":"objectParent","id":"ob_1","parent":"ob_rig","t":2,"inherit":{"rot":false},"strength":{"scale":0.5}}'
+vdm ops '{"op":"objectParentKey","id":"ob_1","channel":"rot","t":3,"v":0.3,"ease":"linear"}'
+vdm ops '{"op":"objectParentUnkey","id":"ob_1","channel":"rot","t":3}'
+vdm ops '{"op":"objectUnparent","id":"ob_1","t":2}'                                       # 保持 t 时刻的世界位置
+```
+
+- `objectParent` 换父级、改开关、改基础强度都会先"取下再挂上"，保证 `t` 时刻不跳位；`parent: null` 等于 `objectUnparent`。
+- `objectUnparent` 把父级在 `t` 时刻的作用**写回**子元素自己的数值和关键帧（中心点 / 位置 / 缩放 / 朝向 / 自转）。
+  在 `t` 时刻精确；父级本身在动时，其它时刻只保留子元素自己的动画（父级的运动不再叠加）。
+  父级有非均匀缩放且带旋转时，取最接近的无剪切姿态；`pivot.x/y/z` 分轴轨道在有旋转时会合并成一条 vec3 轨
+  （按各分轴键时刻的并集取样，分轴的 ease 不保留）。
+- 检查器「父级」区块：选父级、三个跟随开关、旋转/缩放强度（◆ 打帧，Shift+◆ 删帧）。
+
 ## 预览 / 成片一致性
 
-- WebGL：`app/renderer/js/preview3d.js` 用 `objectPose()` 逐对象画单位立方体（一个对象一次 draw），
+- WebGL：`app/renderer/js/preview3d.js` 用 `worldPose()`（`objectPose()` + 父子链）逐对象画单位立方体（一个对象一次 draw），
   颜色/自发光/雾与城市同一套；选中框与运动路径在 `pathgizmo.js`。
-- Blender：`engine/shot.js::bakeObjects()` 在 **JS 侧**用同一个 `objectPose()` 烘逐帧
+- Blender：`engine/shot.js::bakeObjects()` 在 **JS 侧**用同一个 `worldPose()` 烘逐帧
   `{f, loc, rot(3×3 basis), size, opacity}` 进 shot 包；`blender/vdm_city.py::_build_objects()`
   按帧写 location / rotation_quaternion / scale 关键帧，窗外缩放为 1e-4（不可见）。
   两边不各自实现求值，避免漂移。
@@ -135,7 +176,9 @@ vdm ops '{"op":"objectRemove","id":"ob_1"}'
 
 ## 已知限制（下一步）
 
-- 贴图/文字平面、父子（空元素）、子场景还没做。
+- 贴图/文字平面、子场景还没做。
+- 父子：视口选中框、拖拽手柄、运动路径和时间轴属性行（`main.js` / `pathgizmo.js` / `timeline.js`）仍按子元素的
+  本地值画，带父级的元素在视口里拖动会按本地坐标改；大纲树还没有。删除父级不会先把作用写回子元素。
 - 相机轨道的 `speed` 速度曲线还在数据里，当前时间轴只显示位置帧，还没有单独的曲线编辑入口；
   `vdm cam` CLI 也还没暴露 speed。
 - 视口拾取是 CPU ray vs 有向盒子；不考虑城市楼体遮挡（时间线选中永远可用）。
