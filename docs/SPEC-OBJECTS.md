@@ -46,8 +46,8 @@ M = T(pivot) · R(dir, roll) · T(position) · S(scale) · geometry
 - 盒子几何**以几何中心为原点**（不是贴地）。要落地：`pivot.y = geom.h / 2`（检查器「落地」按钮）。
 - `dir` 是朝向，元素正面朝它看的方向；`roll` 是绕朝向自转（度）。
 - `geom` 是米制全尺寸；`scale` 再乘上去。预览和 Blender 都先缩放单位立方体到 `geom`，再乘 `scale`。
-- 目前可绘制类型：`solid / shape / text / image / video / container`，都按**盒子**画
-  （贴图/文字平面还没做）。`empty / audio / camera` 不画。
+- `solid / shape / container` 按**盒子**画；`image / video` 画成贴图平面，`text` 画成 3D 文字（见下节）。
+  `empty` 只在编辑器视口里画成黄色十字；`audio / camera` 不画。
 
 ## 通道（tracks）
 
@@ -91,6 +91,33 @@ vdm ops '{"op":"objectRemove","id":"ob_1"}'
   可带 `ease/out/in/speed`。`out/in` 是相对键值的贝塞尔手柄偏移（米/单位向量）。
 - `objectUnkey`：删该时刻的键；轨道空了就删轨道。
 - 撤销/重做走引擎的快照历史，所有 ops 通用。
+
+## 图片 / 视频 / 文字
+
+`core/objects-media.js`（数据与公式）、`blender/vdm_objects.py`（成片）、`preview3d.js`（视口）。
+
+```json
+{ "type": "image", "src": "media/poster.png", "geom": { "w": 8, "h": 4.5 },
+  "style": { "fit": "contain", "uv": [0, 0, 1, 1], "emissive": 1, "opacity": 1 } }
+{ "type": "video", "src": "media/clip.mp4", "srcIn": 3, "rate": 1, "geom": { "w": 8, "h": 4.5 } }
+{ "type": "text", "style": { "text": "锈梦", "size": 2.4, "color": "#ffd23f", "font": "media/fonts/sarasa-bold.ttf",
+                              "align": "center", "tracking": 0, "lineHeight": 1.2, "extrude": 0, "emissive": 1 } }
+```
+
+- **朝向**：平面/文字的正面朝 `dir`（和「面向镜头」一致），从正面看不镜像；背面可见（镜像）。
+- **图片/视频**：`geom.w × geom.h` 是"框"（米），`geom.d` 不用。`fit`：`contain`（默认，按素材比例缩到框内）、
+  `cover`（铺满框、居中裁掉多余部分）、`stretch`。`uv` 先裁出素材的一块再适配（0..1，v 向上）。
+  自发光材质：亮度 = 素材颜色 × `emissive`，和 Blender 的 Emission 一致；雾和城市同一套。
+- **视频**：项目时间 t → 源时间 `srcIn + (t − start) · rate`，夹在片段内（不循环）。成片前引擎把
+  `[srcIn, srcIn + duration·rate]` 按项目 fps 抽成**保持原比例**的 PNG 序列（`engine/media-objects.js`，按内容哈希缓存），
+  Blender 每帧选第 `floor((t − start)·rate·fps) + 1` 张。视口用 `<video>`：暂停时逐帧对齐，播放时跟播、漂移 > 0.35 s 才校正。
+- **文字**：`size` = **一个 em 的高度（米）**，和 CSS 一致。Blender 按字体包围盒定字号，所以成片里会按字体文件
+  `head` 表的包围盒把字号和行距换算回 em（实测宽度差约 1%）。`font` 可以是项目里的字体文件（`media/fonts/*.ttf`，
+  视口用 `FontFace` 加载同一个文件）或字体名（默认 `SimHei`，走 Blender 的字体表）。
+  `align` 左/右对齐时文字从原点向右/向左排（Blender 的锚点规则，视口一致）；多行用 `\n`。
+  `extrude` 只在成片里有厚度（前后各一半），视口画正面。`tracking` 是近似（Blender 按字宽倍数，视口按 em）。
+- 检查器「内容」区块可改素材、适配、框尺寸、入点/速度、文字排版；添加这三类元素目前走 `vdm ops` / AI
+  （添加菜单在 `main.js`，待接）。
 
 ## 父子（空元素）
 
@@ -176,7 +203,9 @@ vdm ops '{"op":"objectUnparent","id":"ob_1","t":2}'                             
 
 ## 已知限制（下一步）
 
-- 贴图/文字平面、子场景还没做。
+- 子场景还没做。
+- 图片/视频/文字：文字的竖直居中、字距只能近似一致；视口里文字没有厚度；视频不循环；
+  界面「添加」菜单还不能加空元素/图片/视频/文字。
 - 父子：视口选中框、拖拽手柄、运动路径和时间轴属性行（`main.js` / `pathgizmo.js` / `timeline.js`）仍按子元素的
   本地值画，带父级的元素在视口里拖动会按本地坐标改；大纲树还没有。删除父级不会先把作用写回子元素。
 - 相机轨道的 `speed` 速度曲线还在数据里，当前时间轴只显示位置帧，还没有单独的曲线编辑入口；
