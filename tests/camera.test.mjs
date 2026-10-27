@@ -10,6 +10,11 @@ import { generateCity, cityHash, DEFAULT_WORLD } from '../engine/city.js';
 import { normalizeProject } from '../core/schema.js';
 import { applyOp } from '../core/ops.js';
 
+const near = (a, b, eps = 1e-6, msg = '') => {
+  assert.equal(a.length, b.length, msg);
+  a.forEach((v, i) => assert.ok(Math.abs(v - b[i]) <= eps, `${msg}[${i}]: ${v} vs ${b[i]}`));
+};
+
 const project = () => normalizeProject({
   schema: 'vdm.project/1', rev: 1,
   meta: { title: 'cam', fps: 24, width: 1920, height: 1080, duration: 6, background: '#000' },
@@ -180,6 +185,26 @@ test('manual look fades in and out instead of snapping', () => {
     prev = d;
   }
   assert.ok(maxStep < 5, `look step ${maxStep}° (hard window switch would be ~90°)`);
+});
+
+test('a single-key camera keeps its manual look and never returns look == pos', () => {
+  const cam = normalizeCamera({
+    fov: 51.28, shake: { amp: 0 },
+    path: [{ t: 0, pos: [0, 5.4, 20], look: [0, 5.4, 0] }],
+  });
+  for (const t of [0, 0.5, 1, 2, 5, 20]) {
+    const c = evalCamera({ camera: cam }, t);
+    near(c.look, [0, 5.4, 0], 1e-6, `look t=${t}`);
+    assert.ok(v3.len(v3.sub(c.look, c.pos)) > 1, 'look direction stays valid');
+  }
+
+  const free = normalizeCamera({
+    fov: 60, shake: { amp: 0 },
+    path: [{ t: 0, pos: [0, 5.4, 20] }],
+  });
+  const f = evalCamera({ camera: free }, 5);
+  assert.ok(v3.len(v3.sub(f.look, f.pos)) > 1, 'static camera falls back to forward');
+  assert.deepEqual(f.look, [0, 5.4, -70]);
 });
 
 test('bakeCameraTrack covers the range', () => {

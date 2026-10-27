@@ -115,9 +115,11 @@ function manualLookAt(cam, t) {
   if (!looks.length) return null;
   const first = looks[0];
   const last = looks[looks.length - 1];
-  if (t < first.t - LOOK_FADE || t > last.t + LOOK_FADE) return null;
+  if (t < first.t - LOOK_FADE) return null;
+  if (looks.length > 1 && t > last.t + LOOK_FADE) return null;
   let weight;
   if (t < first.t) weight = smooth01((t - (first.t - LOOK_FADE)) / LOOK_FADE);
+  else if (looks.length === 1) weight = 1; // a lone look target keeps aiming (static default camera)
   else if (t > last.t) weight = smooth01(((last.t + LOOK_FADE) - t) / LOOK_FADE);
   else weight = 1;
   let target;
@@ -532,11 +534,25 @@ export function evalCamera(project, t) {
   const pos = v3.add(tr.center, tr.position);
   const posA = v3.add(tr.center, pathPos(cam, t - 0.16));
   const posB = v3.add(tr.center, pathPos(cam, t + 0.16));
-  const tang = v3.norm(v3.sub(posB, posA));
+  const tangentVec = v3.sub(posB, posA);
+  let tang = v3.norm(tangentVec);
+  if (v3.len(tangentVec) < 1e-6) {
+    // A one-key / stationary camera has no finite-difference tangent. Use the
+    // nearest manual look target when one exists, otherwise a stable forward
+    // direction; never return look == pos.
+    const lks = (cam.path || []).filter((k) => Array.isArray(k.look) && k.look.length >= 3);
+    if (lks.length) {
+      const target = t < lks[0].t ? lks[0].look : lks[lks.length - 1].look;
+      const d = v3.sub(target, pos);
+      tang = v3.len(d) > 1e-6 ? v3.norm(d) : [0, 0, -1];
+    } else {
+      tang = [0, 0, -1];
+    }
+  }
 
   // explicit look keys win inside their window; outside, blend back to the
   // tangent so entering / leaving a look range does not snap the camera.
-  const lookAhead = cameraParamValue(cam, 'lookAhead', t);
+  const lookAhead = Math.max(1, Number(cameraParamValue(cam, 'lookAhead', t)) || 1);
   const autoLook = v3.add(pos, v3.mul(tang, Math.max(1, lookAhead)));
   let look = autoLook;
   const manual = manualLookAt(cam, t);
