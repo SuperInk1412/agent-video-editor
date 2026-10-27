@@ -89,6 +89,7 @@ export class Timeline {
     this.camHead.append(this.camHeadGutter, this.camHeadTrack);
 
     this.camsWrap = el('div', 'tl-cams');
+    this.sndWrap = el('div', 'tl-snds');
     this.elsWrap = el('div', 'tl-els');
     this.playhead = el('div', 'tl-playhead');
     const splitBtn = el('button', 'tl-split', '✂');
@@ -101,7 +102,7 @@ export class Timeline {
       this.onSplit?.();
     });
     this.playhead.appendChild(splitBtn);
-    this.inner.append(this.rulerRow, this.camHead, this.camsWrap, this.elsWrap, this.playhead);
+    this.inner.append(this.rulerRow, this.sndWrap, this.camHead, this.camsWrap, this.elsWrap, this.playhead);
 
     const hint = el('div', 'tl-hint');
     hint.innerHTML = '<span>▾ 元素 / 相机展开</span><span class="tl-hint-sep">|</span>'
@@ -309,8 +310,9 @@ export class Timeline {
     if (this.camOpenId && !cams.some((c) => c.id === this.camOpenId)) this.camOpenId = null;
     for (const cam of cams) this._cameraGroup(cam, p);
 
-    // soundtrack/audio elements get their own section above the 2D picture rows
+    // soundtrack/audio elements sit directly under the ruler, always visible
     this.elsWrap.innerHTML = '';
+    this.sndWrap.innerHTML = '';
     this._propRows = [];
     this._elPropRows = [];
     this._objHeads = new Map();
@@ -324,8 +326,8 @@ export class Timeline {
         el('div', 'tl-gutter', `<span>声音</span><span class="tl-sub">${auds.length} 条</span>`),
         el('div', 'tl-track'),
       );
-      this.elsWrap.appendChild(head);
-      for (const e of auds) this._elementGroup(e);
+      this.sndWrap.appendChild(head);
+      for (const e of auds) this._elementGroup(e, this.sndWrap);
     }
     if (els.length) {
       const head = el('div', 'tl-row tl-sechead');
@@ -992,7 +994,7 @@ export class Timeline {
     return row;
   }
 
-  _elementGroup(e) {
+  _elementGroup(e, host = this.elsWrap) {
     const open = this.expandedEls.has(e.id);
     const row = el('div', 'tl-row tl-elhead');
     row.dataset.el = e.id;
@@ -1048,7 +1050,7 @@ export class Timeline {
     });
     track.appendChild(b);
     row.append(g, track);
-    this.elsWrap.appendChild(row);
+    host.appendChild(row);
     this._elHeads.set(e.id, { row, g, eye, name, dot, block: b });
     if (e.type === 'text') {
       row.addEventListener('dblclick', (ev) => {
@@ -1061,30 +1063,30 @@ export class Timeline {
 
     if (!open) return;
     if (e.type === 'audio') {
-      this.elsWrap.appendChild(this._sectionRow('声音', 'audio'));
+      host.appendChild(this._sectionRow('声音', 'audio'));
       if (this.sections.audio !== 'collapsed') {
-        this.elsWrap.appendChild(this._elementNumRow(e, 'audio.volume', '音量', {
+        host.appendChild(this._elementNumRow(e, 'audio.volume', '音量', {
           step: 0.01, axis: 'd', letter: '', unit: '0..1', min: 0, max: 1,
           title: '音量 0..1；◆ 在当前时间打关键帧',
         }));
       }
       return;
     }
-    this.elsWrap.appendChild(this._sectionRow('变换', 'transform', 'px / m'));
+    host.appendChild(this._sectionRow('变换', 'transform', 'px / m'));
     if (this.sections.transform === 'collapsed') return;
     const mode = this.sections.transform;
     const show = (path) => mode === 'full' || this._elTrack(e, path).length > 0;
-    if (show('transform.x')) this.elsWrap.appendChild(this._elementNumRow(e, 'transform.x', 'X', { step: 0.1, axis: 'x', letter: 'X', unit: 'px' }));
-    if (show('transform.y')) this.elsWrap.appendChild(this._elementNumRow(e, 'transform.y', 'Y', { step: 0.1, axis: 'y', letter: 'Y', unit: 'px' }));
+    if (show('transform.x')) host.appendChild(this._elementNumRow(e, 'transform.x', 'X', { step: 0.1, axis: 'x', letter: 'X', unit: 'px' }));
+    if (show('transform.y')) host.appendChild(this._elementNumRow(e, 'transform.y', 'Y', { step: 0.1, axis: 'y', letter: 'Y', unit: 'px' }));
     if (show('transform.z')) {
-      this.elsWrap.appendChild(this._elementNumRow(e, 'transform.z', '纵深 z', {
+      host.appendChild(this._elementNumRow(e, 'transform.z', '纵深 z', {
         step: 0.05, axis: 'd', letter: '', unit: 'm', title: '纵深 z (m)，正值朝相机；在播放头打帧',
       }));
     }
-    if (show('transform.scale')) this.elsWrap.appendChild(this._elementNumRow(e, 'transform.scale', '缩放', { step: 0.01, axis: 'd', letter: '', unit: '×', min: 0 }));
-    if (show('transform.rotation')) this.elsWrap.appendChild(this._elementNumRow(e, 'transform.rotation', '旋转°', { step: 0.5, axis: 'd', letter: '', unit: '°' }));
+    if (show('transform.scale')) host.appendChild(this._elementNumRow(e, 'transform.scale', '缩放', { step: 0.01, axis: 'd', letter: '', unit: '×', min: 0 }));
+    if (show('transform.rotation')) host.appendChild(this._elementNumRow(e, 'transform.rotation', '旋转°', { step: 0.5, axis: 'd', letter: '', unit: '°' }));
     if (show('transform.opacity')) {
-      this.elsWrap.appendChild(this._elementNumRow(e, 'transform.opacity', '不透明度', {
+      host.appendChild(this._elementNumRow(e, 'transform.opacity', '不透明度', {
         step: 0.01, axis: 'd', letter: '', unit: '', min: 0, max: 1,
       }));
     }
