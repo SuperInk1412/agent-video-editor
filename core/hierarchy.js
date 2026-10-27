@@ -21,6 +21,8 @@
 // fall back to "no parent". Opacity and other non-transform values are not inherited.
 import { clamp } from './time.js';
 import { objectPose, sampleChannel, basisFromDir } from './scene.js';
+import { evalCamera } from './camera.js';
+import { evalElement } from './evaluate.js';
 
 export const MAX_DEPTH = 32;
 export const STRENGTH_TRACKS = { rot: 'parent.rot', scale: 'parent.scale' };
@@ -435,4 +437,110 @@ export function applyHierarchyOp(p, op, api) {
     default:
       return null;
   }
+}
+
+// ---------------------------------------------------------------- elements parented to a camera
+//
+// Unified space (docs/DESIGN-UNIFIED-SPACE.md §6): a 2D element whose parent is
+// a camera is "stuck to the screen". el.parent = { id: <camera id>, bind: { pos,
+// basis } } holds the camera frame at the moment of binding; at time t the
+// element's world placement is carried by the camera's rigid motion since then:
+//
+//   x' = c + Rd · (x − bind.pos),  c = camera position,  Rd = basis(t) · bind.basisᵀ
+//
+// Position and rotation only (a zoom still changes how big the element looks).
+// The camera basis uses the renderers' convention (right = f × +Y, up = right × f,
+// then roll), so a screen-locked element does not drift against the picture.
+
+/** Camera by id (stack or legacy alias). */
+export function findCamera(project, id) {
+  if (!id) return null;
+  return (project?.cameras || []).find((c) => c.id === id) || (project?.camera?.id === id ? project.camera : null);
+}
+
+/** World frame of camera `id` at t: { pos, basis: [right, up, forward] } or null. */
+export function cameraFrame(project, id, t) {
+  const cam = findCamera(project, id);
+  if (!cam) return null;
+  const c = evalCamera({ ...project, camera: cam, cameras: [cam], activeCameraId: cam.id }, t);
+  let f = V.sub(c.look, c.pos);
+  if (V.len(f) < 1e-9) f = [0, 0, -1];
+  f = V.norm(f);
+  let r = V.cross(f, [0, 1, 0]);
+  if (V.len(r) < 1e-9) r = [1, 0, 0];
+  r = V.norm(r);
+  let u = V.cross(r, f);
+  const roll = ((Number(c.roll) || 0) * Math.PI) / 180;
+  if (roll) {
+    const cs = Math.cos(roll), sn = Math.sin(roll);
+    [r, u] = [V.add(V.mul(r, cs), V.mul(u, sn)), V.sub(V.mul(u, cs), V.mul(r, sn))];
+  }
+  return { pos: c.pos.slice(), basis: [r, u, f] };
+}
+
+/** The carry map of an element at t ({c, p0, L} like parentMap) or null. */
+export function elementCarrier(project, el, t) {
+  const par = el?.parent;
+  if (!par?.id) return null;
+  const now = cameraFrame(project, par.id, t);
+  if (!now) return null;
+  const bind = normalizeBind(par.bind);
+  const Rd = M3.mul(M3.cols(...now.basis), M3.T(M3.cols(...bind.basis)));
+  return { c: now.pos, p0: bind.pos, L: Rd };
+}
+
+/** Column-major 4x4 of a carry map (x' = L·x + (c − L·p0)); identity for null. */
+export function carrierMatrix(m) {
+  if (!m) return new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+  const L = m.L;
+  const tr = V.sub(m.c, M3.apply(L, m.p0));
+  return new Float32Array([
+    L[0][0], L[1][0], L[2][0], 0,
+    L[0][1], L[1][1], L[2][1], 0,
+    L[0][2], L[1][2], L[2][2], 0,
+    tr[0], tr[1], tr[2], 1,
+  ]);
+}
+
+export const ELEMENT_PARENT_OP_KINDS = ['elementParent', 'elementUnparent'];
+
+const shiftKeys = (el, path, d) => {
+  for (const k of el.keyframes || []) if (k.path === path && Number.isFinite(Number(k.value))) k.value = Number(k.value) + d;
+};
+
+/**
+ * elementParent   {id, parent: <camera id>|null, t?}  bind to a camera at t (nothing moves)
+ * elementUnparent {id, t?}                            keep the element's centre where it is at t
+ *                                                     (position only: x / y / z and their keys shift)
+ */
+export function applyElementParentOp(p, op, api) {
+  const { fail, findElement } = api;
+  const el = findElement(op.id);
+  const t = roundT(op.t);
+  if (op.op === 'elementParent' && op.parent) {
+    const camId = String(op.parent);
+    if (!findCamera(p, camId)) fail(`no camera ${camId}`);
+    if (el.parent) applyElementParentOp(p, { op: 'elementUnparent', id: el.id, t }, api);
+    const f = cameraFrame(p, camId, t);
+    el.parent = { id: camId, kind: 'camera', bind: { pos: f.pos.map(r6), basis: f.basis.map((v) => v.map(r6)) } };
+    return { changed: [el.id] };
+  }
+  if (!el.parent) return { changed: [] };
+  const m = elementCarrier(p, el, t);
+  if (m) {
+    // the element's centre in the world, with and without the camera carry
+    const st = evalElement(el, t, p.meta);
+    const cy = (Number(p.meta?.height) || 1080) / 200;
+    const local = [(st.x || 0) / 100, cy - (st.y || 0) / 100, st.z || 0];
+    const d = V.sub(mapPoint(m, local), local);
+    const tr = el.transform || (el.transform = {});
+    tr.x = (Number(tr.x) || 0) + d[0] * 100;
+    tr.y = (Number(tr.y) || 0) - d[1] * 100;
+    tr.z = (Number(tr.z) || 0) + d[2];
+    shiftKeys(el, 'transform.x', d[0] * 100);
+    shiftKeys(el, 'transform.y', -d[1] * 100);
+    shiftKeys(el, 'transform.z', d[2]);
+  }
+  delete el.parent;
+  return { changed: [el.id] };
 }
