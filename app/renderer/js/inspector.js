@@ -197,6 +197,7 @@ export class Inspector {
     this.root.appendChild(this._section('变换',
       this._field({ label: 'X', value: round(kv('transform.x', el.transform.x)), kf: true, path: 'transform.x', onChange: edit('transform.x', (v) => ({ transform: { x: v } })) }),
       this._field({ label: 'Y', value: round(kv('transform.y', el.transform.y)), kf: true, path: 'transform.y', onChange: edit('transform.y', (v) => ({ transform: { y: v } })) }),
+      this._field({ label: '纵深 z (m)', value: round(kv('transform.z', el.transform.z ?? 0), 3), step: 0.05, kf: true, path: 'transform.z', onChange: edit('transform.z', (v) => ({ transform: { z: v } })) }),
       this._field({ label: '缩放', value: round(kv('transform.scale', el.transform.scale), 3), step: 0.01, kf: true, path: 'transform.scale', onChange: edit('transform.scale', (v) => ({ transform: { scale: v } })) }),
       this._field({ label: '旋转°', value: round(kv('transform.rotation', el.transform.rotation), 2), step: 0.5, kf: true, path: 'transform.rotation', onChange: edit('transform.rotation', (v) => ({ transform: { rotation: v } })) }),
       this._field({ label: '不透明度', value: round(kv('transform.opacity', el.transform.opacity), 3), step: 0.01, min: 0, max: 1, percent: true, kf: true, path: 'transform.opacity', onChange: edit('transform.opacity', (v) => ({ transform: { opacity: v } })) }),
