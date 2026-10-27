@@ -2,6 +2,7 @@
 import { sampleTrack } from '/core/time.js';
 import { objectPose, sampleChannel } from '/core/scene.js';
 import { ancestors, wouldCycle, STRENGTH_TRACKS } from '/core/hierarchy.js';
+import { MEDIA_TYPES, FITS, ALIGNS, mediaSpec, textSpec } from '/core/objects-media.js';
 import { RotBall } from './rotball.js';
 import { SpeedCurve, SPEED_PRESETS } from './speedcurve.js';
 import { escapeHtml } from './timeline.js';
@@ -259,6 +260,60 @@ export class Inspector {
     this._renderKeyframes(project, el, time);
   }
 
+  // ---------------------------------------------------------------- 3D object: picture / video / text
+  /** 内容: source + fit for image/video planes, typography for 3D text. */
+  _renderMedia(obj) {
+    const id = obj.id;
+    const patch = (key, p) => this._commit(`${id}:media:${key}`, { op: 'objectPatch', id, patch: p }, 250);
+    const FIT_LABELS = { contain: '完整显示', cover: '铺满裁切', stretch: '拉伸' };
+    const ALIGN_LABELS = { left: '左', center: '中', right: '右' };
+    const kids = [];
+    if (obj.type === 'text') {
+      const t = textSpec(obj);
+      kids.push(
+        this._field({ label: '文字', type: 'textarea', span: 3, value: t.text, onChange: (v) => patch('text', { style: { text: v } }) }),
+        this._field({ label: '字号 m', value: t.size, step: 0.05, min: 0.01, onChange: (v) => patch('size', { style: { size: v } }) }),
+        this._field({ label: '颜色', type: 'color', value: t.color, onChange: (v) => patch('color', { style: { color: v } }) }),
+        this._field({
+          label: '字体', type: 'text', span: 3, value: t.font, placeholder: 'media/fonts/xxx.ttf 或字体名',
+          onChange: (v) => patch('font', { style: { font: v } }),
+        }),
+        this._field({
+          label: '对齐', type: 'select', value: t.align, options: ALIGNS.map((a) => ({ value: a, label: ALIGN_LABELS[a] })),
+          onChange: (v) => patch('align', { style: { align: v } }),
+        }),
+        this._field({ label: '字距 em', value: t.tracking, step: 0.01, onChange: (v) => patch('tracking', { style: { tracking: v } }) }),
+        this._field({ label: '行高', value: t.lineHeight, step: 0.05, min: 0.1, onChange: (v) => patch('lineHeight', { style: { lineHeight: v } }) }),
+        this._field({ label: '厚度 m', value: t.extrude, step: 0.01, min: 0, onChange: (v) => patch('extrude', { style: { extrude: v } }) }),
+        this._field({ label: '亮度', value: t.emissive, step: 0.05, min: 0, onChange: (v) => patch('emissive', { style: { emissive: v } }) }),
+        h('div', { class: 'hint' }, '字号 = 一个字（em）的高度，单位米。厚度只在成片里有，视口里画正面。'),
+      );
+    } else {
+      const m = mediaSpec(obj);
+      kids.push(
+        this._field({
+          label: obj.type === 'video' ? '视频' : '图片', type: 'text', span: 3, value: m.src, placeholder: 'media/xxx',
+          onChange: (v) => patch('src', { src: v }),
+        }),
+        this._field({
+          label: '适配', type: 'select', value: m.fit, options: FITS.map((f) => ({ value: f, label: FIT_LABELS[f] })),
+          onChange: (v) => patch('fit', { style: { fit: v } }),
+        }),
+        this._field({ label: '框宽 m', value: m.w, step: 0.1, min: 0.01, onChange: (v) => patch('w', { geom: { w: v } }) }),
+        this._field({ label: '框高 m', value: m.h, step: 0.1, min: 0.01, onChange: (v) => patch('h', { geom: { h: v } }) }),
+        this._field({ label: '亮度', value: m.emissive, step: 0.05, min: 0, onChange: (v) => patch('emissive', { style: { emissive: v } }) }),
+      );
+      if (obj.type === 'video') {
+        kids.push(
+          this._field({ label: '入点 s', value: m.srcIn, step: 0.04, min: 0, onChange: (v) => patch('srcIn', { srcIn: v }) }),
+          this._field({ label: '速度', value: m.rate, step: 0.05, min: 0.01, onChange: (v) => patch('rate', { rate: v }) }),
+        );
+      }
+      kids.push(h('div', { class: 'hint' }, '正面朝「朝向」所指的方向；从正面看图像不镜像。完整显示会按图片比例缩小到框内。'));
+    }
+    return this._section('内容', ...kids);
+  }
+
   // ---------------------------------------------------------------- 3D object: parent
   /** 父级: pick a parent, inherit switches, keyable rotation/scale strength. */
   _renderParent(project, obj, time) {
@@ -351,6 +406,7 @@ export class Inspector {
       h('div', { class: 'hint' }, '拖球面上的点改朝向（写 dir 关键帧）；旋转球和速度曲线留在检查器，其余基础属性在时间轴左侧。'),
     ));
 
+    if (MEDIA_TYPES.has(obj.type)) this.root.appendChild(this._renderMedia(obj));
     this.root.appendChild(this._renderParent(project, obj, time));
 
     const rows = [];
