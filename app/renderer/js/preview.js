@@ -885,7 +885,12 @@ export class Preview {
     for (const [x, y] of pts) {
       const qx = (x - W / 2) / S;
       const qy = (y - H / 2) / S;
-      const p = s3.projectPoint([qx / 100, cyW - qy / 100, z]);
+      let w = [qx / 100, cyW - qy / 100, z];
+      if (L.carry) {
+        const m = L.carry;
+        w = [0, 1, 2].map((i) => m[i] * w[0] + m[4 + i] * w[1] + m[8 + i] * w[2] + m[12 + i]);
+      }
+      const p = s3.projectPoint(w);
       if (!p) return null;
       out.push([p.x * W / Math.max(1, s3.lastW), p.y * H / Math.max(1, s3.lastH)]);
     }
@@ -896,15 +901,21 @@ export class Preview {
   hitTest(cx, cy, t) {
     const layers = (this.layers && this.layersAt === t) ? this.layers : this.computeLayers(t);
     if (this._worldMode && this.scene3d?.lastVP) {
-      const s3 = this.scene3d;
       const meta = this.project?.meta || {};
       const cyW = (Number(meta.height) || 1080) / 200;
-      const cam = s3.lastCam?.pos || [0, 0, 20];
-      // Nearest layer wins. Equal distance keeps the higher 2D layer on top.
-      const list = layers.map((L, i) => ({
-        L, i,
-        d: Math.hypot((L.st.x || 0) / 100 - cam[0], cyW - (L.st.y || 0) / 100 - cam[1], (L.st.z || 0) - cam[2]),
-      })).sort((a, b) => (Math.abs(a.d - b.d) > 1e-6 ? a.d - b.d : b.i - a.i));
+      const vp = this.scene3d.lastVP;
+      // Match _drawLayers: compare depth along the view axis, not distance to
+      // the centre, so a full-frame backdrop cannot win over everything.
+      const depth = (L) => {
+        let w = [(L.st.x || 0) / 100, cyW - (L.st.y || 0) / 100, L.st.z || 0];
+        if (L.carry) {
+          const m = L.carry;
+          w = [0, 1, 2].map((i) => m[i] * w[0] + m[4 + i] * w[1] + m[8 + i] * w[2] + m[12 + i]);
+        }
+        return vp[3] * w[0] + vp[7] * w[1] + vp[11] * w[2] + vp[15];
+      };
+      const list = layers.map((L, i) => ({ L, i, d: depth(L) }))
+        .sort((a, b) => (Math.abs(a.d - b.d) > 1e-4 ? a.d - b.d : b.i - a.i));
       for (const { L } of list) {
         const poly = this._layerCorners(L);
         if (poly && pointInPoly(cx, cy, poly)) return L.el.id;
