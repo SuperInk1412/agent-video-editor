@@ -3,7 +3,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { bakeCameraTrack, cameraLayers, cameraTransform } from '../core/camera.js';
-import { objectPose } from '../core/scene.js';
+import { worldPose } from '../core/hierarchy.js';
 import { generateCity, cityHash } from './city.js';
 import { paths } from '../core/store.js';
 
@@ -11,8 +11,9 @@ const r3 = (v) => Math.round(Number(v) * 1000) / 1000;
 const OBJ_TYPES = new Set(['solid', 'shape', 'text', 'image', 'video', 'container']);
 
 /**
- * Elements -> per-frame transforms for Blender. Same objectPose() as the
- * viewport, so position/rotation/scale/opacity cannot drift between the two.
+ * Elements -> per-frame transforms for Blender. Same worldPose() (objectPose +
+ * parent chain) as the viewport, so position/rotation/scale/opacity cannot drift
+ * between the two.
  */
 export function bakeObjects(project, { fps = 24, from = 0, to = null } = {}) {
   const objs = project.scene?.objects || [];
@@ -20,6 +21,7 @@ export function bakeObjects(project, { fps = 24, from = 0, to = null } = {}) {
   const f0 = Math.round(from * fps) + 1;
   const f1 = Math.round((to ?? project.meta.duration) * fps) + 1;
   const out = [];
+  const poses = new Map();
   for (const o of objs) {
     if (!OBJ_TYPES.has(o.type)) continue;
     const start = Number(o.start) || 0;
@@ -34,7 +36,7 @@ export function bakeObjects(project, { fps = 24, from = 0, to = null } = {}) {
     for (let f = f0; f <= f1; f++) {
       const t = (f - 1) / fps;
       const live = t >= start - 1e-6 && t < end - 1e-6;
-      const pose = objectPose(o, t);
+      const pose = worldPose(objs, o, t, poses);
       const hidden = live ? 1 : 0.0001;
       frames.push({
         f,
