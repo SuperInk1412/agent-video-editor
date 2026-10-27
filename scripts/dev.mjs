@@ -38,7 +38,7 @@ const explicitProject = await (async () => {
   }
   return null;
 })();
-const project = explicitProject || path.join(REPO, 'projects', 'demo');
+const project = explicitProject || path.join(REPO, 'projects', 'miku-swiss');
 console.log(`[vdm] opening ${project}${explicitProject ? '' : '（应用里选择项目）'}`);
 
 if (webMode) {

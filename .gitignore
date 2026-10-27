@@ -13,6 +13,17 @@ projects/*/renders/
 assets/fonts/
 assets/media/
 
+# the published miku-swiss sample ships its one audio cue
+!projects/miku-swiss/media/
+!projects/miku-swiss/media/**
+
+# local-only working projects (only the miku-swiss sample is published)
+/projects/demo/
+/projects/nightcity/
+/projects/空项目测试/
+/projects/miku-swiss/tools/
+/projects/miku-swiss/.backup-before-rules.json
+
 # editor / os noise
 .DS_Store
 Thumbs.db

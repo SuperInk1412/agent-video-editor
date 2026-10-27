@@ -24,7 +24,7 @@ npm test                          # 单元测试（ops / 编辑语义 / 求值 /
 npm run check:preview             # 预览朝向回归检查（红顶/蓝底标记图，读像素断言）
 npm run blender:check             # 找 Blender/ffmpeg 并真渲一帧临时项目（文字 + 色块 + 视频）
 node cli/vdm.js still 1.5 --out /tmp/a.png    # 真渲一帧（需要 Blender）
-node scripts/dev.mjs --project projects/demo --capture=/tmp/ui.png --at=1.8
+node scripts/dev.mjs --project projects/miku-swiss --capture=/tmp/ui.png --at=1.8
 ```
 
 - Blender / Electron / dsh 都会在 `PATH` 里找（Linux / macOS 不用设环境变量）；

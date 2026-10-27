@@ -24,7 +24,7 @@ const captureTo = argOf('capture');
 const requestedProject = process.argv.find((a) => a.startsWith('--project='))?.split('=')[1] || process.env.VDM_PROJECT || null;
 
 function resolveRoot() {
-  return requestedProject || path.join(REPO, 'projects', 'demo');
+  return requestedProject || path.join(REPO, 'projects', 'miku-swiss');
 }
 
 /** Restart the whole app (engine included) with another project directory. */

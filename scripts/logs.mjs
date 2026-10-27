@@ -1,5 +1,5 @@
 // Tail the current project log from the terminal.
-//   node scripts/logs.mjs [--project projects/demo] [--lines 100] [--follow]
+//   node scripts/logs.mjs [--project projects/miku-swiss] [--lines 100] [--follow]
 import fs from 'node:fs/promises';
 import fss from 'node:fs';
 import path from 'node:path';
@@ -13,7 +13,7 @@ const val = (name, dflt = null) => {
   const i = argv.indexOf(name);
   return i >= 0 && argv[i + 1] ? argv[i + 1] : dflt;
 };
-const project = path.resolve(val('--project', path.join(REPO, 'projects', 'demo')));
+const project = path.resolve(val('--project', path.join(REPO, 'projects', 'miku-swiss')));
 const root = (await findProjectRoot(project)) || project;
 const lines = Number(val('--lines', 80));
 const follow = argv.includes('--follow');

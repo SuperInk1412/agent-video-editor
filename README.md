@@ -25,11 +25,11 @@ VedioMaker 是一个本地的视频作曲台：时间线由你自己定义，画
 ## 快速开始
 
 ```bash
-# 在仓库根启动：先弹项目选择器（不再默认死开 demo）
+# 在仓库根启动：先弹项目选择器，默认示例是「初音ミクの消失 · Swiss」
 npm start
 
 # 在项目目录里启动就直接打开那个项目（npm start 的 cwd 是包根，脚本读 INIT_CWD）
-cd projects/nightcity && npm start
+cd projects/miku-swiss && npm start
 
 # 应用内：顶栏「项目」或 Ctrl+O 换项目（会带新项目重启），「重启」或 Ctrl+Shift+R 快速重启
 # 项目选择器的「新建项目…」可选目录、标题、画幅、帧率和时长，建一个空时间线并直接打开
@@ -38,8 +38,8 @@ cd projects/nightcity && npm start
 # 或者纯浏览器形态
 npm run web
 
-# demo 的素材不进仓库：有参考工程就从里面抽，没有就生成占位图 + 按已提交节拍合成的鼓点
-npm run demo
+# 示例项目初始就是这样：15s / 8 台相机 / 133 个元素 / 一条已迁移的声音轨
+# 声音文件随仓库提交（projects/miku-swiss/media/shoushitsu-226-241.m4a），克隆后可直接播
 
 # 命令行走一遍：新建 → 分析节拍 → 自动分镜 → 出帧 → 出片
 node cli/vdm.js init projects/myfilm --title "我的片子" --duration 20 --audio bgm.m4a
@@ -61,8 +61,8 @@ Electron 路径可用 `VDM_ELECTRON` 覆盖；Blender 用 `VDM_BLENDER` 覆盖�
 
 - `npm test`：100+ 个单元测试全绿（ops / 编辑语义 / 求值 / 场景 / 相机 / 迁移 / 存储锁与监听 / 节拍 / agent 解析）
 - Blender 5.0.1（Windows）与 5.2.2（Linux）无头 EEVEE：1080p 单帧约 2–5s（含启动），24s@50% 成片约 70s
-- 示例项目 `projects/demo`：24s / 6 分镜 / 13 元素，成片在
-  `projects/demo/.vdm/renders/master-*.mp4`（含音轨）
+- 示例项目 `projects/miku-swiss`（「初音ミクの消失 · Swiss」）：15s / 8 台相机 / 133 个元素 /
+  旧 `meta.audio` 配乐；首次打开会迁移成一条 `audio` 声音元素。`project.vdm.json` 与音频素材随仓库提供，克隆后可直接播放和编辑。
 - AI 闭环：在流水线面板选中分镜（或用 CLI）→ 描述改动 → agent 返回 ops → 引擎落盘 → 预览/时间线即时刷新（可撤销）
 
 ## 3D 镜头（v0.2）
@@ -71,7 +71,7 @@ Electron 路径可用 `VDM_ELECTRON` 覆盖；Blender 用 `VDM_BLENDER` 覆盖�
 成片由 Blender 消费**同一份烘焙包**（城市几何 + 逐帧机位），所以视口里看到的构图就是要渲的。
 
 ```bash
-cd projects/nightcity
+cd projects/miku-swiss
 node ../../cli/vdm.js cam ls
 node ../../cli/vdm.js cam set fov 72
 node ../../cli/vdm.js cam add 7.6 0 34 -40 --look 90,34,-2
@@ -189,6 +189,38 @@ alpha-over，画面变换和透明度逐帧写进 strip，所以预览和最终�
 `core/hierarchy.js::worldPose()`；`engine/shot.js` 把逐帧世界变换烘进 shot 包，
 `blender/vdm_city.py` 按同一组位置/旋转/缩放建盒子。
 
+## 快捷键
+
+| 场景 | 按键 | 作用 |
+| --- | --- | --- |
+| 全局 | `Space` | 播放 / 暂停 |
+| 全局 | `←` / `→` | 上一帧 / 下一帧 |
+| 全局 | `Shift + ← / →` | 前后 1 秒 |
+| 全局 | `Home` / `End` | 跳到项目开头 / 结尾 |
+| 全局 | `Ctrl + Z` / `Ctrl + Shift + Z` | 撤销 / 重做 |
+| 全局 | `Delete` / `Backspace` | 删除选中的关键帧；没有关键帧选中时删除元素 / 3D 对象 |
+| 全局 | `Ctrl + C` / `Ctrl + V` | 复制 / 粘贴选中元素或 3D 对象到播放头（可跨项目） |
+| 全局 | `Ctrl + O` | 打开项目选择器 |
+| 全局 | `Ctrl + Shift + R` | 快速重启当前项目 |
+| 时间轴 | `S` | 在播放头切开选中的元素 / 相机 |
+| 时间轴 | `Ctrl + D` | 红线切开：有选中切选中；没选中切所有穿过红线的 2D / 声音元素 |
+| 时间轴 | `Ctrl + 滚轮` | 以鼠标为锚缩放时间轴 |
+| 时间轴 | `Ctrl + 拖标尺` | 以播放头为锚缩放时间轴 |
+| 时间轴 | 双击标尺 | 缩放到整段时长 |
+| 时间轴 | `Ctrl + 点击` | 加选同类元素、属性行或关键帧 |
+| 时间轴 | 再次单击已选中的行 / 时间块 | 展开 / 折叠属性 |
+| 时间轴 | `U` | 只展开当前选中对象里有键的属性 |
+| 时间轴 | `F2` | 打开 / 关闭数值曲线面板 |
+| 编辑视口 | `Tab` | 进入 / 退出编辑视口 |
+| 编辑视口 | `Alt` | 切换「选择 / 移动相机」 |
+| 编辑视口 | `G` | 开关地面网格 |
+| 编辑视口 | 拖动时按 `Ctrl` | 吸附 0.5m |
+| 文字 | 双击画面文字 / 时间轴文字块 | 进入原位编辑 |
+| 文字原位编辑 | `Ctrl + Enter` | 保存 |
+| 文字原位编辑 | `Tab` | 保存并退出 |
+| 文字原位编辑 | `Esc` | 取消并还原原文 |
+| 数值框 | 在框内拖动 / 拖出框后拖动 | 框内选择文本；拖出后左右改值、上下换挡 |
+
 ## 三条设计原则
 
 1. **项目文件是唯一真相源。** `projects/<name>/project.vdm.json` 是纯 JSON，
@@ -209,7 +241,7 @@ alpha-over，画面变换和透明度逐帧写进 strip，所以预览和最终�
 | `app/renderer/` | 无构建步骤的 UI（原生 ESM + WebGL2） |
 | `app/electron/` | Electron 壳（启动引擎 + 开窗） |
 | `blender/` | bpy 场景构建与渲染（图层、文字、合成器、ffmpeg 封装） |
-| `projects/` | 项目（示例见 `projects/demo/`） |
+| `projects/` | 项目（公开示例：`projects/miku-swiss/`） |
 | `docs/` | 架构、项目格式、CLI、路线图 |
 
 ## 排错 / 日志
@@ -221,13 +253,13 @@ projects/<name>/.vdm/logs/vdm-YYYY-MM-DD.log     # JSONL：ts/level/msg/meta
 ```
 
 - 界面：右侧 **日志** 标签页，可按「警告+ / 只看错误」过滤、自动跟随；
-- 终端：`npm run logs`（或 `node scripts/logs.mjs --project projects/demo --follow`）；
+- 终端：`npm run logs`（或 `node scripts/logs.mjs --project projects/miku-swiss --follow`）；
 - 渲染失败会把 Blender 最后几 KB 的 stderr 一并写进日志；
 - 渲染器里的 `window.onerror` / `unhandledrejection` 会自动上报，不再只躺在 devtools。
 
 ## 状态
 
-v0.1（可跑通的 demo）：时间线编辑、实时预览、元素/细节检查器、关键帧、
+v0.1（可跑通的示例项目）：时间线编辑、实时预览、元素/细节检查器、关键帧、
 Blender 出帧与出片、节拍自动分镜、AI 片段编辑（流式 + 打断）。
 
 详见 `docs/ROADMAP.md`。
