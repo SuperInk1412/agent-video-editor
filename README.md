@@ -32,6 +32,7 @@ npm start
 cd projects/nightcity && npm start
 
 # 应用内：顶栏「项目」或 Ctrl+O 换项目（会带新项目重启），「重启」或 Ctrl+Shift+R 快速重启
+# 项目选择器的「新建项目…」可选目录、标题、画幅、帧率和时长，建一个空时间线并直接打开
 
 # 或者纯浏览器形态
 npm run web

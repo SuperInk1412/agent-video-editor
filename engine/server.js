@@ -11,7 +11,7 @@ import {
   paths, loadProject, saveProject, findProjectRoot, watchProject,
   ensureProjectDirs, projectExists, withLock, PROJECT_FILE,
 } from '../core/store.js';
-import { normalizeProject } from '../core/schema.js';
+import { normalizeProject, createProject } from '../core/schema.js';
 import { applyOps } from '../core/ops.js';
 import { probeMedia, mimeOf, fileExists } from './media.js';
 import { renderStill, renderVideo, blenderVersion, findBlender } from './blender.js';
@@ -344,6 +344,29 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
       }
 
       // ---------------- project picker ----------------
+      if (pathname === '/api/projects/create' && req.method === 'POST') {
+        const body = await readBody(req);
+        const raw = String(body.dir || '').trim();
+        if (!raw) return json(res, 400, { error: '请选择项目目录' });
+        const dir = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(APP_DIR, raw);
+        if (await projectExists(dir)) return json(res, 409, { error: `这个目录已经有项目：${dir}` });
+        const width = Math.max(1, Math.round(Number(body.width) || 1920));
+        const height = Math.max(1, Math.round(Number(body.height) || 1080));
+        const fps = Math.max(1, Math.round(Number(body.fps) || 24));
+        const duration = Math.max(0.1, Number(body.duration) || 12);
+        const project = createProject({
+          title: String(body.title || '').trim() || path.basename(dir) || '未命名项目',
+          fps, width, height, duration,
+          background: /^#[0-9a-f]{6}$/i.test(String(body.background || '')) ? body.background : '#05070d',
+        });
+        try {
+          await saveProject(dir, project, { by: 'ui' });
+        } catch (e) {
+          return json(res, 400, { error: e.message });
+        }
+        return json(res, 200, { ok: true, dir, project });
+      }
+
       if (pathname === '/api/projects' && req.method === 'GET') {
         const list = [];
         const seen = new Set();

@@ -49,7 +49,7 @@ ipcMain.handle('vdm:pick-folder', async () => {
   const res = await dialog.showOpenDialog(win, {
     properties: ['openDirectory'],
     defaultPath: path.join(REPO, 'projects'),
-    title: '选择项目目录（含 project.vdm.json）',
+    title: '选择项目目录',
   });
   if (res.canceled || !res.filePaths?.length) return null;
   return (await findProjectRoot(res.filePaths[0])) || res.filePaths[0];
