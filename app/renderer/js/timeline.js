@@ -123,12 +123,37 @@ export class Timeline {
     this.elsWrap = el('div', 'tl-els');
     this.playhead = el('div', 'tl-playhead');
     const splitBtn = h('button', {
-      type: 'button', class: 'tl-split', 'aria-label': '在播放头切开', 'data-tip': '在播放头切开', 'data-kbd': 'Ctrl+D',
+      type: 'button', class: 'tl-split', 'aria-label': '在播放头切开', 'data-tip': '单击切开 · 拖动移动播放头', 'data-kbd': 'Ctrl+D',
     }, icon('scissors', 'ic-sm'));
-    splitBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
+    // The scissors ride on the playhead, so they double as its drag handle:
+    // past 3px of movement it scrubs like the ruler; a plain click still splits.
+    let splitDragged = false;
+    splitBtn.addEventListener('pointerdown', (e) => {
+      e.stopPropagation();
+      if (e.button !== 0) return;
+      e.preventDefault();
+      splitDragged = false;
+      const x0 = e.clientX;
+      const move = (m) => {
+        if (!splitDragged && Math.abs(m.clientX - x0) < 3) return;
+        if (!splitDragged) { splitDragged = true; this.onPause?.(); document.body.classList.add('tl-scrubbing'); }
+        this._noSnap = m.altKey;
+        this.onSeek?.(this._snap(this._timeAt(m.clientX)));
+      };
+      const up = () => {
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', up);
+        window.removeEventListener('pointercancel', up);
+        document.body.classList.remove('tl-scrubbing');
+      };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', up);
+      window.addEventListener('pointercancel', up);
+    });
     splitBtn.addEventListener('click', (e) => {
       e.preventDefault();
       e.stopPropagation();
+      if (splitDragged) { splitDragged = false; return; }
       this.onSplit?.();
     });
     this.playhead.appendChild(splitBtn);

@@ -161,11 +161,12 @@ body.tl-gutter-resizing, body.tl-gutter-resizing * { cursor: col-resize !importa
   position: absolute; top: 2px; left: 50%; transform: translateX(-50%);
   width: 20px; height: 20px; padding: 0; border: 1px solid var(--danger-border); border-radius: var(--r-sm);
   background: var(--danger-bg); color: var(--text-1); display: grid; place-items: center;
-  cursor: pointer; pointer-events: auto; z-index: 9;
+  cursor: ew-resize; pointer-events: auto; z-index: 9;
 }
 .tl-split .ic-sm { width: 12px; height: 12px; }
 .tl-split:hover { background: var(--danger-bg); border-color: var(--playhead); color: var(--text-1); }
 .tl-split:active { transform: translateX(-50%) translateY(1px); }
+body.tl-scrubbing, body.tl-scrubbing * { cursor: ew-resize !important; user-select: none !important; }
 .tl-els { position: relative; }
 
 /* ---------------- section / element / object header rows ---------------- */
