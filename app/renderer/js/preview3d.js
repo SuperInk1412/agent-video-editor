@@ -1,7 +1,8 @@
 // 3D viewport for camera shots: instanced boxes from the SAME city json Blender uses.
 // Draws into the preview's scene FBO so the existing post chain (bloom/grain/…) applies.
 import { evalCamera } from '/core/camera.js';
-import { objectPose, poseMatrix } from '/core/scene.js';
+import { poseMatrix } from '/core/scene.js';
+import { worldPose } from '/core/hierarchy.js';
 
 const VERT = `#version 300 es
 in vec3 a_corner;
@@ -191,6 +192,20 @@ function hexRgb(c) {
 }
 
 const DRAWABLE = new Set(['solid', 'shape', 'text', 'image', 'video', 'container']);
+// Empties are editor-only: a three-bar cross locator (never baked for Blender).
+const LOCATOR_ARM = 1.2;
+const LOCATOR_BAR = 0.06;
+const LOCATOR_COLOR = [1, 0.78, 0.2];
+
+/** Unit-cube sizes for the three bars of an empty's locator. */
+function locatorBars(pose) {
+  const s = (Math.abs(pose.scale[0]) + Math.abs(pose.scale[1]) + Math.abs(pose.scale[2])) / 3 || 1;
+  return [0, 1, 2].map((a) => {
+    const size = [LOCATOR_BAR, LOCATOR_BAR, LOCATOR_BAR];
+    size[a] = LOCATOR_ARM * s;
+    return size;
+  });
+}
 
 /** Timeline elements promoted to 3D. Empty until the project gets a v3 scene. */
 export function sceneObjects(project) {
@@ -422,21 +437,34 @@ export class Scene3D {
   /** One draw per timeline element; opaque first, then alpha-blended. */
   _drawObjects(project, time, camPos, vp, city) {
     const gl = this.gl;
-    const objs = sceneObjects(project).filter((o) => objectVisibleAt(o, time) && DRAWABLE.has(o.type));
+    const all = sceneObjects(project);
+    const objs = all.filter((o) => objectVisibleAt(o, time) && (DRAWABLE.has(o.type) || o.type === 'empty'));
     if (!objs.length) return;
     const opaque = [];
     const transparent = [];
+    const poses = new Map();
+    const boxItem = (pose, size) => {
+      const { right: r, up: u, forward: f } = pose.basis;
+      return {
+        m: poseMatrix({ ...pose, scale: size }),
+        nm: new Float32Array([
+          r[0] / size[0], r[1] / size[0], r[2] / size[0],
+          u[0] / size[1], u[1] / size[1], u[2] / size[1],
+          f[0] / size[2], f[1] / size[2], f[2] / size[2],
+        ]),
+      };
+    };
     for (const obj of objs) {
-      const pose = objectPose(obj, time);
+      const pose = worldPose(all, obj, time, poses);
+      if (obj.type === 'empty') {
+        for (const size of locatorBars(pose)) {
+          opaque.push({ ...boxItem(pose, size), col: LOCATOR_COLOR, alpha: 1, dist: 0, emissive: 1 });
+        }
+        continue;
+      }
       if (pose.opacity <= 0.003) continue;
       const size = objectSize(obj, pose);
-      const m = poseMatrix({ ...pose, scale: size });
-      const { right: r, up: u, forward: f } = pose.basis;
-      const nm = new Float32Array([
-        r[0] / size[0], r[1] / size[0], r[2] / size[0],
-        u[0] / size[1], u[1] / size[1], u[2] / size[1],
-        f[0] / size[2], f[1] / size[2], f[2] / size[2],
-      ]);
+      const { m, nm } = boxItem(pose, size);
       const col = hexRgb(obj.style?.color || obj.style?.fill || '#8fe0ff');
       const alpha = pose.opacity * Math.max(0, Math.min(1, Number(obj.style?.opacity ?? 1)));
       const dist = Math.hypot(pose.worldPos[0] - camPos[0], pose.worldPos[1] - camPos[1], pose.worldPos[2] - camPos[2]);
@@ -643,11 +671,14 @@ export class Scene3D {
     const r = this.ray(sx, sy);
     if (!r) return null;
     let best = null;
-    for (const obj of sceneObjects(project)) {
-      if (!DRAWABLE.has(obj.type) || !objectVisibleAt(obj, time)) continue;
-      const pose = objectPose(obj, time);
-      if (pose.opacity <= 0.003) continue;
-      const size = objectSize(obj, pose);
+    const all = sceneObjects(project);
+    const poses = new Map();
+    for (const obj of all) {
+      const empty = obj.type === 'empty';
+      if (!(DRAWABLE.has(obj.type) || empty) || !objectVisibleAt(obj, time)) continue;
+      const pose = worldPose(all, obj, time, poses);
+      if (!empty && pose.opacity <= 0.003) continue;
+      const size = empty ? locatorBars(pose).map((b, i) => b[i]) : objectSize(obj, pose);
       const { right, up, forward } = pose.basis;
       const rel = sub(r.origin, pose.worldPos);
       const o = [dot(rel, right) / size[0], dot(rel, up) / size[1], dot(rel, forward) / size[2]];
