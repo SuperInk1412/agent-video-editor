@@ -797,8 +797,12 @@ def build_compositor(scene, meta, cache_dir, fog=None):
         ng.links.new(mul.outputs[0], ao.inputs['Factor'])
         chain = ao.outputs['Image']
 
+    # The group needs a declared output socket: linking to the output node's
+    # empty virtual socket leaves the group without a result, and Blender then
+    # writes the raw render (no fog, grade, bloom, grain or vignette).
+    ng.interface.new_socket('Image', in_out='OUTPUT', socket_type='NodeSocketColor')
     out = ng.nodes.new('NodeGroupOutput')
-    ng.links.new(chain, out.inputs[0])
+    ng.links.new(chain, out.inputs['Image'])
     return ng
 
 
