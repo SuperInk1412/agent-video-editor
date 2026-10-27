@@ -662,13 +662,21 @@ export class Preview {
       } else {
         this._drawCameraStack(p, t, W, H, cams);
       }
-    } else {
-      layers.push(...this.computeLayers(t));
+    }
+    // 2D elements: the whole picture in a 2D project; in a 3D project they sit
+    // on top of the 3D picture, before the post chain (Blender: the VDM_2D
+    // overlay scene, alpha-overed after the fog).
+    layers.push(...this.computeLayers(t));
+    if (!is3d || layers.length) {
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.sceneFBO.fb);
       gl.viewport(0, 0, W, H);
-      const bg = hexRgb(p.meta.background || '#000000');
-      gl.clearColor(bg[0], bg[1], bg[2], 1);
-      gl.clear(gl.COLOR_BUFFER_BIT);
+      if (is3d) {
+        gl.disable(gl.DEPTH_TEST);
+      } else {
+        const bg = hexRgb(p.meta.background || '#000000');
+        gl.clearColor(bg[0], bg[1], bg[2], 1);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+      }
       gl.enable(gl.BLEND);
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
       gl.bindVertexArray(this.vao);
