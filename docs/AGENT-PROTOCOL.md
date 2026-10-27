@@ -37,7 +37,7 @@
 - `start/duration` 是秒；`fps` 在 `meta.fps`。
 - 图片/视频 `scale=1` = cover 填满画面。
 - 文字：`style.text/size/color/font/letterSpacing/lineHeight/align`。
-- 关键帧路径：`transform.x` `transform.y` `transform.scale` `transform.rotation`
+- 关键帧路径：`transform.x` `transform.y` `transform.z`（纵深，米，正值朝镜头）`transform.scale` `transform.rotation`
   `transform.opacity` `style.size` `style.color` `fx.glow`。
 - 关键帧的 `t` 是**项目绝对时间**（不是相对元素起点）；`keyRemove` 带 `t` 只删那一个，不带就清空整条轨。
 - `moveElement` 只改 `start` 时整体平移（关键帧跟着走）；`start`+`duration` 一起改是左裁剪。
