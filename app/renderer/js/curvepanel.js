@@ -55,6 +55,7 @@ export class CurvePanel {
     this.span = null;
     this.previewInner = null;
     this._spanBackup = null;
+    this._spanNotice = null;
     this._liveRaf = 0;
     this.curve = null;
     this.drag = null;
@@ -119,6 +120,7 @@ export class CurvePanel {
   open(state) {
     this.openState = state;
     this.active = 0;
+    this._spanNotice = null;
     const track = this._track();
     if (track?.path === 'path') this._refreshSpan();
     else this.curve = normalizeCurve(track?.segments[0]?.a?.curve) || presetCurve('easeInOut');
@@ -183,6 +185,30 @@ export class CurvePanel {
     const find = (t) => keys.findIndex((k) => Math.abs(k.t - t) <= 1e-4);
     let li = Number.isFinite(from) && Number.isFinite(to) && to > from ? find(from) : -1;
     let ri = li >= 0 ? find(to) : -1;
+    // Selecting keys inside an existing span should edit that span, not try to
+    // create a nested/overlapping one (the op would reject it).
+    if (li >= 0 && ri > li) {
+      const spans = [];
+      keys.forEach((k, i) => {
+        if (!k.curve || !Number.isFinite(Number(k.spanTo))) return;
+        const j = find(Number(k.spanTo));
+        if (j > i) spans.push({ from: keys[i].t, to: keys[j].t });
+      });
+      const hit = spans.find((s) => from < s.to - 1e-4 && to > s.from + 1e-4);
+      if (hit) {
+        if (Math.abs(hit.from - from) > 1e-4 || Math.abs(hit.to - to) > 1e-4) {
+          const msg = `选中的键与已有曲线段相交，已打开 ${hit.from.toFixed(2)}–${hit.to.toFixed(2)}s 的曲线`;
+          if (this._spanNotice !== msg) {
+            this.toast?.(msg, 'info');
+            this._spanNotice = msg;
+          }
+        }
+        from = hit.from;
+        to = hit.to;
+        li = find(from);
+        ri = find(to);
+      }
+    }
     if (li < 0 || ri <= li) {
       const stored = keys.find((k) => k.curve && Number.isFinite(Number(k.spanTo)));
       if (stored) {
@@ -228,6 +254,7 @@ export class CurvePanel {
     this.drag = null;
     this.span = null;
     this.previewInner = null;
+    this._spanNotice = null;
     this.onClose?.();
   }
 
