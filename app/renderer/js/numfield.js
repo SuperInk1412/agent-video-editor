@@ -334,6 +334,14 @@ export function attachNumberField(inp) {
     const dy = e.clientY - drag.y0;
     if (!drag.moved) {
       if (Math.hypot(dx, dy) < 3) return;
+      // A drag that stays inside the field is a normal text selection. Only
+      // start scrubbing after the pointer leaves the field, otherwise
+      // selecting a number would immediately overwrite it and typing would
+      // append to the scrubbed value.
+      const box = el.getBoundingClientRect();
+      const outside = e.clientX < box.left || e.clientX > box.right
+        || e.clientY < box.top || e.clientY > box.bottom;
+      if (!outside) return;
       drag.moved = true;
       document.body.classList.add('nf-scrubbing');
       window.getSelection?.()?.removeAllRanges?.();
