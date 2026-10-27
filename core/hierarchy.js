@@ -449,6 +449,11 @@ export function applyHierarchyOp(p, op, api) {
 //   x' = c + Rd · (x − bind.pos),  c = camera position,  Rd = basis(t) · bind.basisᵀ
 //
 // Position and rotation only (a zoom still changes how big the element looks).
+//
+// For drawing, the carried element is also pulled toward the camera so it sits
+// SCREEN_LOCK_DEPTH metres in front of it: scaling about the camera centre does
+// not change the projection, but it keeps the element in front of the screen
+// plane and the backdrop when the camera pushes in for a close-up.
 // The camera basis uses the renderers' convention (right = f × +Y, up = right × f,
 // then roll), so a screen-locked element does not drift against the picture.
 
@@ -478,15 +483,26 @@ export function cameraFrame(project, id, t) {
   return { pos: c.pos.slice(), basis: [r, u, f] };
 }
 
-/** The carry map of an element at t ({c, p0, L} like parentMap) or null. */
-export function elementCarrier(project, el, t) {
+export const SCREEN_LOCK_DEPTH = 1; // m in front of the camera (render only)
+
+/**
+ * The carry map of an element at t ({c, p0, L} like parentMap) or null.
+ * `rigid: true` gives the plain camera motion (used to keep the element in
+ * place when it is unparented); the default also pulls it toward the camera.
+ */
+export function elementCarrier(project, el, t, { rigid = false } = {}) {
   const par = el?.parent;
   if (!par?.id) return null;
   const now = cameraFrame(project, par.id, t);
   if (!now) return null;
   const bind = normalizeBind(par.bind);
   const Rd = M3.mul(M3.cols(...now.basis), M3.T(M3.cols(...bind.basis)));
-  return { c: now.pos, p0: bind.pos, L: Rd };
+  if (rigid) return { c: now.pos, p0: bind.pos, L: Rd };
+  // x' = cam + k·Rd·(x − bind.pos): the bind pose had the camera at bind.pos,
+  // so the element's depth there is its distance along the bind view axis.
+  const depth = Math.max(1e-3, Number(par.bind?.depth) || 20);
+  const k = SCREEN_LOCK_DEPTH / depth;
+  return { c: now.pos, p0: bind.pos, L: Rd.map((row) => row.map((v) => v * k)), scale: k };
 }
 
 /** Column-major 4x4 of a carry map (x' = L·x + (c − L·p0)); identity for null. */
@@ -522,11 +538,19 @@ export function applyElementParentOp(p, op, api) {
     if (!findCamera(p, camId)) fail(`no camera ${camId}`);
     if (el.parent) applyElementParentOp(p, { op: 'elementUnparent', id: el.id, t }, api);
     const f = cameraFrame(p, camId, t);
-    el.parent = { id: camId, kind: 'camera', bind: { pos: f.pos.map(r6), basis: f.basis.map((v) => v.map(r6)) } };
+    // depth of the element's plane along the bind view axis (for the render-time pull-in)
+    const st = evalElement(el, t, p.meta);
+    const cy = (Number(p.meta?.height) || 1080) / 200;
+    const w = [(st.x || 0) / 100, cy - (st.y || 0) / 100, st.z || 0];
+    const depth = Math.max(1e-3, V.dot(V.sub(w, f.pos), f.basis[2]));
+    el.parent = {
+      id: camId, kind: 'camera',
+      bind: { pos: f.pos.map(r6), basis: f.basis.map((v) => v.map(r6)), depth: r6(depth) },
+    };
     return { changed: [el.id] };
   }
   if (!el.parent) return { changed: [] };
-  const m = elementCarrier(p, el, t);
+  const m = elementCarrier(p, el, t, { rigid: true });
   if (m) {
     // the element's centre in the world, with and without the camera carry
     const st = evalElement(el, t, p.meta);

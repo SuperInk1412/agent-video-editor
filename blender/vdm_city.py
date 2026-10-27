@@ -663,8 +663,11 @@ def _carry_elements(scene, rig, carriers):
         for fr in frames:
             carry.location = Vector(fr['loc'])
             carry.rotation_quaternion = Matrix(fr['rot']).to_quaternion()
+            k = float(fr.get('scale', 1.0))
+            carry.scale = (k, k, k)
             carry.keyframe_insert('location', frame=int(fr['f']))
             carry.keyframe_insert('rotation_quaternion', frame=int(fr['f']))
+            carry.keyframe_insert('scale', frame=int(fr['f']))
         screen = bpy.data.objects.new('VDM_Screen_' + eid, None)
         screen.location = rig.location
         screen.scale = rig.scale

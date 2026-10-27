@@ -22,10 +22,10 @@ function rig() {
 }
 
 /** Element centre in the world (screen plane + depth, then the camera carry). */
-function centre(p, el, t) {
+function centre(p, el, t, opts = {}) {
   const st = evalElement(el, t, p.meta);
   const local = [st.x / 100, p.meta.height / 200 - st.y / 100, st.z];
-  const m = elementCarrier(p, el, t);
+  const m = elementCarrier(p, el, t, opts);
   return m ? mapPoint(m, local) : local;
 }
 
@@ -44,11 +44,15 @@ test('element-parent: ops are registered', () => {
 test('element-parent: binding never moves the element and keeps it on screen while the camera moves', () => {
   const { p, cam, id } = rig();
   const el = () => p.elements.find((e) => e.id === id);
-  const before = centre(p, el(), 0.5);
+  const before = project(p, cam, 0.5, centre(p, el(), 0.5));
   applyOp(p, { op: 'elementParent', id, parent: cam, t: 0.5 });
   assert.equal(el().parent.id, cam);
-  centre(p, el(), 0.5).forEach((v, i) => near(v, before[i], 1e-4, 'no jump'));
   const onScreen = project(p, cam, 0.5, centre(p, el(), 0.5));
+  near(onScreen[0], before[0], 1e-5, 'no jump x');
+  near(onScreen[1], before[1], 1e-5, 'no jump y');
+  // drawn SCREEN_LOCK_DEPTH (1 m) in front of the camera, in front of any close-up plane
+  const f = cameraFrame(p, cam, 2);
+  near(dot(sub(centre(p, el(), 2), f.pos), f.basis[2]), 1, 1e-4, 'pulled in to 1 m');
   for (const t of [0, 1, 2, 3.5]) {
     const s = project(p, cam, t, centre(p, el(), t));
     near(s[0], onScreen[0], 1e-5, `screen x at ${t}`);
@@ -68,7 +72,7 @@ test('element-parent: unparent keeps the centre where it is', () => {
   applyOp(p, { op: 'keySet', id, path: 'transform.x', t: 0, value: 300, ease: 'linear' });
   applyOp(p, { op: 'keySet', id, path: 'transform.x', t: 4, value: 500 });
   applyOp(p, { op: 'elementParent', id, parent: cam, t: 0 });
-  const at = centre(p, el(), 2);
+  const at = centre(p, el(), 2, { rigid: true });
   applyOp(p, { op: 'elementUnparent', id, t: 2 });
   assert.equal(el().parent, undefined);
   centre(p, el(), 2).forEach((v, i) => near(v, at[i], 1e-4, 'kept'));
@@ -84,8 +88,9 @@ test('element-parent: validation, re-parenting and persistence', () => {
   const el = q.elements.find((e) => e.id === id);
   assert.equal(el.parent.id, cam);
   assert.equal(el.parent.bind.basis.length, 3);
-  const m = carrierMatrix(elementCarrier(q, el, 3));
-  [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0].forEach((v, i) => near(m[i], v, 1e-5, `identity at bind ${i}`));
+  const m = carrierMatrix(elementCarrier(q, el, 3, { rigid: true }));
+  [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0].forEach((v, i) => near(m[i], v, 1e-5, `rigid identity at bind ${i}`));
+  assert.ok(el.parent.bind.depth > 0, 'bind depth stored');
   applyOp(q, { op: 'elementParent', id, parent: null, t: 3 });
   assert.equal(q.elements.find((e) => e.id === id).parent, undefined, 'parent null = unparent');
 });

@@ -84,7 +84,13 @@ export function bakeElementCarriers(project, { fps = 24, from = 0, to = null } =
       if (!m) continue;
       const L = m.L;
       const loc = [0, 1, 2].map((i) => m.c[i] - (L[i][0] * m.p0[0] + L[i][1] * m.p0[1] + L[i][2] * m.p0[2]));
-      frames.push({ f, loc: loc.map((v) => Math.round(v * 1e5) / 1e5), rot: L.map((row) => row.map((v) => Math.round(v * 1e6) / 1e6)) });
+      const k = m.scale || 1; // uniform pull-in toward the camera (see elementCarrier)
+      frames.push({
+        f,
+        loc: loc.map((v) => Math.round(v * 1e5) / 1e5),
+        rot: L.map((row) => row.map((v) => Math.round((v / k) * 1e6) / 1e6)),
+        scale: Math.round(k * 1e7) / 1e7,
+      });
     }
     return { id: el.id, frames };
   });
