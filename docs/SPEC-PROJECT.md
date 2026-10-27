@@ -122,6 +122,8 @@ Blender 侧这些效果由合成器节点组 `VDM_Composite` 完成。节点组�
   变焦（fov）仍会改变它的大小。取消时元素中心留在原处（x / y / z 及其关键帧平移，旋转不回写）。预览在 VERT 里乘 `u_carry`，
   Blender 用逐帧烘焙的 `shot.elementCarriers` 驱动 `VDM_Carry_<id>` 空物体。检查器 2D 元素「贴屏」开关绑定到当前激活相机。
 - **已知限制**：多相机分层（VSE）路径仍把 2D 元素作为贴屏层叠在最上面（不产生视差）；预览里 2D 元素点选已经按 `scene3d.lastVP` 投影，相机移动后命中与选中框一致。
+- **编辑器剪贴板**：Ctrl+C / Ctrl+V 复制选中的 2D 元素和 3D 对象，保存在本机 localStorage，跨项目重启仍可用；
+  粘贴时保持组内相对时间，落到当前播放头，2D 副本放到当前图层最上面。跨项目只带元素数据，`media/` 文件不会随剪贴板复制。
 
 ## ops（唯一的写入口）
 
@@ -131,7 +133,6 @@ Blender 侧这些效果由合成器节点组 `VDM_Composite` 完成。节点组�
 {"op":"set","id":"el_x","path":"style.color","value":"#ffd400"}
 {"op":"removeElement","id":"el_x"}
 {"op":"duplicateElement","id":"el_x","start":4.0}
-{"op":"duplicateElements","ids":["el_a","el_b"]}
 {"op":"moveElement","id":"el_x","start":4.0,"duration":2.5,"z":3}
 {"op":"splitElement","id":"el_x","at":2.3}
 {"op":"reorder","id":"el_x","z":5}
@@ -154,8 +155,6 @@ Blender 侧这些效果由合成器节点组 `VDM_Composite` 完成。节点组�
   切口处左半不淡出、右半不淡入；右半视频的 `srcIn` 接上左半；有运动预设时两半共用原来的 `motion.span`。
   结果：切开前后逐帧渲染一致。
 - **duplicateElement**：副本放到新 `start` 时，关键帧和 `motion.span` 跟着平移。
-- **duplicateElements**：批量复制 2D 元素，副本保持原 `start` / `duration` / 关键帧，按当前层级顺序
-  插到各自源元素上方，并把整列表的 `z` 重新编号成连续整数（不改变原有前后顺序）。
 - **2D 元素属性**：属性没有关键帧时，时间轴输入框走 `updateElement` 改 `transform` 基础值，所有时间生效；
   已有该属性的键时才走 `keySet` 在当前时间写键。没有键的元素不会因为改一次值就凭空多出关键帧。
 - **keySet**：同一时刻已有关键帧时，不传 `ease` 就保留原来的缓动。

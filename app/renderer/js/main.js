@@ -737,21 +737,143 @@ async function add2DElement(kind) {
   return id;
 }
 
-/** paste a copied element at the playhead; its animation travels with it */
-function pasteElement(src) {
-  const start = fitStart(S.time, src.duration);
-  const dt = start - src.start;
-  const el = JSON.parse(JSON.stringify(src));
-  delete el.id;
-  delete el.z;
-  el.start = start;
-  el.segment = segmentAt(start)?.id || null;
-  el.keyframes = (el.keyframes || []).map((k) => ({ ...k, t: Math.round((k.t + dt) * 1000) / 1000 }));
-  if (Array.isArray(el.motion?.span)) el.motion.span = el.motion.span.map((v) => Math.round((v + dt) * 1000) / 1000);
-  return op({ op: 'addElement', element: el }).then((j) => {
-    if (j?.changed?.[0]) select({ elementId: j.changed[0] });
-    return j;
+// ---------------------------------------------------------------- clipboard
+// The clipboard is persisted in localStorage so Ctrl+C in one project still
+// works after the app restarts into another one. It carries a list of items in
+// layer order; paste re-times the group to the playhead and lets the current
+// project assign fresh ids.
+const CLIPBOARD_KEY = 'vdm.clipboard.v1';
+const clipRound = (v) => Math.round(Number(v) * 1000) / 1000;
+
+function readClipboard() {
+  try {
+    const j = JSON.parse(localStorage.getItem(CLIPBOARD_KEY) || 'null');
+    if (j?.v === 1 && Array.isArray(j.items) && j.items.length) return j;
+  } catch { /* local storage disabled or corrupt */ }
+  if (S.clipboard?.v === 1 && Array.isArray(S.clipboard.items) && S.clipboard.items.length) return S.clipboard;
+  return null;
+}
+
+function storeClipboard(payload) {
+  S.clipboard = payload;
+  try { localStorage.setItem(CLIPBOARD_KEY, JSON.stringify(payload)); }
+  catch { /* clipboard is best-effort; still usable in this session */ }
+}
+
+/** Copy selected 2D elements and/or 3D objects, preserving their order. */
+function copySelection(onlyElementIds = null) {
+  if (!S.project) return false;
+  const refs = onlyElementIds
+    ? onlyElementIds.map((id) => splitRef(`el:${id}`)).filter(Boolean)
+    : (S.selection.pool?.kind === 'element' ? S.selection.pool.ids.map(splitRef).filter(Boolean) : []);
+  const elIds = new Set(onlyElementIds || refs.filter((r) => r.type === 'el').map((r) => r.id));
+  const obIds = new Set(onlyElementIds ? [] : refs.filter((r) => r.type === 'ob').map((r) => r.id));
+  if (!elIds.size && S.selection.elementId && !onlyElementIds) elIds.add(S.selection.elementId);
+  if (!obIds.size && S.selection.objectId && !onlyElementIds) obIds.add(S.selection.objectId);
+
+  const elements = S.project.elements
+    .filter((e) => elIds.has(e.id))
+    .sort((a, b) => a.z - b.z || a.start - b.start)
+    .map((e) => ({ kind: 'element', data: JSON.parse(JSON.stringify(e)) }));
+  const objects = (S.project.scene?.objects || [])
+    .filter((o) => obIds.has(o.id))
+    .map((o) => ({ kind: 'object', data: JSON.parse(JSON.stringify(o)) }));
+  const items = [...elements, ...objects];
+  if (!items.length) {
+    toast('先选中要复制的元素', 'warn');
+    return false;
+  }
+  storeClipboard({
+    v: 1,
+    source: S.project.meta?.title || '',
+    at: Date.now(),
+    items,
   });
+  toast(`已复制 ${items.length} 个元素（Ctrl+V 粘贴，可跨项目）`, 'success');
+  return true;
+}
+
+/** Paste the persisted clipboard at the playhead, keeping relative timing. */
+async function pasteClipboard() {
+  const clip = readClipboard();
+  if (!clip) {
+    toast('剪贴板里没有元素', 'warn');
+    return null;
+  }
+  if (!S.project) return null;
+  const items = clip.items.filter((it) => it?.data && (it.kind === 'element' || it.kind === 'object'));
+  if (!items.length) return null;
+
+  const startOf = (it) => Number(it.data.start) || 0;
+  const durOf = (it) => Math.max(0.05, Number(it.data.duration) || 1);
+  const minStart = Math.min(...items.map(startOf));
+  const maxEnd = Math.max(...items.map((it) => startOf(it) + durOf(it)));
+  const total = Number(S.project.meta.duration) || 12;
+  let offset = S.time - minStart;
+  offset = Math.min(offset, total - maxEnd);
+  offset = Math.max(offset, -minStart);
+  offset = clipRound(offset);
+
+  const used = new Set([
+    ...S.project.elements.map((e) => e.id),
+    ...(S.project.scene?.objects || []).map((o) => o.id),
+  ]);
+  const stamp = Date.now().toString(36);
+  let serial = 0;
+  const freshId = (prefix) => {
+    let id = `${prefix}_clip_${stamp}_${serial++}`;
+    while (used.has(id)) id += 'x';
+    used.add(id);
+    return id;
+  };
+  const objectItems = items.filter((it) => it.kind === 'object');
+  const objectIds = new Map(objectItems.map((it) => [it.data.id, freshId('ob')]));
+  const ops = [];
+  const refs = [];
+  const elIds = [];
+
+  for (const it of items) {
+    const start = clipRound(Math.max(0, startOf(it) + offset));
+    if (it.kind === 'element') {
+      const el = JSON.parse(JSON.stringify(it.data));
+      el.id = freshId('el');
+      el.start = start;
+      el.duration = clipRound(Math.max(0.05, Math.min(durOf(it), Math.max(0.05, total - start))));
+      el.segment = segmentAt(start)?.id || null;
+      delete el.z;
+      delete el.parent;
+      el.keyframes = (el.keyframes || []).map((k) => ({ ...k, t: clipRound(Number(k.t) + offset) }));
+      if (Array.isArray(el.motion?.span)) el.motion.span = el.motion.span.map((v) => clipRound(Number(v) + offset));
+      ops.push({ op: 'addElement', element: el });
+      refs.push(elementRef(el.id));
+      elIds.push(el.id);
+    } else {
+      const obj = JSON.parse(JSON.stringify(it.data));
+      obj.id = objectIds.get(it.data.id) || freshId('ob');
+      obj.start = start;
+      obj.duration = clipRound(Math.max(0.05, Math.min(durOf(it), Math.max(0.05, total - start))));
+      if (obj.parent?.id) {
+        const pid = objectIds.get(obj.parent.id);
+        if (pid) obj.parent = { ...obj.parent, id: pid };
+        else delete obj.parent;
+      }
+      for (const keys of Object.values(obj.tracks || {})) {
+        for (const k of keys || []) if (Number.isFinite(Number(k.t))) k.t = clipRound(Number(k.t) + offset);
+      }
+      ops.push({ op: 'objectAdd', object: obj });
+      refs.push(objectRef(obj.id));
+    }
+  }
+
+  const j = await op(...ops);
+  if (!j) return null;
+  if (refs.length) {
+    const pool = { kind: 'element', ids: refs, primary: refs[0] };
+    if (elIds.length) select({ elementId: elIds[0], pool });
+    else select({ objectId: refs[0].slice(3), pool });
+  }
+  toast(`已粘贴 ${items.length} 个元素${clip.source ? `（来自 ${clip.source}）` : ''}`, 'success');
+  return j;
 }
 
 function addMediaAt(m, isVid) {
@@ -992,10 +1114,7 @@ async function boot() {
       { label: '选中素材', run: () => select({ elementId: id }) },
       {
         label: '复制（Ctrl+C）',
-        run: () => {
-          S.clipboard = JSON.parse(JSON.stringify(el));
-          toast(`已复制 ${el.name || id}，Ctrl+V 粘贴到播放头`);
-        },
+        run: () => { copySelection([id]); },
       },
       {
         label: '删除素材',
@@ -1901,43 +2020,14 @@ async function boot() {
       e.preventDefault();
       if (e.shiftKey) $('#btnRedo').click(); else $('#btnUndo').click();
     } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') {
-      const el = S.project.elements.find((x) => x.id === S.selection.elementId);
-      if (el && !window.getSelection()?.toString()) {
+      if (!window.getSelection()?.toString()) {
         e.preventDefault();
-        S.clipboard = JSON.parse(JSON.stringify(el));
-        toast(`已复制 ${el.name || el.id}，Ctrl+V 粘贴到播放头`);
+        copySelection();
       }
     } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
-      if (S.clipboard) { e.preventDefault(); pasteElement(S.clipboard); }
-    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'd') {
-      const pool = S.selection.pool;
-      const picked = pool?.kind === 'element'
-        ? pool.ids.map(splitRef).filter((r) => r?.type === 'el').map((r) => r.id)
-        : (S.selection.elementId ? [S.selection.elementId] : []);
-      const ids = [...new Set(picked)];
-      if (ids.length) {
+      if (readClipboard()) {
         e.preventDefault();
-        op({ op: 'duplicateElements', ids }).then((j) => {
-          const copies = (j?.changed || []).filter(Boolean);
-          if (!copies.length) return;
-          const copyPool = {
-            kind: 'element',
-            ids: copies.map(elementRef),
-            primary: elementRef(copies[0]),
-          };
-          select({ elementId: copies[0], pool: copyPool });
-          toast(`已复制 ${copies.length} 个元素（放在各自上方）`);
-        });
-        return;
-      }
-      const o = (S.project.scene?.objects || []).find((x) => x.id === S.selection.objectId);
-      if (o) {
-        e.preventDefault();
-        const copy = JSON.parse(JSON.stringify(o));
-        copy.id = `ob_${Date.now().toString(36)}`;
-        copy.name = `${o.name || '元素'} 副本`;
-        copy.pivot = [copy.pivot[0] + 10, copy.pivot[1], copy.pivot[2]];
-        op({ op: 'objectAdd', object: copy }).then((j) => { if (j) select({ objectId: copy.id }); });
+        pasteClipboard();
       }
     }
   });

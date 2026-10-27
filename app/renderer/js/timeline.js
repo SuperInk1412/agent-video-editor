@@ -112,7 +112,6 @@ export class Timeline {
       + '<span>U 只看带键属性</span><span class="tl-hint-sep">|</span>'
       + '<span>组标题三态 ▾ 全部 / ▾• 带键 / ▸ 收起</span><span class="tl-hint-sep">|</span>'
       + '<span><b>◆</b> 打帧 / 删帧</span><span class="tl-hint-sep">|</span>'
-      + '<span>Ctrl+D 复制到上层</span><span class="tl-hint-sep">|</span>'
       + '<span>Ctrl + 拖标尺缩放</span>';
 
     // timeline zoom: buttons + Ctrl+wheel + double-click the ruler to fit

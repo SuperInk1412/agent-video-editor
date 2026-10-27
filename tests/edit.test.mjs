@@ -111,34 +111,6 @@ test('duplicate at a new time moves the animation with the copy', () => {
   assert.deepEqual(element.keyframes.map((k) => k.t), [1.5], 'source untouched');
 });
 
-test('duplicateElements copies each selected element directly above it, preserving order', () => {
-  const p = fresh();
-  const add = (name, z, start, keyT) => applyOp(p, {
-    op: 'addElement',
-    element: {
-      type: 'text', name, z, start, duration: 3, style: { text: name },
-      keyframes: [{ t: keyT, path: 'transform.x', value: z * 10 }],
-    },
-  }).element;
-  const a = add('a', 0, 1, 1.5);
-  const b = add('b', 1, 4, 5); // not selected: must stay between a and c
-  const c = add('c', 2, 7, 8);
-  const { changed, elements } = applyOp(p, { op: 'duplicateElements', ids: [a.id, c.id] });
-  assert.equal(changed.length, 2);
-  assert.deepEqual(p.elements.map((e) => e.name), ['a', 'a 副本', 'b', 'c', 'c 副本']);
-  assert.deepEqual(p.elements.map((e) => e.z), [0, 1, 2, 3, 4], 'layer order is renumbered around the copies');
-  assert.deepEqual(elements.map((e) => e.start), [1, 7], 'copies stay at the source time');
-  assert.deepEqual(elements[0].keyframes, a.keyframes, 'keys copied without retiming');
-  assert.equal(elements[1].keyframes[0].t, 8);
-  assert.equal(elements[0].id, changed[0]);
-});
-
-test('duplicateElements rejects an unknown selection', () => {
-  const p = fresh();
-  assert.throws(() => applyOp(p, { op: 'duplicateElements', ids: ['el_missing'] }), /none of those elements/);
-  assert.throws(() => applyOp(p, { op: 'duplicateElements', ids: [] }), /needs ids/);
-});
-
 test('updateElement edits the base transform without creating a keyframe', () => {
   const p = fresh();
   const { element } = applyOp(p, { op: 'addElement', element: { type: 'solid', start: 0, duration: 2, transform: { z: 0 } } });
