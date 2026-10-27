@@ -108,14 +108,15 @@ export class Timeline {
     hint.innerHTML = '<span>▾ 元素 / 相机展开</span><span class="tl-hint-sep">|</span>'
       + '<span>U 只看带键属性</span><span class="tl-hint-sep">|</span>'
       + '<span>组标题三态 ▾ 全部 / ▾• 带键 / ▸ 收起</span><span class="tl-hint-sep">|</span>'
-      + '<span><b>◆</b> 打帧 / 删帧</span>';
+      + '<span><b>◆</b> 打帧 / 删帧</span><span class="tl-hint-sep">|</span>'
+      + '<span>Ctrl + 拖标尺缩放</span>';
 
     // timeline zoom: buttons + Ctrl+wheel + double-click the ruler to fit
     const zoomBar = el('div', 'tl-zoom');
     const zOut = el('button', 'tl-zoomb', '−');
-    zOut.title = '缩小时间轴（Ctrl + 滚轮）';
+    zOut.title = '缩小时间轴（Ctrl + 滚轮 / Ctrl + 拖标尺）';
     const zIn = el('button', 'tl-zoomb', '+');
-    zIn.title = '放大时间轴（Ctrl + 滚轮）';
+    zIn.title = '放大时间轴（Ctrl + 滚轮 / Ctrl + 拖标尺）';
     this._zoomLabel = el('span', 'tl-zoomval', '100%');
     const zFit = el('button', 'tl-zoomb', '适应');
     zFit.title = '缩放到整段时长（双击标尺）';
@@ -1536,6 +1537,32 @@ export class Timeline {
     return true;
   }
 
+  /**
+   * Ctrl/Cmd-drag the ruler to zoom. The playhead is the anchor, so its screen
+   * x stays fixed while the time scale changes. This path never seeks.
+   */
+  _startZoomDrag(ev) {
+    this.onPause?.();
+    const startX = ev.clientX;
+    const startZoom = this.zoom;
+    const ruler = this.rulerTrack;
+    const oldCursor = ruler.style.cursor;
+    ruler.style.cursor = 'ew-resize';
+    const move = (e) => {
+      const dx = e.clientX - startX;
+      this.setZoom(startZoom * Math.exp(dx / 220), null);
+    };
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+      ruler.style.cursor = oldCursor;
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+  }
+
   /** Ruler-only scrub: the time axis is the only place that seeks. */
   _startScrub(ev) {
     const seek = (e) => {
@@ -1652,6 +1679,10 @@ export class Timeline {
     if (target.closest('.tl-ruler')) {
       if (target.closest('.tl-gutter')) return;
       ev.preventDefault();
+      if (ev.ctrlKey || ev.metaKey) {
+        this._startZoomDrag(ev);
+        return;
+      }
       this._startScrub(ev);
       return;
     }
