@@ -56,8 +56,6 @@ export class Timeline {
       camMain: 'collapsed', camShake: 'collapsed', camDof: 'collapsed',
     };
     this.propSel = null;
-    this._autoObj = null;
-    this._autoEl = null;
     this._scrollTo = null;
     this._pending = new Map();
     this._editTimes = new Map();
@@ -66,20 +64,6 @@ export class Timeline {
     this._objHeads = new Map();
     this._elHeads = new Map();
     this.expandedEls = new Set();
-    this._anyPointerDown = false;
-    this._pendingRender = false;
-    // Expanding the timeline resizes the stage; if the user is dragging an
-    // element in the viewport, delay the expansion until the pointer is up so
-    // the drag's screen mapping does not jump under the cursor.
-    window.addEventListener('pointerdown', () => { this._anyPointerDown = true; }, true);
-    const release = () => {
-      this._anyPointerDown = false;
-      if (!this._pendingRender) return;
-      this._pendingRender = false;
-      this.render(true);
-    };
-    window.addEventListener('pointerup', release, true);
-    window.addEventListener('pointercancel', release, true);
     this._build();
     window.addEventListener('resize', () => this._layout());
   }
@@ -188,39 +172,11 @@ export class Timeline {
     this.elementId = sel?.elementId || null;
     this.objectId = sel?.objectId || null;
     this.cameraSel = !!sel?.camera;
-    const id = this.objectId;
-    const elId = this.elementId;
-    if (!id) this._autoObj = null;
-    if (!elId) this._autoEl = null;
-    let force = false;
-    if (id && id !== this._autoObj && !this.expanded.has(id)) {
-      this.expanded.add(id);
-      this._autoObj = id;
-      this._scrollTo = id;
-      force = true;
-    } else if (id && id !== prev) {
-      force = true;
-    }
-    if (elId && elId !== this._autoEl && !this.expandedEls.has(elId)) {
-      this.expandedEls.add(elId);
-      this._autoEl = elId;
-      this._scrollTo = `el:${elId}`;
-      force = true;
-    } else if (elId && elId !== prevEl) {
-      force = true;
-    }
-    if (id !== prev || elId !== prevEl) this.propSel = null;
-    if (force) {
-      if (this._anyPointerDown) {
-        this._pendingRender = true;
-        this._paintSelection();
-      } else {
-        this.render(true);
-      }
-    } else {
-      this._paintSelection();
-      this._updateHeight();
-    }
+    if (this.objectId !== prev || this.elementId !== prevEl) this.propSel = null;
+    // Selection alone never opens a property group. A second click on the
+    // already-selected row does that (see _down / viewport click handling).
+    this._paintSelection();
+    this._updateHeight();
   }
 
   setTime(t) {
@@ -1678,7 +1634,6 @@ export class Timeline {
       this.expanded.add(id);
       this._scrollTo = id;
     }
-    this._autoObj = this.expanded.has(id) ? id : null;
     this.render(true);
   }
 
@@ -1689,8 +1644,13 @@ export class Timeline {
       this.expandedEls.add(id);
       this._scrollTo = `el:${id}`;
     }
-    this._autoEl = this.expandedEls.has(id) ? id : null;
     this.render(true);
+  }
+
+  /** Public toggle used by a second click in the viewport. */
+  toggleExpanded(id, kind = 'element') {
+    if (kind === 'object') this._toggleExpand(id);
+    else this._toggleElementExpand(id);
   }
 
   _inlineName(span, o) {
@@ -2028,10 +1988,15 @@ export class Timeline {
       this._startCameraDrag(camHead.dataset.cam, ev.clientY, camHead);
       return;
     }
-    // 2D element header: select without moving the clip
+    // 2D element header: select without moving the clip. A second plain click
+    // on the already-selected row toggles its property pages instead.
     const elHead = target.closest?.('.tl-elhead[data-el]');
     if (elHead && !target.closest?.('.blk.el')) {
       const id = elHead.dataset.el;
+      if (this.elementId === id && !ev.ctrlKey && !ev.metaKey && !ev.shiftKey) {
+        this._toggleElementExpand(id);
+        return;
+      }
       this.elementId = id;
       this._pickPool('element', elementRef(id), ev);
       this.objectId = null; this.segmentId = null; this.cameraSel = false;
@@ -2042,7 +2007,12 @@ export class Timeline {
     }
     const objHead = target.closest?.('.tl-objhead');
     if (objHead && !target.closest?.('.blk.ob')) {
-      this.objectId = objHead.dataset.obj;
+      const id = objHead.dataset.obj;
+      if (this.objectId === id && !ev.ctrlKey && !ev.metaKey && !ev.shiftKey) {
+        this._toggleExpand(id);
+        return;
+      }
+      this.objectId = id;
       this._pickPool('element', objectRef(this.objectId), ev);
       this.elementId = null; this.segmentId = null; this.cameraSel = false;
       this.onSelect?.({ objectId: this.objectId, pool: this.pool });
@@ -2052,6 +2022,7 @@ export class Timeline {
     const objBlk = target.closest?.('.blk.ob');
     if (objBlk) {
       const id = objBlk.dataset.obj;
+      const wasSelected = this.objectId === id && !ev.ctrlKey && !ev.metaKey && !ev.shiftKey;
       this.objectId = id;
       this._pickPool('element', objectRef(id), ev);
       this.elementId = null; this.segmentId = null; this.cameraSel = false;
@@ -2063,8 +2034,11 @@ export class Timeline {
         : target.classList.contains('handle-r') ? 'r' : 'move';
       const t0 = this._timeAt(ev.clientX);
       const orig = { start: item.start, duration: item.duration };
+      let moved = false;
+      const downX = ev.clientX, downY = ev.clientY;
       const move = (e) => {
         this._noSnap = e.altKey;
+        if (Math.abs(e.clientX - downX) + Math.abs(e.clientY - downY) > 3) moved = true;
         const t = this._timeAt(e.clientX);
         const dt = t - t0;
         let ns = orig.start, nd = orig.duration;
@@ -2086,6 +2060,10 @@ export class Timeline {
       const up = () => {
         window.removeEventListener('pointermove', move);
         window.removeEventListener('pointerup', up);
+        if (!moved && wasSelected && mode === 'move') {
+          this._toggleExpand(id);
+          return;
+        }
         const ns = objBlk._ns, nd = objBlk._nd;
         if (ns == null || (Math.abs(ns - orig.start) < 1e-4 && Math.abs(nd - orig.duration) < 1e-4)) return;
         this.onOp?.({ op: 'objectPatch', id, patch: { start: round3(ns), duration: round3(nd) } });
@@ -2124,6 +2102,7 @@ export class Timeline {
 
     if (blk) {
       const id = blk.dataset.id;
+      const wasSelected = this.elementId === id && !ev.ctrlKey && !ev.metaKey && !ev.shiftKey;
       this.elementId = id;
       this._pickPool('element', elementRef(id), ev);
       this.objectId = null; this.segmentId = null; this.cameraSel = false;
@@ -2138,9 +2117,12 @@ export class Timeline {
         : target.classList.contains('handle-r') ? 'r' : 'move';
       const t0 = this._timeAt(ev.clientX);
       const orig = { start: item.start, duration: item.duration };
+      let moved = false;
+      const downX = ev.clientX, downY = ev.clientY;
 
       const move = (e) => {
         this._noSnap = e.altKey;
+        if (Math.abs(e.clientX - downX) + Math.abs(e.clientY - downY) > 3) moved = true;
         const t = this._timeAt(e.clientX);
         const dt = t - t0;
         let ns = orig.start, nd = orig.duration;
@@ -2161,6 +2143,10 @@ export class Timeline {
       const up = () => {
         window.removeEventListener('pointermove', move);
         window.removeEventListener('pointerup', up);
+        if (!moved && wasSelected && mode === 'move') {
+          this._toggleElementExpand(id);
+          return;
+        }
         const ns = blk._ns, nd = blk._nd;
         if (ns == null || (Math.abs(ns - orig.start) < 1e-4 && Math.abs(nd - orig.duration) < 1e-4)) return;
         this.onOp?.({ op: 'moveElement', id, start: round3(ns), duration: round3(nd) });

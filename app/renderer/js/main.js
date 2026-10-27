@@ -1575,6 +1575,8 @@ async function boot() {
    */
   const begin2DElementDrag = (elId, sx, sy, cx, cy, ev) => {
     const el = S.project.elements.find((e) => e.id === elId);
+    const wasSelected = S.selection.elementId === elId
+      && !ev.ctrlKey && !ev.metaKey && !ev.shiftKey;
     select({ elementId: elId });
     if (!el) return false;
     pause();
@@ -1591,6 +1593,7 @@ async function boot() {
         keyedY: elKeyed(el, 'transform.y'),
         backup: JSON.stringify(el),
         startCx: cx, startCy: cy,
+        wasSelected,
       };
       try { canvas.setPointerCapture(ev.pointerId); } catch { /* synthetic events */ }
       updateOverlay();
@@ -1714,6 +1717,8 @@ async function boot() {
     const pick = preview.scene3d?.pickObject(S.project, S.time, sx, sy);
     if (pick) {
       const obj = (S.project.scene?.objects || []).find((o) => o.id === pick.id);
+      const wasSelected = S.selection.objectId === pick.id
+        && !e.ctrlKey && !e.metaKey && !e.shiftKey;
       select({ objectId: pick.id });
       if (obj) {
         const ac = preview.scene3d.lastCam;
@@ -1722,7 +1727,7 @@ async function boot() {
         drag = {
           kind: 'object', id: obj.id, normal, hit: pick.point,
           world0: pose.pivot.slice(), pivot: pose.pivot.slice(),
-          backup: JSON.stringify(obj), x: cx, y: cy, moved: false,
+          backup: JSON.stringify(obj), x: cx, y: cy, moved: false, wasSelected,
         };
         try { canvas.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
         gizmo.draw();
@@ -1942,6 +1947,8 @@ async function boot() {
           op: 'objectKey', id: d.id, path: 'pivot',
           t: Math.round(S.time * 1000) / 1000, v: d.pivot,
         });
+      } else if (d.wasSelected && !e?.ctrlKey && !e?.metaKey && !e?.shiftKey) {
+        timeline?.toggleExpanded(d.id, 'object');
       }
       gizmo.draw();
     } else if (d.kind === 'objkey') {
@@ -1971,6 +1978,8 @@ async function boot() {
         if (Object.keys(patch).length) ops.push({ op: 'updateElement', id: d.id, patch: { transform: patch } });
         if (ops.length === 1) op(ops[0]);
         else if (ops.length > 1) op({ op: 'batch', ops });
+      } else if (d.wasSelected && !e?.ctrlKey && !e?.metaKey && !e?.shiftKey) {
+        timeline?.toggleExpanded(d.id, 'element');
       }
       gizmo.draw();
       updateOverlay();
