@@ -274,6 +274,277 @@ function select(sel = {}) {
   updateSelectionInfo();
 }
 
+// ---------------------------------------------------------------- inline text editor
+// Double-click a text element (2D overlay or 3D text object) in the viewport or
+// on the timeline. The editor is a transparent textarea placed on the projected
+// text quad; the canvas itself keeps rendering the real typography, so typing
+// changes the picture live. No panel and no second copy of the glyphs.
+let inlineTextEdit = null;
+let inlineTextUI = null;
+const INLINE_TEXT_HINT = '在画面上直接改字 · Ctrl+Enter 保存 · Esc 取消 · 点空白处保存';
+
+function textTarget(kind, id) {
+  const target = kind === 'object'
+    ? (S.project?.scene?.objects || []).find((o) => o.id === id)
+    : (S.project?.elements || []).find((e) => e.id === id);
+  if (!target || target.type !== 'text') return null;
+  return { kind, id, target, text: String(target.style?.text ?? '') };
+}
+
+/** Homography from a w×h text box to the four projected corners, as CSS matrix3d. */
+function homographyCss(points, w, h) {
+  const [[x0, y0], [x1, y1], [x2, y2], [x3, y3]] = points;
+  const dx1 = x1 - x2, dx2 = x3 - x2;
+  const dy1 = y1 - y2, dy2 = y3 - y2;
+  const sx = x0 - x1 + x2 - x3;
+  const sy = y0 - y1 + y2 - y3;
+  const den = dx1 * dy2 - dx2 * dy1;
+  if (!Number.isFinite(den) || Math.abs(den) < 1e-9) return null;
+  const g = (sx * dy2 - dx2 * sy) / den;
+  const hh = (dx1 * sy - sx * dy1) / den;
+  const a = x1 - x0 + g * x1;
+  const b = x3 - x0 + hh * x3;
+  const c = x0;
+  const d = y1 - y0 + g * y1;
+  const e = y3 - y0 + hh * y3;
+  const f = y0;
+  // Column-major matrix3d; destination = (x0..x3) in stage CSS pixels.
+  const m = [
+    a / w, d / w, 0, g / w,
+    b / h, e / h, 0, hh / h,
+    0, 0, 1, 0,
+    c, f, 0, 1,
+  ];
+  if (!m.every(Number.isFinite)) return null;
+  return `matrix3d(${m.map((v) => Number(v.toFixed(8))).join(',')})`;
+}
+
+/**
+ * Projected text box for the in-place editor. 2D text comes from the same
+ * layer corners as the selection outline; 3D text uses the object's plane
+ * size/basis projected through the current camera.
+ */
+function inlineTextGeometry(kind, id, text) {
+  const canvas = preview?.canvas;
+  const stage = $('#stageBox');
+  if (!canvas || !stage || !S.project) return null;
+  const cr = canvas.getBoundingClientRect();
+  const br = stage.getBoundingClientRect();
+  if (!(cr.width > 0 && cr.height > 0 && canvas.width > 0 && canvas.height > 0)) return null;
+  const toStage = (x, y) => [
+    cr.left - br.left + x * (cr.width / canvas.width),
+    cr.top - br.top + y * (cr.height / canvas.height),
+  ];
+  const meta = S.project.meta || {};
+  const styleOf = (o) => o?.style || {};
+  const textLines = Math.max(1, String(text ?? '').split('\n').length);
+
+  if (kind === 'element') {
+    const layer = (preview.layers || []).find((L) => L.el?.id === id);
+    if (!layer || layer.kind !== 'tex') return null;
+    const corners = preview._layerCorners(layer);
+    if (!corners || corners.length !== 4) return null;
+    const pts = corners.map(([x, y]) => toStage(x, y));
+    if (!pts.every(([x, y]) => Number.isFinite(x) && Number.isFinite(y))) return null;
+    const style = styleOf(layer.el);
+    const st = layer.st || {};
+    const fontPx = Math.max(1, (Number(st.size) || 96) * (canvas.width / (Number(meta.width) || 1920)));
+    const lineH = fontPx * Math.max(0.1, Number(style.lineHeight) || 1.18);
+    const srcW = Math.max(1, Number(layer.w) || 1);
+    const srcH = Math.max(1, Number(layer.h) || lineH * textLines);
+    return {
+      pts,
+      w: srcW,
+      h: srcH,
+      fontPx,
+      lineH,
+      pad: Math.max(0, (srcH - lineH * textLines) / 2),
+      align: style.align || 'center',
+      weight: style.weight || 400,
+      family: style.font || 'SimHei',
+      letterSpacing: (Number(style.letterSpacing) || 0) * fontPx,
+    };
+  }
+
+  const s3 = preview.scene3d;
+  const obj = (S.project.scene?.objects || []).find((o) => o.id === id);
+  if (!obj || obj.type !== 'text' || !s3?.projectPoint) return null;
+  const pose = worldPose(S.project, obj, S.time);
+  const size = s3._planeSizes?.get(obj.id);
+  const asset = s3.media?.get(obj.id);
+  if (!pose || !size || !asset?.w || !asset?.h) return null;
+  const [sx, sy] = size;
+  const p = pose.worldPos, right = pose.basis.right, up = pose.basis.up;
+  const hw = sx / 2, hh = sy / 2;
+  const worldPts = [
+    [p[0] - right[0] * hw + up[0] * hh, p[1] - right[1] * hw + up[1] * hh, p[2] - right[2] * hw + up[2] * hh],
+    [p[0] + right[0] * hw + up[0] * hh, p[1] + right[1] * hw + up[1] * hh, p[2] + right[2] * hw + up[2] * hh],
+    [p[0] + right[0] * hw - up[0] * hh, p[1] + right[1] * hw - up[1] * hh, p[2] + right[2] * hw - up[2] * hh],
+    [p[0] - right[0] * hw - up[0] * hh, p[1] - right[1] * hw - up[1] * hh, p[2] - right[2] * hw - up[2] * hh],
+  ];
+  const projected = worldPts.map((wp) => s3.projectPoint(wp));
+  if (projected.some((q) => !q || !Number.isFinite(q.x) || !Number.isFinite(q.y))) return null;
+  const pts = projected.map((q) => toStage(
+    q.x * canvas.width / Math.max(1, s3.lastW),
+    q.y * canvas.height / Math.max(1, s3.lastH),
+  ));
+  const style = styleOf(obj);
+  const fontPx = 128; // preview3d's text raster is one em = 128 px
+  return {
+    pts,
+    w: asset.w,
+    h: asset.h,
+    fontPx,
+    lineH: fontPx * Math.max(0.1, Number(style.lineHeight) || 1.2),
+    pad: 0,
+    align: style.align || 'center',
+    weight: 400,
+    family: preview.scene3d._fontFamily?.(style.font) || style.font || 'SimHei',
+    letterSpacing: (Number(style.tracking) || 0) * fontPx,
+  };
+}
+
+function applyInlineTextGeometry(geom) {
+  const ui = inlineTextUI;
+  if (!ui || !geom) return false;
+  const m = homographyCss(geom.pts, geom.w, geom.h);
+  if (!m) return false;
+  const a = ui.area;
+  a.style.width = `${geom.w}px`;
+  a.style.height = `${geom.h}px`;
+  a.style.padding = `${geom.pad}px`;
+  a.style.fontSize = `${geom.fontPx}px`;
+  a.style.lineHeight = `${geom.lineH}px`;
+  a.style.fontFamily = geom.family;
+  a.style.fontWeight = String(geom.weight);
+  a.style.letterSpacing = `${geom.letterSpacing}px`;
+  a.style.textAlign = geom.align === 'left' ? 'left' : geom.align === 'right' ? 'right' : 'center';
+  a.style.transform = m;
+  a.scrollTop = 0;
+  a.scrollLeft = 0;
+  ui.layer.hidden = false;
+  return true;
+}
+
+function refreshInlineTextGeometry() {
+  if (!inlineTextEdit) return false;
+  const geom = inlineTextGeometry(inlineTextEdit.kind, inlineTextEdit.id, inlineTextUI?.area.value ?? '');
+  return geom ? applyInlineTextGeometry(geom) : false;
+}
+
+function ensureInlineTextUI() {
+  if (inlineTextUI) return inlineTextUI;
+  const layer = $('#inlineTextLayer');
+  const area = $('#inlineTextArea');
+  const hint = $('#stageHint');
+  if (!layer || !area) return null;
+  if (hint && !hint.dataset.normal) hint.dataset.normal = hint.textContent;
+  area.addEventListener('input', () => {
+    if (!inlineTextEdit) return;
+    const target = textTarget(inlineTextEdit.kind, inlineTextEdit.id)?.target;
+    if (!target) return;
+    target.style = { ...(target.style || {}), text: area.value };
+    preview?.render(S.time);
+    refreshInlineTextGeometry();
+  });
+  area.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      closeInlineText(false);
+      return;
+    }
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      e.stopPropagation();
+      closeInlineText(true);
+      return;
+    }
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      closeInlineText(true);
+    }
+  });
+  area.addEventListener('blur', () => {
+    // Clicking outside is handled on pointerdown (earlier); this also covers
+    // Tab / window focus changes without leaving an invisible editor behind.
+    const state = inlineTextEdit;
+    setTimeout(() => {
+      if (inlineTextEdit && inlineTextEdit === state) closeInlineText(true);
+    }, 0);
+  });
+  document.addEventListener('pointerdown', (e) => {
+    if (inlineTextEdit && !layer.contains(e.target)) closeInlineText(true);
+  }, true);
+  window.addEventListener('resize', () => {
+    if (inlineTextEdit) refreshInlineTextGeometry();
+  });
+  inlineTextUI = { layer, area, hint };
+  return inlineTextUI;
+}
+
+function closeInlineText(save) {
+  const state = inlineTextEdit;
+  if (!state) return;
+  const ui = inlineTextUI;
+  const value = ui?.area.value ?? state.original;
+  inlineTextEdit = null;
+  if (ui) {
+    ui.layer.hidden = true;
+    ui.area.value = '';
+    if (ui.hint?.dataset.normal) ui.hint.textContent = ui.hint.dataset.normal;
+    ui.area.blur();
+  }
+  const target = textTarget(state.kind, state.id)?.target || state.target;
+  if (!target) return;
+  if (!save) {
+    target.style = { ...(target.style || {}), text: state.original };
+    preview?.render(S.time);
+    return;
+  }
+  target.style = { ...(target.style || {}), text: value };
+  if (value === state.original) {
+    preview?.render(S.time);
+    return;
+  }
+  op(state.kind === 'object'
+    ? { op: 'objectPatch', id: state.id, patch: { style: { text: value } } }
+    : { op: 'updateElement', id: state.id, patch: { style: { text: value } } });
+}
+
+/** Enter in-place editing for a 2D text element or 3D text object. */
+function openTextEditor(kind, id, ev = null) {
+  const found = textTarget(kind, id);
+  if (!found) return false;
+  if (inlineTextEdit) closeInlineText(true);
+  const ui = ensureInlineTextUI();
+  if (!ui) return false;
+  pause();
+  const start = Number(found.target.start) || 0;
+  const end = start + Math.max(0, Number(found.target.duration) || 0);
+  if (S.time < start - 1e-6 || S.time >= end - 1e-6) {
+    setTime(Math.min(Math.max(0, start + 0.001), Math.max(0, end - 0.001)));
+  }
+  select(kind === 'object' ? { objectId: id } : { elementId: id });
+  preview?.render(S.time);
+  const geom = inlineTextGeometry(kind, id, found.text);
+  if (!geom) {
+    toast('当前画面看不到这个文字，先把播放头或镜头移到它可见的位置', 'warn');
+    return false;
+  }
+  inlineTextEdit = { kind, id, target: found.target, original: found.text };
+  ui.area.value = found.text;
+  if (!applyInlineTextGeometry(geom)) {
+    inlineTextEdit = null;
+    return false;
+  }
+  if (ui.hint) ui.hint.textContent = INLINE_TEXT_HINT;
+  ui.area.focus({ preventScroll: true });
+  ui.area.select();
+  return true;
+}
+
+
 // ---------------------------------------------------------------- value curve
 
 /** Every keyed property of a host that has at least two keys, as panel tracks. */
@@ -1267,6 +1538,7 @@ async function boot() {
     onCameraMenu: (id, x, y) => cameraMenu(id, x, y),
     onClipMenu: (id, x, y) => clipMenu(id, x, y),
     onSplit: () => splitAtPlayhead(),
+    onTextEdit: (kind, id, ev) => openTextEditor(kind, id, ev),
   });
   timeline.setProject(S.project);
 
@@ -2037,7 +2309,8 @@ async function boot() {
           t: Math.round(S.time * 1000) / 1000, v: d.pivot,
         });
       } else if (d.wasSelected && !e?.ctrlKey && !e?.metaKey && !e?.shiftKey) {
-        timeline?.toggleExpanded(d.id, 'object');
+        const obj = (S.project.scene?.objects || []).find((o) => o.id === d.id);
+        if (!(e?.detail > 1 && obj?.type === 'text')) timeline?.toggleExpanded(d.id, 'object');
       }
       gizmo.draw();
     } else if (d.kind === 'objkey') {
@@ -2068,7 +2341,8 @@ async function boot() {
         if (ops.length === 1) op(ops[0]);
         else if (ops.length > 1) op({ op: 'batch', ops });
       } else if (d.wasSelected && !e?.ctrlKey && !e?.metaKey && !e?.shiftKey) {
-        timeline?.toggleExpanded(d.id, 'element');
+        const el = S.project.elements.find((x) => x.id === d.id);
+        if (!(e?.detail > 1 && el?.type === 'text')) timeline?.toggleExpanded(d.id, 'element');
       }
       gizmo.draw();
       updateOverlay();
@@ -2103,17 +2377,31 @@ async function boot() {
   }
   canvas.addEventListener('pointercancel', () => { cancelObjectDrag(); drag = null; });
 
-  // double-click a handle to drop it back to the automatic Catmull tangent
+  // double-click a handle to drop it back to the automatic Catmull tangent;
+  // double-click text (2D overlay or 3D text object) to edit its content
   canvas.addEventListener('dblclick', (e) => {
-    if (!S.editMode || S.viewMode !== 'select') return;
+    if (S.editMode && S.viewMode === 'select') {
+      const { sx, sy } = stageXY(e);
+      const hit = gizmo?.hit(sx, sy);
+      if (hit && (hit.kind === 'out' || hit.kind === 'in')) {
+        const key = S.project.camera?.path?.[hit.index];
+        if (!key) return;
+        key[hit.kind] = null;
+        commitCameraPath();
+        gizmo.draw();
+        return;
+      }
+    }
     const { sx, sy } = stageXY(e);
-    const hit = gizmo?.hit(sx, sy);
-    if (!hit || (hit.kind !== 'out' && hit.kind !== 'in')) return;
-    const key = S.project.camera?.path?.[hit.index];
-    if (!key) return;
-    key[hit.kind] = null;
-    commitCameraPath();
-    gizmo.draw();
+    const elId = preview.hitTest(sx, sy, S.time);
+    const el = elId ? S.project.elements.find((x) => x.id === elId) : null;
+    if (el?.type === 'text') {
+      openTextEditor('element', el.id, e);
+      return;
+    }
+    const pick = preview.scene3d?.pickObject(S.project, S.time, sx, sy);
+    const obj = pick ? (S.project.scene?.objects || []).find((o) => o.id === pick.id) : null;
+    if (obj?.type === 'text') openTextEditor('object', obj.id, e);
   });
 
   canvas.addEventListener('wheel', (e) => {

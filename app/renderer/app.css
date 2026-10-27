@@ -619,6 +619,27 @@ body.look-mode #stageBox { box-shadow: 0 0 0 2px rgba(255,209,102,.65), 0 0 30px
 .ctx-menu .ctx-sep { height: 1px; background: #1d2838; margin: 5px 6px; }
 .ctx-menu .ctx-note { padding: 4px 10px; font-size: 10.5px; color: #6f8296; }
 
+/* ---------------- inline text editing (double-click a text element) ---------------- */
+/* A transparent textarea sits exactly on the projected text quad (CSS matrix3d
+   homography); the canvas keeps showing the real typography while the caret and
+   selection live in the editor. No panel, no duplicate glyphs. */
+.inline-text-layer {
+  position: absolute; inset: 0; z-index: 15; overflow: hidden; pointer-events: none;
+}
+.inline-text-layer[hidden] { display: none; }
+#inlineTextArea {
+  position: absolute; left: 0; top: 0; margin: 0; padding: 0;
+  border: 0; outline: 0; resize: none; overflow: hidden;
+  background: transparent; color: transparent; -webkit-text-fill-color: transparent;
+  caret-color: #7fe9ff; text-shadow: none; white-space: pre;
+  transform-origin: 0 0; box-sizing: border-box; pointer-events: auto;
+  scrollbar-width: none; font-variant-ligatures: none;
+}
+#inlineTextArea::-webkit-scrollbar { display: none; }
+#inlineTextArea::selection {
+  background: rgba(23, 217, 255, .30); color: transparent; -webkit-text-fill-color: transparent;
+}
+
 /* ---------------- numeric fields: hover spinner + drag scrub ---------------- */
 .nf-spin {
   position: fixed; z-index: 90; display: flex; flex-direction: column;

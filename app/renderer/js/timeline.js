@@ -26,7 +26,7 @@ const TYPE_COLOR = { image: '#3b6ea5', video: '#2f8f6b', text: '#a06a2b', shape:
 const AX = ['x', 'y', 'z'];
 
 export class Timeline {
-  constructor(root, { onSeek, onSelect, onOp, onPause, onElementMenu, onCameraMenu, onClipMenu, onSplit } = {}) {
+  constructor(root, { onSeek, onSelect, onOp, onPause, onElementMenu, onCameraMenu, onClipMenu, onSplit, onTextEdit } = {}) {
     this.root = root;
     this.onSeek = onSeek;
     this.onSelect = onSelect;
@@ -36,6 +36,7 @@ export class Timeline {
     this.onCameraMenu = onCameraMenu;
     this.onClipMenu = onClipMenu;
     this.onSplit = onSplit;
+    this.onTextEdit = onTextEdit;
     this.project = null;
     this.time = 0;
     this.pool = emptySelection();
@@ -1013,7 +1014,7 @@ export class Timeline {
     dot.style.background = TYPE_COLOR[e.type] || '#666';
     const name = el('span', 'tl-objname');
     name.textContent = e.name || e.id;
-    name.title = e.name || e.id;
+    name.title = e.type === 'text' ? '双击时间块或画面编辑文字内容' : (e.name || e.id);
     const kind = el('span', 'tl-objkind', '2D');
     kind.title = '画面元素（纵深 z 单位：米）';
     g.append(caret, eye, dot, name, kind);
@@ -1031,6 +1032,7 @@ export class Timeline {
     hr.title = '拖动右边界：改结束时间';
     b.append(hl, hr);
     b.style.setProperty('--c', TYPE_COLOR[e.type] || '#666');
+    if (e.type === 'text') b.title = '双击编辑文字内容';
     b.addEventListener('contextmenu', (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
@@ -1040,6 +1042,14 @@ export class Timeline {
     row.append(g, track);
     this.elsWrap.appendChild(row);
     this._elHeads.set(e.id, { row, g, eye, name, dot, block: b });
+    if (e.type === 'text') {
+      row.addEventListener('dblclick', (ev) => {
+        if (ev.target.closest?.('button, input, textarea, .handle')) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        this.onTextEdit?.('element', e.id, ev);
+      });
+    }
 
     if (!open) return;
     this.elsWrap.appendChild(this._sectionRow('变换', 'transform', 'px / m'));
@@ -1167,6 +1177,14 @@ export class Timeline {
     row.append(g, track);
     this.elsWrap.appendChild(row);
     this._objHeads.set(o.id, { row, g, eye, name, dot, block });
+    if (o.type === 'text') {
+      row.addEventListener('dblclick', (ev) => {
+        if (ev.target.closest?.('.tl-objname, button, input, textarea, .handle')) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        this.onTextEdit?.('object', o.id, ev);
+      });
+    }
 
     if (!open) return;
     this.elsWrap.appendChild(this._sectionRow('内容', 'content'));
@@ -2078,7 +2096,8 @@ export class Timeline {
     const elHead = target.closest?.('.tl-elhead[data-el]');
     if (elHead && !target.closest?.('.blk.el')) {
       const id = elHead.dataset.el;
-      if (this.elementId === id && !ev.ctrlKey && !ev.metaKey && !ev.shiftKey) {
+      const dblText = ev.detail > 1 && this._element(id)?.type === 'text';
+      if (this.elementId === id && !ev.ctrlKey && !ev.metaKey && !ev.shiftKey && !dblText) {
         this._toggleElementExpand(id);
         return;
       }
@@ -2093,7 +2112,8 @@ export class Timeline {
     const objHead = target.closest?.('.tl-objhead');
     if (objHead && !target.closest?.('.blk.ob') && !target.closest?.('.blk.cam')) {
       const id = objHead.dataset.obj;
-      if (this.objectId === id && !ev.ctrlKey && !ev.metaKey && !ev.shiftKey) {
+      const dblText = ev.detail > 1 && this._obj(id)?.type === 'text';
+      if (this.objectId === id && !ev.ctrlKey && !ev.metaKey && !ev.shiftKey && !dblText) {
         this._toggleExpand(id);
         return;
       }
@@ -2142,11 +2162,11 @@ export class Timeline {
         objBlk.style.width = `${nd * this.pps}px`;
         objBlk._ns = ns; objBlk._nd = nd;
       };
-      const up = () => {
+      const up = (e) => {
         window.removeEventListener('pointermove', move);
         window.removeEventListener('pointerup', up);
         if (!moved && wasSelected && mode === 'move') {
-          this._toggleExpand(id);
+          if (!(e?.detail > 1 && item.type === 'text')) this._toggleExpand(id);
           return;
         }
         const ns = objBlk._ns, nd = objBlk._nd;
@@ -2226,11 +2246,11 @@ export class Timeline {
         blk.style.width = `${nd * this.pps}px`;
         blk._ns = ns; blk._nd = nd;
       };
-      const up = () => {
+      const up = (e) => {
         window.removeEventListener('pointermove', move);
         window.removeEventListener('pointerup', up);
         if (!moved && wasSelected && mode === 'move') {
-          this._toggleElementExpand(id);
+          if (!(e?.detail > 1 && item.type === 'text')) this._toggleElementExpand(id);
           return;
         }
         const ns = blk._ns, nd = blk._nd;

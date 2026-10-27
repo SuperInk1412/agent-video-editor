@@ -97,13 +97,16 @@
               <polygon id="selPoly" points=""></polygon>
             </svg>
             <div id="selLabel"></div>
+            <div id="inlineTextLayer" class="inline-text-layer" hidden>
+              <textarea id="inlineTextArea" wrap="off" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
+            </div>
           </div>
         </div>
         <div id="stageBar">
           <span id="stageTime" class="mono">0.00 / 0.00s</span>
           <span id="viewMode" class="mode-badge" hidden>选择</span>
           <span id="selInfo" class="sel-info" hidden></span>
-          <span class="hint">Tab 编辑视口 · Alt 切换 选择/移动相机 · Ctrl 吸附 0.5m · G 网格 · 右键菜单 · 空格播放</span>
+          <span id="stageHint" class="hint">Tab 编辑视口 · Alt 切换 选择/移动相机 · Ctrl 吸附 0.5m · G 网格 · 右键菜单 · 空格播放</span>
         </div>
       </section>
 
