@@ -134,6 +134,54 @@ test('banking rolls into the turn and respects maxRoll', () => {
   assert.ok(Math.abs(c.roll) <= 12.0001, `roll ${c.roll}`);
 });
 
+test('banking uses the shortest yaw angle across ±180', () => {
+  const cam = normalizeCamera({
+    fov: 60, lookAhead: 80, bankGain: 2, maxRoll: 30,
+    shake: { amp: 0 },
+    path: [
+      { t: 0, pos: [0, 0, 100] },
+      { t: 1, pos: [100, 0, 0] },
+      { t: 2, pos: [0, 0, -100] },
+      { t: 3, pos: [-100, 0, 0] },
+      { t: 4, pos: [0, 0, 100] },
+    ],
+  });
+  let prev = null;
+  let maxStep = 0;
+  for (let t = 0; t <= 4; t += 1 / 60) {
+    const c = evalCamera({ camera: cam }, t);
+    if (prev != null) maxStep = Math.max(maxStep, Math.abs(c.roll - prev));
+    prev = c.roll;
+  }
+  assert.ok(maxStep < 8, `roll step ${maxStep}° (raw atan2 wrap would be ~60°)`);
+});
+
+test('manual look fades in and out instead of snapping', () => {
+  const cam = normalizeCamera({
+    fov: 60, lookAhead: 90,
+    shake: { amp: 0 },
+    path: [
+      { t: 0, pos: [0, 0, -100] },
+      { t: 1, pos: [0, 0, 0] },
+      { t: 2, pos: [0, 0, 100], look: [100, 0, 100] },
+      { t: 3, pos: [0, 0, 200] },
+      { t: 4, pos: [0, 0, 300] },
+    ],
+  });
+  const dir = (c) => v3.norm(v3.sub(c.look, c.pos));
+  let prev = null;
+  let maxStep = 0;
+  for (let t = 0.8; t <= 3.2; t += 1 / 60) {
+    const d = dir(evalCamera({ camera: cam }, t));
+    if (prev) {
+      const dot = Math.max(-1, Math.min(1, v3.dot(prev, d)));
+      maxStep = Math.max(maxStep, Math.acos(dot) * 180 / Math.PI);
+    }
+    prev = d;
+  }
+  assert.ok(maxStep < 5, `look step ${maxStep}° (hard window switch would be ~90°)`);
+});
+
 test('bakeCameraTrack covers the range', () => {
   const p = project();
   const track = bakeCameraTrack(p, { fps: 24, from: 0, to: 2 });

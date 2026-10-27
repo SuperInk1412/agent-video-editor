@@ -79,6 +79,65 @@ function ease(name, p) {
   }
 }
 
+const LOOK_FADE = 1.0;
+const smooth01 = (u) => {
+  const x = clamp(u, 0, 1);
+  return x * x * (3 - 2 * x);
+};
+
+/** Shortest spherical path between two unit directions. */
+function slerpDir(a, b, u) {
+  const d = clamp(v3.dot(a, b), -1, 1);
+  if (d > 0.99999) return v3.norm(v3.lerp(a, b, u));
+  if (d < -0.99999) {
+    let axis = v3.cross(a, [0, 1, 0]);
+    if (v3.len(axis) < 1e-6) axis = v3.cross(a, [1, 0, 0]);
+    axis = v3.norm(axis);
+    const th = Math.PI * u;
+    return v3.norm(v3.add(v3.mul(a, Math.cos(th)), v3.mul(v3.cross(axis, a), Math.sin(th))));
+  }
+  const th = Math.acos(d);
+  const s = Math.sin(th);
+  if (Math.abs(s) < 1e-8) return a.slice();
+  return v3.norm(v3.add(
+    v3.mul(a, Math.sin((1 - u) * th) / s),
+    v3.mul(b, Math.sin(u * th) / s),
+  ));
+}
+
+/**
+ * Manual look target at t plus how strongly it should override auto-look.
+ * The old code held / switched hard at first.look.t ± 1 s; that snapped the
+ * camera direction. Fade across the same one-second window instead.
+ */
+function manualLookAt(cam, t) {
+  const looks = (cam.path || []).filter((k) => Array.isArray(k.look) && k.look.length >= 3);
+  if (!looks.length) return null;
+  const first = looks[0];
+  const last = looks[looks.length - 1];
+  if (t < first.t - LOOK_FADE || t > last.t + LOOK_FADE) return null;
+  let weight;
+  if (t < first.t) weight = smooth01((t - (first.t - LOOK_FADE)) / LOOK_FADE);
+  else if (t > last.t) weight = smooth01(((last.t + LOOK_FADE) - t) / LOOK_FADE);
+  else weight = 1;
+  let target;
+  if (t <= first.t) {
+    target = first.look.slice();
+  } else if (t >= last.t) {
+    target = last.look.slice();
+  } else {
+    for (let i = 0; i < looks.length - 1; i++) {
+      if (t >= looks[i].t && t <= looks[i + 1].t) {
+        const u = (t - looks[i].t) / Math.max(1e-6, looks[i + 1].t - looks[i].t);
+        const s = smooth01(u);
+        target = v3.lerp(looks[i].look, looks[i + 1].look, s);
+        break;
+      }
+    }
+  }
+  return target ? { target, weight: clamp(weight, 0, 1) } : null;
+}
+
 const numVec = (v, n, dflt) => (Array.isArray(v) && v.length === n && v.every((x) => Number.isFinite(Number(x)))
   ? v.map(Number)
   : dflt.slice());
@@ -475,37 +534,50 @@ export function evalCamera(project, t) {
   const posB = v3.add(tr.center, pathPos(cam, t + 0.16));
   const tang = v3.norm(v3.sub(posB, posA));
 
-  // explicit look keys win inside their window; elsewhere look ahead along the tangent
+  // explicit look keys win inside their window; outside, blend back to the
+  // tangent so entering / leaving a look range does not snap the camera.
   const lookAhead = cameraParamValue(cam, 'lookAhead', t);
-  let look = v3.add(pos, v3.mul(tang, Math.max(1, lookAhead)));
-  const lk = cam.path.filter((k) => k.look);
-  if (lk.length) {
-    const first = lk[0], last = lk[lk.length - 1];
-    if (t >= first.t - 1.0 && t <= last.t + 1.0) {
-      if (t <= first.t) look = first.look.slice();
-      else if (t >= last.t) look = last.look.slice();
-      else {
-        for (let i = 0; i < lk.length - 1; i++) {
-          if (t >= lk[i].t && t <= lk[i + 1].t) {
-            const u = (t - lk[i].t) / Math.max(1e-6, lk[i + 1].t - lk[i].t);
-            const s = u * u * (3 - 2 * u);
-            look = v3.lerp(lk[i].look, lk[i + 1].look, s);
-            break;
-          }
-        }
-      }
+  const autoLook = v3.add(pos, v3.mul(tang, Math.max(1, lookAhead)));
+  let look = autoLook;
+  const manual = manualLookAt(cam, t);
+  if (manual && manual.weight > 0) {
+    const av = v3.sub(autoLook, pos);
+    const mv = v3.sub(manual.target, pos);
+    const ad = v3.len(av);
+    const md = v3.len(mv);
+    if (ad > 1e-6 && md > 1e-6) {
+      const dir = slerpDir(v3.norm(av), v3.norm(mv), manual.weight);
+      const dist = ad + (md - ad) * manual.weight;
+      look = v3.add(pos, v3.mul(dir, dist));
+    } else if (md > 1e-6) {
+      look = manual.target.slice();
     }
   }
 
   const speed = v3.len(v3.sub(posB, posA)) / 0.32;
 
-  // banking: yaw rate around +Y
-  const dirA = v3.norm(v3.sub(v3.add(tr.center, pathPos(cam, t - 0.01)), v3.add(tr.center, pathPos(cam, t - 0.25))));
-  const dirB = v3.norm(v3.sub(v3.add(tr.center, pathPos(cam, t + 0.25)), v3.add(tr.center, pathPos(cam, t + 0.01))));
-  const yawRate = (Math.atan2(dirB[0], dirB[2]) - Math.atan2(dirA[0], dirA[2])) / 0.5;
+  // banking: shortest-angle yaw rate around +Y. Raw atan2 differences flip by
+  // ~2π when the heading crosses ±180°, which used to slam the roll to max.
+  // Near the ends the ±dt probes leave the path; hold the last valid curvature
+  // instead of letting a zero vector produce a fake max bank.
   const bankGain = cameraParamValue(cam, 'bankGain', t);
   const maxRoll = cameraParamValue(cam, 'maxRoll', t);
-  const bank = clamp(-yawRate * bankGain * 57.2958, -maxRoll, maxRoll);
+  let bank = 0;
+  const firstT = Number(cam.path?.[0]?.t) || 0;
+  const lastT = Number(cam.path?.[cam.path.length - 1]?.t) || 0;
+  const bLo = firstT + 0.25;
+  const bHi = lastT - 0.25;
+  const bt = bLo <= bHi ? clamp(t, bLo, bHi) : t;
+  const da = v3.sub(pathPos(cam, bt - 0.01), pathPos(cam, bt - 0.25));
+  const db = v3.sub(pathPos(cam, bt + 0.25), pathPos(cam, bt + 0.01));
+  if (v3.len(da) > 1e-6 && v3.len(db) > 1e-6) {
+    const dirA = v3.norm(da);
+    const dirB = v3.norm(db);
+    let dy = Math.atan2(dirB[0], dirB[2]) - Math.atan2(dirA[0], dirA[2]);
+    dy = ((dy + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI;
+    const yawRate = dy / 0.5;
+    bank = clamp(-yawRate * bankGain * 57.2958, -maxRoll, maxRoll);
+  }
   let roll = bank + cameraParamValue(cam, 'roll', t);
 
   // shake: value noise, stronger at speed
