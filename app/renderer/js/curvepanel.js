@@ -15,6 +15,7 @@ import {
   curveHandles, moveCurveHandle, curveRange, curveParamsText,
 } from '/core/curves.js';
 import { retimePathSpan } from '/core/camera.js';
+import { cameraRef, keyframeRef } from '/core/selection.js';
 
 const el = (tag, cls, html) => {
   const n = document.createElement(tag);
@@ -41,7 +42,7 @@ export const curvePathLabel = (path) => PATH_LABELS[path] || path;
 const U_STEPS = [0.05, 0.1, 0.2, 0.25, 0.5, 1, 2, 5, 10];
 
 export class CurvePanel {
-  constructor(host, { getTimeline, onOp, onClose, toast, getProject, onLivePreview } = {}) {
+  constructor(host, { getTimeline, onOp, onClose, toast, getProject, onLivePreview, onSelect } = {}) {
     this.host = host;
     this.getTimeline = getTimeline;
     this.getProject = getProject;
@@ -49,10 +50,12 @@ export class CurvePanel {
     this.onClose = onClose;
     this.toast = toast;
     this.onLivePreview = onLivePreview;
+    this.onSelect = onSelect;
     this.openState = null;
     this.active = 0;
     this.railGroup = 0;
     this.span = null;
+    this.path = null;
     this.previewInner = null;
     this._spanBackup = null;
     this._spanNotice = null;
@@ -167,9 +170,10 @@ export class CurvePanel {
   }
 
   /**
-   * Work out which path span the panel edits: the two selected keys when F2
-   * was opened from a keyframe pool, otherwise the first stored span, otherwise
-   * the whole path. Inner keys are the ones the span retimes.
+   * Path mode model. Selected path keys are *segment boundaries*: every
+   * adjacent pair is one independent span for the same preset. Stored spans
+   * (curve + spanTo) are the real data the panel draws; selection only decides
+   * which segments the preset will be applied to.
    */
   _refreshSpan() {
     this.previewInner = null;
@@ -177,70 +181,80 @@ export class CurvePanel {
     const track = this._track();
     if (!cam || track?.path !== 'path' || !Array.isArray(cam.path) || cam.path.length < 2) {
       this.span = null;
+      this.path = null;
       return;
     }
     const keys = [...cam.path].sort((a, b) => a.t - b.t);
-    let from = Number(this.openState?.spanFrom);
-    let to = Number(this.openState?.spanTo);
     const find = (t) => keys.findIndex((k) => Math.abs(k.t - t) <= 1e-4);
-    let li = Number.isFinite(from) && Number.isFinite(to) && to > from ? find(from) : -1;
-    let ri = li >= 0 ? find(to) : -1;
-    // Selecting keys inside an existing span should edit that span, not try to
-    // create a nested/overlapping one (the op would reject it).
-    if (li >= 0 && ri > li) {
-      const spans = [];
-      keys.forEach((k, i) => {
-        if (!k.curve || !Number.isFinite(Number(k.spanTo))) return;
-        const j = find(Number(k.spanTo));
-        if (j > i) spans.push({ from: keys[i].t, to: keys[j].t });
+    const explicit = Array.isArray(this.openState?.selectedTimes);
+    let selected = explicit
+      ? [...new Set(this.openState.selectedTimes.map(Number))].filter((t) => find(t) >= 0).sort((a, b) => a - b)
+      : [keys[0].t, keys[keys.length - 1].t];
+    if (!explicit) selected = [keys[0].t, keys[keys.length - 1].t];
+
+    const spans = [];
+    keys.forEach((k, i) => {
+      if (!k.curve || !Number.isFinite(Number(k.spanTo))) return;
+      const j = find(Number(k.spanTo));
+      if (j <= i) return;
+      spans.push({
+        from: keys[i].t,
+        to: keys[j].t,
+        left: keys[i],
+        right: keys[j],
+        inner: keys.slice(i + 1, j),
+        curve: normalizeCurve(k.curve),
       });
-      const hit = spans.find((s) => from < s.to - 1e-4 && to > s.from + 1e-4);
-      if (hit) {
-        if (Math.abs(hit.from - from) > 1e-4 || Math.abs(hit.to - to) > 1e-4) {
-          const msg = `选中的键与已有曲线段相交，已打开 ${hit.from.toFixed(2)}–${hit.to.toFixed(2)}s 的曲线`;
-          if (this._spanNotice !== msg) {
-            this.toast?.(msg, 'info');
-            this._spanNotice = msg;
-          }
-        }
-        from = hit.from;
-        to = hit.to;
-        li = find(from);
-        ri = find(to);
-      }
+    });
+
+    const segments = [];
+    for (let i = 0; i < selected.length - 1; i++) {
+      const li = find(selected[i]);
+      const ri = find(selected[i + 1]);
+      if (ri <= li) continue;
+      segments.push({
+        from: keys[li].t,
+        to: keys[ri].t,
+        left: keys[li],
+        right: keys[ri],
+        inner: keys.slice(li + 1, ri),
+      });
     }
-    if (li < 0 || ri <= li) {
-      const stored = keys.find((k) => k.curve && Number.isFinite(Number(k.spanTo)));
-      if (stored) {
-        from = stored.t;
-        to = Number(stored.spanTo);
-        li = find(from);
-        ri = find(to);
-      }
-    }
-    if (li < 0 || ri <= li) {
-      li = 0;
-      ri = keys.length - 1;
-      from = keys[li].t;
-      to = keys[ri].t;
-    }
-    const left = keys[li];
-    const right = keys[ri];
-    const stored = normalizeCurve(left.curve);
-    this.span = {
-      from: left.t,
-      to: right.t,
-      left,
-      right,
-      inner: keys.slice(li + 1, ri),
-      cameraId: cam.id,
-      hasCurve: !!stored,
-    };
-    this.curve = stored || presetCurve('easeInOut');
+
+    this.path = { cameraId: cam.id, keys, selected, segments, spans };
+    const first = selected[0] ?? keys[0].t;
+    const last = selected[selected.length - 1] ?? keys[keys.length - 1].t;
+    this.span = { from: first, to: last, cameraId: cam.id };
+    const firstCurve = segments.length ? this._segmentCurve(segments[0]) : null;
+    // No curve means no preset should look active. The rail may still show
+    // thumbnails, but the header says 未应用 until the user picks one.
+    this.curve = firstCurve || null;
     if (this.openState) {
-      this.openState.spanFrom = left.t;
-      this.openState.spanTo = right.t;
+      this.openState.selectedTimes = [...selected];
+      this.openState.spanFrom = first;
+      this.openState.spanTo = last;
     }
+  }
+
+  /** Real stored curve for one selected segment, if it exactly matches. */
+  _segmentCurve(segment) {
+    if (!segment || !this.path) return null;
+    const span = this.path.spans.find((s) => Math.abs(s.from - segment.from) <= 1e-4
+      && Math.abs(s.to - segment.to) <= 1e-4);
+    return span?.curve || null;
+  }
+
+  /** All real curves the panel must show, plus a sensible fallback window. */
+  _curveWindow() {
+    if (!this._isPathMode() || !this.path?.spans?.length) return curveRange(this.curve);
+    let min = Infinity;
+    let max = -Infinity;
+    for (const span of this.path.spans) {
+      const [a, b] = curveRange(span.curve);
+      min = Math.min(min, a);
+      max = Math.max(max, b);
+    }
+    return Number.isFinite(min) ? [min, max] : [-0.25, 1.25];
   }
 
   close() {
@@ -253,6 +267,7 @@ export class CurvePanel {
     this.openState = null;
     this.drag = null;
     this.span = null;
+    this.path = null;
     this.previewInner = null;
     this._spanNotice = null;
     this.onClose?.();
@@ -342,13 +357,30 @@ export class CurvePanel {
     const track = this._track();
     if (!st || !track) return;
     this.titleEl.textContent = `曲线 · ${track.label || track.path}`;
-    if (track.path === 'path' && this.span) {
-      const detail = curveParamsText(this.curve);
-      this.rangeEl.textContent = `${this.span.from.toFixed(2)}s → ${this.span.to.toFixed(2)}s · `
-        + `${this.span.inner.length} 个内部键 · 轨迹锁定`
-        + (this.span.hasCurve ? '' : ' · 未应用');
-      this.presetEl.textContent = detail ? `${curveLabel(this.curve)} · ${detail}` : curveLabel(this.curve);
-      this.presetEl.title = this.presetEl.textContent;
+    if (track.path === 'path' && this.path) {
+      const p = this.path;
+      const curves = p.segments.map((seg) => this._segmentCurve(seg));
+      const applied = curves.filter(Boolean);
+      const same = applied.length === curves.length && applied.length > 0
+        && applied.every((c) => JSON.stringify(c) === JSON.stringify(applied[0]));
+      const from = p.selected[0] ?? this.span?.from ?? 0;
+      const to = p.selected[p.selected.length - 1] ?? this.span?.to ?? 0;
+      this.rangeEl.textContent = `${from.toFixed(2)}s → ${to.toFixed(2)}s · `
+        + `${p.selected.length} 键 · ${p.segments.length} 段 · ${p.spans.length} 条已存曲线`;
+      let label;
+      if (!p.segments.length) label = '至少选中两个关键帧';
+      else if (same) {
+        const detail = curveParamsText(applied[0]);
+        label = `${curveLabel(applied[0])}${p.segments.length > 1 ? ` ×${p.segments.length}` : ''}`
+          + (detail ? ` · ${detail}` : '');
+      } else if (!applied.length) {
+        const old = p.spans.filter((s) => s.to > from + 1e-4 && s.from < to - 1e-4).length;
+        label = old ? `已有 ${old} 条旧曲线 · 点预设替换` : '未应用 · 点预设套用';
+      } else {
+        label = `${applied.length}/${p.segments.length} 段已应用`;
+      }
+      this.presetEl.textContent = label;
+      this.presetEl.title = label;
       return;
     }
     const s = track.segments[this.active] || track.segments[0];
@@ -470,7 +502,7 @@ export class CurvePanel {
     const plotRight = L.W - L.rightPad;
     const xOf = (t) => gutter + Number(t) * pps - scroll;
     const tOf = (x) => (x + scroll - gutter) / Math.max(1, pps);
-    const range = curveRange(this.curve);
+    const range = this._curveWindow();
     const height = Math.max(1, L.bottom - L.top);
     const yOf = (v) => L.bottom - ((Number(v) - range[0]) / (range[1] - range[0])) * height;
     const vOf = (y) => range[0] + ((L.bottom - y) / height) * (range[1] - range[0]);
@@ -503,25 +535,43 @@ export class CurvePanel {
     return mult * pow;
   }
 
-  _handlePosSpan(g, handle) {
-    const span = this.span;
+  _handlePosSpan(g, span, handle) {
     if (!span || !handle) return null;
     return {
       x: g.xOf(span.from + handle.u * (span.to - span.from)),
       y: g.yOf(handle.v),
       u: handle.u,
       v: handle.v,
+      span,
       handle,
     };
   }
 
-  _handleOriginSpan(g, handle) {
-    const span = this.span;
+  _handleOriginSpan(g, span, handle) {
     if (!span || !handle?.origin) return null;
     return {
       x: g.xOf(span.from + handle.origin[0] * (span.to - span.from)),
       y: g.yOf(handle.origin[1]),
     };
+  }
+
+  _isSelectedKey(t) {
+    return !!this.path?.selected.some((x) => Math.abs(x - t) <= 1e-4);
+  }
+
+  _isSelectedSegment(span) {
+    return !!this.path?.segments.some((s) => Math.abs(s.from - span.from) <= 1e-4
+      && Math.abs(s.to - span.to) <= 1e-4);
+  }
+
+  /** Spans whose handles are editable for the current selection. */
+  _pathEditableSpans() {
+    const p = this.path;
+    if (!p) return [];
+    if (p.selected.length < 2) return p.spans;
+    const from = p.selected[0];
+    const to = p.selected[p.selected.length - 1];
+    return p.spans.filter((s) => s.to > from + 1e-4 && s.from < to - 1e-4);
   }
 
   _drawPlayhead(ctx, g) {
@@ -533,89 +583,112 @@ export class CurvePanel {
     ctx.beginPath(); ctx.moveTo(px, g.top); ctx.lineTo(px, g.bottom); ctx.stroke();
   }
 
-  /** Camera flight span: one curve across the whole span, endpoints locked. */
+  /** Camera flight: draw every real span, then selection + keyframe markers. */
   _drawPathSpan(ctx, g) {
     const { W } = g;
-    const span = this.span;
-    if (!span) return;
-    const t0 = Math.max(span.from, g.tOf(g.plotLeft));
-    const t1 = Math.min(span.to, g.tOf(W - g.rightPad));
-    if (t1 <= t0) return;
-    const x0 = g.xOf(t0);
-    const x1 = g.xOf(t1);
-    ctx.fillStyle = 'rgba(23,217,255,0.06)';
-    ctx.fillRect(x0, g.top, Math.max(1, x1 - x0), g.bottom - g.top);
+    const p = this.path;
+    if (!p) return;
+    const view0 = g.tOf(g.plotLeft);
+    const view1 = g.tOf(W - g.rightPad);
 
-    const full = Math.max(1e-6, span.to - span.from);
-    const steps = Math.max(60, Math.round(x1 - x0));
-    ctx.beginPath();
-    for (let s = 0; s <= steps; s++) {
-      const x = x0 + ((x1 - x0) * s) / steps;
-      const u = clamp((g.tOf(x) - span.from) / full, 0, 1);
-      const y = g.yOf(sampleCurve(this.curve, u));
-      if (s === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    // Selection bands: each adjacent selected pair is one segment.
+    for (const seg of p.segments) {
+      const x0 = g.xOf(Math.max(seg.from, view0));
+      const x1 = g.xOf(Math.min(seg.to, view1));
+      if (x1 <= x0) continue;
+      ctx.fillStyle = this._segmentCurve(seg)
+        ? 'rgba(23,217,255,0.06)'
+        : 'rgba(255,209,102,0.045)';
+      ctx.fillRect(x0, g.top, Math.max(1, x1 - x0), g.bottom - g.top);
+      ctx.strokeStyle = 'rgba(23,217,255,0.22)';
+      ctx.lineWidth = 1;
+      for (const x of [x0, x1]) {
+        ctx.beginPath(); ctx.moveTo(x + 0.5, g.top); ctx.lineTo(x + 0.5, g.bottom); ctx.stroke();
+      }
     }
-    ctx.strokeStyle = '#17d9ff';
-    ctx.lineWidth = 2.2;
-    ctx.setLineDash(this.span.hasCurve ? [] : [5, 4]);
-    ctx.stroke();
-    ctx.setLineDash([]);
 
-    // Inner keys are retimed by this curve; show their current time dashed.
-    ctx.setLineDash([3, 4]);
-    for (const key of (this.previewInner || span.inner)) {
+    // Real stored spans, clipped to the visible time window.
+    for (const span of p.spans) {
+      const t0 = Math.max(span.from, view0);
+      const t1 = Math.min(span.to, view1);
+      if (t1 <= t0) continue;
+      const x0 = g.xOf(t0);
+      const x1 = g.xOf(t1);
+      const full = Math.max(1e-6, span.to - span.from);
+      const steps = Math.max(40, Math.round(x1 - x0));
+      ctx.beginPath();
+      for (let s = 0; s <= steps; s++) {
+        const x = x0 + ((x1 - x0) * s) / steps;
+        const u = clamp((g.tOf(x) - span.from) / full, 0, 1);
+        const y = g.yOf(sampleCurve(span.curve, u));
+        if (s === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      const active = this._isSelectedSegment(span);
+      ctx.strokeStyle = active ? '#17d9ff' : 'rgba(23,217,255,.38)';
+      ctx.lineWidth = active ? 2.2 : 1.4;
+      ctx.stroke();
+    }
+
+    // Selected segments that have no stored curve yet. A segment that is
+    // already covered by an older span keeps its real curve visible above;
+    // only mark the ones with no data at all.
+    for (const seg of p.segments) {
+      if (this._segmentCurve(seg)) continue;
+      const covered = p.spans.some((s) => s.to > seg.from + 1e-4 && s.from < seg.to - 1e-4);
+      if (covered) continue;
+      const x0 = g.xOf(Math.max(seg.from, view0));
+      const x1 = g.xOf(Math.min(seg.to, view1));
+      if (x1 - x0 < 44) continue;
+      ctx.fillStyle = 'rgba(255,209,102,.55)';
+      ctx.font = '10px system-ui, sans-serif';
+      ctx.fillText('未应用', (x0 + x1) / 2 - 15, g.top + 14);
+    }
+
+    // All keyframes, selected (boundaries) bright, internal ones dimmed.
+    for (const key of p.keys) {
       const x = g.xOf(key.t);
-      if (x < g.plotLeft || x > W - g.rightPad) continue;
-      ctx.strokeStyle = 'rgba(255,209,102,0.38)';
-      ctx.beginPath(); ctx.moveTo(x, g.top); ctx.lineTo(x, g.bottom); ctx.stroke();
-      ctx.fillStyle = '#ffd166';
+      if (x < g.plotLeft - 8 || x > W - g.rightPad + 8) continue;
+      const on = this._isSelectedKey(key.t);
+      if (on) {
+        ctx.setLineDash([3, 4]);
+        ctx.strokeStyle = 'rgba(255,209,102,.4)';
+        ctx.beginPath(); ctx.moveTo(x, g.top); ctx.lineTo(x, g.bottom); ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      const r = on ? 4.5 : 2.8;
       ctx.save();
       ctx.translate(x, g.bottom);
       ctx.rotate(Math.PI / 4);
-      ctx.fillRect(-2.5, -2.5, 5, 5);
+      ctx.fillStyle = on ? '#ffd166' : 'rgba(150,170,190,.5)';
+      ctx.fillRect(-r, -r, r * 2, r * 2);
       ctx.restore();
     }
-    ctx.setLineDash([]);
 
-    // Locked endpoints.
-    for (const [t, y] of [[span.from, g.bottom], [span.to, g.top]]) {
-      const x = g.xOf(t);
-      if (x < g.plotLeft - 8 || x > W - g.rightPad + 8) continue;
-      ctx.strokeStyle = '#b7c9dc';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.arc(x, y, 5, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(x - 2.5, y); ctx.lineTo(x + 2.5, y); ctx.stroke();
-    }
-
-    // Editable curve handles (timing only; the trajectory itself never moves).
-    for (const handle of curveHandles(this.curve)) {
-      const hp = this._handlePosSpan(g, handle);
-      if (!hp) continue;
-      const visible = hp.x >= g.plotLeft - 14 && hp.x <= W - g.rightPad + 14
-        && hp.y >= g.top - 14 && hp.y <= g.bottom + 14;
-      if (!visible) continue;
-      const origin = this._handleOriginSpan(g, handle);
-      if (origin) {
-        ctx.setLineDash([3, 4]);
-        ctx.strokeStyle = 'rgba(150,175,200,0.35)';
-        ctx.beginPath(); ctx.moveTo(origin.x, origin.y); ctx.lineTo(hp.x, hp.y); ctx.stroke();
-        ctx.setLineDash([]);
+    // Editable curve handles for the spans intersecting the selection.
+    for (const span of this._pathEditableSpans()) {
+      for (const handle of curveHandles(span.curve)) {
+        const hp = this._handlePosSpan(g, span, handle);
+        if (!hp) continue;
+        const visible = hp.x >= g.plotLeft - 14 && hp.x <= W - g.rightPad + 14
+          && hp.y >= g.top - 14 && hp.y <= g.bottom + 14;
+        if (!visible) continue;
+        const origin = this._handleOriginSpan(g, span, handle);
+        if (origin) {
+          ctx.setLineDash([3, 4]);
+          ctx.strokeStyle = 'rgba(150,175,200,0.3)';
+          ctx.beginPath(); ctx.moveTo(origin.x, origin.y); ctx.lineTo(hp.x, hp.y); ctx.stroke();
+          ctx.setLineDash([]);
+        }
+        const active = this.drag?.handle?.id === handle.id
+          && this.drag?.span === span;
+        ctx.beginPath();
+        ctx.arc(hp.x, hp.y, active ? 8 : 6, 0, Math.PI * 2);
+        ctx.fillStyle = '#f4fbff';
+        ctx.fill();
+        ctx.strokeStyle = '#8fd8ef';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
       }
-      ctx.setLineDash([3, 4]);
-      ctx.strokeStyle = 'rgba(160,180,200,0.32)';
-      ctx.beginPath(); ctx.moveTo(g.plotLeft, hp.y); ctx.lineTo(W - g.rightPad, hp.y); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(hp.x, g.top); ctx.lineTo(hp.x, g.bottom); ctx.stroke();
-      ctx.setLineDash([]);
-      const active = this.drag?.handle?.id === handle.id;
-      ctx.beginPath();
-      ctx.arc(hp.x, hp.y, active ? 9.5 : 8, 0, Math.PI * 2);
-      ctx.fillStyle = '#f4fbff';
-      ctx.fill();
-      ctx.strokeStyle = '#8fd8ef';
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
     }
   }
 
@@ -758,19 +831,21 @@ export class CurvePanel {
     const g = this._geo();
     if (this._isPathMode()) {
       let best = null;
-      for (const handle of curveHandles(this.curve)) {
-        const hp = this._handlePosSpan(g, handle);
-        if (!hp) continue;
-        const d = Math.hypot(hp.x - x, hp.y - y);
-        if (d <= 15 && (!best || d < best.d)) best = { handle, d };
+      for (const span of this._pathEditableSpans()) {
+        for (const handle of curveHandles(span.curve)) {
+          const hp = this._handlePosSpan(g, span, handle);
+          if (!hp) continue;
+          const d = Math.hypot(hp.x - x, hp.y - y);
+          if (d <= 15 && (!best || d < best.d)) best = { span, handle, d };
+        }
       }
-      return best?.handle || null;
+      return best ? { span: best.span, handle: best.handle } : null;
     }
     const seg = this._track()?.segments[this.active];
     if (!seg) return null;
     let best = null;
     for (const handle of curveHandles(this.curve)) {
-      const hp = this._handlePos(seg, g, handle);
+      const hp = this._handlePos(g, seg, handle);
       if (!hp) continue;
       const d = Math.hypot(hp.x - x, hp.y - y);
       if (d <= 15 && (!best || d < best.d)) best = { handle, d };
@@ -778,25 +853,96 @@ export class CurvePanel {
     return best?.handle || null;
   }
 
+  _hitPathKey(x, y) {
+    const p = this.path;
+    if (!p) return null;
+    const g = this._geo();
+    if (Math.abs(y - g.bottom) > 14) return null;
+    let best = null;
+    for (const key of p.keys) {
+      const kx = g.xOf(key.t);
+      if (kx < g.plotLeft - 8 || kx > g.plotRight + 8) continue;
+      const d = Math.abs(kx - x);
+      if (d <= 10 && (!best || d < best.d)) best = { t: key.t, d };
+    }
+    return best?.t ?? null;
+  }
+
+  /** Panel key clicks use the same pool rules as the timeline lanes. */
+  _pickPathKey(t, ev) {
+    const additive = !!(ev?.ctrlKey || ev?.metaKey || ev?.shiftKey);
+    let selected = this.path?.selected || [];
+    if (additive) {
+      selected = selected.some((x) => Math.abs(x - t) <= 1e-4)
+        ? selected.filter((x) => Math.abs(x - t) > 1e-4)
+        : [...selected, t];
+    } else {
+      selected = [t];
+    }
+    this._setPathSelection(selected);
+  }
+
+  _setPathSelection(times) {
+    if (!this.openState || !this.path) return;
+    const unique = [...new Set(times.map((t) => Math.round(Number(t) * 1000) / 1000))]
+      .sort((a, b) => a - b);
+    this.openState.selectedTimes = unique;
+    this._refreshSpan();
+    this._spanNotice = null;
+    const camId = this.path?.cameraId;
+    if (camId) {
+      const ids = unique.map((t) => keyframeRef(cameraRef(camId), 'path', t));
+      this.onSelect?.(ids.length
+        ? { kind: 'keyframe', ids, primary: ids[0] }
+        : { kind: null, ids: [], primary: null });
+    }
+    this._syncHead();
+    this._syncRailGroup();
+    this.draw();
+  }
+
   _down(e) {
     if (e.button !== 0) return;
     const p = this._localPoint(e);
+    if (this._isPathMode()) {
+      e.preventDefault();
+      const hit = this._hitHandle(p.x, p.y);
+      if (hit) {
+        const span = hit.span;
+        this._spanBackup = {
+          left: span.left,
+          curve: normalizeCurve(span.left.curve),
+          spanTo: span.left.spanTo,
+          inner: span.inner.slice(),
+          times: span.inner.map((k) => k.t),
+        };
+        this.drag = {
+          mode: 'path',
+          handle: hit.handle,
+          span,
+          curve: span.curve,
+          pointer: p,
+          range: this._geo().range,
+        };
+        this.canvas.style.cursor = 'grabbing';
+        return;
+      }
+      const keyT = this._hitPathKey(p.x, p.y);
+      if (keyT != null) {
+        this._pickPathKey(keyT, e);
+        return;
+      }
+      this._setPathSelection([]);
+      return;
+    }
     const handle = this._hitHandle(p.x, p.y);
     if (handle) {
       e.preventDefault();
-      const pathMode = this._isPathMode();
-      this._spanBackup = pathMode && this.span ? {
-        left: this.span.left,
-        curve: normalizeCurve(this.span.left.curve),
-        spanTo: this.span.left.spanTo,
-        inner: this.span.inner.slice(),
-        times: this.span.inner.map((k) => k.t),
-      } : null;
+      this._spanBackup = null;
       this.drag = {
-        mode: pathMode ? 'path' : 'segment',
+        mode: 'segment',
         handle,
         seg: this.active,
-        span: this.span,
         curve: this.curve,
         pointer: p,
         range: this._geo().range,
@@ -804,7 +950,6 @@ export class CurvePanel {
       this.canvas.style.cursor = 'grabbing';
       return;
     }
-    if (this._isPathMode()) return;
     const g = this._geo();
     const t = g.tOf(p.x);
     const idx = (this._track()?.segments || []).findIndex((s) => t >= s.from && t <= s.to);
@@ -823,17 +968,9 @@ export class CurvePanel {
     const handle = drag.handle;
     const g = this._geo();
     const p = this._localPoint(e);
-    let from;
-    let to;
-    if (drag.mode === 'path' && drag.span) {
-      from = drag.span.from;
-      to = drag.span.to;
-    } else {
-      const seg = this._track()?.segments[drag.seg];
-      if (!seg) return;
-      from = seg.from;
-      to = seg.to;
-    }
+    const from = drag.mode === 'path' ? drag.span.from : this._track()?.segments[drag.seg]?.from;
+    const to = drag.mode === 'path' ? drag.span.to : this._track()?.segments[drag.seg]?.to;
+    if (from == null || to == null) return;
     const spanPx = Math.max(1, g.xOf(to) - g.xOf(from));
     const plotH = Math.max(1, g.bottom - g.top);
     const damping = Number.isFinite(handle.damping) ? handle.damping : 1;
@@ -845,18 +982,14 @@ export class CurvePanel {
       v = handle.allowOvershoot ? clamp(v, drag.range[0], drag.range[1]) : clamp(v, 0, 1);
     }
     this.curve = moveCurveHandle(drag.curve, handle.id, u, v);
-    this._syncHead();
-    this._markPreset();
-    if (drag.mode === 'path' && drag.span) {
-      const cam = this._camera();
-      if (cam) {
-        const retime = retimePathSpan(cam, drag.span.from, drag.span.to, this.curve);
-        if (retime?.times) {
-          this.previewInner = drag.span.inner.map((k, j) => ({ ...k, t: retime.times[j] }));
-        }
-      }
+    if (drag.mode === 'path') {
+      drag.span.curve = this.curve;
+      drag.span.left.curve = this.curve;
+      drag.span.left.spanTo = drag.span.to;
       this._scheduleLiveSpan();
     }
+    this._syncHead();
+    this._markPreset();
     this.draw();
   }
 
@@ -866,7 +999,7 @@ export class CurvePanel {
     this.drag = null;
     this.canvas.style.cursor = '';
     if (drag.mode === 'path') {
-      const pending = this._commitPathSpan();
+      const pending = this._commitPathSpan(drag.span);
       if (pending?.then) {
         pending.then((j) => {
           if (j) this._spanBackup = null;
@@ -890,35 +1023,77 @@ export class CurvePanel {
   _applyPreset(id) {
     const curve = presetCurve(id);
     if (!curve) return;
+    if (this._isPathMode()) {
+      this._applyPathPreset(curve);
+      return;
+    }
     this.curve = curve;
     this._syncHead();
     this._syncRailGroup();
     this.draw();
-    if (this._isPathMode()) {
-      const pending = this._commitPathSpan();
-      if (pending?.then) {
-        pending.then((j) => {
-          if (j) return;
+    this._commit(curve, this._track()?.segments || []);
+  }
+
+  /**
+   * Apply one preset to every segment between adjacent selected keys. Any old
+   * span intersecting the selection is cleared first (its whole range), then
+   * each selected pair becomes its own span and retimes its dimmed inner keys.
+   */
+  _applyPathPreset(curve) {
+    const p = this.path;
+    if (!p || p.selected.length < 2 || !p.segments.length) {
+      this.toast?.('至少选中两个关键帧才能套用曲线', 'warn');
+      return;
+    }
+    const from = p.selected[0];
+    const to = p.selected[p.selected.length - 1];
+    const ops = [];
+    for (const span of p.spans) {
+      if (span.to > from + 1e-4 && span.from < to - 1e-4) {
+        ops.push({
+          op: 'keyCurve', host: 'camera', id: p.cameraId, path: 'path',
+          from: Math.round(span.from * 1000) / 1000,
+          to: Math.round(span.to * 1000) / 1000,
+          curve: null,
+        });
+      }
+    }
+    for (const seg of p.segments) {
+      ops.push({
+        op: 'keyCurve', host: 'camera', id: p.cameraId, path: 'path',
+        from: Math.round(seg.from * 1000) / 1000,
+        to: Math.round(seg.to * 1000) / 1000,
+        curve: normalizeCurve(curve),
+      });
+    }
+    this.curve = curve;
+    this._syncHead();
+    this._syncRailGroup();
+    this.draw();
+    const pending = this.onOp?.(ops.length === 1 ? ops[0] : { op: 'batch', ops });
+    if (pending?.then) {
+      pending.then((j) => {
+        if (!j) {
           this._refreshSpan();
           this._syncHead();
           this._syncRailGroup();
           this.draw();
-        });
-      }
-    } else {
-      this._commit(curve, this._track()?.segments || []);
+        } else {
+          this.toast?.(`已套用 ${curveLabel(curve)} · ${p.segments.length} 段`, 'info');
+        }
+      });
     }
   }
 
-  _commitPathSpan() {
-    if (!this.span) return null;
+  _commitPathSpan(span) {
+    if (!span || !this.path) return null;
     return this.onOp?.({
       op: 'keyCurve',
       host: 'camera',
-      id: this.span.cameraId,
+      id: this.path.cameraId,
       path: 'path',
-      from: Math.round(Number(this.span.from) * 1000) / 1000,
-      to: Math.round(Number(this.span.to) * 1000) / 1000,
+      from: Math.round(Number(span.from) * 1000) / 1000,
+      to: Math.round(Number(span.to) * 1000) / 1000,
       curve: normalizeCurve(this.curve),
     });
   }
@@ -932,23 +1107,22 @@ export class CurvePanel {
   }
 
   /**
-   * Live drag preview: write the curve/times into the in-memory project (no
-   * rev, no history) and let main re-render the viewport + timeline. The real
-   * op is sent on pointerup; a failure restores the backup.
+   * Live drag preview for one stored span: write the curve/times into the
+   * in-memory project (no rev, no history) and let main re-render the viewport
+   * and timeline. The real op is sent on pointerup; a failure restores the backup.
    */
   _applyLiveSpan() {
-    if (!this.drag || this.drag.mode !== 'path' || !this.span) return;
+    if (!this.drag || this.drag.mode !== 'path' || !this.drag.span) return;
     const cam = this._camera();
     if (!cam) return;
-    const span = this.span;
+    const span = this.drag.span;
     const curve = normalizeCurve(this.curve);
     if (!curve) return;
+    span.curve = curve;
     span.left.curve = curve;
     span.left.spanTo = span.to;
     const retime = retimePathSpan(cam, span.from, span.to, curve);
     if (retime?.times) retime.times.forEach((t, j) => { if (span.inner[j]) span.inner[j].t = t; });
-    span.hasCurve = true;
-    this.previewInner = null;
     this.onLivePreview?.(cam.id);
   }
 

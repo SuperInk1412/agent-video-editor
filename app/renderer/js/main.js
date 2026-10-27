@@ -324,6 +324,7 @@ function openCurvePanel() {
   let wantedPath = null;
   let spanFrom = null;
   let spanTo = null;
+  let selectedTimes = null;
 
   if (pool?.kind === 'keyframe' && pool.ids.length >= 2) {
     const parts = pool.ids.map((ref) => splitRef(ref));
@@ -331,11 +332,12 @@ function openCurvePanel() {
       const first = parts[0];
       if (parts.every((p) => p.type === first.type && p.id === first.id && p.path === first.path)) {
         if (first.type === 'cam' && first.path === 'path') {
-          const times = parts.map((p) => p.t).sort((a, b) => a - b);
+          const times = [...new Set(parts.map((p) => p.t))].sort((a, b) => a - b);
+          selectedTimes = times;
           spanFrom = times[0];
           spanTo = times[times.length - 1];
-          if (!(spanTo > spanFrom)) {
-            toast('相机轨迹曲线需要选中两个不同时间的路径键', 'warn');
+          if (times.length < 2) {
+            toast('相机轨迹曲线需要至少选中两个路径键', 'warn');
             return;
           }
         }
@@ -363,7 +365,7 @@ function openCurvePanel() {
   let index = tracks.findIndex((t) => t.path === wantedPath);
   if (index < 0 && host === 'camera') index = tracks.findIndex((t) => t.path === 'path');
   if (index < 0) index = 0;
-  curvePanel.open({ host, id, tracks, index, spanFrom, spanTo });
+  curvePanel.open({ host, id, tracks, index, spanFrom, spanTo, selectedTimes });
 }
 
 function toggleCurvePanel() {
@@ -810,6 +812,7 @@ async function boot() {
       preview.render(S.time);
       gizmo?.draw();
     },
+    onSelect: (pool) => select({ elementId: null, segmentId: null, objectId: null, camera: false, pool }),
   });
   // keep the F2 drawer's x axis glued to the timeline while zooming/scrolling
   timeline.onViewChange = () => { if (curvePanel?.isOpen()) curvePanel.draw(); };
