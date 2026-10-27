@@ -1,6 +1,7 @@
 // Inspector: edit the selected element down to the details (or project fx when nothing is selected).
 import { sampleTrack } from '/core/time.js';
-import { objectPose } from '/core/scene.js';
+import { objectPose, sampleChannel } from '/core/scene.js';
+import { ancestors, wouldCycle, STRENGTH_TRACKS } from '/core/hierarchy.js';
 import { RotBall } from './rotball.js';
 import { SpeedCurve, SPEED_PRESETS } from './speedcurve.js';
 import { escapeHtml } from './timeline.js';
@@ -258,6 +259,64 @@ export class Inspector {
     this._renderKeyframes(project, el, time);
   }
 
+  // ---------------------------------------------------------------- 3D object: parent
+  /** 父级: pick a parent, inherit switches, keyable rotation/scale strength. */
+  _renderParent(project, obj, time) {
+    const id = obj.id;
+    const tNow = () => Math.round(this.opts.getTime() * 1000) / 1000;
+    const objs = project.scene?.objects || [];
+    const par = obj.parent || null;
+    const reparent = (extra) => this.opts.onOp({ op: 'objectParent', id, parent: par?.id, t: tNow(), ...extra });
+    const options = [{ value: '', label: '（无）' }].concat(objs
+      .filter((o) => o.id !== id && o.type !== 'audio' && !wouldCycle(objs, id, o.id))
+      .map((o) => ({ value: o.id, label: `${o.name || o.id}${o.type === 'empty' ? ' · 空' : ''}` })));
+    const kids = [
+      this._field({
+        label: '父级', type: 'select', value: par?.id || '', options, span: 4,
+        onChange: (v) => this.opts.onOp(v
+          ? { op: 'objectParent', id, parent: v, t: tNow() }
+          : { op: 'objectUnparent', id, t: tNow() }),
+      }),
+    ];
+    if (par) {
+      const inh = par.inherit || {};
+      for (const [k, label] of [['pos', '跟随位置'], ['rot', '跟随旋转'], ['scale', '跟随缩放']]) {
+        kids.push(this._field({
+          label, type: 'checkbox', value: inh[k] !== false, span: 1,
+          onChange: (v) => reparent({ inherit: { [k]: v } }),
+        }));
+      }
+      for (const [ch, label] of [['rot', '旋转强度'], ['scale', '缩放强度']]) {
+        const track = obj.tracks?.[STRENGTH_TRACKS[ch]] || [];
+        const v = sampleChannel(track, time, par.strength?.[ch] ?? 1);
+        const tol = 0.5 / (project.meta?.fps || 24);
+        const atKey = track.find((k) => Math.abs(k.t - time) <= tol);
+        const fld = this._field({
+          label, value: Math.round(Number(v) * 1000) / 1000, step: 0.01, min: 0, max: 1, percent: true,
+          // Keyed channel: write a key at the playhead; otherwise change the base strength (re-binds at the playhead).
+          onChange: (nv) => this._commit(`${id}:parent.${ch}`, track.length
+            ? { op: 'objectParentKey', id, channel: ch, t: tNow(), v: nv }
+            : { op: 'objectParent', id, parent: par.id, t: tNow(), strength: { [ch]: nv } }),
+        });
+        fld.appendChild(h('button', {
+          class: `kf-btn${atKey ? ' on' : ''}`, title: '在当前时间记录强度关键帧（Shift+点击删除）',
+          onclick: (e) => {
+            this._flush();
+            this.opts.onOp(e.shiftKey
+              ? { op: 'objectParentUnkey', id, channel: ch, t: atKey ? atKey.t : tNow() }
+              : { op: 'objectParentKey', id, channel: ch, t: tNow(), v: Number(v) });
+          },
+        }, '◆'));
+        kids.push(fld);
+      }
+      const chain = ancestors(objs, id).map((o) => o.name || o.id).join(' ← ');
+      kids.push(h('div', { class: 'hint' }, `层级：${obj.name || id} ← ${chain}。挂上 / 取下 / 改开关都以当前时间为准，不跳位。`));
+    } else {
+      kids.push(h('div', { class: 'hint' }, '选一个元素当父级（常用「空元素」），之后它怎么动，这个元素就跟着怎么动。'));
+    }
+    return this._section('父级', ...kids);
+  }
+
   // ---------------------------------------------------------------- 3D object
   _renderObject(project, obj, time) {
     const id = obj.id;
@@ -292,8 +351,11 @@ export class Inspector {
       h('div', { class: 'hint' }, '拖球面上的点改朝向（写 dir 关键帧）；旋转球和速度曲线留在检查器，其余基础属性在时间轴左侧。'),
     ));
 
+    this.root.appendChild(this._renderParent(project, obj, time));
+
     const rows = [];
     for (const [path, list] of Object.entries(obj.tracks || {})) {
+      if (path.startsWith('parent.')) continue; // shown in the 父级 section
       for (const k of list || []) rows.push({ path, k });
     }
     rows.sort((a, b) => a.k.t - b.k.t);
