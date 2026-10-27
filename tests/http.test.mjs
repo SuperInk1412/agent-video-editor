@@ -155,3 +155,38 @@ test('the upstream curve editor can submit keyCurve through the shared HTTP tran
   assert.equal(repeated.rev, 3);
   assert.equal(evalElement(repeated.project.elements[0], 1, repeated.project.meta).x, 50);
 });
+
+test('audio, timeline cuts and parenting round-trip through HTTP, history and persisted projects', async (t) => {
+  const { post } = await setup(t);
+  const send = async (ops) => {
+    const response = await post('api/ops', { ops });
+    const body = await response.json();
+    assert.equal(response.status, 200, JSON.stringify(body));
+    return body;
+  };
+  const created = await send([
+    { op: 'addElement', element: { id: 'sound', type: 'audio', src: 'media/song.m4a', duration: 4, volume: 0.8 } },
+    { op: 'objectAdd', object: { id: 'parent', type: 'solid', duration: 4 } },
+    { op: 'objectAdd', object: { id: 'child', type: 'solid', duration: 4 } },
+  ]);
+  assert.equal(created.project.elements.find((el) => el.id === 'sound').volume, 0.8);
+  const bound = await send([
+    { op: 'objectParent', id: 'child', parent: 'parent', t: 0, inherit: { pos: true, rot: true }, strength: { rot: 0.7 } },
+    { op: 'objectParentKey', id: 'child', channel: 'rot', t: 1, v: 0.5 },
+    { op: 'elementParent', id: 'el_1', parent: '@live', t: 0 },
+  ]);
+  assert.equal(bound.project.scene.objects.find((obj) => obj.id === 'child').parent.id, 'parent');
+  assert.equal(bound.project.elements.find((el) => el.id === 'el_1').parent.id, '@live');
+  const unbound = await send([
+    { op: 'objectParentUnkey', id: 'child', channel: 'rot', t: 1 },
+    { op: 'objectUnparent', id: 'child', t: 1 },
+    { op: 'elementUnparent', id: 'el_1', t: 1 },
+  ]);
+  assert.equal(unbound.project.scene.objects.find((obj) => obj.id === 'child').parent, undefined);
+  assert.equal(unbound.project.elements.find((el) => el.id === 'el_1').parent, undefined);
+  const cut = await send([{ op: 'splitAt', at: 2, ids: ['sound'] }]);
+  assert.equal(cut.project.elements.filter((el) => el.type === 'audio').length, 2);
+  assert.equal(cut.project.elements.find((el) => el.type === 'audio' && el.start === 2).srcIn, 2);
+  const restored = await (await post('api/undo', { expectedRev: cut.rev })).json();
+  assert.equal(restored.project.elements.filter((el) => el.type === 'audio').length, 1);
+});

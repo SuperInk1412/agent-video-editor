@@ -1,19 +1,24 @@
 import { OP_KINDS } from './ops.js';
+import { ELEMENT_TYPES } from './schema.js';
 
 const string = { type: 'string', minLength: 1, maxLength: 512 };
 const number = { type: 'number' };
 const time = { type: 'number', minimum: 0 };
 const object = { type: 'object' };
 const vector = (size) => ({ type: 'array', items: number, minItems: size, maxItems: size });
+const nullableId = { type: ['string', 'null'] };
+const parentChannel = { enum: ['rot', 'scale'] };
+const parentStrength = { type: 'object', properties: { rot: number, scale: number }, additionalProperties: false };
 const property = { ...string, description: 'Dotted property path. 2D positions are project pixels, y down; 3D positions are metres, y up.' };
 const definitions = {
-  addElement: [{ element: { ...object, required: ['type'], properties: { type: { enum: ['image', 'video', 'text', 'solid', 'shape'] }, start: time, duration: { type: 'number', exclusiveMinimum: 0 } } } }, ['element']],
+  addElement: [{ element: { ...object, required: ['type'], properties: { type: { enum: ELEMENT_TYPES }, start: time, duration: { type: 'number', exclusiveMinimum: 0 } } } }, ['element']],
   updateElement: [{ id: string, patch: object }, ['id', 'patch']],
   set: [{ id: string, path: property, value: {} }, ['id', 'path', 'value']],
   removeElement: [{ id: string }, ['id']],
   duplicateElement: [{ id: string, start: time, offset: number }, ['id']],
   moveElement: [{ id: string, start: time, duration: { type: 'number', exclusiveMinimum: 0 }, z: number, segment: { type: ['string', 'null'] }, keys: { enum: ['shift', 'keep'] } }, ['id']],
   splitElement: [{ id: string, at: time }, ['id', 'at']],
+  splitAt: [{ at: time, id: string, ids: { type: 'array', items: string } }, ['at']],
   reorder: [{ id: string, z: number, delta: number }, ['id']],
   addSegment: [{ segment: object }, ['segment']],
   updateSegment: [{ id: string, patch: object }, ['id', 'patch']],
@@ -42,6 +47,14 @@ const definitions = {
   objectPatch: [{ id: string, patch: object }, ['id', 'patch']],
   objectKey: [{ id: string, path: property, t: time, v: {}, value: {}, ease: string, out: vector(3), in: vector(3), speed: {} }, ['id', 'path', 't']],
   objectUnkey: [{ id: string, path: property, t: time }, ['id', 'path', 't']],
+  objectParent: [{ id: string, parent: nullableId, t: time,
+    inherit: { type: 'object', properties: { pos: { type: 'boolean' }, rot: { type: 'boolean' }, scale: { type: 'boolean' } }, additionalProperties: false },
+    strength: parentStrength }, ['id', 'parent']],
+  objectUnparent: [{ id: string, t: time }, ['id']],
+  objectParentKey: [{ id: string, channel: parentChannel, t: time, v: number, value: number, ease: string }, ['id', 'channel', 't']],
+  objectParentUnkey: [{ id: string, channel: parentChannel, t: time }, ['id', 'channel', 't']],
+  elementParent: [{ id: string, parent: nullableId, t: time }, ['id', 'parent']],
+  elementUnparent: [{ id: string, t: time }, ['id']],
 };
 
 export const PUBLIC_OPS = OP_KINDS.filter((op) => Object.hasOwn(definitions, op));
