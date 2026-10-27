@@ -26,7 +26,7 @@ const TYPE_COLOR = { image: '#3b6ea5', video: '#2f8f6b', text: '#a06a2b', shape:
 const AX = ['x', 'y', 'z'];
 
 export class Timeline {
-  constructor(root, { onSeek, onSelect, onOp, onPause, onElementMenu, onCameraMenu } = {}) {
+  constructor(root, { onSeek, onSelect, onOp, onPause, onElementMenu, onCameraMenu, onClipMenu } = {}) {
     this.root = root;
     this.onSeek = onSeek;
     this.onSelect = onSelect;
@@ -34,6 +34,7 @@ export class Timeline {
     this.onPause = onPause;
     this.onElementMenu = onElementMenu;
     this.onCameraMenu = onCameraMenu;
+    this.onClipMenu = onClipMenu;
     this.project = null;
     this.time = 0;
     this.pool = emptySelection();
@@ -358,6 +359,11 @@ export class Timeline {
       b.appendChild(el('div', 'handle handle-l'));
       b.appendChild(el('div', 'handle handle-r'));
       b.style.setProperty('--c', TYPE_COLOR[e.type] || '#666');
+      b.addEventListener('contextmenu', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        this.onClipMenu?.(e.id, ev.clientX, ev.clientY);
+      });
       track.appendChild(b);
       row.append(g, track);
       this.elsWrap.appendChild(row);

@@ -116,7 +116,15 @@ function showContextMenu(x, y, items) {
     const b = document.createElement('button');
     b.textContent = it.label;
     if (it.danger) b.classList.add('danger');
-    b.onclick = () => { hideContextMenu(); it.run?.(); };
+    if (it.disabled) {
+      b.disabled = true;
+      b.title = it.title || '';
+    }
+    b.onclick = () => {
+      if (it.disabled) return;
+      hideContextMenu();
+      it.run?.();
+    };
     m.appendChild(b);
   }
   m.hidden = false;
@@ -709,6 +717,52 @@ async function boot() {
       },
     ]);
   };
+  /** Split one media element at the playhead and keep the right half selected. */
+  const splitElementAt = (id) => {
+    const el = S.project?.elements?.find((e) => e.id === id);
+    if (!el) return;
+    const at = Math.round(S.time * 1000) / 1000;
+    if (!(at > el.start + 0.02 && at < el.start + el.duration - 0.02)) {
+      toast('播放头不在该素材范围内（或离两端太近）', 'warn');
+      return;
+    }
+    return op({ op: 'splitElement', id, at }).then((j) => {
+      if (!j) return;
+      const right = (j.changed || []).find((x) => x && x !== id);
+      if (right) select({ elementId: right });
+      toast(`已在 ${at.toFixed(2)}s 切分 ${el.name || id}`, 'info');
+    });
+  };
+  const clipMenu = (id, x, y) => {
+    const el = S.project?.elements?.find((e) => e.id === id);
+    if (!el) return;
+    const at = Math.round(S.time * 1000) / 1000;
+    const can = at > el.start + 0.02 && at < el.start + el.duration - 0.02;
+    showContextMenu(x, y, [
+      {
+        label: can ? `在播放头切分（${at.toFixed(2)}s）` : '在播放头切分（播放头不在素材内）',
+        disabled: !can,
+        title: can ? '快捷键 S' : `素材范围 ${el.start.toFixed(2)}–${(el.start + el.duration).toFixed(2)}s`,
+        run: () => { splitElementAt(id); },
+      },
+      { sep: true },
+      { label: '选中素材', run: () => select({ elementId: id }) },
+      {
+        label: '复制（Ctrl+C）',
+        run: () => {
+          S.clipboard = JSON.parse(JSON.stringify(el));
+          toast(`已复制 ${el.name || id}，Ctrl+V 粘贴到播放头`);
+        },
+      },
+      {
+        label: '删除素材',
+        danger: true,
+        run: () => {
+          if (confirm(`删除 ${el.name || id}?`)) op({ op: 'removeElement', id });
+        },
+      },
+    ]);
+  };
   const cameraMenu = (id, x, y) => {
     const cam = (S.project.cameras || []).find((c) => c.id === id);
     if (!cam) return;
@@ -740,6 +794,7 @@ async function boot() {
     onPause: () => pause(),
     onElementMenu: (id, x, y) => elementMenu(id, x, y),
     onCameraMenu: (id, x, y) => cameraMenu(id, x, y),
+    onClipMenu: (id, x, y) => clipMenu(id, x, y),
   });
   timeline.setProject(S.project);
 
@@ -1424,7 +1479,10 @@ async function boot() {
         op({ op: 'objectRemove', id });
       }
     } else if (e.key === 's' && !e.ctrlKey) {
-      if (S.selection.elementId) { e.preventDefault(); op({ op: 'splitElement', id: S.selection.elementId, at: Math.round(S.time * 1000) / 1000 }); }
+      if (S.selection.elementId) {
+        e.preventDefault();
+        splitElementAt(S.selection.elementId);
+      }
     } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
       e.preventDefault();
       if (e.shiftKey) $('#btnRedo').click(); else $('#btnUndo').click();
