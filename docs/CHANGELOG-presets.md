@@ -17,3 +17,7 @@
 | 2026-10-27 | `1c79b35` | 预览视口画图片/视频/文字平面（视频跟时间轴同步） | 编辑时看得到真实内容 | `app/renderer/js/preview3d.js` | `git revert 1c79b35` |
 | 2026-10-27 | `072aecc` | 检查器「内容」区块：素材、适配、框尺寸、入点/速度、文字排版 | 不用命令行也能改内容 | `app/renderer/js/inspector.js` | `git revert 072aecc` |
 | 2026-10-27 | `e8f7f01` | SPEC-OBJECTS 写清图片/视频/文字的数据、公式、一致性和限制 | 文档跟代码同步 | `docs/SPEC-OBJECTS.md` | `git revert e8f7f01` |
+| 2026-10-27 | `f2755bf` | **修复**：Blender 合成器节点组没声明输出接口，导致成片一直是原始渲染（雾、调色、辉光、颗粒、暗角都没生效）；补上输出接口 | W3 的 2D 叠加依赖合成器；顺带让所有成片的后期真正生效（观感会变） | `blender/vdm_build.py`（`build_compositor` 末尾 4 行） | `git revert f2755bf`（成片回到无后期的样子） |
+| 2026-10-27 | `2c26333` | W3：3D 项目里的 2D 元素在 Blender 成片里叠到 3D 画面上（单相机走合成器，多相机走 VSE 顶层轨道） | 字幕、HUD、遮罩要盖在 3D 画面上 | `blender/vdm_build.py`（`SceneBuilder.build` 可建到指定场景、透明底）、`blender/vdm_city.py` | `git revert 2c26333` |
+| 2026-10-27 | `b729c58` | W3：预览里 3D 画面画完后再画 2D 图层 | 预览和成片一致 | `app/renderer/js/preview.js` | `git revert b729c58` |
+| 2026-10-27 | `729f839` | SPEC-PROJECT 写清 3D 项目里 2D 元素的规则、合成器输出接口的要求和已知差异 | 文档跟代码同步 | `docs/SPEC-PROJECT.md` | `git revert 729f839` |
