@@ -54,6 +54,7 @@
   "punch": 0.8,                    // 跟随节拍缩放（0..2）
   "fadeIn": 0.45, "fadeOut": 0.4,
   "srcIn": 0,                      // video/audio：从素材的第几秒开始播
+  "loop": false,                   // video/audio：true 才允许长度超过素材本身
   "volume": 1,                     // audio：基础线性音量 0..1
   "keyframes": [ { "t": 0.2, "path": "transform.scale", "value": 0.9, "ease": "outExpo" } ]
 }
@@ -61,6 +62,10 @@
 
 - 音频元素的音量关键帧 path 是 `audio.volume`，值 `0..1`；与元素时间一样是绝对时间。
   `volume` 是基础值；有键时按线性段插值（预览和成片一致）。
+- `video`/`audio` 的 `duration` 是从源素材截取的窗口长度，不是变速拉伸。没有 `loop: true` 时，
+  `srcIn + duration` 不能超过素材源时长；时间轴拖动会被限制在素材结尾，`ops` 也会按
+  `meta.sourceDuration`（添加素材时 probe 得到）兜底 clamp。开启 `loop` 后长度可超过素材，
+  预览、抽帧和混音都从素材 0 秒重新循环。
 - `audio` 没有画面，预览和 Blender 的 2D 图层都会跳过它；它只进入声音混音和项目时长计算。
 - 旧项目的 `meta.audio` 仍是配乐/节拍分析的兼容字段；打开时 `ensureAudioElements()` 会把它变成一条
   `type:"audio"` 元素并写 `meta.audioMigrated: true`，之后再编辑/切分/音量都是元素操作，不会重复生成。

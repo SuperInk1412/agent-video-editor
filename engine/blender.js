@@ -69,7 +69,7 @@ export async function prepareSequences(dir, project, { onLog, signal } = {}) {
     if (!(await fileExists(src))) continue;
     const before = await fs.stat(src);
     const digest = await hashFile(src, { signal });
-    const key = hashOf({ version: 2, digest, in: el.srcIn || 0, d: el.duration, fps, w: width, h: height, fit: el.style?.fit || 'cover' });
+    const key = hashOf({ version: 2, digest, in: el.srcIn || 0, d: el.duration, fps, w: width, h: height, fit: el.style?.fit || 'cover', loop: el.loop === true });
     const seqDir = path.join(seqRoot, key);
     const marker = path.join(seqDir, '.ok');
     if (!(await fileExists(marker))) {
@@ -78,7 +78,7 @@ export async function prepareSequences(dir, project, { onLog, signal } = {}) {
       try {
         const result = await extractSequence({
           src, outDir: temporary, srcIn: el.srcIn || 0, duration: el.duration,
-          fps, width, height, fit: el.style?.fit || 'cover', onLog, signal,
+          fps, width, height, fit: el.style?.fit || 'cover', loop: el.loop === true, onLog, signal,
         });
         if (!result.count) throw new Error(`no video frames extracted for ${el.id}`);
         const after = await fs.stat(src);

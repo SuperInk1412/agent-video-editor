@@ -7,6 +7,20 @@
 /* inputs inside the timeline are the compact height */
 :where(.tl) select, :where(.tl) input[type="text"], :where(.tl) input[type="number"] { height: var(--h-sm); font-size: var(--fs-sm); }
 .tl-scroll { flex: 1; min-height: 0; overflow: auto; }
+/* The native horizontal bar would span the sticky name column too; .tl-hscroll
+   draws our own track starting at --tl-gutter (timeline.js _syncHScroll). */
+.tl-scroll::-webkit-scrollbar:horizontal { height: 0; }
+.tl-hscroll {
+  position: absolute; left: var(--tl-gutter, 340px); right: 9px; bottom: 0; height: 9px;
+  z-index: 9; background: var(--surface-0); border-top: 1px solid var(--border-subtle);
+}
+.tl-hscroll.off { display: none; }
+.tl-hthumb {
+  position: absolute; top: 2px; bottom: 2px; left: 0; min-width: 24px;
+  border-radius: var(--r-pill); background: var(--surface-4); cursor: grab;
+}
+.tl-hthumb:hover, .tl-hthumb.drag { background: var(--border-strong); }
+.tl-hthumb.drag { cursor: grabbing; }
 
 /* ---------------- toolbar (32px) ---------------- */
 .tl-toolbar {
@@ -80,6 +94,8 @@ body.tl-gutter-resizing, body.tl-gutter-resizing * { cursor: col-resize !importa
 .tl-sub { margin-left: auto; font-size: var(--fs-xs); color: var(--text-3); flex: 0 0 auto; }
 .tl-track { position: relative; flex: 1; min-width: 0; }
 .tl-tick { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--border-subtle); }
+.tl-tick.major { background: var(--border); }
+.tl-tick.minor { top: 14px; background: var(--border-subtle); }
 .tl-ticklabel {
   position: absolute; left: 4px; top: 5px; font-size: var(--fs-xs); color: var(--text-3);
   font-family: var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap;
@@ -107,6 +123,8 @@ body.tl-gutter-resizing, body.tl-gutter-resizing * { cursor: col-resize !importa
   border-left: 3px solid var(--clip-camera); padding-left: 6px; border-radius: 0;
 }
 .blk.ob { background: var(--clip-object-bg); border-left: 3px solid var(--clip-object); padding-left: 6px; border-radius: 0; }
+/* looping video / audio: repeat icon before the name */
+.blk-loop { flex: 0 0 auto; width: 12px; height: 12px; margin-right: 4px; color: var(--text-2); }
 .blk-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 0 1 auto; }
 .blk-meta {
   margin-left: auto; color: var(--text-2); font-size: var(--fs-xs); padding-left: 6px;
@@ -125,6 +143,12 @@ body.tl-gutter-resizing, body.tl-gutter-resizing * { cursor: col-resize !importa
 .handle-r { right: 0; }
 
 /* ---------------- playhead + split ---------------- */
+/* Clips the playhead at the name column: spans the track area below the toolbar
+   (left = --tl-gutter, set again by timeline.js _syncPlayhead) down to the bottom. */
+.tl-playhead-layer {
+  position: absolute; left: var(--tl-gutter, 340px); right: 0; top: var(--tl-tb-h); bottom: 0;
+  overflow: hidden; pointer-events: none; z-index: 8;
+}
 .tl-playhead {
   position: absolute; top: 0; bottom: 0; width: 2px; background: var(--playhead);
   pointer-events: none; z-index: 8;

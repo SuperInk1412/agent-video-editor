@@ -355,6 +355,20 @@ export class Preview {
     for (const el of p.elements) this._ensureAsset(el);
   }
 
+  /** Full source length of a 2D media element once its player is ready. */
+  sourceDuration(el) {
+    if (!el) return null;
+    if (el.type === 'video') {
+      const v = this.assets.get(el.id)?.video;
+      if (v && Number.isFinite(v.duration) && v.duration > 0) return v.duration;
+    } else if (el.type === 'audio') {
+      const a = this.elementAudio.get(el.id);
+      if (a && Number.isFinite(a.duration) && a.duration > 0) return a.duration;
+    }
+    const recorded = Number(el.meta?.sourceDuration);
+    return Number.isFinite(recorded) && recorded > 0 ? recorded : null;
+  }
+
   /** Create / retarget one HTMLAudioElement per audio element. */
   _syncElementAudioPlayers(project) {
     const wanted = new Set();
@@ -365,6 +379,7 @@ export class Preview {
       if (!a) {
         a = new Audio();
         a.preload = 'auto';
+        a.loop = false;
         a.crossOrigin = 'anonymous';
         this.elementAudio.set(el.id, a);
       }
@@ -402,7 +417,9 @@ export class Preview {
         if (!a.paused) a.pause();
         continue;
       }
-      const want = Math.max(0, (Number(el.srcIn) || 0) + (t - start));
+      const source = el.loop ? this.sourceDuration(el) : null;
+      let want = Math.max(0, (Number(el.srcIn) || 0) + (t - start));
+      if (el.loop && source) want = ((want % source) + source) % source;
       if (!playing) {
         if (!a.paused) a.pause();
         if (Math.abs(a.currentTime - want) > 0.02) {
@@ -758,13 +775,27 @@ export class Preview {
       const el = p.elements.find((e) => e.id === id);
       if (!el) continue;
       const active = t >= el.start && t < el.start + el.duration;
-      const local = Math.max(0, t - el.start + (Number(el.srcIn) || 0));
+      const source = this.sourceDuration(el);
+      let local = Math.max(0, t - el.start + (Number(el.srcIn) || 0));
+      if (el.loop && source) local = ((local % source) + source) % source;
+      const pastEnd = !el.loop && source && local >= source - 1e-6;
       const v = a.video;
-      if (active) {
-        if (Math.abs(v.currentTime - local) > 0.16 && !this.playing) v.currentTime = Math.min(local, Math.max(0, (v.duration || 1) - 0.05));
-        else if (Math.abs(v.currentTime - local) > 0.35) v.currentTime = local;
-        if (this.playing && v.paused) v.play().catch(() => {});
-        if (!this.playing && !v.paused) v.pause();
+      if (active && !pastEnd) {
+        if (this.playing) {
+          if (el.loop && source && v.ended) {
+            try { v.currentTime = local; } catch { /* not ready */ }
+            v.play().catch(() => {});
+          } else if (v.paused) {
+            v.play().catch(() => {});
+          } else if (Math.abs(v.currentTime - local) > 0.35) {
+            try { v.currentTime = local; } catch { /* not ready */ }
+          }
+        } else {
+          if (!v.paused) v.pause();
+          if (Math.abs(v.currentTime - local) > 0.16) {
+            try { v.currentTime = Math.min(local, Math.max(0, (v.duration || source || 1) - 0.05)); } catch { /* not ready */ }
+          }
+        }
       } else if (!v.paused) v.pause();
       if (a.tex) {
         gl.bindTexture(gl.TEXTURE_2D, a.tex);

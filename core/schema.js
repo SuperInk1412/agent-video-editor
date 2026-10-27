@@ -284,6 +284,7 @@ export function validateProject(p) {
     if (e.src !== undefined) source(e.src, `${at}.src`);
     if (e.type === 'audio' && !e.src) push(`${at}.src`, 'audio element needs src');
     for (const name of ['fadeIn', 'fadeOut', 'srcIn', 'punch']) if (e[name] !== undefined) number(e[name], `${at}.${name}`, { min: 0 });
+    if (e.loop !== undefined && typeof e.loop !== 'boolean') push(`${at}.loop`, 'must be boolean');
     if (e.volume !== undefined) number(e.volume, `${at}.volume`, { min: 0, max: 1 });
     if (e.transform !== undefined && record(e.transform, `${at}.transform`)) {
       for (const name of Object.keys(DEFAULT_TRANSFORM)) if (e.transform[name] !== undefined) number(e.transform[name], `${at}.transform.${name}`);

@@ -43,7 +43,7 @@ const CLIP_META_MIN = 90;
 export class Timeline {
   constructor(root, {
     onSeek, onSelect, onOp, onPause, onElementMenu, onCameraMenu, onClipMenu, onSplit, onTextEdit,
-    onToggleCurves, isCurvesOpen,
+    onToggleCurves, isCurvesOpen, sourceDuration, onSourceLimit,
   } = {}) {
     this.root = root;
     this.onSeek = onSeek;
@@ -57,6 +57,8 @@ export class Timeline {
     this.onTextEdit = onTextEdit;
     this.onToggleCurves = onToggleCurves;
     this.isCurvesOpen = isCurvesOpen;
+    this.sourceDuration = sourceDuration;
+    this.onSourceLimit = onSourceLimit;
     this.project = null;
     this.time = 0;
     this.pool = emptySelection();
@@ -130,10 +132,57 @@ export class Timeline {
       this.onSplit?.();
     });
     this.playhead.appendChild(splitBtn);
-    this.inner.append(this.rulerRow, this.sndWrap, this.camHead, this.camsWrap, this.elsWrap, this.playhead);
+    this.playheadLayer = el('div', 'tl-playhead-layer');
+    this.playheadLayer.appendChild(this.playhead);
+    this.inner.append(this.rulerRow, this.sndWrap, this.camHead, this.camsWrap, this.elsWrap);
+
+    // Native horizontal scrollbars span the whole footer, including the sticky
+    // property gutter (--tl-gutter). Draw our own track starting at the gutter so the
+    // scroll range never looks like it belongs to the property editor.
+    this.hscroll = el('div', 'tl-hscroll');
+    this.hthumb = el('div', 'tl-hthumb');
+    this.hscroll.appendChild(this.hthumb);
+    this.root.appendChild(this.hscroll);
+    this.root.appendChild(this.playheadLayer);
+    this.hthumb.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.hthumb.classList.add('drag');
+      const startX = e.clientX;
+      const startScroll = this.scroll.scrollLeft;
+      const track = Math.max(1, this.hscroll.clientWidth);
+      const thumb = Math.max(1, this.hthumb.offsetWidth);
+      const maxThumb = Math.max(1, track - thumb);
+      const maxScroll = Math.max(0, this.scroll.scrollWidth - this.scroll.clientWidth);
+      const move = (ev) => {
+        const x = Math.max(0, Math.min(maxThumb, (ev.clientX - startX) + (startScroll / Math.max(1, maxScroll)) * maxThumb));
+        this.scroll.scrollLeft = maxScroll ? (x / maxThumb) * maxScroll : 0;
+      };
+      const up = () => {
+        this.hthumb.classList.remove('drag');
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', up);
+      };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', up);
+    });
+    this.hscroll.addEventListener('pointerdown', (e) => {
+      if (e.target === this.hthumb) return;
+      e.preventDefault();
+      const r = this.hscroll.getBoundingClientRect();
+      const thumb = Math.max(1, this.hthumb.offsetWidth);
+      const maxThumb = Math.max(1, r.width - thumb);
+      const maxScroll = Math.max(0, this.scroll.scrollWidth - this.scroll.clientWidth);
+      const x = Math.max(0, Math.min(maxThumb, e.clientX - r.left - thumb / 2));
+      this.scroll.scrollLeft = maxScroll ? (x / maxThumb) * maxScroll : 0;
+    });
 
     this.inner.addEventListener('pointerdown', (e) => this._down(e));
-    this.scroll.addEventListener('scroll', () => this.onViewChange?.());
+    this.scroll.addEventListener('scroll', () => {
+      this._syncHScroll();
+      this._syncPlayhead();
+      this.onViewChange?.();
+    });
     this.scroll.addEventListener('wheel', (e) => {
       if (e.ctrlKey) {
         e.preventDefault();
@@ -348,11 +397,12 @@ export class Timeline {
     if (next === this._gutterW) return false;
     this._gutterW = next;
     this.root.style.setProperty('--tl-gutter', `${next}px`);
-    // lanes are positioned inside .tl-track, so only the content width and the
-    // playhead (absolute in .tl-inner) depend on the gutter
+    // lanes are positioned inside .tl-track, so only the content width, the
+    // custom h-scrollbar and the playhead layer (both inset by the gutter) depend on it
     if (this.project && this.pps) {
       this.inner.style.width = `${this._gutter() + this.project.meta.duration * this.pps + 60}px`;
       this.setTime(this.time);
+      this._syncHScroll();
     }
     this.onViewChange?.();
     return true;
@@ -423,8 +473,10 @@ export class Timeline {
     const dur = this.project?.meta.duration || 12;
     if (this.timeLabel) this.timeLabel.textContent = `${t.toFixed(2)} / ${dur.toFixed(2)}s`;
     const x = this._trackX(t);
-    this.playhead.style.transform = `translateX(${x}px)`;
-    if (this.scroll.scrollLeft > x - 20) this.scroll.scrollLeft = Math.max(0, x - 80);
+    if (this.scroll.scrollLeft > x - this._gutter() - 20) {
+      this.scroll.scrollLeft = Math.max(0, x - this._gutter() - 80);
+    }
+    this._syncPlayhead();
     this._syncProps(true);
   }
 
@@ -456,6 +508,31 @@ export class Timeline {
 
   _gutter() { return this._gutterW; }
   _trackX(t) { return this._gutter() + t * this.pps; }
+
+  /** Keep the custom track inset over the scrollable (non-gutter) part. */
+  _syncHScroll() {
+    if (!this.hscroll || !this.hthumb) return;
+    this.hscroll.style.left = `${this._gutter()}px`;
+    const s = this.scroll;
+    const maxScroll = Math.max(0, s.scrollWidth - s.clientWidth);
+    this.hscroll.classList.toggle('off', maxScroll < 1);
+    if (maxScroll < 1) return;
+    const view = Math.max(1, s.clientWidth - this._gutter());
+    const content = Math.max(view, s.scrollWidth - this._gutter());
+    const track = Math.max(1, this.hscroll.clientWidth);
+    const thumb = Math.max(24, Math.min(track, (track * view) / content));
+    const maxThumb = Math.max(1, track - thumb);
+    this.hthumb.style.width = `${thumb}px`;
+    this.hthumb.style.transform = `translateX(${(s.scrollLeft / maxScroll) * maxThumb}px)`;
+  }
+
+  /** The red line belongs to the track; the sticky gutter clips it naturally. */
+  _syncPlayhead() {
+    if (!this.playhead || !this.playheadLayer) return;
+    this.playheadLayer.style.left = `${this._gutter()}px`;
+    const screen = this._trackX(this.time) - this.scroll.scrollLeft;
+    this.playhead.style.transform = `translateX(${screen - this._gutter()}px)`;
+  }
   _timeAt(clientX) {
     const r = this.scroll.getBoundingClientRect();
     const x = clientX - r.left + this.scroll.scrollLeft - this._gutter();
@@ -509,6 +586,8 @@ export class Timeline {
     const dur = p.meta.duration;
     this.inner.style.width = `${this._gutter() + dur * this.pps + 60}px`;
     this.inner.style.minHeight = '100%';
+    this._syncHScroll();
+    this._syncPlayhead();
 
     const objs = Array.isArray(p.scene?.objects) ? p.scene.objects : [];
     const ids = new Set(objs.map((o) => o.id));
@@ -516,13 +595,48 @@ export class Timeline {
     const elIds = new Set(p.elements.map((e) => e.id));
     for (const id of [...this.expandedEls]) if (!elIds.has(id)) this.expandedEls.delete(id);
 
-    // ruler
+    // ruler: labels adapt to the zoom, and once a frame is wide enough the
+    // minor ticks switch from seconds to exact frame boundaries. Frame counts
+    // are used (not accumulated seconds) so ticks never drift at 24/30/60 fps.
     this.rulerTrack.innerHTML = '';
-    const step = this.pps > 90 ? 1 : this.pps > 40 ? 2 : this.pps > 18 ? 5 : 10;
-    for (let t = 0; t <= dur + 0.001; t += step) {
-      const tick = el('div', 'tl-tick');
+    const fps = Math.max(1, Math.round(Number(p.meta.fps) || 24));
+    const pxPerFrame = this.pps / fps;
+    const totalFrames = Math.max(0, Math.floor(dur * fps + 1e-6));
+    const NICE_FRAMES = [1, 2, 3, 5, 6, 10, 12, 15, 20, 24, 30, 48, 60, 90, 120, 150, 240, 300, 600, 1200, 1800, 3600, 7200, 18000, 36000];
+    const atLeast = (minPx) => NICE_FRAMES.find((n) => n * pxPerFrame >= minPx) || NICE_FRAMES[NICE_FRAMES.length - 1];
+    let minorFrames = pxPerFrame >= 6 ? 1
+      : pxPerFrame >= 3 ? 2
+        : pxPerFrame >= 1.5 ? 5
+          : pxPerFrame >= 0.75 ? 10
+            : atLeast(7);
+    let majorFrames = atLeast(68);
+    if (totalFrames / majorFrames > 2000) {
+      majorFrames = NICE_FRAMES.find((n) => n >= majorFrames && totalFrames / n <= 2000)
+        || Math.ceil(totalFrames / 2000);
+    }
+    minorFrames = Math.min(minorFrames, majorFrames);
+    // A very long timeline at a high zoom must not create tens of thousands of
+    // nodes; widen the minor grid until the count is bounded.
+    if (totalFrames / minorFrames > 4000) {
+      minorFrames = NICE_FRAMES.find((n) => n >= minorFrames && totalFrames / n <= 4000)
+        || Math.ceil(totalFrames / 4000);
+    }
+    const majorSet = new Set();
+    for (let f = 0; f <= totalFrames; f += majorFrames) majorSet.add(f);
+    if (minorFrames < majorFrames) {
+      for (let f = 0; f <= totalFrames; f += minorFrames) {
+        if (majorSet.has(f)) continue;
+        const tick = el('div', 'tl-tick minor');
+        tick.style.left = `${(f / fps) * this.pps}px`;
+        this.rulerTrack.appendChild(tick);
+      }
+    }
+    const useTimecode = majorFrames < fps;
+    for (const f of majorSet) {
+      const t = f / fps;
+      const tick = el('div', 'tl-tick major');
       tick.style.left = `${t * this.pps}px`;
-      const lab = el('span', 'tl-ticklabel', step >= 1 ? fmtTick(t) : timecode(t, p.meta.fps));
+      const lab = el('span', 'tl-ticklabel', useTimecode ? timecode(t, fps) : fmtTick(t));
       tick.appendChild(lab);
       this.rulerTrack.appendChild(tick);
     }
@@ -1261,6 +1375,7 @@ export class Timeline {
     setClipWidth(b, Math.max(4, (Number(e.duration) || 0) * this.pps));
     const label = elementClipLabel(e);
     b.innerHTML = `<span class="blk-name">${escapeHtml(label)}</span>`;
+    setClipLoopMark(b, isLooping(e));
     b.append(...clipHandles());
     b.dataset.tip = elementClipTip(e, label);
     b.addEventListener('contextmenu', (ev) => {
@@ -1859,6 +1974,7 @@ export class Timeline {
       const nameEl = h.block.querySelector('.blk-name');
       const label = elementClipLabel(e);
       if (nameEl) nameEl.textContent = label;
+      setClipLoopMark(h.block, isLooping(e));
       h.block.dataset.tip = elementClipTip(e, label);
     }
   }
@@ -2470,6 +2586,10 @@ export class Timeline {
         : target.classList.contains('handle-r') ? 'r' : 'move';
       const t0 = this._timeAt(ev.clientX);
       const orig = { start: item.start, duration: item.duration };
+      const srcIn = Math.max(0, Number(item.srcIn) || 0);
+      const rawSource = (item.type === 'video' || item.type === 'audio')
+        ? Number(this.sourceDuration?.(item)) : NaN;
+      const sourceLimit = !item.loop && Number.isFinite(rawSource) && rawSource > 0 ? rawSource : null;
       let moved = false;
       const downX = ev.clientX, downY = ev.clientY;
 
@@ -2479,19 +2599,32 @@ export class Timeline {
         const t = this._timeAt(e.clientX);
         const dt = t - t0;
         let ns = orig.start, nd = orig.duration;
+        let hitSource = false;
         if (mode === 'move') {
           ns = Math.max(0, this._snap(orig.start + dt));
         } else if (mode === 'r') {
           const end = this._snap(orig.start + orig.duration + dt);
           nd = Math.max(0.08, end - orig.start);
+          if (sourceLimit) {
+            const maxDur = Math.max(0.08, sourceLimit - srcIn);
+            if (nd > maxDur + 1e-9) { nd = maxDur; hitSource = true; }
+          }
         } else {
-          const s = Math.min(orig.start + orig.duration - 0.08, Math.max(0, this._snap(orig.start + dt)));
+          let s = Math.min(orig.start + orig.duration - 0.08, Math.max(0, this._snap(orig.start + dt)));
+          if (sourceLimit) {
+            const minStart = Math.max(0, orig.start - srcIn);
+            if (s < minStart) { s = minStart; hitSource = true; }
+          }
           nd = Math.max(0.08, orig.start + orig.duration - s);
+          if (sourceLimit) {
+            const maxDur = Math.max(0.08, sourceLimit - (srcIn + (s - orig.start)));
+            if (nd > maxDur + 1e-9) { nd = maxDur; hitSource = true; }
+          }
           ns = s;
         }
         blk.style.left = `${ns * this.pps}px`;
         setClipWidth(blk, nd * this.pps);
-        blk._ns = ns; blk._nd = nd;
+        blk._ns = ns; blk._nd = nd; blk._sourceHit = hitSource;
       };
       const up = (e) => {
         window.removeEventListener('pointermove', move);
@@ -2500,6 +2633,8 @@ export class Timeline {
           if (!(e?.detail > 1 && item.type === 'text')) this._toggleElementExpand(id);
           return;
         }
+        const hitSource = !!blk._sourceHit && moved;
+        if (hitSource) this.onSourceLimit?.(mode === 'l' ? 'start' : 'end');
         const ns = blk._ns, nd = blk._nd;
         if (ns == null || (Math.abs(ns - orig.start) < 1e-4 && Math.abs(nd - orig.duration) < 1e-4)) return;
         this.onOp?.({ op: 'moveElement', id, start: round3(ns), duration: round3(nd) });
@@ -2582,9 +2717,22 @@ function elementClipLabel(e) {
 }
 
 function elementClipTip(e, label) {
+  const loop = isLooping(e) ? '\n循环播放，长度可超过素材本身' : '';
   if (e.type === 'text') return `${label}\n双击编辑文字内容`;
-  if (e.type === 'audio') return `${label}\n拖动改时间；双击展开音量关键帧`;
-  return label;
+  if (e.type === 'audio') return `${label}\n拖动改时间；双击展开音量关键帧${loop}`;
+  return `${label}${loop}`;
+}
+
+/** Looping video / audio may run past the source length (core/ops.js caps the rest). */
+const isLooping = (e) => !!e.loop && (e.type === 'video' || e.type === 'audio');
+
+/** Leading repeat icon on a looping clip (DESIGN.md §5: icons, not ↻ text). */
+function setClipLoopMark(block, on) {
+  const mark = block.querySelector(':scope > .blk-loop');
+  if (!on) { mark?.remove(); return; }
+  if (mark) return;
+  const ic = icon('repeat', 'ic-sm blk-loop');
+  block.insertBefore(ic, block.firstChild);
 }
 const round2 = (v) => Math.round(Number(v) * 100) / 100;
 const fmtTick = (t) => (t >= 60 ? `${Math.floor(t / 60)}:${String(Math.round(t % 60)).padStart(2, '0')}` : `${Math.round(t)}s`);
