@@ -255,12 +255,18 @@ def _unit_cube_mesh(name):
     return mesh
 
 
-def _build_objects(scene, shot):
-    """Timeline elements as emissive boxes, animated exactly like the viewport."""
+def _build_objects(scene, shot, root=None):
+    """Timeline elements as emissive boxes, animated exactly like the viewport.
+    Image/video/text objects are built as planes / 3D text by vdm_objects.py."""
     from mathutils import Matrix
+    import vdm_objects
+    updaters = []
     for i, o in enumerate(shot.get('objects') or []):
         frames = o.get('frames') or []
         if not frames:
+            continue
+        if o.get('media') or o.get('text'):
+            vdm_objects.build_media_object(scene, o, root, updaters)
             continue
         name = str(o.get('name') or o.get('id') or f'element_{i}')
         mesh = _unit_cube_mesh('el_' + str(o.get('id') or i))
@@ -290,6 +296,7 @@ def _build_objects(scene, shot):
             if animated_alpha and alpha_input is not None:
                 alpha_input.default_value = float(f.get('opacity', 1.0))
                 alpha_input.keyframe_insert('default_value', frame=fr)
+    vdm_objects.install_updaters(scene, updaters)
 
 
 # ---------------------------------------------------------------- camera
@@ -705,7 +712,7 @@ def build_shot_scene(shot, opts):
     scene.collection.objects.link(nobj)
 
     # timeline elements (emissive boxes with baked per-frame transforms)
-    _build_objects(scene, shot)
+    _build_objects(scene, shot, opts.get('root'))
 
     # frame range from the baked camera
     cam_frames = [int(e['f']) for e in shot.get('camera', [])]
