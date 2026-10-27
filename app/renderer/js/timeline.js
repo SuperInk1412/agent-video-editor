@@ -22,7 +22,7 @@ const el = (tag, cls, html) => {
   return n;
 };
 
-const TYPE_COLOR = { image: '#3b6ea5', video: '#2f8f6b', text: '#a06a2b', shape: '#8a4b8f', solid: '#666' };
+const TYPE_COLOR = { image: '#3b6ea5', video: '#2f8f6b', text: '#a06a2b', shape: '#8a4b8f', solid: '#666', audio: '#2f8f6b' };
 const AX = ['x', 'y', 'z'];
 
 export class Timeline {
@@ -53,7 +53,7 @@ export class Timeline {
     this.pps = 60;
     this.expanded = new Set();
     this.sections = {
-      content: 'full', transform: 'full', camPos: 'full',
+      content: 'full', transform: 'full', audio: 'full', camPos: 'full',
       camMain: 'collapsed', camShake: 'collapsed', camDof: 'collapsed',
     };
     this.propSel = null;
@@ -177,7 +177,6 @@ export class Timeline {
     // Selection alone never opens a property group. A second click on the
     // already-selected row does that (see _down / viewport click handling).
     this._paintSelection();
-    this._updateHeight();
   }
 
   setTime(t) {
@@ -236,13 +235,6 @@ export class Timeline {
     if (this._zoomLabel) this._zoomLabel.textContent = `${Math.round(this.zoom * 100)}%`;
     this.render(true);
     this.onViewChange?.();
-  }
-
-  _updateHeight() {
-    const app = document.querySelector('#app');
-    const open = (!!this.camOpenId && !!this.project?.camera)
-      || this.expanded.size > 0 || this.expandedEls.size > 0;
-    if (app) app.classList.toggle('tl-expanded', open);
   }
 
   _snap(t) {
@@ -317,13 +309,24 @@ export class Timeline {
     if (this.camOpenId && !cams.some((c) => c.id === this.camOpenId)) this.camOpenId = null;
     for (const cam of cams) this._cameraGroup(cam, p);
 
-    // v2 (2D) element lanes, then the 3D objects
+    // soundtrack/audio elements get their own section above the 2D picture rows
     this.elsWrap.innerHTML = '';
     this._propRows = [];
     this._elPropRows = [];
     this._objHeads = new Map();
     this._elHeads = new Map();
-    const els = [...p.elements].sort((a, b) => b.z - a.z);
+    const allEls = [...p.elements].sort((a, b) => b.z - a.z);
+    const auds = allEls.filter((e) => e.type === 'audio');
+    const els = allEls.filter((e) => e.type !== 'audio');
+    if (auds.length) {
+      const head = el('div', 'tl-row tl-sechead');
+      head.append(
+        el('div', 'tl-gutter', `<span>声音</span><span class="tl-sub">${auds.length} 条</span>`),
+        el('div', 'tl-track'),
+      );
+      this.elsWrap.appendChild(head);
+      for (const e of auds) this._elementGroup(e);
+    }
     if (els.length) {
       const head = el('div', 'tl-row tl-sechead');
       head.append(
@@ -331,13 +334,12 @@ export class Timeline {
         el('div', 'tl-track'),
       );
       this.elsWrap.appendChild(head);
+      for (const e of els) this._elementGroup(e);
     }
-    for (const e of els) this._elementGroup(e);
     this._build3D(p, objs);
 
     this.setTime(this.time);
     this._paintSelection();
-    this._updateHeight();
     if (this._scrollTo) {
       const id = this._scrollTo;
       this._scrollTo = null;
@@ -1014,9 +1016,10 @@ export class Timeline {
     dot.style.background = TYPE_COLOR[e.type] || '#666';
     const name = el('span', 'tl-objname');
     name.textContent = e.name || e.id;
-    name.title = e.type === 'text' ? '双击时间块或画面编辑文字内容' : (e.name || e.id);
-    const kind = el('span', 'tl-objkind', '2D');
-    kind.title = '画面元素（纵深 z 单位：米）';
+    name.title = e.type === 'text' ? '双击时间块或画面编辑文字内容'
+      : e.type === 'audio' ? '声音元素：展开可给音量打关键帧' : (e.name || e.id);
+    const kind = el('span', 'tl-objkind', e.type === 'audio' ? 'AUDIO' : '2D');
+    kind.title = e.type === 'audio' ? '声音 / 音乐（不参与画面）' : '画面元素（纵深 z 单位：米）';
     g.append(caret, eye, dot, name, kind);
 
     const track = el('div', 'tl-track');
@@ -1024,7 +1027,11 @@ export class Timeline {
     b.dataset.id = e.id;
     b.style.left = `${(Number(e.start) || 0) * this.pps}px`;
     b.style.width = `${Math.max(4, (Number(e.duration) || 0) * this.pps)}px`;
-    const label = e.type === 'text' ? String(e.style?.text || '').slice(0, 24) : (e.src || '').split('/').pop();
+    const label = e.type === 'text'
+      ? String(e.style?.text || '').slice(0, 24)
+      : e.type === 'audio'
+        ? `♪ ${e.name || (e.src || '').split('/').pop() || e.id}`
+        : (e.src || '').split('/').pop();
     b.innerHTML = `<span class="blk-name">${escapeHtml(label || e.id)}</span>`;
     const hl = el('div', 'handle handle-l');
     hl.title = '拖动左边界：改开始时间';
@@ -1033,6 +1040,7 @@ export class Timeline {
     b.append(hl, hr);
     b.style.setProperty('--c', TYPE_COLOR[e.type] || '#666');
     if (e.type === 'text') b.title = '双击编辑文字内容';
+    if (e.type === 'audio') b.title = '拖动改时间；双击展开音量关键帧';
     b.addEventListener('contextmenu', (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
@@ -1052,6 +1060,16 @@ export class Timeline {
     }
 
     if (!open) return;
+    if (e.type === 'audio') {
+      this.elsWrap.appendChild(this._sectionRow('声音', 'audio'));
+      if (this.sections.audio !== 'collapsed') {
+        this.elsWrap.appendChild(this._elementNumRow(e, 'audio.volume', '音量', {
+          step: 0.01, axis: 'd', letter: '', unit: '0..1', min: 0, max: 1,
+          title: '音量 0..1；◆ 在当前时间打关键帧',
+        }));
+      }
+      return;
+    }
     this.elsWrap.appendChild(this._sectionRow('变换', 'transform', 'px / m'));
     if (this.sections.transform === 'collapsed') return;
     const mode = this.sections.transform;
@@ -1451,7 +1469,8 @@ export class Timeline {
   _elValue(e, path, t) {
     const prop = path.slice(path.lastIndexOf('.') + 1);
     let base = path.startsWith('transform.') ? e?.transform?.[prop] : undefined;
-    if (base == null) base = (prop === 'scale' || prop === 'opacity') ? 1 : 0;
+    if (path === 'audio.volume') base = e?.volume;
+    if (base == null) base = (prop === 'scale' || prop === 'opacity' || path === 'audio.volume') ? 1 : 0;
     return sampleTrack(e?.keyframes, path, t, Number(base));
   }
 
@@ -1688,12 +1707,16 @@ export class Timeline {
     if (!pr || !e) return;
     let v = readNumber(pr.input);
     if (!Number.isFinite(v)) return;
-    if (path === 'transform.opacity') v = Math.max(0, Math.min(1, v));
+    if (path === 'transform.opacity' || path === 'audio.volume') v = Math.max(0, Math.min(1, v));
     if (path === 'transform.scale') v = Math.max(0, v);
     const t = this._editTimes.get(`${elId}:${path}`) ?? round3(this.time);
     const keyed = pr.keyedAtFocus ?? this._elTrack(e, path).length > 0;
     if (keyed) {
       this.onOp?.({ op: 'keySet', id: elId, path, t, value: v });
+      return;
+    }
+    if (path === 'audio.volume') {
+      this.onOp?.({ op: 'updateElement', id: elId, patch: { volume: v } });
       return;
     }
     const key = path.slice(path.lastIndexOf('.') + 1);

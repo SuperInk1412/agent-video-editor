@@ -6,6 +6,7 @@ import fss from 'node:fs';
 import path from 'node:path';
 import { normalizeProject, validateProject } from './schema.js';
 import { ensureSpace } from './space.js';
+import { ensureAudioElements } from './audio.js';
 
 export const PROJECT_FILE = 'project.vdm.json';
 export const VDM_DIR = '.vdm';
@@ -65,6 +66,8 @@ export async function loadProject(dir) {
   // Every project is 3D: a former 2D project gets the empty world and the
   // default camera when it is opened (docs/DESIGN-UNIFIED-SPACE.md §7).
   ensureSpace(project);
+  // Old projects kept their song only in meta.audio; show it as a real element.
+  ensureAudioElements(project);
   return project;
 }
 

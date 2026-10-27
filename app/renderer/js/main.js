@@ -342,7 +342,8 @@ function inlineTextGeometry(kind, id, text) {
   if (kind === 'element') {
     const layer = (preview.layers || []).find((L) => L.el?.id === id);
     if (!layer || layer.kind !== 'tex') return null;
-    const corners = preview._layerCorners(layer);
+    const rect = preview.textContentRect?.(layer) || [0, 0, 1, 1];
+    const corners = preview._layerCorners(layer, rect);
     if (!corners || corners.length !== 4) return null;
     const pts = corners.map(([x, y]) => toStage(x, y));
     if (!pts.every(([x, y]) => Number.isFinite(x) && Number.isFinite(y))) return null;
@@ -350,15 +351,15 @@ function inlineTextGeometry(kind, id, text) {
     const st = layer.st || {};
     const fontPx = Math.max(1, (Number(st.size) || 96) * (canvas.width / (Number(meta.width) || 1920)));
     const lineH = fontPx * Math.max(0.1, Number(style.lineHeight) || 1.18);
-    const srcW = Math.max(1, Number(layer.w) || 1);
-    const srcH = Math.max(1, Number(layer.h) || lineH * textLines);
+    const srcW = Math.max(1, (Number(layer.w) || 1) * (rect[2] - rect[0]));
+    const srcH = Math.max(1, (Number(layer.h) || lineH * textLines) * (rect[3] - rect[1]));
     return {
       pts,
       w: srcW,
       h: srcH,
       fontPx,
       lineH,
-      pad: Math.max(0, (srcH - lineH * textLines) / 2),
+      pad: 0,
       align: style.align || 'center',
       weight: style.weight || 400,
       family: style.font || 'SimHei',
@@ -540,7 +541,8 @@ function openTextEditor(kind, id, ev = null) {
   }
   if (ui.hint) ui.hint.textContent = INLINE_TEXT_HINT;
   ui.area.focus({ preventScroll: true });
-  ui.area.select();
+  const caret = ui.area.value.length;
+  ui.area.setSelectionRange(caret, caret);
   return true;
 }
 
@@ -652,7 +654,7 @@ function updateOverlay() {
   const poly = $('#selPoly');
   const label = $('#selLabel');
   if (!box || !poly || !label || !preview || !S.project) return;
-  const item = preview.layerPolygons().find((x) => x.id === S.selection.elementId);
+  const item = preview.layerPolygons(true).find((x) => x.id === S.selection.elementId);
   if (!item) {
     box.style.display = 'none';
     label.style.display = 'none';
@@ -955,7 +957,9 @@ async function renderMedia() {
     const isTrack = isAud && S.project.meta.audio?.src === m.path;
     const card = document.createElement('div');
     card.className = `media-card${isTrack ? ' on' : ''}`;
-    card.title = isAud ? (isTrack ? '当前配乐' : '点击设为配乐（会重新分析节拍）') : (isImg || isVid ? '点击在播放头处加入时间线' : '不支持的素材类型');
+    card.title = isAud
+      ? '点击加入时间线；右键设为配乐'
+      : (isImg || isVid ? '点击在播放头处加入时间线' : '不支持的素材类型');
     card.innerHTML = isImg
       ? `<img src="/${m.path}" loading="lazy">`
       : `<div class="fileicon">${isVid ? '▶' : isAud ? '♪' : '?'}</div>`;
@@ -964,10 +968,23 @@ async function renderMedia() {
     cap.textContent = isTrack ? `♪ 配乐 · ${m.name}` : m.name;
     card.appendChild(cap);
     card.onclick = () => {
-      if (isAud) setSoundtrack(m);
+      if (isAud) addAudioAt(m);
       else if (isImg || isVid) addMediaAt(m, isVid);
       else toast('只能把图片和视频放进时间线', 'warn');
     };
+    if (isAud) {
+      card.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        showContextMenu(e.clientX, e.clientY, [
+          { label: '加入时间线', run: () => addAudioAt(m) },
+          {
+            label: isTrack ? '当前已是配乐' : '设为配乐（分析节拍）',
+            disabled: isTrack,
+            run: () => setSoundtrack(m),
+          },
+        ]);
+      });
+    }
     grid.appendChild(card);
   }
   root.appendChild(grid);
@@ -976,7 +993,28 @@ async function renderMedia() {
 async function setSoundtrack(m) {
   if (S.project.meta.audio?.src === m.path) { toast('已经是当前配乐'); return; }
   const prev = S.project.meta.audio || {};
-  const j = await op({ op: 'setMeta', path: 'audio', value: { src: m.path, offset: 0, gain: prev.gain || 0 } });
+  const gain = Number(prev.gain) || 0;
+  const volume = Math.max(0, Math.min(1, 10 ** (gain / 20)));
+  const total = Math.max(0.05, Number(S.project.meta.duration) || 12);
+  const current = (S.project.elements || []);
+  const song = current.find((e) => e.type === 'audio' && e.meta?.fromSoundtrack)
+    || current.find((e) => e.type === 'audio' && e.src === m.path);
+  const ops = [
+    { op: 'setMeta', path: 'audio', value: { src: m.path, offset: 0, gain } },
+    { op: 'setMeta', path: 'audioMigrated', value: true },
+  ];
+  if (song) {
+    ops.push({ op: 'updateElement', id: song.id, patch: { src: m.path, name: m.name, start: 0, duration: total, srcIn: 0, volume } });
+  } else {
+    ops.push({
+      op: 'addElement',
+      element: {
+        type: 'audio', name: m.name, src: m.path, start: 0, duration: total,
+        srcIn: 0, volume, meta: { fromSoundtrack: true },
+      },
+    });
+  }
+  const j = await op(...ops);
   if (!j) return;
   renderMedia();
   toast('已设为配乐，正在分析节拍…');
@@ -1171,6 +1209,31 @@ function addMediaAt(m, isVid) {
       fadeIn: 0.2, fadeOut: 0.2,
     },
   }).then((j) => { if (j?.changed?.[0]) select({ elementId: j.changed[0] }); });
+}
+
+/** Add a sound file as a normal timeline element at the playhead. */
+function addAudioAt(m) {
+  if (!S.project) return null;
+  const existing = S.project.elements.find((e) => e.type === 'audio' && e.src === m.path);
+  if (existing) {
+    select({ elementId: existing.id });
+    toast('这段声音已经在时间线里了', 'info');
+    return Promise.resolve(existing.id);
+  }
+  const total = Math.max(0.05, Number(S.project.meta.duration) || 12);
+  const start = Math.max(0, Math.min(total - 0.05, S.time));
+  const duration = Math.max(0.05, total - start);
+  return op({
+    op: 'addElement',
+    element: {
+      type: 'audio', name: m.name, src: m.path, start, duration, srcIn: 0, volume: 1,
+    },
+  }).then((j) => {
+    if (!j) return null;
+    if (j.changed?.[0]) select({ elementId: j.changed[0] });
+    toast(`声音已加入时间线：${m.name}`, 'success');
+    return j.changed?.[0] || null;
+  });
 }
 
 function switchRightTab(name) {

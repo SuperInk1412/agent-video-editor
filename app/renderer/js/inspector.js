@@ -151,7 +151,7 @@ export class Inspector {
 
   _renderElement(project, el, time) {
     this._elId = el.id;
-    const typeLabel = { image: '图片', video: '视频', text: '文字', shape: '形状', solid: '色块' }[el.type] || el.type;
+    const typeLabel = { image: '图片', video: '视频', text: '文字', shape: '形状', solid: '色块', audio: '声音' }[el.type] || el.type;
     const head = h('div', { class: 'insp-head' },
       h('div', { class: 'insp-kind' }, typeLabel),
       h('div', { class: 'insp-id' }, el.id),
@@ -181,7 +181,7 @@ export class Inspector {
       else set(path, patch(v));
     };
 
-    this.root.appendChild(this._section('基础',
+    const baseFields = [
       this._field({ label: '名称', type: 'text', value: el.name, onChange: (v) => set('name', { name: v }) }),
       this._field({
         label: '所属分镜', type: 'select', value: el.segment || '', options: [{ value: '', label: '—' }, ...project.segments.map((s) => ({ value: s.id, label: `${s.name} (${s.start.toFixed(1)}s)` }))],
@@ -189,10 +189,29 @@ export class Inspector {
       }),
       this._field({ label: '开始 (s)', value: round(el.start), step: 0.01, min: 0, onChange: (v) => this._commit(`${el.id}:start`, { op: 'moveElement', id: el.id, start: v }) }),
       this._field({ label: '时长 (s)', value: round(el.duration), step: 0.01, min: 0.05, onChange: (v) => this._commit(`${el.id}:dur`, { op: 'moveElement', id: el.id, duration: v }) }),
-      this._field({ label: '层级 z', value: el.z, step: 1, onChange: (v) => this._commit(`${el.id}:z`, { op: 'moveElement', id: el.id, z: v }) }),
-      this._field({ label: '淡入 (s)', value: el.fadeIn || 0, step: 0.05, min: 0, onChange: (v) => set('fade', { fadeIn: v }) }),
-      this._field({ label: '淡出 (s)', value: el.fadeOut || 0, step: 0.05, min: 0, onChange: (v) => set('fade', { fadeOut: v }) }),
-    ));
+    ];
+    if (el.type !== 'audio') {
+      baseFields.push(
+        this._field({ label: '层级 z', value: el.z, step: 1, onChange: (v) => this._commit(`${el.id}:z`, { op: 'moveElement', id: el.id, z: v }) }),
+        this._field({ label: '淡入 (s)', value: el.fadeIn || 0, step: 0.05, min: 0, onChange: (v) => set('fade', { fadeIn: v }) }),
+        this._field({ label: '淡出 (s)', value: el.fadeOut || 0, step: 0.05, min: 0, onChange: (v) => set('fade', { fadeOut: v }) }),
+      );
+    }
+    this.root.appendChild(this._section('基础', ...baseFields));
+
+    if (el.type === 'audio') {
+      this.root.appendChild(this._section('声音',
+        this._field({ label: '素材', type: 'text', span: 3, value: el.src || '', onChange: (v) => set('src', { src: v }) }),
+        this._field({
+          label: '音量', value: round(kv('audio.volume', el.volume ?? 1), 3),
+          step: 0.01, min: 0, max: 1, percent: true, kf: true, path: 'audio.volume',
+          onChange: edit('audio.volume', (v) => ({ volume: v })),
+        }),
+        this._field({ label: '源入点 (s)', value: round(el.srcIn || 0), step: 0.05, min: 0, onChange: (v) => set('srcIn', { srcIn: v }) }),
+        h('div', { class: 'hint' }, '声音也是时间线元素：拖时间块改时长，展开「声音」给音量打关键帧。'),
+      ));
+      return;
+    }
 
     this.root.appendChild(this._section('变换',
       this._field({ label: 'X', value: round(kv('transform.x', el.transform.x)), kf: true, path: 'transform.x', onChange: edit('transform.x', (v) => ({ transform: { x: v } })) }),

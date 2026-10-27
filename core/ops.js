@@ -270,7 +270,9 @@ function splitOne(p, el, at, ids = allIds(p)) {
   right.duration = t3(end - at);
   right.keyframes = keysForRange(el.keyframes, at, end);
   right.fadeIn = 0;
-  if (el.type === 'video') right.srcIn = t3((Number(el.srcIn) || 0) + (at - el.start));
+  if (el.type === 'video' || el.type === 'audio') {
+    right.srcIn = t3((Number(el.srcIn) || 0) + (at - el.start));
+  }
   const motion = el.motion || {};
   if (motion.type && motion.type !== 'none' && Number(motion.amount)) {
     const span = Array.isArray(motion.span) && motion.span.length === 2 ? motion.span : [el.start, end];
@@ -472,7 +474,11 @@ export function applyOp(p, op) {
       else if (ids.has(el.id)) fail(`id ${el.id} already used`);
       const full = {
         id: el.id,
-        name: el.name || (el.type === 'text' ? (el.style?.text || 'text') : el.type),
+        name: el.name || (el.type === 'text'
+          ? (el.style?.text || 'text')
+          : el.type === 'audio'
+            ? String(el.src || '').split('/').pop() || '声音'
+            : el.type),
         type: el.type,
         src: el.src || '',
         segment: el.segment || null,
@@ -487,7 +493,15 @@ export function applyOp(p, op) {
         visible: el.visible !== false,
         meta: el.meta || {},
       };
+      if (full.type === 'video' || full.type === 'audio') {
+        full.srcIn = Math.max(0, Number(el.srcIn) || 0);
+      }
+      if (full.type === 'audio') {
+        const v = el.volume == null ? 1 : Number(el.volume);
+        full.volume = Math.max(0, Math.min(1, Number.isFinite(v) ? v : 1));
+      }
       if (!(full.duration > 0)) fail('element duration must be > 0');
+      if (full.type === 'audio' && !full.src) fail('audio element needs src');
       if (full.segment && !p.segments.some((s) => s.id === full.segment)) fail(`unknown segment ${full.segment}`);
       p.elements.push(full);
       p.elements.sort((a, b) => a.z - b.z || a.start - b.start);
@@ -569,7 +583,7 @@ export function applyOp(p, op) {
         const trim = Math.abs(el.duration - oldDur) > 1e-6;
         const carry = op.keys === 'shift' || (op.keys !== 'keep' && !trim);
         if (carry) shiftTiming(el, dt);
-        else if (el.type === 'video') el.srcIn = t3(Math.max(0, (Number(el.srcIn) || 0) + dt));
+        else if (el.type === 'video' || el.type === 'audio') el.srcIn = t3(Math.max(0, (Number(el.srcIn) || 0) + dt));
       }
       changed.push(el.id);
       return { changed, element: el };

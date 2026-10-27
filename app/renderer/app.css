@@ -184,7 +184,6 @@ body.look-mode #stageBox { box-shadow: 0 0 0 2px rgba(255,209,102,.65), 0 0 30px
 
 /* ---------------- timeline ---------------- */
 #timeline { border-top: 1px solid var(--line); background: #0a0d12; overflow: hidden; }
-#app.tl-expanded { grid-template-rows: 46px minmax(0, 1fr) 400px; }
 .tl { height: 100%; display: flex; flex-direction: column; }
 .tl-scroll { flex: 1; min-height: 0; overflow: auto; }
 .tl-hint {
@@ -229,6 +228,7 @@ body.look-mode #stageBox { box-shadow: 0 0 0 2px rgba(255,209,102,.65), 0 0 30px
 .blk.el.t-image { background: #171f2b; border-left-color: #3b6ea5; }
 .blk.el.t-video { background: #14241f; border-left-color: #2f8f6b; }
 .blk.el.t-shape, .blk.el.t-solid { background: #251a26; border-left-color: #8a4b8f; }
+.blk.el.t-audio { background: #13241f; border-color: #244d41; border-left-color: #2f8f6b; color: #c6f5e3; }
 .blk.ob { background: linear-gradient(180deg, #10222b, #0d1a21); border-color: #1f4654; }
 .blk.ob.sel { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(23,217,255,.3); }
 

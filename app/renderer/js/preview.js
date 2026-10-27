@@ -3,6 +3,7 @@
 import { evalElement } from '/core/evaluate.js';
 import { clamp } from '/core/time.js';
 import { cameraTransform, evalCamera, cameraLayers } from '/core/camera.js';
+import { audioElements, audioVolume } from '/core/audio.js';
 import { Scene3D } from './preview3d.js';
 import { elementCarrier, carrierMatrix } from '/core/hierarchy.js';
 
@@ -298,6 +299,7 @@ export class Preview {
     this.layers = [];
     this.soloCameras = new Set();
     this.audioEl = null;
+    this.elementAudio = new Map(); // element id -> HTMLAudioElement
     this.scene3d = new Scene3D(this.gl);
     this.editMode = false;
     this.editCam = null;
@@ -336,7 +338,75 @@ export class Preview {
     const changedAudio = this.project?.meta?.audio?.src !== p.meta.audio?.src;
     this.project = p;
     if (changedAudio || !this.audioEl) this._setupAudio();
+    this._syncElementAudioPlayers(p);
+    // Audio elements supersede the legacy soundtrack. Keep the old player
+    // around for projects that have no audio elements yet.
+    if (this.elementAudio.size) this.audioEl?.pause();
     for (const el of p.elements) this._ensureAsset(el);
+  }
+
+  /** Create / retarget one HTMLAudioElement per audio element. */
+  _syncElementAudioPlayers(project) {
+    const wanted = new Set();
+    for (const el of audioElements(project)) {
+      if (!el.src) continue;
+      wanted.add(el.id);
+      let a = this.elementAudio.get(el.id);
+      if (!a) {
+        a = new Audio();
+        a.preload = 'auto';
+        a.crossOrigin = 'anonymous';
+        this.elementAudio.set(el.id, a);
+      }
+      if (a._vdmSrc !== el.src) {
+        a.pause();
+        a.src = `/media/${String(el.src).replace(/^media\//, '')}`;
+        a._vdmSrc = el.src;
+      }
+    }
+    for (const [id, a] of this.elementAudio) {
+      if (wanted.has(id)) continue;
+      a.pause();
+      a.removeAttribute('src');
+      a.load();
+      this.elementAudio.delete(id);
+    }
+  }
+
+  /**
+   * Keep every sound element at the right source time and volume. called from
+   * render() every frame, so volume keyframes follow the playhead immediately.
+   */
+  _syncElementAudio(t, playing) {
+    if (!this.elementAudio.size) return;
+    const els = new Map((this.project?.elements || []).map((e) => [e.id, e]));
+    for (const [id, a] of this.elementAudio) {
+      const el = els.get(id);
+      if (!el || el.type !== 'audio' || el.visible === false) { a.pause(); continue; }
+      const start = Number(el.start) || 0;
+      const end = start + Math.max(0, Number(el.duration) || 0);
+      const live = t >= start - 1e-6 && t < end - 1e-6;
+      const vol = audioVolume(el, t);
+      try { a.volume = Math.max(0, Math.min(1, vol)); } catch { /* old engine */ }
+      if (!live) {
+        if (!a.paused) a.pause();
+        continue;
+      }
+      const want = Math.max(0, (Number(el.srcIn) || 0) + (t - start));
+      if (!playing) {
+        if (!a.paused) a.pause();
+        if (Math.abs(a.currentTime - want) > 0.02) {
+          try { a.currentTime = want; } catch { /* not ready */ }
+        }
+        continue;
+      }
+      if (a.paused) {
+        try { a.currentTime = want; } catch { /* not ready */ }
+        a.play().catch(() => {});
+      } else if (Math.abs(a.currentTime - want) > 0.25) {
+        try { a.currentTime = want; } catch { /* ignore */ }
+      }
+    }
   }
 
   /** Viewport-only camera solo; final renders still use every visible camera. */
@@ -346,7 +416,7 @@ export class Preview {
 
   _setupAudio() {
     const src = this.project?.meta?.audio?.src;
-    if (!src) { this.audioEl = null; return; }
+    if (!src || this.project?.meta?.audioMigrated) { this.audioEl = null; return; }
     if (!this.audioEl) {
       this.audioEl = new Audio();
       this.audioEl.preload = 'auto';
@@ -653,6 +723,7 @@ export class Preview {
     const p = this.project;
     if (!p) return;
     this.time = t;
+    this._syncElementAudio(t, !!this.playing);
     const W = this.canvas.width, H = this.canvas.height;
 
     // ---- sync videos ----
@@ -874,8 +945,10 @@ export class Preview {
    * projected through the last 3D view-projection, so picking follows a moved
    * camera instead of the flat screen-space matrix.
    */
-  _layerCorners(L) {
-    const pts = [[0, 0], [1, 0], [1, 1], [0, 1]].map(([u, v]) => M3.apply(L.M, u, v));
+  _layerCorners(L, rect = [0, 0, 1, 1]) {
+    const [u0, v0, u1, v1] = rect;
+    const pts = [[u0, v0], [u1, v0], [u1, v1], [u0, v1]]
+      .map(([u, v]) => M3.apply(L.M, u, v));
     const s3 = this.scene3d;
     if (!this._worldMode || !s3?.lastVP) return pts;
     const W = this.canvas.width, H = this.canvas.height;
@@ -974,10 +1047,33 @@ export class Preview {
     }).filter(Boolean);
   }
 
+  /**
+   * UV sub-rect of a text layer that covers the actual line boxes instead of
+   * the raster's empty padding. Used by the selection outline and the in-place
+   * editor so the light-blue box hugs the words.
+   */
+  _textContentRect(L) {
+    if (!L?.el || L.el.type !== 'text' || !L.st) return [0, 0, 1, 1];
+    const style = L.el.style || {};
+    const meta = this.project?.meta || {};
+    const w = Number(L.w) || 1;
+    const h = Number(L.h) || 1;
+    const lines = String(L.st.text ?? style.text ?? '').split('\n').length;
+    const fontPx = Math.max(1, (Number(L.st.size) || 96) * (this.canvas.width / (Number(meta.width) || 1920)));
+    const lineH = fontPx * Math.max(0.1, Number(style.lineHeight) || 1.18);
+    const pad = Math.max(0, (h - lineH * lines) / 2);
+    if (pad * 2 >= w || pad * 2 >= h) return [0, 0, 1, 1];
+    return [pad / w, pad / h, 1 - pad / w, 1 - pad / h];
+  }
+
+  /** Public alias for the in-place editor geometry. */
+  textContentRect(L) { return this._textContentRect(L); }
+
   /** Projected quad of every 2D layer, in canvas pixels (perspective-aware). */
-  layerPolygons() {
+  layerPolygons(tightText = false) {
     return (this.layers || []).map((L) => {
-      const points = this._layerCorners(L);
+      const rect = tightText ? this._textContentRect(L) : [0, 0, 1, 1];
+      const points = this._layerCorners(L, rect);
       return points ? { id: L.el.id, points } : null;
     }).filter(Boolean);
   }
@@ -1043,6 +1139,10 @@ export class Preview {
   }
 
   playAudio(at) {
+    if (this.elementAudio.size) {
+      this._syncElementAudio(at, true);
+      return;
+    }
     const a = this.audioEl;
     if (!a) return;
     const offset = Number(this.project.meta.audio?.offset) || 0;
@@ -1050,9 +1150,16 @@ export class Preview {
     a.play().catch(() => {});
   }
 
-  pauseAudio() { this.audioEl?.pause(); }
+  pauseAudio() {
+    for (const a of this.elementAudio.values()) a.pause();
+    this.audioEl?.pause();
+  }
 
   setAudioTime(at) {
+    if (this.elementAudio.size) {
+      this._syncElementAudio(at, !!this.playing);
+      return;
+    }
     const a = this.audioEl;
     if (!a) return;
     const offset = Number(this.project.meta.audio?.offset) || 0;

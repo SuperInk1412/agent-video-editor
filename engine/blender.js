@@ -7,9 +7,11 @@ import fss from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { paths } from '../core/store.js';
+import { audioElements } from '../core/audio.js';
 import { encodeSequence, extractSequence, fileExists, hashOf } from './media.js';
 import { is3D, writeShot } from './shot.js';
 import { prepareObjectSequences } from './media-objects.js';
+import { buildAudioMix } from './audio-mix.js';
 import { which } from './which.js';
 
 const execFileP = promisify(execFile);
@@ -196,9 +198,12 @@ export async function renderVideo({
     dir, project, from, to: end, scale, samples, onProgress, onLog, signal,
   });
   const outPath = out ? path.resolve(out) : path.join(p.renders, `render-${Date.now()}.mp4`);
-  const audio = project.meta.audio?.src
+  const hasElementAudio = audioElements(project).length > 0;
+  const mixed = hasElementAudio ? await buildAudioMix({ dir: p.root, project, from, to: end }) : null;
+  const legacyAudio = !hasElementAudio && !project.meta.audioMigrated && project.meta.audio?.src
     ? (path.isAbsolute(project.meta.audio.src) ? project.meta.audio.src : path.join(p.root, project.meta.audio.src))
     : null;
+  const audio = mixed || legacyAudio;
   const hasAudio = audio && (await fileExists(audio));
   await encodeSequence({
     framesDir,
@@ -207,8 +212,8 @@ export async function renderVideo({
     fps,
     out: outPath,
     audio: hasAudio ? audio : null,
-    audioOffset: -from + (hasAudio ? (project.meta.audio.offset || 0) : 0),
-    gain: project.meta.audio?.gain || 0,
+    audioOffset: mixed ? 0 : (-from + (hasAudio ? (project.meta.audio.offset || 0) : 0)),
+    gain: mixed ? 0 : (project.meta.audio?.gain || 0),
     crf,
     onLog,
   });

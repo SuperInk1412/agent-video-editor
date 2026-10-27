@@ -5,7 +5,7 @@ import { normalizeWorld } from './world.js';
 
 export const SCHEMA = 'vdm.project/1';
 
-export const ELEMENT_TYPES = ['image', 'video', 'text', 'solid', 'shape'];
+export const ELEMENT_TYPES = ['image', 'video', 'text', 'solid', 'shape', 'audio'];
 export const SEGMENT_STATUS = ['draft', 'previewed', 'approved'];
 
 export const DEFAULT_TRANSFORM = { x: 0, y: 0, scale: 1, rotation: 0, opacity: 1 };
