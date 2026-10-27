@@ -10,7 +10,7 @@ import { LogPanel } from './logs.js';
 import { ProjectsPanel } from './projects.js';
 import { evalCamera, pathPos, cameraTransform, cameraRange } from '/core/camera.js';
 import { curveSegments } from '/core/curves.js';
-import { worldPose, toLocalPoint, toLocalVector, ancestors, childrenOf } from '/core/hierarchy.js';
+import { worldPose, toLocalPoint, toLocalVector, ancestors, childrenOf, elementCarrier, carrierMatrix } from '/core/hierarchy.js';
 import { defaultCamera } from '/core/space.js';
 import { sampleTrack } from '/core/time.js';
 import {
@@ -1494,6 +1494,26 @@ async function boot() {
     return { sx: (e.clientX - r.left) * kx, sy: (e.clientY - r.top) * ky, cx: e.clientX, cy: e.clientY };
   };
   let drag = null;
+  /** Column-major 4x4 * point (used for the screen-lock carry). */
+  const applyMat4 = (m, p) => [
+    m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12],
+    m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13],
+    m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14],
+  ];
+  /** Inverse of a column-major 3x3 linear block applied to v. */
+  const invertMat3 = (m, v) => {
+    const a = m[0], b = m[4], c = m[8];
+    const d = m[1], e = m[5], f = m[9];
+    const g = m[2], h = m[6], i = m[10];
+    const det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+    if (Math.abs(det) < 1e-12) return v.slice();
+    const k = 1 / det;
+    return [
+      k * (e * i - f * h) * v[0] + k * (c * h - b * i) * v[1] + k * (b * f - c * e) * v[2],
+      k * (f * g - d * i) * v[0] + k * (a * i - c * g) * v[1] + k * (c * d - a * f) * v[2],
+      k * (d * h - e * g) * v[0] + k * (b * g - a * h) * v[1] + k * (a * e - b * d) * v[2],
+    ];
+  };
   // Write a value straight into the in-memory track so the viewport previews a
   // drag before the op lands (the op rewrites the same key on pointerup).
   const setLiveKey = (obj, path, v) => {
@@ -1627,6 +1647,12 @@ async function boot() {
    * Select and start dragging a 2D element on its depth plane. Used both by the
    * edit viewport and by the normal camera preview, so a new colour block can
    * be moved without first pressing Tab.
+   *
+   * Parented ("screen-locked") elements are rendered through a carry matrix
+   * (camera motion + pull-in scale). We intersect the pointer ray with the
+   * rendered plane and invert that matrix's linear part, so dragging a HUD
+   * element follows the picture under camera rotation/zoom instead of the old
+   * world plane at z.
    */
   const begin2DElementDrag = (elId, sx, sy, cx, cy, ev) => {
     const el = S.project.elements.find((e) => e.id === elId);
@@ -1636,14 +1662,19 @@ async function boot() {
     if (!el) return false;
     pause();
     const z = elValue(el, 'transform.z', S.time);
-    const hit = preview.scene3d?.planeHit(sx, sy, [0, 0, z], [0, 0, 1]);
+    const elX = elValue(el, 'transform.x', S.time);
+    const elY = elValue(el, 'transform.y', S.time);
+    const cyW = (Number(S.project.meta.height) || 1080) / 200;
+    const carry = carrierMatrix(elementCarrier(S.project, el, S.time));
+    const center = applyMat4(carry, [elX / 100, cyW - elY / 100, z]);
+    const normal = v3norm([carry[8], carry[9], carry[10]]);
+    const hit = preview.scene3d?.planeHit(sx, sy, center, normal);
     if (hit) {
       drag = {
-        kind: 'element', id: elId, z, hit,
-        elX: elValue(el, 'transform.x', S.time),
-        elY: elValue(el, 'transform.y', S.time),
-        x: elValue(el, 'transform.x', S.time),
-        y: elValue(el, 'transform.y', S.time),
+        kind: 'element', id: elId, z, hit, carry, center, normal,
+        elX, elY,
+        x: elX,
+        y: elY,
         keyedX: elKeyed(el, 'transform.x'),
         keyedY: elKeyed(el, 'transform.y'),
         backup: JSON.stringify(el),
@@ -1842,13 +1873,16 @@ async function boot() {
     }
     if (drag.kind === 'element') {
       if (Math.abs(cx - drag.startCx) + Math.abs(cy - drag.startCy) < 3) return;
-      const w = preview.scene3d?.planeHit(sx, sy, [0, 0, drag.z], [0, 0, 1]);
+      const w = preview.scene3d?.planeHit(sx, sy, drag.center, drag.normal);
       if (!w) return;
       const el = S.project.elements.find((x) => x.id === drag.id);
       if (!el) return;
-      // The plane is in metres; transform.x/y are project pixels (100 px = 1 m).
-      const nx = drag.elX + (w[0] - drag.hit[0]) * 100;
-      const ny = drag.elY - (w[1] - drag.hit[1]) * 100;
+      // World delta -> the element's local page plane. For a free element the
+      // carry is identity; for a screen-locked HUD it is the camera's carry
+      // (including the pull-in scale), so x/y stay under the pointer.
+      const d = invertMat3(drag.carry, [w[0] - drag.hit[0], w[1] - drag.hit[1], w[2] - drag.hit[2]]);
+      const nx = drag.elX + d[0] * 100;
+      const ny = drag.elY - d[1] * 100;
       const t = Math.round(S.time * 1000) / 1000;
       setElLive(el, 'transform.x', t, nx);
       setElLive(el, 'transform.y', t, ny);
