@@ -25,6 +25,21 @@ async function setup(t, options = {}) {
   return { root, service, post };
 }
 
+test('creating a project over HTTP starts from unified space', async (t) => {
+  const { root, post } = await setup(t);
+  const dir = path.join(root, 'created');
+  const response = await post('api/projects/create', {
+    dir, title: 'created', width: 640, height: 360, duration: 3,
+  });
+  assert.equal(response.status, 200);
+  const created = (await response.json()).project;
+  assert.equal(created.meta.title, 'created');
+  assert.equal(created.cameras.length, 1);
+  assert.equal(created.world.source, 'none');
+  assert.equal(created.camera.id, created.cameras[0].id);
+  assert.equal((await loadProject(dir)).cameras.length, 1, 'the file on disk is already 3D');
+});
+
 test('HTTP blocks sibling traversal, symlinks, foreign origins and malformed URL encoding', async (t) => {
   const { root, service } = await setup(t);
   await fs.mkdir(path.join(root, 'media-private'));
