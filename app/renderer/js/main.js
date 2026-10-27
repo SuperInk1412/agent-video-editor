@@ -286,6 +286,13 @@ function curveTracksFor(host, id) {
       ? (S.project.scene?.objects || []).find((o) => o.id === id)
       : (S.project.cameras || []).find((c) => c.id === id);
     if (!obj) return tracks;
+    if (host === 'camera' && Array.isArray(obj.path) && obj.path.length >= 2) {
+      tracks.push({
+        path: 'path',
+        label: curvePathLabel('path'),
+        segments: curveSegments(obj.path),
+      });
+    }
     for (const [path, keys] of Object.entries(obj.tracks || {})) {
       if (host === 'camera' && path === 'path') continue;
       const segments = curveSegments(keys);
@@ -307,6 +314,8 @@ function openCurvePanel() {
   let host = null;
   let id = null;
   let wantedPath = null;
+  let spanFrom = null;
+  let spanTo = null;
 
   if (pool?.kind === 'keyframe' && pool.ids.length >= 2) {
     const parts = pool.ids.map((ref) => splitRef(ref));
@@ -314,8 +323,13 @@ function openCurvePanel() {
       const first = parts[0];
       if (parts.every((p) => p.type === first.type && p.id === first.id && p.path === first.path)) {
         if (first.type === 'cam' && first.path === 'path') {
-          toast('相机飞行路径请用视口里的路径手柄 / 速度曲线', 'warn');
-          return;
+          const times = parts.map((p) => p.t).sort((a, b) => a - b);
+          spanFrom = times[0];
+          spanTo = times[times.length - 1];
+          if (!(spanTo > spanFrom)) {
+            toast('相机轨迹曲线需要选中两个不同时间的路径键', 'warn');
+            return;
+          }
         }
         host = first.type === 'cam' ? 'camera' : first.type === 'ob' ? 'object' : 'element';
         id = first.id;
@@ -339,8 +353,9 @@ function openCurvePanel() {
     return;
   }
   let index = tracks.findIndex((t) => t.path === wantedPath);
+  if (index < 0 && host === 'camera') index = tracks.findIndex((t) => t.path === 'path');
   if (index < 0) index = 0;
-  curvePanel.open({ host, id, tracks, index });
+  curvePanel.open({ host, id, tracks, index, spanFrom, spanTo });
 }
 
 function toggleCurvePanel() {
@@ -733,6 +748,13 @@ async function boot() {
     getProject: () => S.project,
     onOp: (o) => op(o),
     toast,
+    // Live path-curve drag: the panel temporarily mutates the in-memory camera
+    // path; redraw the stage and timeline without a round-trip/rev bump.
+    onLivePreview: () => {
+      timeline.render(true);
+      preview.render(S.time);
+      gizmo?.draw();
+    },
   });
   // keep the F2 drawer's x axis glued to the timeline while zooming/scrolling
   timeline.onViewChange = () => { if (curvePanel?.isOpen()) curvePanel.draw(); };

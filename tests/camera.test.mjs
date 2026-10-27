@@ -1,7 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeCamera, pathPos, pathFov, evalCamera, bakeCameraTrack, cameraTransform, cameraParamValue, v3 } from '../core/camera.js';
+import {
+  normalizeCamera, pathPos, pathFov, evalCamera, bakeCameraTrack, cameraTransform, cameraParamValue, v3,
+  pathArcTable, pathPointAtArc, retimePathSpan,
+} from '../core/camera.js';
 import { ease } from '../core/time.js';
+import { presetCurve, normalizeCurve, sampleCurve } from '../core/curves.js';
 import { generateCity, cityHash, DEFAULT_WORLD } from '../engine/city.js';
 import { normalizeProject } from '../core/schema.js';
 import { applyOp } from '../core/ops.js';
@@ -322,4 +326,123 @@ test('camera path speed curve re-times a segment without moving its keys', () =>
   assert.deepEqual(slowStart.camera.path[0].speed, [[0, 0.1], [1, 1.9]]);
   applyOp(slowStart, { op: 'cameraKey', t: a.t, pos: a.pos });
   assert.deepEqual(slowStart.camera.path[0].speed, [[0, 0.1], [1, 1.9]]);
+});
+
+test('camera span curve changes speed without bending a straight path', () => {
+  const cam = normalizeCamera({
+    fov: 60,
+    path: [{ t: 0, pos: [0, 0, 0] }, { t: 2, pos: [10, 0, 0] }],
+  });
+  cam.path[0].curve = presetCurve('easeIn');
+  cam.path[0].spanTo = 2;
+  const early = pathPos(cam, 0.5);
+  assert.ok(early[0] > 0 && early[0] < 2.5, `easeIn lags, got x=${early[0]}`);
+  assert.deepEqual(pathPos(cam, 0), [0, 0, 0]);
+  assert.deepEqual(pathPos(cam, 2), [10, 0, 0]);
+  for (let t = 0; t <= 2; t += 0.1) {
+    const p = pathPos(cam, t);
+    assert.ok(Math.abs(p[1]) < 1e-9 && Math.abs(p[2]) < 1e-9, `still on the straight path at ${t}`);
+  }
+  // Arc length is the parameter the curve drives: linear u = half the span arc.
+  cam.path[0].curve = presetCurve('linear');
+  const table = pathArcTable(cam);
+  const mid = pathPointAtArc(cam, table.total / 2);
+  const got = pathPos(cam, 1);
+  assert.ok(v3.len(v3.sub(mid, got)) < 1e-6);
+});
+
+test('camera span overshoot continues into the next segment or holds at the end', () => {
+  const endOnly = normalizeCamera({
+    fov: 60,
+    path: [{ t: 0, pos: [0, 0, 0] }, { t: 1, pos: [10, 0, 0] }],
+  });
+  endOnly.path[0].curve = presetCurve('elastic');
+  endOnly.path[0].spanTo = 1;
+  let maxEnd = 0;
+  for (let t = 0; t <= 1; t += 0.01) maxEnd = Math.max(maxEnd, pathPos(endOnly, t)[0]);
+  assert.ok(maxEnd <= 10 + 1e-6, 'no next segment: hold at the last position');
+  assert.ok(maxEnd > 9.99, 'still reaches the end');
+
+  const withNext = normalizeCamera({
+    fov: 60,
+    path: [
+      { t: 0, pos: [0, 0, 0] },
+      { t: 1, pos: [10, 0, 0] },
+      { t: 2, pos: [20, 0, 0] },
+    ],
+  });
+  withNext.path[0].curve = presetCurve('elastic');
+  withNext.path[0].spanTo = 1;
+  let maxNext = 0;
+  for (let t = 0; t <= 1; t += 0.005) maxNext = Math.max(maxNext, pathPos(withNext, t)[0]);
+  assert.ok(maxNext > 10.1, `overshoot runs past the key, got ${maxNext}`);
+  assert.ok(maxNext <= 20 + 1e-6, 'clamped at the end of the trajectory');
+});
+
+test('camera span reverse overshoot clamps at the span start', () => {
+  const cam = normalizeCamera({
+    fov: 60,
+    path: [{ t: 0, pos: [0, 0, 0] }, { t: 1, pos: [10, 0, 0] }],
+  });
+  const dip = normalizeCurve({ type: 'bezier', p1: [0.3, -0.5], p2: [0.7, 1] });
+  assert.ok(sampleCurve(dip, 0.05) < 0, 'this curve starts below zero');
+  cam.path[0].curve = dip;
+  cam.path[0].spanTo = 1;
+  assert.deepEqual(pathPos(cam, 0.05), [0, 0, 0]);
+  assert.deepEqual(pathPos(cam, 0.1), [0, 0, 0]);
+});
+
+test('camera span retimes inner keys to their first forward arrival', () => {
+  const p = project();
+  const cam = p.camera;
+  const curve = presetCurve('easeIn');
+  const table = pathArcTable(cam);
+  const res = retimePathSpan(cam, 0, 6, curve);
+  assert.equal(res.times.length, 2);
+  assert.ok(res.times[0] > 0 && res.times[0] < 6);
+  assert.ok(res.times[1] > res.times[0] && res.times[1] < 6);
+  res.times.forEach((nt, j) => {
+    const u = nt / 6;
+    assert.ok(Math.abs(sampleCurve(curve, u) - res.fractions[j]) < 2e-3, `key ${j}`);
+  });
+  // Retiming uses the *first* arrival: an overshooting curve must not push
+  // the inner keys to its later return pass.
+  const elastic = retimePathSpan(cam, 0, 6, presetCurve('elastic'));
+  assert.ok(elastic.times[0] < elastic.times[1]);
+  assert.ok(v3.len(v3.sub(pathPointAtArc(cam, table.keyArc[1]), cam.path[1].pos)) < 1e-9);
+});
+
+test('keyCurve on a camera path retimes keys and survives path edits', () => {
+  const p = project();
+  const cam = p.camera;
+  const original = cam.path.map((k) => k.t);
+  applyOp(p, {
+    op: 'keyCurve', host: 'camera', id: cam.id, path: 'path', from: 0, to: 6,
+    curve: presetCurve('easeIn'),
+  });
+  assert.equal(cam.path[0].spanTo, 6);
+  assert.equal(cam.path[0].curve.preset, 'easeIn');
+  assert.ok(cam.path[1].t > original[1], 'inner key retimed later for easeIn');
+  assert.ok(cam.path[2].t > original[2]);
+
+  applyOp(p, { op: 'keyCurve', host: 'camera', id: cam.id, path: 'path', from: 0, to: 6, curve: presetCurve('elastic') });
+  assert.equal(cam.path[0].curve.type, 'elastic');
+
+  // Editing a node / writing the whole path keeps the span metadata.
+  applyOp(p, { op: 'cameraKey', t: cam.path[1].t, pos: [1, 2, 3] });
+  assert.equal(cam.path[0].spanTo, 6);
+  applyOp(p, { op: 'cameraPath', path: cam.path.map((k) => ({ ...k, pos: k.pos.slice() })) });
+  assert.equal(cam.path[0].spanTo, 6);
+  assert.equal(cam.path[0].curve.type, 'elastic');
+
+  // Overlapping spans are rejected (a nested span inside the active one).
+  assert.throws(() => applyOp(p, {
+    op: 'keyCurve', host: 'camera', id: cam.id, path: 'path',
+    from: cam.path[1].t, to: cam.path[2].t, curve: presetCurve('linear'),
+  }), /overlap/);
+
+  // Removing the right endpoint drops the span instead of leaving a dangling ref.
+  applyOp(p, { op: 'cameraRemove', t: 6 });
+  assert.equal(cam.path[0].curve, undefined);
+  assert.equal(cam.path[0].spanTo, undefined);
 });

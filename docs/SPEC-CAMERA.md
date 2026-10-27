@@ -17,7 +17,7 @@ mesh、还要处理 shader 转换），不适合作为这一步的基础。
 
 | 参数 | 范围 | 说明 |
 | --- | --- | --- |
-| `path[]` | 关键点 | `{ t, pos:[x,y,z], out?, in?, ease?, speed? }`，米制世界坐标；**三次贝塞尔**穿过每个点。`out`/`in` 是相对 `pos` 的手柄，省略时自动取 Catmull-Rom 切线（旧数据因而完全等价）。视口里可直接拖节点、拉手柄，双击手柄回到自动。`speed` 是段级 `[u,v]` 速度曲线（数据字段；时间轴只把关键点显示为位置帧，不单独列表） |
+| `path[]` | 关键点 | `{ t, pos:[x,y,z], out?, in?, ease?, speed?, curve?, spanTo? }`，米制世界坐标；**三次贝塞尔**穿过每个点。`out`/`in` 是相对 `pos` 的手柄，省略时自动取 Catmull-Rom 切线（旧数据因而完全等价）。视口里可直接拖节点、拉手柄，双击手柄回到自动。`speed` 是段级 `[u,v]` 速度曲线（数据字段；时间轴只把关键点显示为位置帧，不单独列表）。`curve`+`spanTo` 是跨多个路径键的**弧长速度曲线**：只改沿轨迹的快慢、不改形状，内部键按第一次正向到达重定时；过冲进入后续轨迹，没有后续段则停在末端，反向过冲在起点夹住 |
 | `fov` | 1–360° | 水平视场角；逐关键点可覆盖（变焦 / dolly zoom）。≥180° 时透视投影退化，自动切**等距鱼眼**：预览用立方体贴图 + 鱼眼合成，Blender 用 Cycles 的 `FISHEYE_EQUIDISTANT`（EEVEE 不支持全景相机） |
 | `lookAhead` | 0–500 m | 自动看向前方多远；0 表示用显式 `look` 点 |
 | `look` | 可选 | 关键点里的显式目标点（拍楼、拍霓虹招牌时用） |
@@ -62,7 +62,9 @@ C-b 逐帧参数：`视场角 FOV`、`看向前方`、`转弯侧倾`、`最大�
 轨道求值顺序（`core/camera.js`，Blender 用**同一份烘焙结果**）：
 
 ```
-path 关键点 → Catmull-Rom 位置
+path 关键点 → 弧长表（整条轨迹）
+          → 有 span 曲线：时间 → 曲线进度 → 弧长 → 贝塞尔位置
+          → 无 span：Catmull-Rom 位置（旧 ease/speed）
           → 切线 → look = pos + normalize(tangent)·lookAhead（或显式 look）
           → 曲率 → roll = clamp(-yawRate·bankGain, ±maxRoll) + 手动 roll
           → shake：3D value noise × (amp + 速度项)，叠加到 pos 与 look
@@ -103,7 +105,6 @@ path 关键点 → Catmull-Rom 位置
 
 ## 五、下一步（未做）
 
-- 路径关键点在预览里可视化编辑（贝塞尔手柄、曲线视图）；
 - `look` 目标点吸附到楼体/霓虹；
 - 真街区：`world.source="blend"` 导入 WolvenKit 导出的 district；
 - 车流/飞行车光带、体积雾、雨、镜头光晕。

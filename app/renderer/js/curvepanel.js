@@ -14,6 +14,7 @@ import {
   sampleCurve, normalizeCurve, presetCurve, curveLabel, curveSegments, CURVE_GROUPS,
   curveHandles, moveCurveHandle, curveRange, curveParamsText,
 } from '/core/curves.js';
+import { retimePathSpan } from '/core/camera.js';
 
 const el = (tag, cls, html) => {
   const n = document.createElement(tag);
@@ -25,6 +26,7 @@ const el = (tag, cls, html) => {
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 
 const PATH_LABELS = {
+  path: '飞行轨迹',
   'transform.x': '位置 X', 'transform.y': '位置 Y', 'transform.scale': '缩放',
   'transform.rotation': '旋转', 'transform.opacity': '不透明度', 'style.size': '字号',
   'fx.glow': '辉光', opacity: '透明度', scale: '缩放', center: '中心点',
@@ -39,16 +41,21 @@ export const curvePathLabel = (path) => PATH_LABELS[path] || path;
 const U_STEPS = [0.05, 0.1, 0.2, 0.25, 0.5, 1, 2, 5, 10];
 
 export class CurvePanel {
-  constructor(host, { getTimeline, onOp, onClose, toast, getProject } = {}) {
+  constructor(host, { getTimeline, onOp, onClose, toast, getProject, onLivePreview } = {}) {
     this.host = host;
     this.getTimeline = getTimeline;
     this.getProject = getProject;
     this.onOp = onOp;
     this.onClose = onClose;
     this.toast = toast;
+    this.onLivePreview = onLivePreview;
     this.openState = null;
     this.active = 0;
     this.railGroup = 0;
+    this.span = null;
+    this.previewInner = null;
+    this._spanBackup = null;
+    this._liveRaf = 0;
     this.curve = null;
     this.drag = null;
     this._build();
@@ -69,7 +76,8 @@ export class CurvePanel {
       this.openState.index = Number(this.pathSel.value) || 0;
       this.active = 0;
       const track = this._track();
-      this.curve = normalizeCurve(track?.segments[0]?.a?.curve) || presetCurve('easeInOut');
+      if (track?.path === 'path') this._refreshSpan();
+      else this.curve = normalizeCurve(track?.segments[0]?.a?.curve) || presetCurve('easeInOut');
       this._syncHead();
       this._syncRailGroup();
       this.draw();
@@ -112,7 +120,8 @@ export class CurvePanel {
     this.openState = state;
     this.active = 0;
     const track = this._track();
-    this.curve = normalizeCurve(track?.segments[0]?.a?.curve) || presetCurve('easeInOut');
+    if (track?.path === 'path') this._refreshSpan();
+    else this.curve = normalizeCurve(track?.segments[0]?.a?.curve) || presetCurve('easeInOut');
     this.root.hidden = false;
     this.railGroup = this._groupIndex();
     this._buildRail();
@@ -125,7 +134,9 @@ export class CurvePanel {
   /** Scroll the timeline so the edited segment is at least partly visible. */
   _reveal() {
     const tl = this.getTimeline();
-    const seg = this._track()?.segments[0];
+    const seg = this._isPathMode() && this.span
+      ? { from: this.span.from }
+      : this._track()?.segments[0];
     if (!tl || !seg) return;
     const x0 = tl._trackX(seg.from);
     const viewL = tl.scroll.scrollLeft;
@@ -140,10 +151,83 @@ export class CurvePanel {
     return this.openState?.tracks?.[this.openState.index] || null;
   }
 
+  _isPathMode() {
+    return this._track()?.path === 'path';
+  }
+
+  _camera() {
+    const st = this.openState;
+    if (!st || st.host !== 'camera') return null;
+    const p = this.getProject?.();
+    if (!p) return null;
+    return (p.cameras || []).find((c) => c.id === st.id)
+      || (p.camera?.id === st.id ? p.camera : null);
+  }
+
+  /**
+   * Work out which path span the panel edits: the two selected keys when F2
+   * was opened from a keyframe pool, otherwise the first stored span, otherwise
+   * the whole path. Inner keys are the ones the span retimes.
+   */
+  _refreshSpan() {
+    this.previewInner = null;
+    const cam = this._camera();
+    const track = this._track();
+    if (!cam || track?.path !== 'path' || !Array.isArray(cam.path) || cam.path.length < 2) {
+      this.span = null;
+      return;
+    }
+    const keys = [...cam.path].sort((a, b) => a.t - b.t);
+    let from = Number(this.openState?.spanFrom);
+    let to = Number(this.openState?.spanTo);
+    const find = (t) => keys.findIndex((k) => Math.abs(k.t - t) <= 1e-4);
+    let li = Number.isFinite(from) && Number.isFinite(to) && to > from ? find(from) : -1;
+    let ri = li >= 0 ? find(to) : -1;
+    if (li < 0 || ri <= li) {
+      const stored = keys.find((k) => k.curve && Number.isFinite(Number(k.spanTo)));
+      if (stored) {
+        from = stored.t;
+        to = Number(stored.spanTo);
+        li = find(from);
+        ri = find(to);
+      }
+    }
+    if (li < 0 || ri <= li) {
+      li = 0;
+      ri = keys.length - 1;
+      from = keys[li].t;
+      to = keys[ri].t;
+    }
+    const left = keys[li];
+    const right = keys[ri];
+    const stored = normalizeCurve(left.curve);
+    this.span = {
+      from: left.t,
+      to: right.t,
+      left,
+      right,
+      inner: keys.slice(li + 1, ri),
+      cameraId: cam.id,
+      hasCurve: !!stored,
+    };
+    this.curve = stored || presetCurve('easeInOut');
+    if (this.openState) {
+      this.openState.spanFrom = left.t;
+      this.openState.spanTo = right.t;
+    }
+  }
+
   close() {
+    if (this._liveRaf) {
+      cancelAnimationFrame(this._liveRaf);
+      this._liveRaf = 0;
+    }
+    this._restoreSpanBackup();
     this.root.hidden = true;
     this.openState = null;
     this.drag = null;
+    this.span = null;
+    this.previewInner = null;
     this.onClose?.();
   }
 
@@ -176,6 +260,12 @@ export class CurvePanel {
       const segs = curveSegments(keys);
       if (segs.length) tracks.push({ path, label: curvePathLabel(path), segments: segs });
     }
+    if (st.host === 'camera') {
+      const cam = (project.cameras || []).find((c) => c.id === st.id);
+      if (cam && Array.isArray(cam.path) && cam.path.length >= 2) {
+        tracks.push({ path: 'path', label: curvePathLabel('path'), segments: curveSegments(cam.path) });
+      }
+    }
     return tracks.sort((a, b) => a.path.localeCompare(b.path));
   }
 
@@ -197,7 +287,8 @@ export class CurvePanel {
     st.index = idx;
     const segs = tracks[idx].segments;
     this.active = Math.min(this.active, segs.length - 1);
-    this.curve = normalizeCurve(segs[this.active].a?.curve) || this.curve;
+    if (tracks[idx].path === 'path') this._refreshSpan();
+    else this.curve = normalizeCurve(segs[this.active].a?.curve) || this.curve;
     this._buildPathSelect();
     this._syncHead();
     this._syncRailGroup();
@@ -224,6 +315,15 @@ export class CurvePanel {
     const track = this._track();
     if (!st || !track) return;
     this.titleEl.textContent = `曲线 · ${track.label || track.path}`;
+    if (track.path === 'path' && this.span) {
+      const detail = curveParamsText(this.curve);
+      this.rangeEl.textContent = `${this.span.from.toFixed(2)}s → ${this.span.to.toFixed(2)}s · `
+        + `${this.span.inner.length} 个内部键 · 轨迹锁定`
+        + (this.span.hasCurve ? '' : ' · 未应用');
+      this.presetEl.textContent = detail ? `${curveLabel(this.curve)} · ${detail}` : curveLabel(this.curve);
+      this.presetEl.title = this.presetEl.textContent;
+      return;
+    }
     const s = track.segments[this.active] || track.segments[0];
     this.rangeEl.textContent = `${s.from.toFixed(2)}s → ${s.to.toFixed(2)}s · ${track.segments.length} 段 · 第 ${this.active + 1} 段`;
     const detail = curveParamsText(this.curve);
@@ -376,6 +476,122 @@ export class CurvePanel {
     return mult * pow;
   }
 
+  _handlePosSpan(g, handle) {
+    const span = this.span;
+    if (!span || !handle) return null;
+    return {
+      x: g.xOf(span.from + handle.u * (span.to - span.from)),
+      y: g.yOf(handle.v),
+      u: handle.u,
+      v: handle.v,
+      handle,
+    };
+  }
+
+  _handleOriginSpan(g, handle) {
+    const span = this.span;
+    if (!span || !handle?.origin) return null;
+    return {
+      x: g.xOf(span.from + handle.origin[0] * (span.to - span.from)),
+      y: g.yOf(handle.origin[1]),
+    };
+  }
+
+  _drawPlayhead(ctx, g) {
+    const tl = this.getTimeline();
+    const px = g.xOf(tl?.time ?? 0);
+    if (px <= g.plotLeft || px >= g.plotRight) return;
+    ctx.strokeStyle = '#ff5c7a';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(px, g.top); ctx.lineTo(px, g.bottom); ctx.stroke();
+  }
+
+  /** Camera flight span: one curve across the whole span, endpoints locked. */
+  _drawPathSpan(ctx, g) {
+    const { W } = g;
+    const span = this.span;
+    if (!span) return;
+    const t0 = Math.max(span.from, g.tOf(g.plotLeft));
+    const t1 = Math.min(span.to, g.tOf(W - g.rightPad));
+    if (t1 <= t0) return;
+    const x0 = g.xOf(t0);
+    const x1 = g.xOf(t1);
+    ctx.fillStyle = 'rgba(23,217,255,0.06)';
+    ctx.fillRect(x0, g.top, Math.max(1, x1 - x0), g.bottom - g.top);
+
+    const full = Math.max(1e-6, span.to - span.from);
+    const steps = Math.max(60, Math.round(x1 - x0));
+    ctx.beginPath();
+    for (let s = 0; s <= steps; s++) {
+      const x = x0 + ((x1 - x0) * s) / steps;
+      const u = clamp((g.tOf(x) - span.from) / full, 0, 1);
+      const y = g.yOf(sampleCurve(this.curve, u));
+      if (s === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.strokeStyle = '#17d9ff';
+    ctx.lineWidth = 2.2;
+    ctx.setLineDash(this.span.hasCurve ? [] : [5, 4]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Inner keys are retimed by this curve; show their current time dashed.
+    ctx.setLineDash([3, 4]);
+    for (const key of (this.previewInner || span.inner)) {
+      const x = g.xOf(key.t);
+      if (x < g.plotLeft || x > W - g.rightPad) continue;
+      ctx.strokeStyle = 'rgba(255,209,102,0.38)';
+      ctx.beginPath(); ctx.moveTo(x, g.top); ctx.lineTo(x, g.bottom); ctx.stroke();
+      ctx.fillStyle = '#ffd166';
+      ctx.save();
+      ctx.translate(x, g.bottom);
+      ctx.rotate(Math.PI / 4);
+      ctx.fillRect(-2.5, -2.5, 5, 5);
+      ctx.restore();
+    }
+    ctx.setLineDash([]);
+
+    // Locked endpoints.
+    for (const [t, y] of [[span.from, g.bottom], [span.to, g.top]]) {
+      const x = g.xOf(t);
+      if (x < g.plotLeft - 8 || x > W - g.rightPad + 8) continue;
+      ctx.strokeStyle = '#b7c9dc';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(x, y, 5, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x - 2.5, y); ctx.lineTo(x + 2.5, y); ctx.stroke();
+    }
+
+    // Editable curve handles (timing only; the trajectory itself never moves).
+    for (const handle of curveHandles(this.curve)) {
+      const hp = this._handlePosSpan(g, handle);
+      if (!hp) continue;
+      const visible = hp.x >= g.plotLeft - 14 && hp.x <= W - g.rightPad + 14
+        && hp.y >= g.top - 14 && hp.y <= g.bottom + 14;
+      if (!visible) continue;
+      const origin = this._handleOriginSpan(g, handle);
+      if (origin) {
+        ctx.setLineDash([3, 4]);
+        ctx.strokeStyle = 'rgba(150,175,200,0.35)';
+        ctx.beginPath(); ctx.moveTo(origin.x, origin.y); ctx.lineTo(hp.x, hp.y); ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      ctx.setLineDash([3, 4]);
+      ctx.strokeStyle = 'rgba(160,180,200,0.32)';
+      ctx.beginPath(); ctx.moveTo(g.plotLeft, hp.y); ctx.lineTo(W - g.rightPad, hp.y); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(hp.x, g.top); ctx.lineTo(hp.x, g.bottom); ctx.stroke();
+      ctx.setLineDash([]);
+      const active = this.drag?.handle?.id === handle.id;
+      ctx.beginPath();
+      ctx.arc(hp.x, hp.y, active ? 9.5 : 8, 0, Math.PI * 2);
+      ctx.fillStyle = '#f4fbff';
+      ctx.fill();
+      ctx.strokeStyle = '#8fd8ef';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+  }
+
   // ------------------------------------------------------------ draw
   draw() {
     if (!this.isOpen() || !this.openState) return;
@@ -425,6 +641,12 @@ export class CurvePanel {
       ctx.fillStyle = '#55697f';
       const label = step >= 1 ? `${Math.round(t * 100) / 100}s` : `${t.toFixed(2)}s`;
       ctx.fillText(label, x + 3, H - 7);
+    }
+
+    if (this._isPathMode() && this.span) {
+      this._drawPathSpan(ctx, g);
+      this._drawPlayhead(ctx, g);
+      return;
     }
 
     // segments (clipped to the visible time window)
@@ -496,13 +718,7 @@ export class CurvePanel {
     }
 
     // playhead
-    const tl = this.getTimeline();
-    const px = g.xOf(tl?.time ?? 0);
-    if (px > g.plotLeft && px < g.plotRight) {
-      ctx.strokeStyle = '#ff5c7a';
-      ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(px, g.top); ctx.lineTo(px, g.bottom); ctx.stroke();
-    }
+    this._drawPlayhead(ctx, g);
   }
 
   // ------------------------------------------------------------ interaction
@@ -513,6 +729,16 @@ export class CurvePanel {
 
   _hitHandle(x, y) {
     const g = this._geo();
+    if (this._isPathMode()) {
+      let best = null;
+      for (const handle of curveHandles(this.curve)) {
+        const hp = this._handlePosSpan(g, handle);
+        if (!hp) continue;
+        const d = Math.hypot(hp.x - x, hp.y - y);
+        if (d <= 15 && (!best || d < best.d)) best = { handle, d };
+      }
+      return best?.handle || null;
+    }
     const seg = this._track()?.segments[this.active];
     if (!seg) return null;
     let best = null;
@@ -531,9 +757,19 @@ export class CurvePanel {
     const handle = this._hitHandle(p.x, p.y);
     if (handle) {
       e.preventDefault();
+      const pathMode = this._isPathMode();
+      this._spanBackup = pathMode && this.span ? {
+        left: this.span.left,
+        curve: normalizeCurve(this.span.left.curve),
+        spanTo: this.span.left.spanTo,
+        inner: this.span.inner.slice(),
+        times: this.span.inner.map((k) => k.t),
+      } : null;
       this.drag = {
+        mode: pathMode ? 'path' : 'segment',
         handle,
         seg: this.active,
+        span: this.span,
         curve: this.curve,
         pointer: p,
         range: this._geo().range,
@@ -541,6 +777,7 @@ export class CurvePanel {
       this.canvas.style.cursor = 'grabbing';
       return;
     }
+    if (this._isPathMode()) return;
     const g = this._geo();
     const t = g.tOf(p.x);
     const idx = (this._track()?.segments || []).findIndex((s) => t >= s.from && t <= s.to);
@@ -555,13 +792,22 @@ export class CurvePanel {
 
   _move(e) {
     if (!this.drag) return;
-    const seg = this._track()?.segments[this.drag.seg];
-    if (!seg) return;
     const drag = this.drag;
     const handle = drag.handle;
     const g = this._geo();
     const p = this._localPoint(e);
-    const spanPx = Math.max(1, g.xOf(seg.to) - g.xOf(seg.from));
+    let from;
+    let to;
+    if (drag.mode === 'path' && drag.span) {
+      from = drag.span.from;
+      to = drag.span.to;
+    } else {
+      const seg = this._track()?.segments[drag.seg];
+      if (!seg) return;
+      from = seg.from;
+      to = seg.to;
+    }
+    const spanPx = Math.max(1, g.xOf(to) - g.xOf(from));
     const plotH = Math.max(1, g.bottom - g.top);
     const damping = Number.isFinite(handle.damping) ? handle.damping : 1;
     const u = clamp(handle.u + ((p.x - drag.pointer.x) / spanPx) * damping, 0, 1);
@@ -574,14 +820,37 @@ export class CurvePanel {
     this.curve = moveCurveHandle(drag.curve, handle.id, u, v);
     this._syncHead();
     this._markPreset();
+    if (drag.mode === 'path' && drag.span) {
+      const cam = this._camera();
+      if (cam) {
+        const retime = retimePathSpan(cam, drag.span.from, drag.span.to, this.curve);
+        if (retime?.times) {
+          this.previewInner = drag.span.inner.map((k, j) => ({ ...k, t: retime.times[j] }));
+        }
+      }
+      this._scheduleLiveSpan();
+    }
     this.draw();
   }
 
   _up() {
     if (!this.drag) return;
-    const seg = this._track()?.segments[this.drag.seg];
+    const drag = this.drag;
     this.drag = null;
     this.canvas.style.cursor = '';
+    if (drag.mode === 'path') {
+      const pending = this._commitPathSpan();
+      if (pending?.then) {
+        pending.then((j) => {
+          if (j) this._spanBackup = null;
+          else this._restoreSpanBackup();
+        });
+      } else {
+        this._spanBackup = null;
+      }
+      return;
+    }
+    const seg = this._track()?.segments[drag.seg];
     if (seg) this._commit(this.curve, [seg]);
   }
 
@@ -598,7 +867,80 @@ export class CurvePanel {
     this._syncHead();
     this._syncRailGroup();
     this.draw();
-    this._commit(curve, this._track()?.segments || []);
+    if (this._isPathMode()) {
+      const pending = this._commitPathSpan();
+      if (pending?.then) {
+        pending.then((j) => {
+          if (j) return;
+          this._refreshSpan();
+          this._syncHead();
+          this._syncRailGroup();
+          this.draw();
+        });
+      }
+    } else {
+      this._commit(curve, this._track()?.segments || []);
+    }
+  }
+
+  _commitPathSpan() {
+    if (!this.span) return null;
+    return this.onOp?.({
+      op: 'keyCurve',
+      host: 'camera',
+      id: this.span.cameraId,
+      path: 'path',
+      from: Math.round(Number(this.span.from) * 1000) / 1000,
+      to: Math.round(Number(this.span.to) * 1000) / 1000,
+      curve: normalizeCurve(this.curve),
+    });
+  }
+
+  _scheduleLiveSpan() {
+    if (this._liveRaf) return;
+    this._liveRaf = requestAnimationFrame(() => {
+      this._liveRaf = 0;
+      this._applyLiveSpan();
+    });
+  }
+
+  /**
+   * Live drag preview: write the curve/times into the in-memory project (no
+   * rev, no history) and let main re-render the viewport + timeline. The real
+   * op is sent on pointerup; a failure restores the backup.
+   */
+  _applyLiveSpan() {
+    if (!this.drag || this.drag.mode !== 'path' || !this.span) return;
+    const cam = this._camera();
+    if (!cam) return;
+    const span = this.span;
+    const curve = normalizeCurve(this.curve);
+    if (!curve) return;
+    span.left.curve = curve;
+    span.left.spanTo = span.to;
+    const retime = retimePathSpan(cam, span.from, span.to, curve);
+    if (retime?.times) retime.times.forEach((t, j) => { if (span.inner[j]) span.inner[j].t = t; });
+    span.hasCurve = true;
+    this.previewInner = null;
+    this.onLivePreview?.(cam.id);
+  }
+
+  _restoreSpanBackup() {
+    const b = this._spanBackup;
+    this._spanBackup = null;
+    if (!b?.left) return;
+    if (b.curve) b.left.curve = b.curve;
+    else delete b.left.curve;
+    if (b.spanTo != null) b.left.spanTo = b.spanTo;
+    else delete b.left.spanTo;
+    (b.inner || []).forEach((k, j) => { k.t = b.times[j]; });
+    this.previewInner = null;
+    this.onLivePreview?.();
+    if (this.isOpen()) {
+      this._refreshSpan();
+      this._syncHead();
+      this.draw();
+    }
   }
 
   _commit(curve, segments) {

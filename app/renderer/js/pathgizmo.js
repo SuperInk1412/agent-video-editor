@@ -288,6 +288,18 @@ export class PathGizmo {
     }
     ctx.stroke();
 
+    // Equal-time dots reveal the span curve's speed: tighter = slower.
+    if (keys.some((key) => key.curve && Number.isFinite(Number(key.spanTo)))) {
+      const dots = 42;
+      ctx.fillStyle = 'rgba(255,209,102,.85)';
+      for (let i = 0; i <= dots; i++) {
+        const t = t0 + ((t1 - t0) * i) / dots;
+        const world = add3(cameraTransform(cam, t).center, pathPos(cam, t));
+        const s = this.project(world);
+        if (s) ctx.fillRect(s[0] - 1.6, s[1] - 1.6, 3.2, 3.2);
+      }
+    }
+
     if (time >= t0 && time <= t1) {
       const world = add3(cameraTransform(cam, time).center, pathPos(cam, time));
       const now = this.project(world);

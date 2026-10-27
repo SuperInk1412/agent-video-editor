@@ -2,7 +2,7 @@
 // Ops are plain JSON so they can be logged, replayed, diffed and undone.
 import { DEFAULT_TRANSFORM, DEFAULT_STYLE, DEFAULT_FX, ELEMENT_TYPES, newId } from './schema.js';
 import { SCENE_VERSION, normalizeObject } from './scene.js';
-import { normalizeCamera } from './camera.js';
+import { normalizeCamera, retimeCamSpans, retimePathSpan } from './camera.js';
 import { normalizeCurve } from './curves.js';
 import { EXT_OP_KINDS, applyExtOp } from './ops-ext.js';
 
@@ -134,6 +134,19 @@ function cameraById(p, id) {
   const cam = p.cameras.find((c) => c.id === String(id));
   if (!cam) fail(`no camera ${id}`);
   return cam;
+}
+
+/** Drop span curves whose right endpoint disappeared. */
+function cleanupPathSpans(cam) {
+  const keys = cam.path || [];
+  for (const k of keys) {
+    if (!k.curve) continue;
+    const ok = keys.some((x) => x !== k && Math.abs(Number(x.t) - Number(k.spanTo)) <= 1e-4);
+    if (!ok) {
+      delete k.curve;
+      delete k.spanTo;
+    }
+  }
 }
 
 /** Normalized picture-space fields: keep base values inside their meaning. */
@@ -493,12 +506,44 @@ export function applyOp(p, op) {
     case 'keyCurve': {
       // Attach (or clear, with curve=null) a value curve to the keyframe that
       // starts the segment [from, to). Stored on the left key.
+      // Camera flights use the same op with path='path': the curve spans
+      // several path keys and retimes the inner ones (arc-length timing).
       const host = String(op.host || 'element');
       const path = String(op.path || '');
       if (!path) fail('keyCurve needs path');
       const from = Math.round(Number(op.from) * 1000) / 1000;
       const to = Math.round(Number(op.to) * 1000) / 1000;
       if (!Number.isFinite(from) || !Number.isFinite(to) || !(to > from)) fail('keyCurve needs from < to');
+      const curve = normalizeCurve(op.curve);
+      if (host === 'camera' && path === 'path') {
+        if (op.curve != null && !curve) fail('keyCurve: invalid curve');
+        const cam = cameraById(p, op.id);
+        const keys = cam.path || (cam.path = []);
+        keys.sort((a, b) => a.t - b.t);
+        const li = keys.findIndex((k) => Math.abs(Number(k.t) - from) <= 1e-4);
+        const ri = keys.findIndex((k) => Math.abs(Number(k.t) - to) <= 1e-4);
+        if (li < 0) fail(`keyCurve: no path key at ${from}`);
+        if (ri <= li) fail(`keyCurve: no path key at ${to}`);
+        if (curve) {
+          // A span owns the timing between its endpoints; overlapping spans
+          // would fight over the same keys.
+          for (const k of keys) {
+            if (k === keys[li] || !k.curve || !Number.isFinite(Number(k.spanTo))) continue;
+            if (Number(k.spanTo) > from && Number(k.t) < to) fail('keyCurve: path spans overlap');
+          }
+          const retime = retimePathSpan(cam, from, to, curve);
+          if (retime?.times?.length) {
+            retime.times.forEach((nt, j) => { if (keys[li + 1 + j]) keys[li + 1 + j].t = nt; });
+          }
+          keys[li].curve = curve;
+          keys[li].spanTo = to;
+          keys.sort((a, b) => a.t - b.t);
+        } else {
+          delete keys[li].curve;
+          delete keys[li].spanTo;
+        }
+        return { changed: ['camera', cam.id] };
+      }
       let keys;
       let changedId;
       if (host === 'element') {
@@ -522,7 +567,6 @@ export function applyOp(p, op) {
       if (!key) fail(`keyCurve: no keyframe at ${from}`);
       const hasNext = keys.some((k) => Number(k.t) > from && Math.abs(Number(k.t) - to) <= 1e-4);
       if (!hasNext) fail(`keyCurve: no keyframe at ${to}`);
-      const curve = normalizeCurve(op.curve);
       if (curve) key.curve = curve;
       else delete key.curve;
       return { changed: [changedId] };
@@ -551,8 +595,11 @@ export function applyOp(p, op) {
         ? null
         : (Array.isArray(op.speed) ? normSpeed(op.speed) : (Array.isArray(old?.speed) ? old.speed : null));
       if (speed) entry.speed = speed;
+      if (old?.curve) entry.curve = old.curve;
+      if (Number.isFinite(Number(old?.spanTo))) entry.spanTo = Number(old.spanTo);
       cam.path.push(entry);
       cam.path.sort((a, b) => a.t - b.t);
+      retimeCamSpans(cam);
       return { changed: ['camera', cam.id] };
     }
 
@@ -564,6 +611,8 @@ export function applyOp(p, op) {
       const t = Math.round(Number(op.t) * 1000) / 1000;
       if (!Number.isFinite(t)) fail('cameraRemove needs a finite t');
       cam.path = (cam.path || []).filter((k) => Math.abs(k.t - t) > 1e-4);
+      cleanupPathSpans(cam);
+      retimeCamSpans(cam);
       return { changed: ['camera', cam.id] };
     }
 
@@ -573,7 +622,11 @@ export function applyOp(p, op) {
       const next = deepMerge(cam, patch);
       Object.keys(next).forEach((k) => { cam[k] = next[k]; });
       clampCameraPicture(cam);
-      if (Array.isArray(cam.path)) cam.path.sort((a, b) => a.t - b.t);
+      if (Array.isArray(cam.path)) {
+        cam.path.sort((a, b) => a.t - b.t);
+        cleanupPathSpans(cam);
+        retimeCamSpans(cam);
+      }
       return { changed: ['camera', cam.id] };
     }
 
@@ -583,17 +636,30 @@ export function applyOp(p, op) {
       const cam = activeCamera(p, true);
       cam.path = op.path
         .filter((k) => k && Array.isArray(k.pos) && k.pos.length === 3 && Number.isFinite(Number(k.t)))
-        .map((k) => ({
-          t: Math.round(Number(k.t) * 1000) / 1000,
-          pos: k.pos.map(Number),
-          look: Array.isArray(k.look) && k.look.length === 3 ? k.look.map(Number) : null,
-          fov: k.fov != null ? Number(k.fov) : null,
-          ease: k.ease ? String(k.ease) : null,
-          out: Array.isArray(k.out) && k.out.length === 3 ? k.out.map(Number) : null,
-          in: Array.isArray(k.in) && k.in.length === 3 ? k.in.map(Number) : null,
-          speed: normSpeed(k.speed),
-        }))
+        .map((k) => {
+          const t = Math.round(Number(k.t) * 1000) / 1000;
+          const old = (cam.path || []).find((o) => Math.abs(Number(o.t) - t) <= 1e-4);
+          const curve = normalizeCurve(k.curve ?? old?.curve);
+          const entry = {
+            t,
+            pos: k.pos.map(Number),
+            look: Array.isArray(k.look) && k.look.length === 3 ? k.look.map(Number) : null,
+            fov: k.fov != null ? Number(k.fov) : null,
+            ease: k.ease ? String(k.ease) : null,
+            out: Array.isArray(k.out) && k.out.length === 3 ? k.out.map(Number) : null,
+            in: Array.isArray(k.in) && k.in.length === 3 ? k.in.map(Number) : null,
+            speed: normSpeed(k.speed),
+          };
+          if (curve) {
+            entry.curve = curve;
+            const spanTo = Number(k.spanTo ?? old?.spanTo);
+            if (Number.isFinite(spanTo)) entry.spanTo = spanTo;
+          }
+          return entry;
+        })
         .sort((a, b) => a.t - b.t);
+      cleanupPathSpans(cam);
+      retimeCamSpans(cam);
       return { changed: ['camera', cam.id] };
     }
 

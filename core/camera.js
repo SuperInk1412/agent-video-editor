@@ -2,6 +2,7 @@
 // Pure math — used by the realtime viewport, the engine (bake for Blender) and the CLI.
 import { clamp, speedWarp } from './time.js';
 import { normalizeTracks, sampleAxes, sampleChannel, sampleVec3 } from './scene.js';
+import { normalizeCurve, sampleCurve } from './curves.js';
 
 export const DEFAULT_CAMERA = {
   id: null,
@@ -99,20 +100,32 @@ export function normalizeCamera(cam) {
   c.motionBlur = { ...DEFAULT_CAMERA.motionBlur, ...(cam?.motionBlur || {}) };
   c.path = (Array.isArray(cam?.path) ? cam.path : [])
     .filter((k) => Array.isArray(k.pos) && k.pos.length === 3)
-    .map((k) => ({
-      t: Number(k.t) || 0,
-      pos: k.pos.map(Number),
-      look: Array.isArray(k.look) ? k.look.map(Number) : null,
-      fov: k.fov != null ? clamp(Number(k.fov), 1, 360) : null,
-      ease: k.ease ? String(k.ease) : null,
-      out: Array.isArray(k.out) && k.out.length === 3 ? k.out.map(Number) : null,
-      in: Array.isArray(k.in) && k.in.length === 3 ? k.in.map(Number) : null,
-      speed: Array.isArray(k.speed) && k.speed.length >= 2
-        ? k.speed
-          .filter((p) => Array.isArray(p) && p.length >= 2 && Number.isFinite(Number(p[0])) && Number.isFinite(Number(p[1])))
-          .map((p) => [clamp(Number(p[0]), 0, 1), Math.max(0, Number(p[1]))])
-        : null,
-    }))
+    .map((k) => {
+      const curve = normalizeCurve(k.curve);
+      const spanTo = Number.isFinite(Number(k.spanTo)) && Number(k.spanTo) > Number(k.t)
+        ? Number(k.spanTo)
+        : null;
+      const out = {
+        t: Number(k.t) || 0,
+        pos: k.pos.map(Number),
+        look: Array.isArray(k.look) ? k.look.map(Number) : null,
+        fov: k.fov != null ? clamp(Number(k.fov), 1, 360) : null,
+        ease: k.ease ? String(k.ease) : null,
+        out: Array.isArray(k.out) && k.out.length === 3 ? k.out.map(Number) : null,
+        in: Array.isArray(k.in) && k.in.length === 3 ? k.in.map(Number) : null,
+        speed: Array.isArray(k.speed) && k.speed.length >= 2
+          ? k.speed
+            .filter((p) => Array.isArray(p) && p.length >= 2 && Number.isFinite(Number(p[0])) && Number.isFinite(Number(p[1])))
+            .map((p) => [clamp(Number(p[0]), 0, 1), Math.max(0, Number(p[1]))])
+          : null,
+      };
+      // Span timing curve: only meaningful together with a right endpoint.
+      if (curve && spanTo != null) {
+        out.curve = curve;
+        out.spanTo = spanTo;
+      }
+      return out;
+    })
     .sort((a, b) => a.t - b.t);
   return c;
 }
@@ -128,6 +141,188 @@ function bez3(p0, p1, p2, p3, u) {
   ];
 }
 
+// ---------------------------------------------------------------- path timing
+// A span curve lives on the left key of a camera path span (`curve` + `spanTo`)
+// and maps time-progress to *arc-length* progress along the whole path. The
+// trajectory never changes: only the rate at which the camera travels it.
+// Inner keys are retimed to their first forward arrival; their own ease/speed/
+// curve is ignored while the span curve is active.
+
+const ARC_SUBDIV = 32;
+const ARC_CACHE = new WeakMap();
+
+/** Geometry of one path segment (same handles as the legacy pathPos math). */
+function segmentPoint(cam, i) {
+  const keys = cam.path;
+  const k1 = keys[i], k2 = keys[i + 1];
+  const k0 = keys[Math.max(0, i - 1)], k3 = keys[Math.min(keys.length - 1, i + 2)];
+  const p1 = k1.pos, p2 = k2.pos;
+  const out = k1.out || [(p2[0] - k0.pos[0]) / 6, (p2[1] - k0.pos[1]) / 6, (p2[2] - k0.pos[2]) / 6];
+  const inn = k2.in || [-(k3.pos[0] - p1[0]) / 6, -(k3.pos[1] - p1[1]) / 6, -(k3.pos[2] - p1[2]) / 6];
+  const c1 = [p1[0] + out[0], p1[1] + out[1], p1[2] + out[2]];
+  const c2 = [p2[0] + inn[0], p2[1] + inn[1], p2[2] + inn[2]];
+  return (s) => bez3(p1, c1, c2, p2, s);
+}
+
+function pathSignature(cam) {
+  // Only geometry matters for the arc table; retiming the keys (span curves)
+  // must not invalidate it.
+  return cam.path.map((k) => `${k.pos.join(',')}|${k.out ? k.out.join(',') : ''}|${k.in ? k.in.join(',') : ''}`).join(';');
+}
+
+/** Cumulative arc length at every key + a 32-step table per segment. */
+export function pathArcTable(cam) {
+  const sig = pathSignature(cam);
+  const hit = ARC_CACHE.get(cam);
+  if (hit && hit.sig === sig) return hit.table;
+  const keys = cam.path || [];
+  const segments = [];
+  const keyArc = [0];
+  let total = 0;
+  for (let i = 0; i < keys.length - 1; i++) {
+    const at = segmentPoint(cam, i);
+    let prev = at(0);
+    let len = 0;
+    const arcs = [0];
+    for (let j = 1; j <= ARC_SUBDIV; j++) {
+      const cur = at(j / ARC_SUBDIV);
+      len += v3.len(v3.sub(cur, prev));
+      arcs.push(len);
+      prev = cur;
+    }
+    segments.push({ len, arcs, at });
+    total += len;
+    keyArc.push(total);
+  }
+  const table = { segments, keyArc, total };
+  ARC_CACHE.set(cam, { sig, table });
+  return table;
+}
+
+/** Position at an absolute arc length along the path. */
+export function pathPointAtArc(cam, arc) {
+  const keys = cam.path || [];
+  if (!keys.length) return [0, 20, 0];
+  const table = pathArcTable(cam);
+  if (keys.length === 1 || table.total <= 1e-9) return keys[0].pos.slice();
+  const target = clamp(Number(arc), 0, table.total);
+  let i = 0;
+  while (i < table.segments.length - 1 && table.keyArc[i + 1] < target) i++;
+  const seg = table.segments[i];
+  if (seg.len <= 1e-9) return keys[i].pos.slice();
+  const local = clamp(target - table.keyArc[i], 0, seg.len);
+  let j = 1;
+  while (j < seg.arcs.length - 1 && seg.arcs[j] < local) j++;
+  const across = seg.arcs[j] - seg.arcs[j - 1];
+  const frac = across > 1e-12 ? (local - seg.arcs[j - 1]) / across : 0;
+  return seg.at((j - 1 + frac) / ARC_SUBDIV);
+}
+
+/** Active span curve for t (left key with `curve` + `spanTo`), or null. */
+function spanAt(cam, t) {
+  const keys = cam.path || [];
+  for (let i = 0; i < keys.length - 1; i++) {
+    const left = keys[i];
+    if (!left.curve || !Number.isFinite(Number(left.spanTo))) continue;
+    let ri = -1;
+    for (let j = i + 1; j < keys.length; j++) {
+      if (Math.abs(keys[j].t - Number(left.spanTo)) <= 1e-4) { ri = j; break; }
+    }
+    if (ri < 0) continue;
+    if (t >= left.t && t <= keys[ri].t) return { i, ri, left, right: keys[ri] };
+  }
+  return null;
+}
+
+function spanPosition(cam, span, t) {
+  const { i, ri, left, right } = span;
+  const u = clamp((t - left.t) / Math.max(1e-6, right.t - left.t), 0, 1);
+  const q = sampleCurve(left.curve, u);
+  const table = pathArcTable(cam);
+  const a0 = table.keyArc[i];
+  const a1 = table.keyArc[ri];
+  // Overshoot continues along the rest of the path; reverse overshoot holds
+  // at the start of the span (the approved symmetric-clamp rule).
+  const arc = q > 1 ? a1 + (q - 1) * (a1 - a0) : q < 0 ? a0 : a0 + q * (a1 - a0);
+  return pathPointAtArc(cam, clamp(arc, a0, table.total));
+}
+
+/** First u in [0,1] where the curve reaches `fraction` (for retiming). */
+function firstArrival(curve, fraction) {
+  if (!curve || !Number.isFinite(fraction)) return null;
+  if (fraction <= 0) return 0;
+  if (fraction >= 1) return 1;
+  const steps = 512;
+  let prevU = 0;
+  for (let i = 1; i <= steps; i++) {
+    const u = i / steps;
+    if (sampleCurve(curve, u) >= fraction) {
+      let lo = prevU;
+      let hi = u;
+      for (let k = 0; k < 24; k++) {
+        const mid = (lo + hi) / 2;
+        if (sampleCurve(curve, mid) >= fraction) hi = mid;
+        else lo = mid;
+      }
+      return hi;
+    }
+    prevU = u;
+  }
+  return null;
+}
+
+/**
+ * Retimed inner-key times for the span [from, to]. `times` is aligned with the
+ * inner keys in path order. Returns null when the endpoints are not path keys.
+ */
+export function retimePathSpan(cam, from, to, curve) {
+  const keys = cam.path || [];
+  const li = keys.findIndex((k) => Math.abs(Number(k.t) - Number(from)) <= 1e-4);
+  const ri = keys.findIndex((k) => Math.abs(Number(k.t) - Number(to)) <= 1e-4);
+  if (li < 0 || ri <= li) return null;
+  const table = pathArcTable(cam);
+  const a0 = table.keyArc[li];
+  const a1 = table.keyArc[ri];
+  const spanLen = a1 - a0;
+  const inner = keys.slice(li + 1, ri);
+  if (!inner.length || spanLen <= 1e-9) return { times: [], fractions: [] };
+  const fractions = inner.map((k, j) => clamp((table.keyArc[li + 1 + j] - a0) / spanLen, 0, 1));
+  const times = [];
+  let last = keys[li].t;
+  const end = keys[ri].t;
+  for (let j = 0; j < inner.length; j++) {
+    const u = firstArrival(curve, fractions[j]);
+    let nt = u == null ? inner[j].t : keys[li].t + u * (end - keys[li].t);
+    nt = Math.max(last + 0.0005, Math.min(end - 0.0005, nt));
+    nt = Math.round(nt * 1000) / 1000;
+    if (nt <= last) nt = Math.round((last + 0.001) * 1000) / 1000;
+    if (nt >= end) nt = Math.round((end - 0.001) * 1000) / 1000;
+    times.push(nt);
+    last = nt;
+  }
+  return { times, fractions };
+}
+
+/** Re-apply every valid span's retiming after the path geometry changed. */
+export function retimeCamSpans(cam) {
+  const keys = cam.path || [];
+  const spans = [];
+  for (let i = 0; i < keys.length - 1; i++) {
+    const k = keys[i];
+    if (!k.curve || !Number.isFinite(Number(k.spanTo))) continue;
+    const ri = keys.findIndex((x) => Math.abs(x.t - Number(k.spanTo)) <= 1e-4);
+    if (ri > i) spans.push({ from: k.t, to: keys[ri].t, curve: k.curve });
+  }
+  for (const span of spans) {
+    const res = retimePathSpan(cam, span.from, span.to, span.curve);
+    if (!res?.times?.length) continue;
+    const li = keys.findIndex((k) => Math.abs(Number(k.t) - Number(span.from)) <= 1e-4);
+    res.times.forEach((nt, j) => { if (keys[li + 1 + j]) keys[li + 1 + j].t = nt; });
+  }
+  keys.sort((a, b) => a.t - b.t);
+  return cam;
+}
+
 /** position at time t along the smoothed path (cubic bezier between keys) */
 export function pathPos(cam, t) {
   const keys = cam.path;
@@ -137,12 +332,14 @@ export function pathPos(cam, t) {
   if (keys.length === 1) return keys[0].pos.slice();
   if (t <= keys[0].t) return keys[0].pos.slice();
   if (t >= keys[keys.length - 1].t) return keys[keys.length - 1].pos.slice();
+  const span = spanAt(cam, t);
+  if (span) return spanPosition(cam, span, t);
   let i = 0;
   while (i < keys.length - 2 && t > keys[i + 1].t) i++;
   const k1 = keys[i], k2 = keys[i + 1];
   const k0 = keys[Math.max(0, i - 1)], k3 = keys[Math.min(keys.length - 1, i + 2)];
-  const span = Math.max(1e-6, k2.t - k1.t);
-  const u = clamp((t - k1.t) / span);
+  const spanTime = Math.max(1e-6, k2.t - k1.t);
+  const u = clamp((t - k1.t) / spanTime);
   // Per-segment speed curve wins; ease is the legacy fallback.
   const s = Array.isArray(k1.speed) && k1.speed.length >= 2
     ? speedWarp(k1.speed, u)
