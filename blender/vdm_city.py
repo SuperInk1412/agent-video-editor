@@ -11,7 +11,7 @@ import bpy
 import json
 import math
 import os
-from mathutils import Vector, Quaternion
+from mathutils import Matrix, Vector, Quaternion
 
 from vdm_build import (
     reset_scene, hex_rgba, build_compositor, set_menu, srgb_to_linear,
@@ -328,7 +328,24 @@ def _build_camera(scene, shot, width, height):
         d = look - pos
         if d.length < 1e-4:
             d = Vector((0, 0, -1))
-        q = d.to_track_quat('-Z', 'Y')
+        d = d.normalized()
+        # The project world is Y-up, so build the camera basis from world +Y:
+        # camera X = right, Y = up, -Z = view direction.  Blender's
+        # to_track_quat('-Z', 'Y') would instead pull camera Y towards world
+        # +Z and silently roll the shot (nightcity was ~45 degrees off from
+        # the preview).
+        right = d.cross(Vector((0.0, 1.0, 0.0)))
+        if right.length < 1e-5:
+            right = Vector((1.0, 0.0, 0.0))
+        right.normalize()
+        up = right.cross(d)
+        up.normalize()
+        basis = Matrix((
+            (right.x, up.x, -d.x),
+            (right.y, up.y, -d.y),
+            (right.z, up.z, -d.z),
+        ))
+        q = basis.to_quaternion()
         roll = math.radians(float(e.get('roll', 0.0)))
         q = q @ Quaternion((0.0, 0.0, 1.0), roll)
         cam.rotation_quaternion = q
