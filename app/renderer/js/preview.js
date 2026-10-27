@@ -449,13 +449,15 @@ export class Preview {
     this.textCache.clear();
   }
 
-  _textTexture(el, st, style) {
+  _textTexture(el, st, style, zoom = 1) {
     const gl = this.gl;
-    const px = this.canvas.width / (this.project?.meta.width || 1920);
+    // `zoom` rasterises sharper than the default framing needs (camera close-ups);
+    // the entry's w / h stay in canvas units so the layer matrix is unchanged.
+    const px = (this.canvas.width / (this.project?.meta.width || 1920)) * zoom;
     const size = Math.max(4, st.size * px);
     const font = `${style.weight || 400} ${size}px "${style.font || 'SimHei'}", "Microsoft YaHei", sans-serif`;
     const text = String(st.text ?? style.text ?? ' ');
-    const key = `${text}|${font}|${st.color}|${style.align}|${style.lineHeight}|${style.letterSpacing}|${style.shadow}|${style.stroke}|${style.strokeWidth}|${px.toFixed(3)}`;
+    const key = `${text}|${font}|${st.color}|${style.align}|${style.lineHeight}|${style.letterSpacing}|${style.shadow}|${style.stroke}|${style.strokeWidth}|${px.toFixed(3)}|z${zoom}`;
     let entry = this.textCache.get(el.id);
     if (entry && entry.key === key) return entry;
     const lines = text.split('\n');
@@ -468,6 +470,10 @@ export class Preview {
     const pad = Math.max(8, size * 0.35);
     const w = Math.ceil(maxW + pad * 2);
     const h = Math.ceil(lineH * lines.length + pad * 2);
+    const limit = Math.min(8192, gl.getParameter(gl.MAX_TEXTURE_SIZE) || 4096);
+    if (zoom > 1 && Math.max(w, h) > limit) {
+      return this._textTexture(el, st, style, Math.max(1, Math.floor((zoom * limit) / Math.max(w, h) * 4) / 4));
+    }
     const cv = document.createElement('canvas');
     cv.width = Math.max(2, w); cv.height = Math.max(2, h);
     const ctx = cv.getContext('2d');
@@ -495,11 +501,13 @@ export class Preview {
     gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, cv);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    // mipmaps: a close-up raster shown small (camera pulling back) stays clean
+    gl.generateMipmap(gl.TEXTURE_2D);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    entry = { key, tex, w: cv.width, h: cv.height, canvas: cv };
+    entry = { key, tex, w: cv.width, h: cv.height, canvas: cv, zoom };
     this.textCache.set(el.id, entry);
     return entry;
   }
@@ -592,6 +600,8 @@ export class Preview {
     const S = W / (p.meta.width || 1920);
     const cx = W / 2, cy = H / 2;
     const out = [];
+    // the camera this frame is seen through (text is rasterised for its close-ups)
+    const cam = this.scene3d.city ? (this.editMode && this.editCam ? this.editCam : evalCamera(p, t)) : null;
     for (const el of p.elements) {
       if (el.visible === false) continue;
       if (t < el.start - 1e-6 || t >= el.start + el.duration - 1e-6) continue;
@@ -599,8 +609,8 @@ export class Preview {
       if (st.opacity <= 0.002) continue;
       const rot = (st.rotation || 0) * Math.PI / 180;
       if (el.type === 'text') {
-        const tt = this._textTexture(el, st, el.style);
-        const w = tt.w, h = tt.h;
+        const tt = this._textTexture(el, st, el.style, this._textZoom(el, st, cam));
+        const w = tt.w / tt.zoom, h = tt.h / tt.zoom;
         const M = M3.mul(
           M3.mul(M3.mul(M3.T(cx + st.x * S, cy + st.y * S), M3.R(rot)), M3.S(st.scale, st.scale)),
           M3.mul(M3.T(-w / 2, -h / 2), M3.S(w, h)),
@@ -903,6 +913,28 @@ export class Preview {
     }
     const c = camPos || [0, cyW, 20];
     return Math.abs((c[0] - w[0]) * n[0] + (c[1] - w[1]) * n[1] + (c[2] - w[2]) * n[2]);
+  }
+
+  /**
+   * How much larger than in the default framing a text element appears through
+   * `cam` (distance to its plane, fov change, its own scale), rounded up to a
+   * few levels so a camera move re-rasterises only now and then. Screen-locked
+   * elements are pulled in and keep their screen size, so they stay at 1.
+   */
+  _textZoom(el, st, cam) {
+    if (!cam || el.parent) return 1;
+    const meta = this.project?.meta || {};
+    const cyW = (Number(meta.height) || 1080) / 200;
+    const w = [(st.x || 0) / 100, cyW - (st.y || 0) / 100, st.z || 0];
+    const f = [cam.look[0] - cam.pos[0], cam.look[1] - cam.pos[1], cam.look[2] - cam.pos[2]];
+    const fl = Math.hypot(f[0], f[1], f[2]) || 1;
+    const depth = ((w[0] - cam.pos[0]) * f[0] + (w[1] - cam.pos[1]) * f[1] + (w[2] - cam.pos[2]) * f[2]) / fl;
+    if (!(depth > 0.05)) return 1;
+    const halfDefault = Math.atan(((Number(meta.width) || 1920) / 200) / 20);
+    const halfNow = ((Number(cam.fov) || 51.282) * Math.PI) / 360;
+    const z = (20 / depth) * (Math.tan(halfDefault) / Math.tan(halfNow)) * Math.max(1, Math.abs(st.scale || 1));
+    for (const level of [1, 1.5, 2, 3, 4, 6, 8]) if (z <= level * 1.05) return level;
+    return 8;
   }
 
   /** canvas-space hit test -> topmost element id */
