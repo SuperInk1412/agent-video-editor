@@ -125,6 +125,31 @@ Blender 侧这些效果由合成器节点组 `VDM_Composite` 完成。节点组�
 - **编辑器剪贴板**：Ctrl+C / Ctrl+V 复制选中的 2D 元素和 3D 对象，保存在本机 localStorage，跨项目重启仍可用；
   粘贴时保持组内相对时间，落到当前播放头，2D 副本放到当前图层最上面。跨项目只带元素数据，`media/` 文件不会随剪贴板复制。
 
+## 相机与镜头片段
+
+相机栈在 `cameras[]`，`cameraOrder` 是自顶向下顺序，`activeCameraId` 是编辑相机（`camera` 是它的旧别名）。
+相机路径 `/ tracks` 的关键帧时间都是**项目绝对时间**。
+
+```jsonc
+{
+  "id": "cam_1", "name": "主机位",
+  "start": 0, "duration": 3.2,     // 片段范围，可省略
+  "path": [ { "t": 0, "pos": [0, 5, 20], "look": [0, 5, 0] } ],
+  "tracks": { "fov": [ { "t": 0, "v": 62 } ] }
+}
+```
+
+- `start` / `duration` 都可省略：省略 = 覆盖整个项目（旧相机行为不变）。给了 `duration` 后片段是
+  半开区间 `[start, start+duration)`；`start` 缺省为 0，`duration` 缺省到项目结束。
+- `cameraLayers(project, solo?, t?)`：不传 `t` 返回整栈（渲染器和相机栈 UI 用）；传 `t` 只返回覆盖该时刻的片段。
+- `evalCamera(project, t)` 的「当前镜头」：active 相机覆盖 `t` 就用它；否则取栈里最上面一台覆盖 `t` 的可见相机；
+  都不覆盖才回退 active。`elementParent { parent: '@live' }` 跟着这个当前镜头走。
+- 相机也是可切分的元素：`splitElement {id, at}` 在相机 id 上走相机分支。左半保留原 id，右半新 id，
+  `start = at`，名称加 ` · 2`，路径和参数轨用与 2D 元素相同的 range 规则保留（不插新键），
+  右半插在 `cameraOrder` 中源相机下面并设为 active。`moveElement {id, start, duration}` 同样接受相机 id：
+  平移会带着路径 / 参数键一起走，裁边保留键的绝对时间。
+- 项目总时长只把带**显式 `duration`** 的相机片段计入（否则旧全段相机不会因为项目变短而被截断）。
+
 ## ops（唯一的写入口）
 
 ```jsonc
@@ -134,7 +159,9 @@ Blender 侧这些效果由合成器节点组 `VDM_Composite` 完成。节点组�
 {"op":"removeElement","id":"el_x"}
 {"op":"duplicateElement","id":"el_x","start":4.0}
 {"op":"moveElement","id":"el_x","start":4.0,"duration":2.5,"z":3}
+{"op":"moveElement","id":"cam_1","start":2.0,"duration":3.0}   // 相机片段同样
 {"op":"splitElement","id":"el_x","at":2.3}
+{"op":"splitElement","id":"cam_1","at":2.3}                    // 相机 id：切成两个镜头片段
 {"op":"splitAt","at":2.3,"ids":["el_a","el_b"]}   // 不传 ids：切开红线经过的所有元素
 {"op":"reorder","id":"el_x","z":5}
 {"op":"addSegment","segment":{"start":0,"duration":3,"name":"镜 01"}}
@@ -151,15 +178,17 @@ Blender 侧这些效果由合成器节点组 `VDM_Composite` 完成。节点组�
 
 - **moveElement**：只改 `start`（或 `start` 加不变的 `duration`）= 平移，关键帧和 `motion.span`
   一起平移；`start` 和 `duration` 一起变 = 左裁剪，关键帧留在原处，视频的 `srcIn` 前进同样的秒数。
-  `"keys": "shift" | "keep"` 可以显式指定。
+  `"keys": "shift" | "keep"` 可以显式指定。相机 id 也走这里（平移带路径/参数键，裁边保留绝对时间）。
 - **splitElement**：两半各保留自己范围内的关键帧，外加每条轨在范围外最近的一个（保证插值不变）；
-  切口处左半不淡出、右半不淡入；右半视频的 `srcIn` 接上左半；有运动预设时两半共用原来的 `motion.span`。
+  相机路径是 Catmull-Rom 曲线，额外保留两侧第二个键以保住切线（同样不插新键）。切口处左半不淡出、右半不淡入；
+  右半视频的 `srcIn` 接上左半；有运动预设时两半共用原来的 `motion.span`；相机右半插在源相机下面并成为 active。
   结果：切开前后逐帧渲染一致。
 - **splitAt**：UI 的「切开」动作。传 `ids` 时只切这些元素里跨过 `at` 的，不传时切所有跨过 `at` 的元素；
   右半段保持原 `z`，但插入到源元素之后，并把全部元素的 `z` 按新顺序重编号，所以右半段就在源元素上一层；
   `changed` 只返回右半段 id，方便编辑器选中它们。操作是原子的。
-- **项目总时长**：`applyOps` 在所有时间相关操作（增删/移动/切开/裁剪/复制元素、增删/改时长 3D 对象）之后，
-  自动设为所有 2D 元素和 3D 对象 `start + duration` 的最大值；元素变长会变大，变短会变小。
+- **项目总时长**：`applyOps` 在所有时间相关操作（增删/移动/切开/裁剪/复制元素、增删/改时长 3D 对象、
+  显式带 `duration` 的相机片段）之后，自动设为所有 2D 元素、3D 对象和相机片段
+  `start + duration` 的最大值；元素变长会变大，变短会变小。
 - **duplicateElement**：副本放到新 `start` 时，关键帧和 `motion.span` 跟着平移。
 - **2D 元素属性**：属性没有关键帧时，时间轴输入框走 `updateElement` 改 `transform` 基础值，所有时间生效；
   已有该属性的键时才走 `keySet` 在当前时间写键。没有键的元素不会因为改一次值就凭空多出关键帧。

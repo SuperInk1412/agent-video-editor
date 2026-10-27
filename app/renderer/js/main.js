@@ -8,7 +8,7 @@ import { AgentPanel } from './ai.js';
 import { PipelinePanel } from './pipeline.js';
 import { LogPanel } from './logs.js';
 import { ProjectsPanel } from './projects.js';
-import { evalCamera, pathPos, cameraTransform } from '/core/camera.js';
+import { evalCamera, pathPos, cameraTransform, cameraRange } from '/core/camera.js';
 import { curveSegments } from '/core/curves.js';
 import { worldPose, toLocalPoint, toLocalVector, ancestors, childrenOf } from '/core/hierarchy.js';
 import { defaultCamera } from '/core/space.js';
@@ -1102,13 +1102,57 @@ async function boot() {
     return [...new Set(ids)];
   };
 
+  const selectedCameraId = () => {
+    const pool = S.selection.pool;
+    const ids = pool?.kind === 'element'
+      ? pool.ids.map(splitRef).filter((r) => r?.type === 'cam').map((r) => r.id)
+      : [];
+    if (ids.length) return ids[0];
+    return S.selection.camera && pool?.kind === 'element'
+      ? (S.project?.activeCameraId || S.project?.camera?.id || null)
+      : null;
+  };
+
+  /**
+   * Cut one camera clip at the playhead. The right half becomes active (the
+   * op does that), so the viewport stays continuous at the cut.
+   */
+  function splitCameraAtPlayhead(camId = null) {
+    if (!S.project) return null;
+    const id = camId || selectedCameraId();
+    const cam = (S.project.cameras || []).find((c) => c.id === id);
+    if (!cam) {
+      toast('没有选中相机', 'warn');
+      return null;
+    }
+    const at = Math.round(S.time * 1000) / 1000;
+    const range = cameraRange(S.project, cam);
+    const can = at > range.start + 0.02 && at < range.end - 0.02;
+    if (!can) {
+      toast(`播放头不在镜头范围内（${range.start.toFixed(2)}–${range.end.toFixed(2)}s）`, 'warn');
+      return null;
+    }
+    return op({ op: 'splitElement', id, at }).then((j) => {
+      if (!j) return;
+      const rightId = S.project?.activeCameraId;
+      if (rightId) select({ camera: true, pool: selectOne('element', cameraRef(rightId)) });
+      toast(`已在 ${at.toFixed(2)}s 切开镜头「${cam.name || cam.id}」`, 'success');
+    });
+  }
+
   /**
    * Cut at the playhead. With a selection, only the selected 2D elements that
    * cross the line are cut; with no selection, every crossing element is cut.
-   * Each right half is inserted directly above its source by splitAt.
+   * Each right half is inserted directly above its source by splitAt. A
+   * selected camera is cut with the same key (its clip goes through
+   * splitElement's camera branch).
    */
   function splitAtPlayhead(onlyIds = null) {
     if (!S.project) return null;
+    if (!onlyIds) {
+      const camId = selectedCameraId();
+      if (camId) return splitCameraAtPlayhead(camId);
+    }
     const at = Math.round(S.time * 1000) / 1000;
     const selected = onlyIds ? onlyIds.filter(Boolean) : selected2D();
     const crosses = (e) => at > e.start + 0.02 && at < e.start + e.duration - 0.02;
@@ -1195,6 +1239,17 @@ async function boot() {
         },
       },
       { label: '激活相机', run: () => { op({ op: 'activateCamera', id }); select({ camera: true }); } },
+      (() => {
+        const at = Math.round(S.time * 1000) / 1000;
+        const range = cameraRange(S.project, cam);
+        const can = at > range.start + 0.02 && at < range.end - 0.02;
+        return {
+          label: can ? `在播放头切分镜头（${at.toFixed(2)}s）` : '在播放头切分镜头（播放头不在镜头内）',
+          disabled: !can,
+          title: can ? '快捷键 S / Ctrl+D' : `镜头范围 ${range.start.toFixed(2)}–${range.end.toFixed(2)}s`,
+          run: () => splitCameraAtPlayhead(id),
+        };
+      })(),
       { sep: true },
       {
         label: '删除相机', danger: true,
@@ -2092,6 +2147,9 @@ async function boot() {
       if (S.selection.elementId) {
         e.preventDefault();
         splitElementAt(S.selection.elementId);
+      } else if (selectedCameraId()) {
+        e.preventDefault();
+        splitCameraAtPlayhead(selectedCameraId());
       }
     } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
       e.preventDefault();

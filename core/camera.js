@@ -154,6 +154,13 @@ export function normalizeCamera(cam) {
   c.picturePivot = numVec(cam?.picturePivot, 2, DEFAULT_CAMERA.picturePivot);
   c.pictureOffset = numVec(cam?.pictureOffset, 2, DEFAULT_CAMERA.pictureOffset);
   c.opacity = clamp(Number.isFinite(Number(c.opacity)) ? Number(c.opacity) : 1, 0, 1);
+  // An absent range means "the whole project"; do not materialise defaults,
+  // because the timeline and duration sync use presence to tell clips apart
+  // from legacy full-length cameras.
+  if (cam?.start != null && Number.isFinite(Number(cam.start))) c.start = Math.max(0, Number(cam.start));
+  else delete c.start;
+  if (cam?.duration != null && Number.isFinite(Number(cam.duration))) c.duration = Math.max(0.001, Number(cam.duration));
+  else delete c.duration;
   c.tracks = normalizeTracks(cam?.tracks);
   c.visible = c.visible !== false;
   c.shake = { ...DEFAULT_CAMERA.shake, ...(cam?.shake || {}) };
@@ -425,11 +432,37 @@ export function activeCameraOf(project) {
 }
 
 /**
+ * Effective timeline range of a camera clip. Cameras without an explicit
+ * `start` / `duration` cover the whole project (the old behaviour); only
+ * `duration` sets the end, and a missing `start` begins at 0. A camera clip is
+ * half-open: [start, end).
+ */
+export function cameraRange(project, cam) {
+  const total = Math.max(0, Number(project?.meta?.duration) || 0);
+  const hasStart = Number.isFinite(Number(cam?.start));
+  const hasDuration = Number.isFinite(Number(cam?.duration));
+  const start = hasStart ? Math.max(0, Number(cam.start)) : 0;
+  const end = hasDuration ? start + Math.max(0, Number(cam.duration)) : Math.max(start, total);
+  return { start, end, duration: Math.max(0, end - start), explicit: hasStart || hasDuration };
+}
+
+/** Does camera `cam` cover time t? Un-ranged cameras cover every time. */
+export function cameraCovers(project, cam, t) {
+  const at = Number(t);
+  if (!Number.isFinite(at)) return true;
+  const r = cameraRange(project, cam);
+  if (!r.explicit) return true;
+  return at >= r.start - 1e-6 && at < r.end - 1e-6;
+}
+
+/**
  * Cameras that contribute to the viewport / render, in timeline order
  * (top of the stack first). Hidden cameras and cameras without a path are
- * skipped; `solo` is a viewport-only set of camera ids.
+ * skipped; `solo` is a viewport-only set of camera ids. Passing `t` keeps only
+ * the clips covering that time; omitting it preserves the old full-stack
+ * behaviour used by the renderer and camera UI.
  */
-export function cameraLayers(project, solo = null) {
+export function cameraLayers(project, solo = null, t = null) {
   const cams = Array.isArray(project?.cameras) && project.cameras.length
     ? project.cameras
     : (project?.camera ? [project.camera] : []);
@@ -439,12 +472,28 @@ export function cameraLayers(project, solo = null) {
     ? project.cameraOrder
     : cams.map((c) => c.id);
   const only = solo instanceof Set ? solo : new Set(solo || []);
+  const hasT = t != null && Number.isFinite(Number(t));
   return order
     .map((id) => byId.get(id))
     .filter((cam) => cam
       && cam.visible !== false
       && Array.isArray(cam.path) && cam.path.length > 0
-      && (!only.size || only.has(cam.id)));
+      && (!only.size || only.has(cam.id))
+      && (!hasT || cameraCovers(project, cam, t)));
+}
+
+/**
+ * Camera that is live at t ("current shot"): the active camera when its clip
+ * covers t, otherwise the topmost visible camera whose clip covers t. Falls
+ * back to the active camera, then the first stack entry, when nothing covers
+ * the time (e.g. a gap or past the end of every clip).
+ */
+export function cameraAtTime(project, t) {
+  const active = activeCameraOf(project);
+  if (active && cameraCovers(project, active, t)) return active;
+  const covering = cameraLayers(project, null, t);
+  if (covering.length) return covering[0];
+  return active || cameraLayers(project)[0] || null;
 }
 
 /**
@@ -529,7 +578,7 @@ export function pathSpeed(cam, t, dt = 0.1) {
  * @returns {{pos:number[], look:number[], up:number[], fov:number, roll:number, speed:number, focus:number}}
  */
 export function evalCamera(project, t) {
-  const cam = activeCameraOf(project) || normalizeCamera(null);
+  const cam = cameraAtTime(project, t) || normalizeCamera(null);
   const tr = cameraTransform(cam, t);
   const pos = v3.add(tr.center, tr.position);
   const posA = v3.add(tr.center, pathPos(cam, t - 0.16));

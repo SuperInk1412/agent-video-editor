@@ -223,6 +223,12 @@ export function validateProject(p) {
     else if (camIds.has(c.id)) push(`cameras[${i}].id`, `duplicate id ${c.id}`);
     camIds.add(c.id);
     if (!Array.isArray(c.path)) push(`cameras[${i}].path`, 'path must be an array');
+    if (c.start != null && (!Number.isFinite(Number(c.start)) || Number(c.start) < 0)) {
+      push(`cameras[${i}].start`, 'start must be a number >= 0');
+    }
+    if (c.duration != null && (!Number.isFinite(Number(c.duration)) || !(Number(c.duration) > 0))) {
+      push(`cameras[${i}].duration`, 'duration must be > 0');
+    }
   });
   const order = Array.isArray(p.cameraOrder) ? p.cameraOrder : [];
   order.forEach((id, i) => {

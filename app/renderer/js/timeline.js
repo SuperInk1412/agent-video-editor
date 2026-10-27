@@ -8,7 +8,7 @@
 import { timecode, sampleTrack } from '/core/time.js';
 import { objectPose } from '/core/scene.js';
 import { childrenOf } from '/core/hierarchy.js';
-import { pathPos, cameraTransform, cameraParamValue } from '/core/camera.js';
+import { pathPos, cameraTransform, cameraParamValue, cameraRange } from '/core/camera.js';
 import {
   emptySelection, normalizeSelection, selectOne, addSelection, toggleSelection,
   cameraRef, objectRef, elementRef, propertyRef, keyframeRef, splitRef,
@@ -470,13 +470,98 @@ export class Timeline {
     const track = el('div', 'tl-track');
     const block = el('div', 'blk cam');
     block.dataset.cam = cam.id;
-    block.style.left = '0px';
-    block.style.width = `${Math.max(8, p.meta.duration * this.pps)}px`;
+    const range = cameraRange(p, cam);
+    block.style.left = `${range.start * this.pps}px`;
+    block.style.width = `${Math.max(8, range.duration * this.pps)}px`;
+    block.title = `${cam.name || '相机'} · ${range.start.toFixed(2)}–${range.end.toFixed(2)}s`;
     block.innerHTML = `<span class="blk-name">${escapeHtml(cam.name || '镜头')}</span><span class="blk-meta">${(cam.path || []).length} 关键点</span>`;
+    const hl = el('div', 'handle handle-l');
+    hl.title = '拖动左边界：改开始时间';
+    const hr = el('div', 'handle handle-r');
+    hr.title = '拖动右边界：改结束时间';
+    block.append(hl, hr);
+    block.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.onCameraMenu?.(cam.id, e.clientX, e.clientY);
+    });
     track.appendChild(block);
     row.append(g, track);
     this.camsWrap.appendChild(row);
     if (open) this._cameraRows(cam, this.camsWrap);
+  }
+
+  /**
+   * Drag / trim a camera clip. Mirrors the 2D element block: a move carries
+   * path + parameter keys (moveElement does that), an edge trim keeps them
+   * pinned in absolute time so the shot content does not jump.
+   */
+  _startCameraClipDrag(cam, block, ev) {
+    const p = this.project;
+    if (!p) return;
+    const range = cameraRange(p, cam);
+    const orig = { start: range.start, duration: range.duration };
+    const active = this._activeCameraId() === cam.id;
+    const wasSelected = this.cameraSel && !ev.ctrlKey && !ev.metaKey && !ev.shiftKey && active;
+    // Select on pointerdown, but do not activate through an op here: an op
+    // reply re-renders the timeline and detaches the block mid-drag. Activation
+    // is batched with the move on pointerup instead (one save / one undo).
+    if (!this.cameraSel || this.pool?.primary !== cameraRef(cam.id)) {
+      this.cameraSel = true;
+      this.pool = selectOne('element', cameraRef(cam.id));
+      this.onSelect?.({ camera: true, pool: this.pool });
+      this._paintSelection();
+    }
+
+    const mode = ev.target.classList.contains('handle-l') ? 'l'
+      : ev.target.classList.contains('handle-r') ? 'r' : 'move';
+    const t0 = this._timeAt(ev.clientX);
+    const downX = ev.clientX, downY = ev.clientY;
+    let moved = false;
+    const move = (e) => {
+      this._noSnap = e.altKey;
+      if (Math.abs(e.clientX - downX) + Math.abs(e.clientY - downY) > 3) moved = true;
+      const dt = this._timeAt(e.clientX) - t0;
+      let ns = orig.start, nd = orig.duration;
+      if (mode === 'move') {
+        ns = Math.max(0, this._snap(orig.start + dt));
+      } else if (mode === 'r') {
+        const end = this._snap(orig.start + orig.duration + dt);
+        nd = Math.max(0.08, end - orig.start);
+      } else {
+        const end = orig.start + orig.duration;
+        const s = Math.min(end - 0.08, Math.max(0, this._snap(orig.start + dt)));
+        nd = Math.max(0.08, end - s);
+        ns = s;
+      }
+      block.style.left = `${ns * this.pps}px`;
+      block.style.width = `${Math.max(8, nd * this.pps)}px`;
+      block._ns = ns;
+      block._nd = nd;
+    };
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+      if (!moved) {
+        if (wasSelected && mode === 'move') this._toggleCam(cam.id);
+        else if (!active) this._activateCamera(cam.id);
+        return;
+      }
+      const ns = block._ns, nd = block._nd;
+      const changed = ns != null && (Math.abs(ns - orig.start) >= 1e-4 || Math.abs(nd - orig.duration) >= 1e-4);
+      if (!changed) {
+        if (!active) this._activateCamera(cam.id);
+        return;
+      }
+      const ops = [];
+      if (!active) ops.push({ op: 'activateCamera', id: cam.id });
+      ops.push({ op: 'moveElement', id: cam.id, start: round3(ns), duration: round3(nd) });
+      this.onOp?.(ops.length > 1 ? { op: 'batch', ops } : ops[0]);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
   }
 
   _cameraRows(cam, host) {
@@ -1984,7 +2069,7 @@ export class Timeline {
     }
     // camera row header: select/activate + vertical drag to reorder the stack
     const camHead = target.closest?.('.tl-camhead[data-cam]');
-    if (camHead) {
+    if (camHead && !target.closest?.('.blk.cam')) {
       this._startCameraDrag(camHead.dataset.cam, ev.clientY, camHead);
       return;
     }
@@ -2006,7 +2091,7 @@ export class Timeline {
       return;
     }
     const objHead = target.closest?.('.tl-objhead');
-    if (objHead && !target.closest?.('.blk.ob')) {
+    if (objHead && !target.closest?.('.blk.ob') && !target.closest?.('.blk.cam')) {
       const id = objHead.dataset.obj;
       if (this.objectId === id && !ev.ctrlKey && !ev.metaKey && !ev.shiftKey) {
         this._toggleExpand(id);
@@ -2075,7 +2160,8 @@ export class Timeline {
 
     // ---- camera / segments / v2 ----
     if (blk?.classList.contains('cam')) {
-      this._activateCamera(blk.dataset.cam);
+      const cam = this._camById(blk.dataset.cam);
+      if (cam) this._startCameraClipDrag(cam, blk, ev);
       return;
     }
     // camera property labels (the lane below is for marquee selection, not scrubbing)

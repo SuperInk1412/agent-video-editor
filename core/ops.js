@@ -2,7 +2,7 @@
 // Ops are plain JSON so they can be logged, replayed, diffed and undone.
 import { DEFAULT_TRANSFORM, DEFAULT_STYLE, DEFAULT_FX, ELEMENT_TYPES, newId } from './schema.js';
 import { SCENE_VERSION, normalizeObject } from './scene.js';
-import { normalizeCamera, retimeCamSpans, retimePathSpan } from './camera.js';
+import { normalizeCamera, retimeCamSpans, retimePathSpan, cameraRange } from './camera.js';
 import { normalizeCurve } from './curves.js';
 import { EXT_OP_KINDS, applyExtOp } from './ops-ext.js';
 
@@ -22,7 +22,7 @@ const isObj = (o) => o && typeof o === 'object' && !Array.isArray(o);
 
 const TIMING_OPS = new Set([
   'addElement', 'removeElement', 'moveElement', 'splitElement', 'splitAt',
-  'duplicateElement', 'objectAdd', 'objectRemove',
+  'duplicateElement', 'objectAdd', 'objectRemove', 'addCamera', 'removeCamera',
 ]);
 
 function touchesTiming(op) {
@@ -34,13 +34,18 @@ function touchesTiming(op) {
   if (op.op === 'objectPatch') {
     return isObj(op.patch) && ('start' in op.patch || 'duration' in op.patch);
   }
+  if (op.op === 'cameraPatch' || op.op === 'cameraSet') {
+    return isObj(op.patch) && ('start' in op.patch || 'duration' in op.patch);
+  }
   return TIMING_OPS.has(op.op);
 }
 
 /**
  * Projects are as long as their furthest element. Called after edits that can
  * change an element's start/duration, so trimming, moving, adding and splitting
- * grow or shrink the timeline automatically.
+ * grow or shrink the timeline automatically. Camera clips only count when they
+ * carry an explicit duration; a legacy camera without a range still covers the
+ * whole project and does not pin its length.
  */
 function syncDuration(p) {
   if (!p.meta) return;
@@ -52,6 +57,11 @@ function syncDuration(p) {
   for (const obj of p.scene?.objects || []) {
     const n = Number(obj.start) + Number(obj.duration);
     if (Number.isFinite(n)) ends.push(n);
+  }
+  for (const cam of p.cameras || []) {
+    if (!Number.isFinite(Number(cam.duration))) continue;
+    const start = Number.isFinite(Number(cam.start)) ? Math.max(0, Number(cam.start)) : 0;
+    ends.push(start + Math.max(0, Number(cam.duration)));
   }
   if (!ends.length) return;
   const end = Math.max(...ends);
@@ -222,22 +232,25 @@ function shiftTiming(el, dt) {
 }
 
 /**
- * Keys a half of a split element needs for [start, end]: everything inside plus the
- * nearest key on each side per path, so sampling inside the range is unchanged.
+ * Keys a half of a split element needs for [start, end]: everything inside plus
+ * `context` nearest keys on each side per path, so sampling inside the range is
+ * unchanged. Element keyframes are linear (1 is enough); camera paths use cubic
+ * Catmull-Rom tangents and pass 2 so the curve shape near the cut is identical.
  */
-function keysForRange(keys, start, end) {
+function keysForRange(keys, start, end, context = 1) {
   const byPath = new Map();
   for (const k of keys || []) {
     if (!byPath.has(k.path)) byPath.set(k.path, []);
     byPath.get(k.path).push(k);
   }
   const out = [];
+  const n = Math.max(1, Math.floor(context));
   for (const list of byPath.values()) {
     list.sort((a, b) => a.t - b.t);
-    const before = list.filter((k) => k.t < start - 1e-6).pop();
-    const after = list.find((k) => k.t > end + 1e-6);
+    const before = list.filter((k) => k.t < start - 1e-6).slice(-n);
+    const after = list.filter((k) => k.t > end + 1e-6).slice(0, n);
     for (const k of list) {
-      if (k === before || k === after || (k.t >= start - 1e-6 && k.t <= end + 1e-6)) out.push({ ...k });
+      if (before.includes(k) || after.includes(k) || (k.t >= start - 1e-6 && k.t <= end + 1e-6)) out.push({ ...k });
     }
   }
   return out.sort((a, b) => a.t - b.t);
@@ -268,6 +281,107 @@ function splitOne(p, el, at, ids = allIds(p)) {
   el.keyframes = keysForRange(el.keyframes, el.start, at);
   el.fadeOut = 0;
   return right;
+}
+
+// ---------------------------------------------------------------- camera clips
+
+/** Camera in this project by id, or null (does not throw for element ids). */
+function cameraClipById(p, id) {
+  ensureCameraStack(p);
+  return p.cameras.find((c) => c.id === String(id)) || null;
+}
+
+/** Camera path / track keys are absolute-time, like element keyframes. */
+function shiftCameraTiming(cam, dt) {
+  if (!dt) return;
+  for (const k of cam.path || []) {
+    k.t = t3(Number(k.t) + dt);
+    if (Number.isFinite(Number(k.spanTo))) k.spanTo = t3(Number(k.spanTo) + dt);
+  }
+  for (const keys of Object.values(cam.tracks || {})) {
+    for (const k of keys || []) k.t = t3(Number(k.t) + dt);
+  }
+  cam.path?.sort((a, b) => a.t - b.t);
+}
+
+/**
+ * Split one camera clip like splitOne(): the left half keeps the id, the right
+ * half gets a fresh id and the original name + " · 2". Path keys and parameter
+ * tracks keep the keys inside the half plus two nearest keys on each side (the
+ * cubic path needs one extra for its tangent), never inserting a key, so
+ * evaluation inside either range is unchanged.
+ */
+function splitCameraOne(p, cam, at) {
+  const range = cameraRange(p, cam);
+  const start = range.start;
+  const end = range.end;
+  if (!Array.isArray(cam.path) || !cam.path.length) fail('camera has no path to split');
+  if (!(at > start + 0.02 && at < end - 0.02)) fail('split point outside camera');
+
+  const ids = new Set(p.cameras.map((c) => c.id));
+  const right = JSON.parse(JSON.stringify(cam));
+  right.id = newId('cam', ids);
+  right.name = `${cam.name || '相机'} · 2`;
+  right.start = t3(at);
+  right.duration = t3(end - at);
+
+  const leftTracks = {};
+  const rightTracks = {};
+  for (const [path, keys] of Object.entries(cam.tracks || {})) {
+    const left = keysForRange(keys, start, at, 2);
+    if (left.length) leftTracks[path] = left;
+    const rightKeys = keysForRange(keys, at, end, 2);
+    if (rightKeys.length) rightTracks[path] = rightKeys;
+  }
+
+  right.path = keysForRange(cam.path, at, end, 2);
+  right.tracks = rightTracks;
+  cam.start = t3(start);
+  cam.duration = t3(at - start);
+  cam.path = keysForRange(cam.path, start, at, 2);
+  cam.tracks = leftTracks;
+
+  const index = p.cameras.indexOf(cam);
+  p.cameras.splice(index + 1, 0, right);
+  const orderIndex = p.cameraOrder.indexOf(cam.id);
+  if (orderIndex >= 0) p.cameraOrder.splice(orderIndex + 1, 0, right.id);
+  else p.cameraOrder.push(right.id);
+  p.activeCameraId = right.id;
+  p.camera = right;
+  return right;
+}
+
+/** Move / trim a camera clip. Moving carries its path and parameter keys. */
+function moveCameraClip(p, cam, op) {
+  const hadDuration = Number.isFinite(Number(cam.duration));
+  const oldRange = cameraRange(p, cam);
+  const oldStart = oldRange.start;
+  let start = oldStart;
+  let duration = oldRange.duration;
+
+  if (op.start != null) {
+    const s0 = Number(op.start);
+    if (!Number.isFinite(s0)) fail('moveElement start must be a number');
+    start = Math.max(0, s0);
+  }
+  if (op.duration != null) {
+    const d0 = Number(op.duration);
+    if (!Number.isFinite(d0)) fail('moveElement duration must be a number');
+    duration = Math.max(1 / 120, d0);
+  } else if (op.start != null && !hadDuration) {
+    // A start-only move of a legacy full-length camera keeps its length instead
+    // of letting the implicit end follow the project duration.
+    duration = oldRange.duration;
+  }
+
+  const dt = start - oldStart;
+  const trim = Math.abs(duration - oldRange.duration) > 1e-6;
+  const carry = op.keys === 'shift' || (op.keys !== 'keep' && !trim);
+  if (carry) shiftCameraTiming(cam, dt);
+
+  cam.start = t3(start);
+  cam.duration = t3(duration);
+  return cam;
 }
 
 // ---------------------------------------------------------------- v3 objects
@@ -427,6 +541,11 @@ export function applyOp(p, op) {
       // start only (or start with the same duration) = move: keyframes travel along.
       // start + new duration = left trim: content stays put in time, video skips ahead.
       // `keys: "shift" | "keep"` overrides the guess.
+      const cam = cameraClipById(p, op.id);
+      if (cam) {
+        moveCameraClip(p, cam, op);
+        return { changed: [cam.id], element: cam };
+      }
       const el = findEl(p, op.id);
       const oldStart = el.start;
       const oldDur = el.duration;
@@ -457,8 +576,14 @@ export function applyOp(p, op) {
     }
 
     case 'splitElement': {
-      const el = findEl(p, op.id);
       const at = t3(Number(op.at));
+      if (!Number.isFinite(at)) fail('splitElement needs at');
+      const cam = cameraClipById(p, op.id);
+      if (cam) {
+        const right = splitCameraOne(p, cam, at);
+        return { changed: [cam.id, right.id], camera: right };
+      }
+      const el = findEl(p, op.id);
       if (!(at > el.start + 0.02 && at < el.start + el.duration - 0.02)) fail('split point outside element');
       const right = splitOne(p, el, at);
       p.elements.push(right);
