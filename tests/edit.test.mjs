@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createProject, normalizeProject } from '../core/schema.js';
-import { applyOp } from '../core/ops.js';
+import { applyOp, applyOps } from '../core/ops.js';
 import { evalElement } from '../core/evaluate.js';
 
 const fresh = () => normalizeProject(createProject({ title: 't', duration: 20 }));
@@ -109,6 +109,51 @@ test('duplicate at a new time moves the animation with the copy', () => {
   assert.equal(copy.start, 4);
   assert.deepEqual(copy.keyframes.map((k) => k.t), [4.5]);
   assert.deepEqual(element.keyframes.map((k) => k.t), [1.5], 'source untouched');
+});
+
+test('splitAt cuts every crossing element and puts each right half directly above its source', () => {
+  const p = fresh();
+  const a = applyOp(p, { op: 'addElement', element: { type: 'solid', start: 1, duration: 4, z: 0 } }).element;
+  const b = applyOp(p, { op: 'addElement', element: { type: 'solid', start: 1, duration: 4, z: 1 } }).element;
+  const res = applyOps(p, [{ op: 'splitAt', at: 2.5 }]);
+  assert.equal(res.changed.length, 2);
+  assert.deepEqual(p.elements.map((e) => [e.start, e.duration, e.z]), [
+    [1, 1.5, 0], [2.5, 2.5, 1], [1, 1.5, 2], [2.5, 2.5, 3],
+  ]);
+  assert.equal(p.elements[0].id, a.id);
+  assert.equal(p.elements[2].id, b.id);
+  assert.equal(p.elements[1].id, res.changed[0], 'right half is the first changed id');
+  assert.equal(p.elements[3].id, res.changed[1]);
+  assert.equal(p.meta.duration, 5, 'split does not change the furthest end');
+});
+
+test('splitAt with ids only cuts the selected element', () => {
+  const p = fresh();
+  applyOp(p, { op: 'addElement', element: { type: 'solid', start: 1, duration: 4, z: 0 } });
+  const b = applyOp(p, { op: 'addElement', element: { type: 'solid', start: 1, duration: 4, z: 1 } }).element;
+  applyOps(p, [{ op: 'splitAt', at: 2, ids: [b.id] }]);
+  assert.equal(p.elements.length, 3);
+  assert.deepEqual(p.elements.map((e) => e.z), [0, 1, 2]);
+  assert.equal(p.elements[1].id, b.id);
+  assert.equal(p.elements[2].start, 2);
+});
+
+test('splitAt refuses when the playhead does not cross a target', () => {
+  const p = fresh();
+  const a = applyOp(p, { op: 'addElement', element: { type: 'solid', start: 0, duration: 1 } }).element;
+  assert.throws(() => applyOps(p, [{ op: 'splitAt', at: 3 }]), /no element crosses/);
+  assert.throws(() => applyOps(p, [{ op: 'splitAt', at: 3, ids: [a.id] }]), /selected elements do not cross/);
+});
+
+test('project duration follows the furthest element end after timing edits', () => {
+  const p = fresh();
+  const j = applyOps(p, [{ op: 'addElement', element: { type: 'solid', start: 2, duration: 3 } }]);
+  const id = j.changed[0];
+  assert.equal(p.meta.duration, 5, 'grows to the new element end');
+  applyOps(p, [{ op: 'moveElement', id, start: 2, duration: 6 }]);
+  assert.equal(p.meta.duration, 8, 'grows when trimmed longer');
+  applyOps(p, [{ op: 'moveElement', id, start: 1, duration: 2 }]);
+  assert.equal(p.meta.duration, 3, 'shrinks when trimmed shorter');
 });
 
 test('updateElement edits the base transform without creating a keyframe', () => {

@@ -346,12 +346,25 @@ body.look-mode #stageBox { box-shadow: 0 0 0 2px rgba(255,209,102,.65), 0 0 30px
 }
 .blk-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .blk-meta { margin-left: auto; color: #8fa3b6; font-size: 10px; padding-left: 6px; }
-.handle { position: absolute; top: 0; bottom: 0; width: 7px; cursor: ew-resize; }
-.handle:hover { background: rgba(23,217,255,.25); }
+.handle { position: absolute; top: 0; bottom: 0; width: 9px; cursor: ew-resize; z-index: 3; }
+.handle::after {
+  content: ''; position: absolute; top: 5px; bottom: 5px; left: 3px; width: 2px;
+  border-radius: 2px; background: transparent;
+}
+.handle:hover { background: rgba(23,217,255,.22); }
+.handle:hover::after { background: #fff; }
 .handle-l { left: 0; }
 .handle-r { right: 0; }
 .tl-playhead { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--accent2); pointer-events: none; z-index: 8; box-shadow: 0 0 10px rgba(255,59,107,.5); }
 .tl-playhead::before { content: ''; position: absolute; top: 0; left: -5px; border: 6px solid transparent; border-top-color: var(--accent2); }
+.tl-split {
+  position: absolute; top: 2px; left: 50%; transform: translateX(-50%);
+  width: 20px; height: 19px; padding: 0; border: 1px solid #6b3a47; border-radius: 4px;
+  background: #241017; color: #ffd7df; font-size: 11px; line-height: 17px;
+  cursor: pointer; pointer-events: auto; z-index: 9;
+}
+.tl-split:hover { background: #3a1822; border-color: var(--accent2); color: #fff; }
+.tl-split:active { transform: translateX(-50%) translateY(1px); }
 .tl-els { position: relative; }
 .type-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; flex: 0 0 6px; }
 

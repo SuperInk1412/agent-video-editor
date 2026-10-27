@@ -157,6 +157,7 @@ function syncWorld(p) {
 }
 
 function applyProject(p, source) {
+  const prevDuration = S.project?.meta?.duration;
   S.project = p;
   // JSON responses cannot preserve the server-side `camera` alias identity;
   // re-point it at the active stack entry so edits and reads share one object.
@@ -199,6 +200,7 @@ function applyProject(p, source) {
   if (editBtn) editBtn.hidden = !p.camera;
   if (!p.camera && S.editMode) setEditMode(false);
   updateOverlay();
+  if (prevDuration !== p.meta.duration || S.time > p.meta.duration) setTime(S.time);
 }
 
 // ---------------------------------------------------------------- time
@@ -1091,22 +1093,65 @@ async function boot() {
       },
     ]);
   };
-  /** Split one media element at the playhead and keep the right half selected. */
-  const splitElementAt = (id) => {
-    const el = S.project?.elements?.find((e) => e.id === id);
-    if (!el) return;
-    const at = Math.round(S.time * 1000) / 1000;
-    if (!(at > el.start + 0.02 && at < el.start + el.duration - 0.02)) {
-      toast('播放头不在该素材范围内（或离两端太近）', 'warn');
-      return;
-    }
-    return op({ op: 'splitElement', id, at }).then((j) => {
-      if (!j) return;
-      const right = (j.changed || []).find((x) => x && x !== id);
-      if (right) select({ elementId: right });
-      toast(`已在 ${at.toFixed(2)}s 切分 ${el.name || id}`, 'info');
-    });
+  const selected2D = () => {
+    const pool = S.selection.pool;
+    const ids = pool?.kind === 'element'
+      ? pool.ids.map(splitRef).filter((r) => r?.type === 'el').map((r) => r.id)
+      : [];
+    if (!ids.length && S.selection.elementId) ids.push(S.selection.elementId);
+    return [...new Set(ids)];
   };
+
+  /**
+   * Cut at the playhead. With a selection, only the selected 2D elements that
+   * cross the line are cut; with no selection, every crossing element is cut.
+   * Each right half is inserted directly above its source by splitAt.
+   */
+  function splitAtPlayhead(onlyIds = null) {
+    if (!S.project) return null;
+    const at = Math.round(S.time * 1000) / 1000;
+    const selected = onlyIds ? onlyIds.filter(Boolean) : selected2D();
+    const crosses = (e) => at > e.start + 0.02 && at < e.start + e.duration - 0.02;
+    if (selected.length) {
+      const ids = selected.filter((id) => {
+        const el = S.project.elements.find((e) => e.id === id);
+        return el && crosses(el);
+      });
+      if (!ids.length) {
+        toast('播放头不在选中的元素范围内（或离两端太近）', 'warn');
+        return null;
+      }
+      return op({ op: 'splitAt', at, ids }).then((j) => {
+        if (!j) return;
+        const rights = (j.changed || []).filter(Boolean);
+        if (rights.length) {
+          const pool = { kind: 'element', ids: rights.map(elementRef), primary: elementRef(rights[0]) };
+          select({ elementId: rights[0], pool });
+        }
+        toast(`已在 ${at.toFixed(2)}s 切开 ${ids.length} 个元素`, 'success');
+      });
+    }
+    if (S.selection.objectId || S.selection.camera) {
+      toast('只能切开 2D 素材', 'warn');
+      return null;
+    }
+    if (!S.project.elements.some(crosses)) {
+      toast('红线没有经过可切开的元素', 'warn');
+      return null;
+    }
+    return op({ op: 'splitAt', at }).then((j) => {
+      if (!j) return;
+      const rights = (j.changed || []).filter(Boolean);
+      if (rights.length) {
+        const pool = { kind: 'element', ids: rights.map(elementRef), primary: elementRef(rights[0]) };
+        select({ elementId: rights[0], pool });
+      }
+      toast(`已在 ${at.toFixed(2)}s 切开 ${rights.length} 个元素`, 'success');
+    });
+  }
+
+  /** Split one media element at the playhead and keep the right half selected. */
+  const splitElementAt = (id) => splitAtPlayhead([id]);
   const clipMenu = (id, x, y) => {
     const el = S.project?.elements?.find((e) => e.id === id);
     if (!el) return;
@@ -1116,7 +1161,7 @@ async function boot() {
       {
         label: can ? `在播放头切分（${at.toFixed(2)}s）` : '在播放头切分（播放头不在素材内）',
         disabled: !can,
-        title: can ? '快捷键 S' : `素材范围 ${el.start.toFixed(2)}–${(el.start + el.duration).toFixed(2)}s`,
+        title: can ? '快捷键 Ctrl+D / S' : `素材范围 ${el.start.toFixed(2)}–${(el.start + el.duration).toFixed(2)}s`,
         run: () => { splitElementAt(id); },
       },
       { sep: true },
@@ -1166,6 +1211,7 @@ async function boot() {
     onElementMenu: (id, x, y) => elementMenu(id, x, y),
     onCameraMenu: (id, x, y) => cameraMenu(id, x, y),
     onClipMenu: (id, x, y) => clipMenu(id, x, y),
+    onSplit: () => splitAtPlayhead(),
   });
   timeline.setProject(S.project);
 
@@ -1522,12 +1568,51 @@ async function boot() {
     }
   });
 
+  /**
+   * Select and start dragging a 2D element on its depth plane. Used both by the
+   * edit viewport and by the normal camera preview, so a new colour block can
+   * be moved without first pressing Tab.
+   */
+  const begin2DElementDrag = (elId, sx, sy, cx, cy, ev) => {
+    const el = S.project.elements.find((e) => e.id === elId);
+    select({ elementId: elId });
+    if (!el) return false;
+    pause();
+    const z = elValue(el, 'transform.z', S.time);
+    const hit = preview.scene3d?.planeHit(sx, sy, [0, 0, z], [0, 0, 1]);
+    if (hit) {
+      drag = {
+        kind: 'element', id: elId, z, hit,
+        elX: elValue(el, 'transform.x', S.time),
+        elY: elValue(el, 'transform.y', S.time),
+        x: elValue(el, 'transform.x', S.time),
+        y: elValue(el, 'transform.y', S.time),
+        keyedX: elKeyed(el, 'transform.x'),
+        keyedY: elKeyed(el, 'transform.y'),
+        backup: JSON.stringify(el),
+        startCx: cx, startCy: cy,
+      };
+      try { canvas.setPointerCapture(ev.pointerId); } catch { /* synthetic events */ }
+      updateOverlay();
+      ev.preventDefault();
+      return true;
+    }
+    drag = { kind: 'click', x: cx, y: cy };
+    try { canvas.setPointerCapture(ev.pointerId); } catch { /* synthetic events */ }
+    ev.preventDefault();
+    return true;
+  };
+
   canvas.addEventListener('pointerdown', (e) => {
     if (e.button !== 0 && e.button !== 2) return;
     hideContextMenu();
     const { sx, sy, cx, cy } = stageXY(e);
     if (!S.editMode) {
-      if (e.button === 0) selectAt(sx, sy);
+      if (e.button === 0) {
+        const elId = preview.hitTest(sx, sy, S.time);
+        if (elId) { begin2DElementDrag(elId, sx, sy, cx, cy, e); return; }
+        selectAt(sx, sy);
+      }
       return;
     }
     if (S.viewMode === 'move') {
@@ -1622,33 +1707,7 @@ async function boot() {
     // screen delta is mapped to metres at the element's z, then back to pixels.
     const elId = preview.hitTest(sx, sy, S.time);
     if (elId) {
-      const el = S.project.elements.find((e) => e.id === elId);
-      select({ elementId: elId });
-      if (el) {
-        pause();
-        const z = elValue(el, 'transform.z', S.time);
-        const hit = preview.scene3d?.planeHit(sx, sy, [0, 0, z], [0, 0, 1]);
-        if (hit) {
-          drag = {
-            kind: 'element', id: elId, z, hit,
-            elX: elValue(el, 'transform.x', S.time),
-            elY: elValue(el, 'transform.y', S.time),
-            x: elValue(el, 'transform.x', S.time),
-            y: elValue(el, 'transform.y', S.time),
-            keyedX: elKeyed(el, 'transform.x'),
-            keyedY: elKeyed(el, 'transform.y'),
-            backup: JSON.stringify(el),
-            startCx: cx, startCy: cy,
-          };
-          try { canvas.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
-          updateOverlay();
-          e.preventDefault();
-          return;
-        }
-      }
-      drag = { kind: 'click', x: cx, y: cy };
-      try { canvas.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
-      e.preventDefault();
+      begin2DElementDrag(elId, sx, sy, cx, cy, e);
       return;
     }
     // timeline element in the 3D scene: pick it and start a keyed move
@@ -2028,6 +2087,9 @@ async function boot() {
     } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
       e.preventDefault();
       if (e.shiftKey) $('#btnRedo').click(); else $('#btnUndo').click();
+    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'd') {
+      e.preventDefault();
+      splitAtPlayhead();
     } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') {
       if (!window.getSelection()?.toString()) {
         e.preventDefault();

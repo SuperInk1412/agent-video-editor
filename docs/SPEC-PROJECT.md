@@ -135,6 +135,7 @@ Blender 侧这些效果由合成器节点组 `VDM_Composite` 完成。节点组�
 {"op":"duplicateElement","id":"el_x","start":4.0}
 {"op":"moveElement","id":"el_x","start":4.0,"duration":2.5,"z":3}
 {"op":"splitElement","id":"el_x","at":2.3}
+{"op":"splitAt","at":2.3,"ids":["el_a","el_b"]}   // 不传 ids：切开红线经过的所有元素
 {"op":"reorder","id":"el_x","z":5}
 {"op":"addSegment","segment":{"start":0,"duration":3,"name":"镜 01"}}
 {"op":"updateSegment","id":"seg_1","patch":{"status":"approved"}}
@@ -154,6 +155,11 @@ Blender 侧这些效果由合成器节点组 `VDM_Composite` 完成。节点组�
 - **splitElement**：两半各保留自己范围内的关键帧，外加每条轨在范围外最近的一个（保证插值不变）；
   切口处左半不淡出、右半不淡入；右半视频的 `srcIn` 接上左半；有运动预设时两半共用原来的 `motion.span`。
   结果：切开前后逐帧渲染一致。
+- **splitAt**：UI 的「切开」动作。传 `ids` 时只切这些元素里跨过 `at` 的，不传时切所有跨过 `at` 的元素；
+  右半段保持原 `z`，但插入到源元素之后，并把全部元素的 `z` 按新顺序重编号，所以右半段就在源元素上一层；
+  `changed` 只返回右半段 id，方便编辑器选中它们。操作是原子的。
+- **项目总时长**：`applyOps` 在所有时间相关操作（增删/移动/切开/裁剪/复制元素、增删/改时长 3D 对象）之后，
+  自动设为所有 2D 元素和 3D 对象 `start + duration` 的最大值；元素变长会变大，变短会变小。
 - **duplicateElement**：副本放到新 `start` 时，关键帧和 `motion.span` 跟着平移。
 - **2D 元素属性**：属性没有关键帧时，时间轴输入框走 `updateElement` 改 `transform` 基础值，所有时间生效；
   已有该属性的键时才走 `keySet` 在当前时间写键。没有键的元素不会因为改一次值就凭空多出关键帧。

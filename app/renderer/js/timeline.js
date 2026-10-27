@@ -26,7 +26,7 @@ const TYPE_COLOR = { image: '#3b6ea5', video: '#2f8f6b', text: '#a06a2b', shape:
 const AX = ['x', 'y', 'z'];
 
 export class Timeline {
-  constructor(root, { onSeek, onSelect, onOp, onPause, onElementMenu, onCameraMenu, onClipMenu } = {}) {
+  constructor(root, { onSeek, onSelect, onOp, onPause, onElementMenu, onCameraMenu, onClipMenu, onSplit } = {}) {
     this.root = root;
     this.onSeek = onSeek;
     this.onSelect = onSelect;
@@ -35,6 +35,7 @@ export class Timeline {
     this.onElementMenu = onElementMenu;
     this.onCameraMenu = onCameraMenu;
     this.onClipMenu = onClipMenu;
+    this.onSplit = onSplit;
     this.project = null;
     this.time = 0;
     this.pool = emptySelection();
@@ -105,6 +106,16 @@ export class Timeline {
     this.camsWrap = el('div', 'tl-cams');
     this.elsWrap = el('div', 'tl-els');
     this.playhead = el('div', 'tl-playhead');
+    const splitBtn = el('button', 'tl-split', '✂');
+    splitBtn.type = 'button';
+    splitBtn.title = '在红线处切开（Ctrl+D）';
+    splitBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
+    splitBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.onSplit?.();
+    });
+    this.playhead.appendChild(splitBtn);
     this.inner.append(this.rulerRow, this.camHead, this.camsWrap, this.elsWrap, this.playhead);
 
     const hint = el('div', 'tl-hint');
@@ -112,6 +123,7 @@ export class Timeline {
       + '<span>U 只看带键属性</span><span class="tl-hint-sep">|</span>'
       + '<span>组标题三态 ▾ 全部 / ▾• 带键 / ▸ 收起</span><span class="tl-hint-sep">|</span>'
       + '<span><b>◆</b> 打帧 / 删帧</span><span class="tl-hint-sep">|</span>'
+      + '<span>Ctrl+D 红线切开</span><span class="tl-hint-sep">|</span>'
       + '<span>Ctrl + 拖标尺缩放</span>';
 
     // timeline zoom: buttons + Ctrl+wheel + double-click the ruler to fit
@@ -972,8 +984,11 @@ export class Timeline {
     b.style.width = `${Math.max(4, (Number(e.duration) || 0) * this.pps)}px`;
     const label = e.type === 'text' ? String(e.style?.text || '').slice(0, 24) : (e.src || '').split('/').pop();
     b.innerHTML = `<span class="blk-name">${escapeHtml(label || e.id)}</span>`;
-    b.appendChild(el('div', 'handle handle-l'));
-    b.appendChild(el('div', 'handle handle-r'));
+    const hl = el('div', 'handle handle-l');
+    hl.title = '拖动左边界：改开始时间';
+    const hr = el('div', 'handle handle-r');
+    hr.title = '拖动右边界：改结束时间';
+    b.append(hl, hr);
     b.style.setProperty('--c', TYPE_COLOR[e.type] || '#666');
     b.addEventListener('contextmenu', (ev) => {
       ev.preventDefault();
@@ -1102,8 +1117,11 @@ export class Timeline {
     block.style.left = `${(Number(o.start) || 0) * this.pps}px`;
     block.style.width = `${Math.max(4, (Number(o.duration) || 0) * this.pps)}px`;
     block.innerHTML = `<span class="blk-name">${escapeHtml(o.name || o.id)}</span><span class="blk-meta">${(Number(o.duration) || 0).toFixed(2)}s</span>`;
-    block.appendChild(el('div', 'handle handle-l'));
-    block.appendChild(el('div', 'handle handle-r'));
+    const hl = el('div', 'handle handle-l');
+    hl.title = '拖动左边界：改开始时间';
+    const hr = el('div', 'handle handle-r');
+    hr.title = '拖动右边界：改结束时间';
+    block.append(hl, hr);
     track.appendChild(block);
     row.append(g, track);
     this.elsWrap.appendChild(row);
@@ -2045,19 +2063,18 @@ export class Timeline {
         : target.classList.contains('handle-r') ? 'r' : 'move';
       const t0 = this._timeAt(ev.clientX);
       const orig = { start: item.start, duration: item.duration };
-      const total = this.project.meta.duration;
       const move = (e) => {
         this._noSnap = e.altKey;
         const t = this._timeAt(e.clientX);
         const dt = t - t0;
         let ns = orig.start, nd = orig.duration;
         if (mode === 'move') {
-          ns = Math.max(0, Math.min(Math.max(0, total - orig.duration), this._snap(orig.start + dt)));
+          ns = Math.max(0, this._snap(orig.start + dt));
         } else if (mode === 'r') {
           const end = this._snap(orig.start + orig.duration + dt);
-          nd = Math.max(0.08, Math.min(Math.max(0.08, total - orig.start), end - orig.start));
+          nd = Math.max(0.08, end - orig.start);
         } else {
-          const end = Math.min(total, orig.start + orig.duration);
+          const end = orig.start + orig.duration;
           const s = Math.min(end - 0.08, Math.max(0, this._snap(orig.start + dt)));
           nd = Math.max(0.08, end - s);
           ns = s;

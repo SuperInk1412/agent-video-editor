@@ -8,7 +8,7 @@ import { EXT_OP_KINDS, applyExtOp } from './ops-ext.js';
 
 export const OP_KINDS = [
   'addElement', 'updateElement', 'set', 'removeElement', 'moveElement',
-  'splitElement', 'duplicateElement', 'reorder', 'addSegment', 'updateSegment',
+  'splitElement', 'splitAt', 'duplicateElement', 'reorder', 'addSegment', 'updateSegment',
   'removeSegment', 'setMeta', 'setFx', 'keySet', 'keyRemove', 'keyCurve', 'batch',
   'cameraKey', 'cameraRemove', 'cameraSet', 'cameraPath', 'cameraPatch',
   'cameraParamKey', 'cameraParamUnkey', 'worldSet',
@@ -19,6 +19,44 @@ export const OP_KINDS = [
 ];
 
 const isObj = (o) => o && typeof o === 'object' && !Array.isArray(o);
+
+const TIMING_OPS = new Set([
+  'addElement', 'removeElement', 'moveElement', 'splitElement', 'splitAt',
+  'duplicateElement', 'objectAdd', 'objectRemove',
+]);
+
+function touchesTiming(op) {
+  if (!op) return false;
+  if (op.op === 'batch') return (op.ops || []).some(touchesTiming);
+  if (op.op === 'updateElement') {
+    return isObj(op.patch) && ('start' in op.patch || 'duration' in op.patch);
+  }
+  if (op.op === 'objectPatch') {
+    return isObj(op.patch) && ('start' in op.patch || 'duration' in op.patch);
+  }
+  return TIMING_OPS.has(op.op);
+}
+
+/**
+ * Projects are as long as their furthest element. Called after edits that can
+ * change an element's start/duration, so trimming, moving, adding and splitting
+ * grow or shrink the timeline automatically.
+ */
+function syncDuration(p) {
+  if (!p.meta) return;
+  const ends = [];
+  for (const el of p.elements || []) {
+    const n = Number(el.start) + Number(el.duration);
+    if (Number.isFinite(n)) ends.push(n);
+  }
+  for (const obj of p.scene?.objects || []) {
+    const n = Number(obj.start) + Number(obj.duration);
+    if (Number.isFinite(n)) ends.push(n);
+  }
+  if (!ends.length) return;
+  const end = Math.max(...ends);
+  p.meta.duration = Math.max(0.1, Math.round(end * 1000) / 1000);
+}
 
 export function deepMerge(target, patch) {
   if (!isObj(patch)) return patch;
@@ -203,6 +241,33 @@ function keysForRange(keys, start, end) {
     }
   }
   return out.sort((a, b) => a.t - b.t);
+}
+
+/** Split one element in place and return the new right-hand element. */
+function splitOne(p, el, at, ids = allIds(p)) {
+  // Both halves must look exactly like the original did: keyframe times are
+  // absolute, the motion preset keeps its original span, there is no fade at
+  // the cut, and the right half of a video resumes where the left one stopped.
+  const end = el.start + el.duration;
+  const right = JSON.parse(JSON.stringify(el));
+  right.id = newId('el', ids);
+  ids.add(right.id);
+  right.name = el.name;
+  right.start = at;
+  right.duration = t3(end - at);
+  right.keyframes = keysForRange(el.keyframes, at, end);
+  right.fadeIn = 0;
+  if (el.type === 'video') right.srcIn = t3((Number(el.srcIn) || 0) + (at - el.start));
+  const motion = el.motion || {};
+  if (motion.type && motion.type !== 'none' && Number(motion.amount)) {
+    const span = Array.isArray(motion.span) && motion.span.length === 2 ? motion.span : [el.start, end];
+    el.motion = { ...motion, span: [...span] };
+    right.motion = { ...motion, span: [...span] };
+  }
+  el.duration = t3(at - el.start);
+  el.keyframes = keysForRange(el.keyframes, el.start, at);
+  el.fadeOut = 0;
+  return right;
 }
 
 // ---------------------------------------------------------------- v3 objects
@@ -392,33 +457,43 @@ export function applyOp(p, op) {
     }
 
     case 'splitElement': {
-      // Both halves must look exactly like the original did: keyframe times are
-      // absolute, the motion preset keeps its original span, there is no fade at
-      // the cut, and the right half of a video resumes where the left one stopped.
       const el = findEl(p, op.id);
       const at = t3(Number(op.at));
       if (!(at > el.start + 0.02 && at < el.start + el.duration - 0.02)) fail('split point outside element');
-      const ids = allIds(p);
-      const end = el.start + el.duration;
-      const right = JSON.parse(JSON.stringify(el));
-      right.id = newId('el', ids);
-      right.name = el.name;
-      right.start = at;
-      right.duration = t3(end - at);
-      right.keyframes = keysForRange(el.keyframes, at, end);
-      right.fadeIn = 0;
-      if (el.type === 'video') right.srcIn = t3((Number(el.srcIn) || 0) + (at - el.start));
-      const motion = el.motion || {};
-      if (motion.type && motion.type !== 'none' && Number(motion.amount)) {
-        const span = Array.isArray(motion.span) && motion.span.length === 2 ? motion.span : [el.start, end];
-        el.motion = { ...motion, span: [...span] };
-        right.motion = { ...motion, span: [...span] };
-      }
-      el.duration = t3(at - el.start);
-      el.keyframes = keysForRange(el.keyframes, el.start, at);
-      el.fadeOut = 0;
+      const right = splitOne(p, el, at);
       p.elements.push(right);
       return { changed: [el.id, right.id], element: right };
+    }
+
+    case 'splitAt': {
+      // Split every target that crosses the playhead in one undo step. The
+      // right half is inserted directly above its source in layer order; this
+      // is the UI's "cut" action (button on the playhead / Ctrl+D).
+      const at = t3(Number(op.at));
+      if (!Number.isFinite(at)) fail('splitAt needs at');
+      const wanted = Array.isArray(op.ids) && op.ids.length
+        ? new Set(op.ids.map(String))
+        : (op.id ? new Set([String(op.id)]) : null);
+      const ordered = p.elements.slice().sort((a, b) => a.z - b.z || a.start - b.start);
+      const targets = new Set();
+      for (const el of ordered) {
+        if (wanted && !wanted.has(el.id)) continue;
+        if (at > el.start + 0.02 && at < el.start + el.duration - 0.02) targets.add(el);
+      }
+      if (!targets.size) fail(wanted ? 'splitAt: selected elements do not cross the playhead' : 'splitAt: no element crosses the playhead');
+      const ids = allIds(p);
+      const out = [];
+      const rights = [];
+      for (const el of ordered) {
+        out.push(el);
+        if (!targets.has(el)) continue;
+        const right = splitOne(p, el, at, ids);
+        out.push(right);
+        rights.push(right);
+      }
+      out.forEach((el, i) => { el.z = i; });
+      p.elements = out;
+      return { changed: rights.map((r) => r.id), elements: rights };
     }
 
     case 'reorder': {
@@ -889,5 +964,6 @@ export function applyOps(p, ops) {
   }
   // keep elements ordered by z for rendering
   p.elements.sort((a, b) => a.z - b.z || a.start - b.start);
+  if ((ops || []).some(touchesTiming)) syncDuration(p);
   return { changed: [...changed] };
 }
