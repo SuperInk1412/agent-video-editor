@@ -941,6 +941,14 @@ export class Preview {
     }).filter(Boolean);
   }
 
+  /** Projected quad of every 2D layer, in canvas pixels (perspective-aware). */
+  layerPolygons() {
+    return (this.layers || []).map((L) => {
+      const points = this._layerCorners(L);
+      return points ? { id: L.el.id, points } : null;
+    }).filter(Boolean);
+  }
+
   /** debug: the exact 2D canvas used as a text texture */
   debugTextTexture(id) {
     const el = this.project?.elements.find((e) => e.id === id);

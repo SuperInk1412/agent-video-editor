@@ -376,18 +376,27 @@ function toggleCurvePanel() {
 
 function updateOverlay() {
   const box = $('#selBox');
-  if (!box || !preview || !S.project) return;
-  const rects = preview.layerRects();
-  const r = rects.find((x) => x.id === S.selection.elementId);
-  if (!r) { box.style.display = 'none'; return; }
-  const scale = $('#stage').clientWidth / preview.canvas.width;
+  const poly = $('#selPoly');
+  const label = $('#selLabel');
+  if (!box || !poly || !label || !preview || !S.project) return;
+  const item = preview.layerPolygons().find((x) => x.id === S.selection.elementId);
+  if (!item) {
+    box.style.display = 'none';
+    label.style.display = 'none';
+    return;
+  }
+  const W = preview.canvas.width, H = preview.canvas.height;
+  const pts = item.points;
+  box.setAttribute('viewBox', `0 0 ${W} ${H}`);
   box.style.display = 'block';
-  box.style.left = `${r.x * scale}px`;
-  box.style.top = `${r.y * scale}px`;
-  box.style.width = `${r.w * scale}px`;
-  box.style.height = `${r.h * scale}px`;
-  const el = S.project.elements.find((e) => e.id === r.id);
-  box.dataset.label = `${el?.name || r.id}`;
+  poly.setAttribute('points', pts.map((p) => `${p[0]},${p[1]}`).join(' '));
+  const scale = $('#stage').clientWidth / Math.max(1, W);
+  const top = pts.reduce((a, b) => (b[1] < a[1] ? b : a), pts[0]);
+  const el = S.project.elements.find((e) => e.id === item.id);
+  label.textContent = el?.name || item.id;
+  label.style.display = 'block';
+  label.style.left = `${Math.max(2, top[0] * scale)}px`;
+  label.style.top = `${Math.max(14, top[1] * scale)}px`;
 }
 
 /** Selected 3D object: parent breadcrumb + world position (+ child count). */
