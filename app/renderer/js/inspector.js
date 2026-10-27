@@ -3,6 +3,7 @@ import { sampleTrack } from '/core/time.js';
 import { objectPose, sampleChannel } from '/core/scene.js';
 import { ancestors, wouldCycle, STRENGTH_TRACKS } from '/core/hierarchy.js';
 import { MEDIA_TYPES, FITS, ALIGNS, mediaSpec, textSpec } from '/core/objects-media.js';
+import { normalizeWorld } from '/core/world.js';
 import { RotBall } from './rotball.js';
 import { SpeedCurve, SPEED_PRESETS } from './speedcurve.js';
 import { escapeHtml } from './timeline.js';
@@ -500,9 +501,30 @@ export class Inspector {
     this.root.appendChild(h('div', { class: 'hint pad' },
       '相机属性折叠在时间轴相机行里：点行首 ▾ 展开；位置是飞行路径关键帧，中心点 / 画面 / 透明度 / 缩放也能逐帧打点。'));
 
-    const w = project.world;
+    // normalised: an empty world is stored as little as {source:'none'}
+    const w = normalizeWorld(project.world);
     const setW = (patch) => this._commit('world', { op: 'worldSet', patch });
+    const empty = w.source === 'none';
+    const fog = [
+      this._field({ label: '雾开始 (m)', value: w.fog.start ?? 30, step: 5, min: 0, max: 500, onChange: (v) => setW({ fog: { ...w.fog, start: v } }) }),
+      this._field({ label: '雾深度 (m)', value: w.fog.depth ?? 700, step: 25, min: 10, max: 5000, onChange: (v) => setW({ fog: { ...w.fog, depth: v } }) }),
+      this._field({ label: '雾强度', value: w.fog.strength ?? 1, step: 0.05, min: 0, max: 1, onChange: (v) => setW({ fog: { ...w.fog, strength: v } }) }),
+    ];
+    const head = [
+      this._field({
+        label: '世界', type: 'select', value: w.source,
+        options: [{ value: 'none', label: '空（只有背景）' }, { value: 'procedural', label: '程序化城市' }],
+        onChange: (v) => this.opts.onOp({ op: 'worldSet', patch: { source: v } }),
+      }),
+      this._field({ label: '背景色', type: 'color', value: w.sky, onChange: (v) => setW({ sky: v }) }),
+    ];
+    if (empty) {
+      this.root.appendChild(this._section('世界', ...head, ...fog,
+        h('div', { class: 'hint' }, '空世界只有背景色和你自己加的元素；编辑视口里的地面网格不进成片。需要城市时把「世界」切到程序化城市。')));
+      return;
+    }
     this.root.appendChild(this._section('世界',
+      ...head,
       this._field({ label: 'seed', value: w.seed, step: 1, onChange: (v) => setW({ seed: v }) }),
       h('div', { class: 'row-btns' }, h('button', { class: 'mini', onclick: () => setW({ seed: Math.floor(Math.random() * 9999) }) }, '换一座城')),
       this._field({ label: '航线避让', type: 'select', value: String(!!w.corridor.enabled), options: [{ value: 'true', label: '开' }, { value: 'false', label: '关' }], onChange: (v) => setW({ corridor: { ...w.corridor, enabled: v === 'true' } }) }),
@@ -516,9 +538,7 @@ export class Inspector {
       this._field({ label: '亮窗比例', value: w.window.density, step: 0.02, min: 0, max: 1, onChange: (v) => setW({ window: { ...w.window, density: v } }) }),
       this._field({ label: '窗光强度', value: w.window.glow, step: 0.1, onChange: (v) => setW({ window: { ...w.window, glow: v } }) }),
       this._field({ label: '霓虹强度', value: w.neon.glow, step: 0.1, onChange: (v) => setW({ neon: { ...w.neon, glow: v } }) }),
-      this._field({ label: '雾开始 (m)', value: w.fog.start ?? 30, step: 5, min: 0, max: 500, onChange: (v) => setW({ fog: { ...w.fog, start: v } }) }),
-      this._field({ label: '雾深度 (m)', value: w.fog.depth ?? 700, step: 25, min: 10, max: 5000, onChange: (v) => setW({ fog: { ...w.fog, depth: v } }) }),
-      this._field({ label: '雾强度', value: w.fog.strength ?? 1, step: 0.05, min: 0, max: 1, onChange: (v) => setW({ fog: { ...w.fog, strength: v } }) }),
+      ...fog,
     ));
   }
 
