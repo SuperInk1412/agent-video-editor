@@ -133,10 +133,39 @@ function bakeCameraLayer(project, cam, { fps, from, to }) {
   };
 }
 
+/**
+ * Camera clips that simply follow one another (each with its own start /
+ * duration, no overlap, default picture transform): a cut sequence. Blender
+ * then renders them as ONE camera whose baked track jumps at the cuts (the
+ * current-shot rule of evalCamera), so the single-camera path keeps the 2D
+ * elements in the world, the screen-locked type and the compositor.
+ */
+export function isCutSequence(project) {
+  const cams = cameraLayers(project);
+  if (cams.length < 2) return false;
+  const near1 = (v) => Math.abs(Number(v) - 1) < 1e-4;
+  const clips = [];
+  for (const c of cams) {
+    if (!Number.isFinite(Number(c.start)) || !(Number(c.duration) > 0)) return false;
+    const tr = c.tracks || {};
+    if (['opacity', 'scale', 'picturePivot', 'pictureOffset'].some((k) => Array.isArray(tr[k]) && tr[k].length)) return false;
+    const sc = c.scale || [1, 1, 1];
+    const pv = c.picturePivot || [0.5, 0.5];
+    const po = c.pictureOffset || [0, 0];
+    if (!near1(c.opacity ?? 1) || !near1(sc[0]) || !near1(sc[1])) return false;
+    if (Math.abs(pv[0] - 0.5) > 1e-4 || Math.abs(pv[1] - 0.5) > 1e-4 || Math.abs(po[0]) > 1e-4 || Math.abs(po[1]) > 1e-4) return false;
+    clips.push([Number(c.start), Number(c.start) + Number(c.duration)]);
+  }
+  clips.sort((a, b) => a[0] - b[0]);
+  for (let i = 1; i < clips.length; i++) if (clips[i][0] < clips[i - 1][1] - 1e-4) return false;
+  return true;
+}
+
 export function buildShot(project, { from = 0, to = null, fps = null } = {}) {
   const frameRate = fps || project.meta.fps || 24;
   const end = to ?? project.meta.duration;
-  const layers = cameraLayers(project).map((cam) => bakeCameraLayer(project, cam, {
+  // a cut sequence renders through the single live-camera track below
+  const layers = isCutSequence(project) ? [] : cameraLayers(project).map((cam) => bakeCameraLayer(project, cam, {
     fps: frameRate, from, to: end,
   }));
   // Bake the active camera as the legacy single-camera field. Blender keeps

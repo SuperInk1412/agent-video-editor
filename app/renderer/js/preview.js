@@ -513,8 +513,9 @@ export class Preview {
   }
 
   /** Cameras that contribute to the viewport, in timeline order (top -> bottom). */
-  _cameraLayers() {
-    return cameraLayers(this.project, this.soloCameras);
+  /** Cameras on screen at t (camera clips: only those whose start/duration covers t). */
+  _cameraLayers(t = this.time) {
+    return cameraLayers(this.project, this.soloCameras, t);
   }
 
   /** Full-frame picture transform: scale around pivot, then offset. */
@@ -676,7 +677,7 @@ export class Preview {
     }
 
     // ---- scene pass ----
-    const cams = this._cameraLayers();
+    const cams = this._cameraLayers(t);
     const is3d = !!(this.scene3d.city && cams.length);
     const layers = this.computeLayers(t);
     this.layers = layers;
