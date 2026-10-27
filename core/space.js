@@ -43,6 +43,12 @@ export function defaultCamera(meta) {
     roll: 0,
     center: [0, 0, 0],
     path: [{ t: 0, pos: [0, cy, SCREEN_DISTANCE], look: [0, cy, 0] }],
+    // Flat motion graphics: no motion blur, no handheld shake, no auto bank on
+    // turns — once the user keys a move the frame must not drift on its own.
+    // All three can be switched on in the camera settings.
+    motionBlur: { enabled: false, shutter: 0.5 },
+    shake: { amp: 0 },
+    bankGain: 0,
   };
 }
 

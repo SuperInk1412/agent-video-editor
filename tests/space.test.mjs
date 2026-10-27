@@ -34,6 +34,9 @@ test('space: defaults for world and camera', () => {
   assert.equal(cam.id, undefined, 'the op assigns the id');
   assert.deepEqual(cam.path, [{ t: 0, pos: [0, 5.4, 20], look: [0, 5.4, 0] }]);
   near(cam.fov, 51.2820, 1e-4);
+  assert.equal(cam.motionBlur.enabled, false, 'flat elements keep the 2D look');
+  assert.equal(cam.shake.amp, 0);
+  assert.equal(cam.bankGain, 0);
 });
 
 test('space: ensureSpace upgrades camera-less projects once and leaves 3D projects alone', () => {
