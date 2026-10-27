@@ -74,3 +74,17 @@ test('a sparse keyframe path still cuts a continuous tube', () => {
   const cut = generateCity(world, { path });
   assert.ok(cut.corridor.cleared >= 1);
 });
+
+test('separate camera corridors never clear an imaginary connecting flight', () => {
+  const world = { seed: 9, corridor: { enabled: true, radius: 5 } };
+  const target = generateCity(world).buildings[0];
+  const paths = [
+    [[target.x - 200, 10, target.z], [target.x - 180, 10, target.z]],
+    [[target.x + 180, 10, target.z], [target.x + 200, 10, target.z]],
+  ];
+  const separate = generateCity(world, { paths });
+  const joined = generateCity(world, { path: paths.flat() });
+  assert.ok(separate.buildings.some((b) => b.seed === target.seed));
+  assert.equal(joined.buildings.some((b) => b.seed === target.seed), false);
+  assert.notEqual(separate.hash, joined.hash);
+});

@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { findBin, fileExists } from './media.js';
-import { paths } from '../core/store.js';
+import { paths } from './storage.js';
 import { audioElements, audioBaseVolume, AUDIO_VOLUME_PATH } from '../core/audio.js';
 
 const num = (v, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);

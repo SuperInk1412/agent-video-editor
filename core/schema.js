@@ -1,9 +1,12 @@
 // Project schema: defaults, normalisation, ids.
 import { normalizeCamera } from './camera.js';
 import { normalizeWorld } from './world.js';
+import { OBJECT_TYPES } from './scene.js';
+import { assertSafeData, isRecord, pathParts } from './json.js';
+import { PROJECT_SCHEMA } from './version.js';
 // A "project" is the single source of truth on disk: <project>/project.vdm.json
 
-export const SCHEMA = 'vdm.project/1';
+export const SCHEMA = PROJECT_SCHEMA;
 
 export const ELEMENT_TYPES = ['image', 'video', 'text', 'solid', 'shape', 'audio'];
 export const SEGMENT_STATUS = ['draft', 'previewed', 'approved'];
@@ -130,25 +133,31 @@ export function normalizeCameraStack(p) {
 
 /** Fill in defaults for every known field without clobbering user values. */
 export function normalizeProject(p) {
-  if (!p || typeof p !== 'object') throw new Error('project must be an object');
-  p.schema = p.schema || SCHEMA;
-  p.rev = Number.isFinite(p.rev) ? p.rev : 0;
-  p.meta = p.meta || {};
+  assertSafeData(p);
+  if (!isRecord(p)) throw Object.assign(new Error('project must be an object'), { code: 'OP_INVALID' });
+  p.schema ??= SCHEMA;
+  p.rev ??= 0;
+  p.meta ??= {};
+  if (!isRecord(p.meta)) throw Object.assign(new Error('meta must be an object'), { code: 'OP_INVALID' });
   const m = p.meta;
   m.title = m.title || 'Untitled';
-  m.fps = Number(m.fps) || 24;
-  m.width = Number(m.width) || 1920;
-  m.height = Number(m.height) || 1080;
-  m.duration = Number(m.duration) || 12;
+  m.fps ??= 24;
+  m.width ??= 1920;
+  m.height ??= 1080;
+  m.duration ??= 12;
   m.background = m.background || '#05070d';
   m.audio = m.audio || null;
-  m.beats = Array.isArray(m.beats) ? m.beats : [];
-  m.tempo = Number(m.tempo) || 0;
+  m.beats ??= [];
+  m.tempo ??= 0;
   m.fx = { ...DEFAULT_FX, ...(m.fx || {}) };
   m.style = m.style || 'default';
 
-  p.segments = Array.isArray(p.segments) ? p.segments : [];
-  p.elements = Array.isArray(p.elements) ? p.elements : [];
+  p.segments ??= [];
+  p.elements ??= [];
+  if (!Array.isArray(p.segments) || !Array.isArray(p.elements)
+    || !p.segments.every(isRecord) || !p.elements.every(isRecord)) {
+    throw Object.assign(new Error('segments and elements must be arrays of objects'), { code: 'OP_INVALID' });
+  }
 
   const segIds = new Set(p.segments.map((s) => s.id));
   p.segments = p.segments.map((s) => ({
@@ -163,15 +172,15 @@ export function normalizeProject(p) {
 
   const elIds = new Set(p.elements.map((e) => e.id));
   p.elements = p.elements.map((e) => {
-    e.type = ELEMENT_TYPES.includes(e.type) ? e.type : 'solid';
-    e.start = Number(e.start) || 0;
-    e.duration = Number(e.duration) || 1;
-    e.z = Number.isFinite(e.z) ? e.z : 0;
+    e.type ??= 'solid';
+    e.start ??= 0;
+    e.duration ??= 1;
+    e.z ??= 0;
     e.transform = { ...DEFAULT_TRANSFORM, ...(e.transform || {}) };
     e.style = { ...DEFAULT_STYLE, ...(e.style || {}) };
     e.fx = { glow: 0, ...(e.fx || {}) };
     e.motion = { ...DEFAULT_MOTION, ...(e.motion || {}) };
-    e.keyframes = Array.isArray(e.keyframes) ? e.keyframes : [];
+    e.keyframes ??= [];
     e.visible = e.visible !== false;
     e.name = e.name || (e.type === 'text' ? (e.style.text || 'text') : e.type);
     return e;
@@ -184,60 +193,163 @@ export function normalizeProject(p) {
   return p;
 }
 
-/** Throwing validation. Returns list of problems instead when {collect:true}. */
+/** Collect validation problems without repairing or mutating the document. */
 export function validateProject(p) {
   const issues = [];
   const push = (path, msg) => issues.push({ path, msg });
-  if (!p || typeof p !== 'object') return [{ path: '', msg: 'not an object' }];
-  if (!p.meta) push('meta', 'missing meta');
+  if (!isRecord(p)) return [{ path: '', msg: 'project must be an object' }];
+  try { assertSafeData(p); } catch (e) { push('', e.message); return issues; }
+  const number = (v, at, { min = -Infinity, max = Infinity, exclusive = false } = {}) => {
+    if (!Number.isFinite(v) || (exclusive ? v <= min : v < min) || v > max) push(at, `must be a finite number ${exclusive ? '>' : '>='} ${min} and <= ${max}`);
+  };
+  const array = (v, at, optional = false) => {
+    if (optional && v === undefined) return [];
+    if (!Array.isArray(v)) { push(at, 'must be an array'); return []; }
+    return v;
+  };
+  const record = (v, at) => {
+    if (!isRecord(v)) { push(at, 'must be an object'); return false; }
+    return true;
+  };
+  const id = (v, at, taken) => {
+    if (typeof v !== 'string' || !v || v.length > 128) push(at, 'must be a nonempty string of at most 128 characters');
+    if (taken.has(v)) push(at, `duplicate id ${v}`);
+    taken.add(v);
+  };
+  const vector = (v, at, dims) => {
+    if (!Array.isArray(v) || v.length !== dims || !v.every(Number.isFinite)) push(at, `must be a finite ${dims}-vector`);
+  };
+  const source = (v, at) => {
+    if (typeof v !== 'string' || /[\\\0]/.test(v) || v.startsWith('/') || /^[a-z][a-z\d+.-]*:/i.test(v) || v.split('/').includes('..')) push(at, 'must be a project-relative media path');
+  };
+  const tracks = (v, at) => {
+    if (v === undefined) return;
+    if (!record(v, at)) return;
+    for (const [name, track] of Object.entries(v)) {
+      try { pathParts(name); } catch (e) { push(`${at}.${name}`, e.message); }
+      array(track, `${at}.${name}`).forEach((key, i) => {
+        const loc = `${at}.${name}[${i}]`;
+        if (!record(key, loc)) return;
+        number(key.t, `${loc}.t`, { min: 0 });
+        if (key.v === undefined || key.v === null) push(`${loc}.v`, 'missing value');
+        if (Array.isArray(key.v) && !key.v.every(Number.isFinite)) push(`${loc}.v`, 'vector values must be finite');
+      });
+    }
+  };
+  if (p.schema !== SCHEMA) push('schema', `unsupported schema ${p.schema}`);
+  if (!Number.isSafeInteger(p.rev) || p.rev < 0) push('rev', 'must be a nonnegative safe integer');
+  if (!record(p.meta, 'meta')) { /* remaining sections can still be checked */ }
   else {
-    if (!(p.meta.fps > 0)) push('meta.fps', 'fps must be > 0');
-    if (!(p.meta.width > 0)) push('meta.width', 'width must be > 0');
-    if (!(p.meta.height > 0)) push('meta.height', 'height must be > 0');
-    if (!(p.meta.duration > 0)) push('meta.duration', 'duration must be > 0');
+    for (const name of ['fps', 'width', 'height', 'duration']) number(p.meta[name], `meta.${name}`, { min: 0, exclusive: true });
+    if (typeof p.meta.title !== 'string') push('meta.title', 'must be a string');
+    if (p.meta.audio != null && record(p.meta.audio, 'meta.audio')) {
+      source(p.meta.audio.src, 'meta.audio.src');
+      for (const name of ['offset', 'gain']) if (p.meta.audio[name] !== undefined) number(p.meta.audio[name], `meta.audio.${name}`);
+    }
+    let lastBeat = -Infinity;
+    array(p.meta.beats, 'meta.beats', true).forEach((beat, i) => {
+      number(beat, `meta.beats[${i}]`, { min: 0 });
+      if (beat < lastBeat) push(`meta.beats[${i}]`, 'beats must be sorted');
+      lastBeat = beat;
+    });
+  }
+  if (p.world !== undefined && record(p.world, 'world')) {
+    if (p.world.grid !== undefined && record(p.world.grid, 'world.grid')) {
+      for (const name of ['nx', 'nz']) {
+        const value = p.world.grid[name];
+        if (!Number.isInteger(value) || value < 1 || value > 256) push(`world.grid.${name}`, 'must be an integer from 1 to 256');
+      }
+      for (const name of ['block', 'street']) number(p.world.grid[name], `world.grid.${name}`, { min: 0, exclusive: name === 'block' });
+    }
+    if (p.world.density !== undefined) number(p.world.density, 'world.density', { min: 0, max: 1 });
+    if (p.world.palette !== undefined && (!Array.isArray(p.world.palette) || !p.world.palette.length || !p.world.palette.every((c) => typeof c === 'string'))) push('world.palette', 'must be a nonempty array of colors');
   }
   const segIds = new Set();
-  (p.segments || []).forEach((s, i) => {
-    if (!s.id) push(`segments[${i}].id`, 'missing id');
-    if (segIds.has(s.id)) push(`segments[${i}].id`, `duplicate id ${s.id}`);
-    segIds.add(s.id);
-    if (!(s.duration > 0)) push(`segments[${i}].duration`, 'duration must be > 0');
+  array(p.segments, 'segments').forEach((s, i) => {
+    const at = `segments[${i}]`;
+    if (!record(s, at)) return;
+    id(s.id, `${at}.id`, segIds);
+    number(s.start, `${at}.start`, { min: 0 });
+    number(s.duration, `${at}.duration`, { min: 0, exclusive: true });
+    if (s.status !== undefined && !SEGMENT_STATUS.includes(s.status)) push(`${at}.status`, 'unknown segment status');
   });
   const ids = new Set();
-  (p.elements || []).forEach((e, i) => {
-    if (!e.id) push(`elements[${i}].id`, 'missing id');
-    if (ids.has(e.id)) push(`elements[${i}].id`, `duplicate id ${e.id}`);
-    ids.add(e.id);
+  array(p.elements, 'elements').forEach((e, i) => {
+    const at = `elements[${i}]`;
+    if (!record(e, at)) return;
+    id(e.id, `${at}.id`, ids);
     if (!ELEMENT_TYPES.includes(e.type)) push(`elements[${i}].type`, `unknown type ${e.type}`);
-    if (!(e.duration > 0)) push(`elements[${i}].duration`, 'duration must be > 0');
-    if (e.start < 0) push(`elements[${i}].start`, 'start must be >= 0');
+    number(e.duration, `${at}.duration`, { min: 0, exclusive: true });
+    number(e.start, `${at}.start`, { min: 0 });
+    if (e.src !== undefined) source(e.src, `${at}.src`);
+    if (e.type === 'audio' && !e.src) push(`${at}.src`, 'audio element needs src');
+    for (const name of ['fadeIn', 'fadeOut', 'srcIn', 'punch']) if (e[name] !== undefined) number(e[name], `${at}.${name}`, { min: 0 });
+    if (e.volume !== undefined) number(e.volume, `${at}.volume`, { min: 0, max: 1 });
+    if (e.transform !== undefined && record(e.transform, `${at}.transform`)) {
+      for (const name of Object.keys(DEFAULT_TRANSFORM)) if (e.transform[name] !== undefined) number(e.transform[name], `${at}.transform.${name}`);
+    }
+    if (e.style?.size !== undefined) number(e.style.size, `${at}.style.size`, { min: 0 });
     if (e.segment && !segIds.has(e.segment)) push(`elements[${i}].segment`, `unknown segment ${e.segment}`);
-    (e.keyframes || []).forEach((k, j) => {
-      if (typeof k.t !== 'number') push(`elements[${i}].keyframes[${j}].t`, 't must be a number');
-      if (!k.path) push(`elements[${i}].keyframes[${j}].path`, 'missing path');
+    array(e.keyframes, `${at}.keyframes`, true).forEach((k, j) => {
+      const loc = `${at}.keyframes[${j}]`;
+      if (!record(k, loc)) return;
+      number(k.t, `${loc}.t`); // keys outside the element window are needed after splitting
+      try { pathParts(k.path); } catch (err) { push(`${loc}.path`, err.message); }
+      if (k.value === undefined) push(`${loc}.value`, 'missing value');
     });
   });
   const camIds = new Set();
-  (p.cameras || []).forEach((c, i) => {
-    if (!c.id) push(`cameras[${i}].id`, 'missing id');
-    else if (camIds.has(c.id)) push(`cameras[${i}].id`, `duplicate id ${c.id}`);
-    camIds.add(c.id);
-    if (!Array.isArray(c.path)) push(`cameras[${i}].path`, 'path must be an array');
-    if (c.start != null && (!Number.isFinite(Number(c.start)) || Number(c.start) < 0)) {
-      push(`cameras[${i}].start`, 'start must be a number >= 0');
-    }
-    if (c.duration != null && (!Number.isFinite(Number(c.duration)) || !(Number(c.duration) > 0))) {
-      push(`cameras[${i}].duration`, 'duration must be > 0');
-    }
+  array(p.cameras, 'cameras', true).forEach((c, i) => {
+    const at = `cameras[${i}]`;
+    if (!record(c, at)) return;
+    id(c.id, `${at}.id`, camIds);
+    if (c.fov !== undefined) number(c.fov, `${at}.fov`, { min: 1, max: 360 });
+    if (c.start !== undefined) number(c.start, `${at}.start`, { min: 0 });
+    if (c.duration !== undefined) number(c.duration, `${at}.duration`, { min: 0, exclusive: true });
+    for (const name of ['center', 'scale']) if (c[name] !== undefined) vector(c[name], `${at}.${name}`, 3);
+    array(c.path, `${at}.path`).forEach((key, j) => {
+      const loc = `${at}.path[${j}]`;
+      if (!record(key, loc)) return;
+      number(key.t, `${loc}.t`, { min: 0 });
+      vector(key.pos, `${loc}.pos`, 3);
+      if (key.look != null) vector(key.look, `${loc}.look`, 3);
+    });
+    tracks(c.tracks, `${at}.tracks`);
   });
-  const order = Array.isArray(p.cameraOrder) ? p.cameraOrder : [];
+  const order = array(p.cameraOrder, 'cameraOrder', true);
   order.forEach((id, i) => {
     if (!camIds.has(id)) push(`cameraOrder[${i}]`, `unknown camera ${id}`);
   });
   if (p.activeCameraId != null && !camIds.has(p.activeCameraId)) {
     push('activeCameraId', `unknown camera ${p.activeCameraId}`);
   }
+  if (p.scene !== undefined && record(p.scene, 'scene')) {
+    if (p.scene.version !== 3 || p.scene.units !== 'm') push('scene', 'unsupported scene version or units');
+    const objects = new Set();
+    array(p.scene.objects, 'scene.objects').forEach((obj, i) => {
+      const at = `scene.objects[${i}]`;
+      if (!record(obj, at)) return;
+      id(obj.id, `${at}.id`, objects);
+      if (!OBJECT_TYPES.includes(obj.type)) push(`${at}.type`, 'unknown object type');
+      number(obj.start, `${at}.start`, { min: 0 });
+      number(obj.duration, `${at}.duration`, { min: 0, exclusive: true });
+      for (const name of ['pivot', 'position', 'scale']) if (obj[name] !== undefined) vector(obj[name], `${at}.${name}`, 3);
+      if (obj.rot !== undefined && record(obj.rot, `${at}.rot`)) {
+        vector(obj.rot.dir, `${at}.rot.dir`, 3);
+        number(obj.rot.roll, `${at}.rot.roll`);
+      }
+      if (obj.opacity !== undefined) number(obj.opacity, `${at}.opacity`, { min: 0, max: 1 });
+      if (obj.geom !== undefined && record(obj.geom, `${at}.geom`)) for (const name of ['w', 'h', 'd']) number(obj.geom[name], `${at}.geom.${name}`, { min: 0, exclusive: true });
+      tracks(obj.tracks, `${at}.tracks`);
+    });
+  }
   return issues;
+}
+
+export function assertValidProject(project) {
+  const issues = validateProject(project);
+  if (issues.length) throw Object.assign(new Error(`invalid project: ${issues.map((i) => `${i.path}: ${i.msg}`).join('; ')}`), { code: 'OP_INVALID', issues });
+  return project;
 }
 
 export function elementsAt(p, t) {

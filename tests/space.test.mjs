@@ -7,7 +7,8 @@ import {
   SCREEN_DISTANCE, screenCenterY, defaultFov, screenToWorld, defaultWorld, defaultCamera, ensureSpace, hasCamera,
 } from '../core/space.js';
 import { createProject, normalizeProject } from '../core/schema.js';
-import { saveProject, loadProject } from '../core/store.js';
+import { saveProject, loadProject } from '../engine/storage.js';
+import { projectService } from '../engine/projects.js';
 import { evalCamera } from '../core/camera.js';
 import { applyOp } from '../core/ops.js';
 
@@ -60,6 +61,21 @@ test('space: ensureSpace upgrades camera-less projects once and leaves 3D projec
   const world = JSON.stringify(q.world);
   assert.equal(ensureSpace(q), false);
   assert.equal(JSON.stringify(q.world), world, 'world untouched when a camera exists');
+});
+
+test('space: a new project is created in unified space with a default camera', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'vdm-new-space-'));
+  try {
+    const tx = await projectService(dir).transact({
+      command: { type: 'initialize', options: { title: 'new', background: '#101010' } },
+    });
+    assert.equal(tx.project.cameras.length, 1);
+    assert.equal(tx.project.world.source, 'none');
+    assert.equal(tx.project.world.sky, '#101010');
+    assert.equal(tx.project.camera.id, tx.project.cameras[0].id);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('space: loading a 2D project from disk upgrades it in memory only', async () => {

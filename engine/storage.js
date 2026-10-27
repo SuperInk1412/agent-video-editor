@@ -4,9 +4,10 @@
 import fs from 'node:fs/promises';
 import fss from 'node:fs';
 import path from 'node:path';
-import { normalizeProject, validateProject } from './schema.js';
-import { ensureSpace } from './space.js';
-import { ensureAudioElements } from './audio.js';
+import { randomUUID } from 'node:crypto';
+import { normalizeProject, assertValidProject } from '../core/schema.js';
+import { ensureSpace } from '../core/space.js';
+import { ensureAudioElements } from '../core/audio.js';
 
 export const PROJECT_FILE = 'project.vdm.json';
 export const VDM_DIR = '.vdm';
@@ -68,53 +69,92 @@ export async function loadProject(dir) {
   ensureSpace(project);
   // Old projects kept their song only in meta.audio; show it as a real element.
   ensureAudioElements(project);
+  assertValidProject(project);
   return project;
 }
 
 export async function saveProject(dir, project, { by = 'ui' } = {}) {
   const p = await ensureProjectDirs(dir);
-  const issues = validateProject(project);
-  if (issues.length) {
-    const err = new Error(`invalid project: ${issues.map((i) => `${i.path}: ${i.msg}`).join('; ')}`);
-    err.issues = issues;
-    throw err;
-  }
-  project.rev = (project.rev || 0) + 1;
-  project.meta.savedAt = new Date().toISOString();
-  const json = JSON.stringify(project, null, 2) + '\n';
-  const tmp = `${p.file}.tmp-${process.pid}-${Date.now()}`;
-  await fs.writeFile(tmp, json, 'utf8');
-  await fs.rename(tmp, p.file);
+  assertValidProject(project);
+  const next = JSON.parse(JSON.stringify(project));
+  next.rev++;
+  next.meta.savedAt = new Date().toISOString();
+  await atomicJson(p.file, next);
+  project.rev = next.rev;
+  project.meta.savedAt = next.meta.savedAt;
   await fs.writeFile(p.app && path.join(p.vdm, 'last-save.json'),
     JSON.stringify({ rev: project.rev, by, at: project.meta.savedAt }, null, 2)).catch(() => {});
   return project;
 }
 
-/** Acquire an inter-process lock (mkdir is atomic on every platform we care about). */
-export async function withLock(dir, fn, { timeout = 8000, stale = 15000 } = {}) {
+/** Atomic publication; a failed write never leaves a partial JSON file. */
+export async function atomicJson(file, value) {
+  const temporary = `${file}.tmp-${randomUUID()}`;
+  let handle;
+  try {
+    handle = await fs.open(temporary, 'wx', 0o600);
+    await handle.writeFile(JSON.stringify(value, null, 2) + '\n', 'utf8');
+    await handle.sync();
+    await handle.close();
+    handle = null;
+    await fs.rename(temporary, file);
+  } finally {
+    await handle?.close().catch(() => {});
+    await fs.rm(temporary, { force: true });
+  }
+}
+
+const alive = (pid) => {
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code !== 'ESRCH'; }
+};
+
+// Removing a unique owner's file is the ownership check. Only the process that
+// successfully unlinks it may remove the now-empty directory. Never rm -r a lock.
+async function releaseOwner(lock, name) {
+  try { await fs.unlink(path.join(lock, name)); }
+  catch (e) { if (e.code === 'ENOENT') return; throw e; }
+  try { await fs.rmdir(lock); }
+  catch (e) { if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(e.code)) throw e; }
+}
+
+/** Local cross-process lock. A live owner is never evicted because of its age. */
+export async function withLock(dir, fn, { timeout = 8000, stale = 15000, lockName = 'lock' } = {}) {
   const p = await ensureProjectDirs(dir);
+  if (!['lock', 'runtime-lock', 'jobs-lock'].includes(lockName)) throw new Error('invalid lock name');
+  p.lock = path.join(p.vdm, lockName);
   const t0 = Date.now();
+  const owner = `owner-${process.pid}-${randomUUID()}`;
   for (;;) {
     try {
       await fs.mkdir(p.lock);
+      try { await fs.writeFile(path.join(p.lock, owner), '', { flag: 'wx' }); }
+      catch (e) { await fs.rmdir(p.lock).catch(() => {}); throw e; }
       break;
     } catch (e) {
       if (e.code !== 'EEXIST') throw e;
       try {
-        const st = await fs.stat(p.lock);
-        if (Date.now() - st.mtimeMs > stale) {
-          await fs.rm(p.lock, { recursive: true, force: true });
-          continue;
+        const entries = await fs.readdir(p.lock);
+        if (entries.length === 1) {
+          const match = /^owner-(\d+)-[\da-f-]+$/.exec(entries[0]);
+          if (match && !alive(Number(match[1]))) {
+            await releaseOwner(p.lock, entries[0]);
+            continue;
+          }
         }
-      } catch { /* raced */ }
-      if (Date.now() - t0 > timeout) throw new Error(`project is locked: ${p.lock}`);
+      } catch (e) { if (e.code !== 'ENOENT') throw e; }
+      if (Date.now() - t0 >= timeout) {
+        const st = await fs.stat(p.lock).catch(() => null);
+        const entries = await fs.readdir(p.lock).catch(() => []);
+        const orphan = st && !entries.length && Date.now() - st.mtimeMs > stale;
+        throw Object.assign(new Error(`${orphan ? 'project lock has no identifiable owner' : 'project is locked'}: ${p.lock}`), { code: orphan ? 'LOCK_ORPHANED' : 'LOCK_TIMEOUT', status: 409 });
+      }
       await sleep(40);
     }
   }
   try {
     return await fn(p);
   } finally {
-    await fs.rm(p.lock, { recursive: true, force: true }).catch(() => {});
+    await releaseOwner(p.lock, owner);
   }
 }
 

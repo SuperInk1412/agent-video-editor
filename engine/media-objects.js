@@ -4,7 +4,7 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { paths } from '../core/store.js';
+import { paths } from './storage.js';
 import { mediaSpec, videoSpan } from '../core/objects-media.js';
 import { fileExists, findBin, hashOf } from './media.js';
 

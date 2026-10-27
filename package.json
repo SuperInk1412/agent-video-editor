@@ -12,11 +12,14 @@
     "web": "node engine/server.js --open",
     "dev": "node scripts/dev.mjs --web",
     "cli": "node cli/vdm.js",
-    "test": "node --test \"tests/*.test.mjs\"",
+    "mcp": "node mcp/server.js",
+    "test": "node scripts/test.mjs",
     "still": "node cli/vdm.js still",
     "blender:check": "node scripts/blender-check.mjs",
     "logs": "node scripts/logs.mjs --project projects/miku-swiss --lines 120 --follow",
-    "check:preview": "node scripts/check-preview.mjs"
+    "check:preview": "node scripts/check-preview.mjs",
+    "check:evaluate": "node scripts/check-evaluate.mjs",
+    "benchmark": "node scripts/benchmark.mjs"
   },
   "keywords": [
     "video",

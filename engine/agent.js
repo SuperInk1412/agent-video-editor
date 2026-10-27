@@ -11,6 +11,7 @@ import fss from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { which } from './which.js';
 
 const NL = String.fromCharCode(10);
@@ -83,17 +84,15 @@ function killTree(child) {
 }
 
 export class AgentRunner {
-  constructor({ root, onEvent }) {
+  constructor({ root, onEvent, resolveRuntime = findDsh }) {
     this.root = root;
     this.onEvent = onEvent;
-    this.child = null;
-    this.runId = null;
-    this.finalText = '';
-    this.textBuf = '';
-    this.startedAt = 0;
+    this.resolveRuntime = resolveRuntime;
+    this.run = null;
   }
 
-  get running() { return !!this.child; }
+  get running() { return !!this.run && ['starting', 'running', 'applying', 'cancelling'].includes(this.run.status); }
+  get runId() { return this.run?.id || null; }
 
   /** Context bundle the agent reads: selection, frames, project summary. */
   async writeContext({ selection, frames = [], extra = {} }) {
@@ -167,39 +166,46 @@ export class AgentRunner {
 
   async start({ task, contextFile, frames = [], selection = {}, project }) {
     if (this.running) throw new Error('agent is already running');
-    const dsh = await findDsh();
-    if (!dsh) throw new Error('DSH-TUI not found. Install it (npm i -g @deepseek-ai/dsh) or set VDM_DSH to lib/bin.js');
-    const prompt = this.buildTask({ task, contextFile, frames, selection, project });
-    this.runId = `run-${Date.now()}`;
-    this.finalText = '';
-    this.textBuf = '';
-    this.startedAt = Date.now();
-
-    const env = { ...process.env };
-    if (isElectron && dsh.node === process.execPath) env.ELECTRON_RUN_AS_NODE = '1';
-    const child = spawn(dsh.node, [dsh.bin, '--profile', 'headless', '--json', prompt], {
-      cwd: this.root,
-      windowsHide: true,
-      env,
-    });
-    this.child = child;
-    const emit = (ev) => this.onEvent?.({ runId: this.runId, ...ev });
-    emit({ type: 'started', bin: dsh.bin, node: dsh.node });
+    // Reserve this run before resolving the executable; simultaneous starts
+    // cannot pass the guard, and callbacks never read the next run's state.
+    let finish;
+    const run = { id: `run-${randomUUID()}`, baseRev: project.rev, status: 'starting', cancelled: false,
+      child: null, finalText: '', text: '', startedAt: Date.now(), done: new Promise((r) => { finish = r; }) };
+    this.run = run;
+    const emit = async (ev) => this.onEvent?.({ runId: run.id, baseRev: run.baseRev, ...ev });
+    let dsh, child;
+    try {
+      dsh = await this.resolveRuntime();
+      if (run.cancelled) throw new Error('agent cancelled');
+      if (!dsh) throw new Error('DSH-TUI not found. Install it (npm i -g @deepseek-ai/dsh) or set VDM_DSH to lib/bin.js');
+      const prompt = this.buildTask({ task, contextFile, frames, selection, project });
+      const env = { ...process.env };
+      if (isElectron && dsh.node === process.execPath) env.ELECTRON_RUN_AS_NODE = '1';
+      child = spawn(dsh.node, [dsh.bin, '--profile', 'headless', '--json', prompt], { cwd: this.root, windowsHide: true, env });
+      run.child = child;
+      run.status = 'running';
+    } catch (e) {
+      run.status = run.cancelled ? 'cancelled' : 'failed';
+      finish();
+      throw e;
+    }
+    const forward = (ev) => { void emit(ev).catch(() => {}); };
+    forward({ type: 'started', bin: dsh.bin, node: dsh.node });
 
     let buf = '';
     const handle = (line) => {
       const s = line.trim();
       if (!s) return;
       let ev;
-      try { ev = JSON.parse(s); } catch { emit({ type: 'raw', text: s }); return; }
+      try { ev = JSON.parse(s); } catch { forward({ type: 'raw', text: s }); return; }
       if (ev.type === 'text') {
-        this.textBuf += ev.text || '';
-        emit({ type: 'agent', event: ev });
+        run.text += ev.text || '';
+        forward({ type: 'agent', event: ev });
       } else if (ev.type === 'final') {
-        this.finalText = ev.text || this.textBuf;
-        emit({ type: 'agent', event: ev });
+        run.finalText = ev.text || run.text;
+        forward({ type: 'agent', event: ev });
       } else {
-        emit({ type: 'agent', event: ev });
+        forward({ type: 'agent', event: ev });
       }
     };
     child.stdout.on('data', (d) => {
@@ -213,31 +219,44 @@ export class AgentRunner {
       errText += String(d);
       if (errText.length > 20000) errText = errText.slice(-10000);
     });
-    child.on('error', (e) => emit({ type: 'error', message: String(e) }));
-    child.on('close', (code) => {
+    child.on('error', (e) => { run.failed = true; forward({ type: 'error', message: String(e) }); });
+    child.on('close', async (code) => {
       if (buf) handle(buf);
-      this.child = null;
-      const proposal = extractProposal(this.finalText || this.textBuf);
-      if (proposal) emit({ type: 'proposal', proposal });
-      emit({
-        type: 'exit',
-        code,
-        seconds: (Date.now() - this.startedAt) / 1000,
-        stderr: errText ? errText.slice(-2000) : '',
-        hadFinal: !!this.finalText,
-      });
+      run.child = null;
+      try {
+        const proposal = !run.cancelled && !run.failed && code === 0 ? extractProposal(run.finalText || run.text) : null;
+        if (proposal) {
+          run.status = 'applying';
+          await emit({ type: 'proposal', proposal });
+        }
+        run.status = run.cancelled ? 'cancelled' : code === 0 && !run.failed ? 'succeeded' : 'failed';
+        await emit({
+          type: 'exit',
+          code,
+          cancelled: run.cancelled,
+          seconds: (Date.now() - run.startedAt) / 1000,
+          stderr: errText ? errText.slice(-2000) : '',
+          hadFinal: !!run.finalText,
+        });
+      } catch (e) {
+        run.status = 'failed';
+        forward({ type: 'error', message: String(e) });
+      } finally { finish(); }
     });
-    return { runId: this.runId };
+    return { runId: run.id };
   }
 
   cancel() {
-    if (!this.child) return false;
-    const runId = this.runId;
-    killTree(this.child);
-    this.child = null;
-    this.onEvent?.({ runId, type: 'cancelled' });
+    const run = this.run;
+    if (!this.running || run.cancelled || run.status === 'applying') return false;
+    run.cancelled = true;
+    run.status = 'cancelling';
+    killTree(run.child);
+    void Promise.resolve(this.onEvent?.({ runId: run.id, type: 'cancelled' })).catch(() => {});
     return true;
   }
+
+  async close() { this.cancel(); await this.run?.done; }
 }
 
 /** Pull {"note","ops"} out of the agent's final answer (tolerates fences / chatter). */

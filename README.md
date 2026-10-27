@@ -24,6 +24,9 @@ VedioMaker 是一个本地的视频作曲台：时间线由你自己定义，画
 
 ## 快速开始
 
+外部 agent 可通过 MCP stdio 操作项目：`node mcp/server.js --project <项目目录>`。
+配置与编辑 / 出帧闭环见 [MCP 接口](docs/SPEC-MCP.md)。
+
 ```bash
 # 在仓库根启动：先弹项目选择器，默认示例是「初音ミクの消失 · Swiss」
 npm start
@@ -59,7 +62,8 @@ Electron 路径可用 `VDM_ELECTRON` 覆盖；Blender 用 `VDM_BLENDER` 覆盖�
 
 ## 已验证
 
-- `npm test`：100+ 个单元测试全绿（ops / 编辑语义 / 求值 / 场景 / 相机 / 迁移 / 存储锁与监听 / 节拍 / agent 解析）
+- `npm test`：覆盖 ops、编辑语义、求值、迁移、事务恢复、跨进程锁、任务、运行时和 MCP 图像回读；可选外部依赖缺失时对应集成用例明确跳过
+- `npm run check:evaluate`：85 个边界样例与真实 Blender 逐字段对拍；`npm run benchmark` 提供 10 / 100 / 1000 元素的采样量测
 - Blender 5.0.1（Windows）与 5.2.2（Linux）无头 EEVEE：1080p 单帧约 2–5s（含启动），24s@50% 成片约 70s
 - 示例项目 `projects/miku-swiss`（「初音ミクの消失 · Swiss」）：15s / 8 台相机 / 133 个元素 /
   旧 `meta.audio` 配乐；首次打开会迁移成一条 `audio` 声音元素。`project.vdm.json` 与音频素材随仓库提供，克隆后可直接播放和编辑。
@@ -235,9 +239,11 @@ alpha-over，画面变换和透明度逐帧写进 strip，所以预览和最终�
 
 | 路径 | 作用 |
 | --- | --- |
-| `core/` | 纯 JS 模型：时间、求值、ops、schema、存储（零依赖，浏览器/Node 共用） |
+| `core/` | 纯 JS 模型：时间、求值、ops、schema、输入边界（零依赖，浏览器/Node 共用） |
 | `cli/vdm.js` | `vdm` 命令：人用，也**是 AI 的工具面** |
-| `engine/` | Node 服务：静态/媒体服务、REST+SSE、Blender 调度、agent 调度、节拍分析 |
+| `engine/` | Node 服务：项目存储与锁、静态/媒体服务、REST+SSE、Blender 调度、agent 调度、节拍分析 |
+| `application/` | 公共事务、全局历史、任务生命周期、查询和契约校验 |
+| `mcp/` | 零依赖 stdio 协议、工具和图像资源，复用项目运行时 |
 | `app/renderer/` | 无构建步骤的 UI（原生 ESM + WebGL2） |
 | `app/electron/` | Electron 壳（启动引擎 + 开窗） |
 | `blender/` | bpy 场景构建与渲染（图层、文字、合成器、ffmpeg 封装） |

@@ -3,6 +3,8 @@
 import { DEFAULT_TRANSFORM, DEFAULT_STYLE, DEFAULT_FX, ELEMENT_TYPES, newId } from './schema.js';
 import { SCENE_VERSION, normalizeObject } from './scene.js';
 import { normalizeCamera, retimeCamSpans, retimePathSpan, cameraRange } from './camera.js';
+import { assertSafeData, pathParts } from './json.js';
+import { clearCompiledTracks } from './tracks.js';
 import { normalizeCurve } from './curves.js';
 import { EXT_OP_KINDS, applyExtOp } from './ops-ext.js';
 
@@ -14,6 +16,7 @@ export const OP_KINDS = [
   'cameraParamKey', 'cameraParamUnkey', 'worldSet',
   'addCamera', 'removeCamera', 'reorderCamera', 'activateCamera',
   'objectAdd', 'objectRemove', 'objectPatch', 'objectKey', 'objectUnkey',
+  'replaceTimeline', 'restoreProject',
   // ops added by feature modules through core/ops-ext.js
   ...EXT_OP_KINDS,
 ];
@@ -69,10 +72,15 @@ function syncDuration(p) {
 }
 
 export function deepMerge(target, patch) {
+  assertSafeData(patch);
+  return merge(target, patch);
+}
+
+function merge(target, patch) {
   if (!isObj(patch)) return patch;
   const out = isObj(target) ? { ...target } : {};
   for (const [k, v] of Object.entries(patch)) {
-    if (isObj(v) && isObj(out[k])) out[k] = deepMerge(out[k], v);
+    if (isObj(v) && Object.hasOwn(out, k) && isObj(out[k])) out[k] = merge(out[k], v);
     else out[k] = v;
   }
   return out;
@@ -81,19 +89,24 @@ export function deepMerge(target, patch) {
 /** get/set a dotted path, with numeric segments addressing array indices */
 export function getPath(obj, path) {
   if (!path) return obj;
-  return path.split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj);
+  return pathParts(path).reduce((o, k) => (o != null && Object.hasOwn(o, k) ? o[k] : undefined), obj);
 }
 
 export function setPath(obj, path, value) {
-  const parts = String(path).split('.');
+  const parts = pathParts(path);
+  assertSafeData(value);
   let cur = obj;
   for (let i = 0; i < parts.length - 1; i++) {
     const k = parts[i];
     const nextIsIndex = /^\d+$/.test(parts[i + 1]);
-    if (cur[k] == null) cur[k] = nextIsIndex ? [] : {};
+    if (Array.isArray(cur) && (!/^(0|[1-9]\d*)$/.test(k) || Number(k) > cur.length)) fail('invalid or sparse array index');
+    if (!Object.hasOwn(cur, k) || cur[k] == null) cur[k] = nextIsIndex ? [] : {};
+    if (!cur[k] || typeof cur[k] !== 'object') fail(`cannot traverse property ${k}`);
     cur = cur[k];
   }
-  cur[parts[parts.length - 1]] = value;
+  const last = parts[parts.length - 1];
+  if (Array.isArray(cur) && (!/^(0|[1-9]\d*)$/.test(last) || Number(last) > cur.length)) fail('invalid or sparse array index');
+  cur[last] = value;
   return obj;
 }
 
@@ -459,21 +472,37 @@ export function coerceValue(value) {
  * Ops never touch disk.
  */
 export function applyOp(p, op) {
+  clearCompiledTracks();
+  assertSafeData(op);
   if (!op || typeof op !== 'object') fail('op must be an object');
   const kind = op.op;
   if (!kind) fail('op.op missing');
   const changed = [];
 
   switch (kind) {
+    case 'restoreProject': {
+      // Used by audited initialization, snapshot import and history commands.
+      if (!isObj(op.project)) fail('restoreProject needs a project');
+      const revision = p.rev;
+      for (const key of Object.keys(p)) delete p[key];
+      Object.assign(p, JSON.parse(JSON.stringify(op.project)), { rev: revision });
+      return { changed: ['project'] };
+    }
+    case 'replaceTimeline': {
+      if (!Array.isArray(op.elements) || !Array.isArray(op.segments)) fail('replaceTimeline needs elements and segments');
+      p.elements = JSON.parse(JSON.stringify(op.elements));
+      p.segments = JSON.parse(JSON.stringify(op.segments));
+      return { changed: ['elements', 'segments'] };
+    }
     case 'addElement': {
       const el = op.element;
       if (!isObj(el)) fail('addElement needs element object');
       if (!el.type || !ELEMENT_TYPES.includes(el.type)) fail(`bad element type ${el.type}`);
       const ids = allIds(p);
-      if (!el.id) el.id = newId('el', ids);
-      else if (ids.has(el.id)) fail(`id ${el.id} already used`);
+      const id = el.id || newId('el', ids);
+      if (el.id && ids.has(el.id)) fail(`id ${el.id} already used`);
       const full = {
-        id: el.id,
+        id,
         name: el.name || (el.type === 'text'
           ? (el.style?.text || 'text')
           : el.type === 'audio'
@@ -491,6 +520,10 @@ export function applyOp(p, op) {
         motion: { type: 'none', amount: 0, dir: 'in', ...(el.motion || {}) },
         keyframes: Array.isArray(el.keyframes) ? el.keyframes : [],
         visible: el.visible !== false,
+        fadeIn: el.fadeIn ?? 0,
+        fadeOut: el.fadeOut ?? 0,
+        punch: el.punch ?? 0,
+        srcIn: el.srcIn ?? 0,
         meta: el.meta || {},
       };
       if (full.type === 'video' || full.type === 'audio') {
@@ -514,6 +547,7 @@ export function applyOp(p, op) {
       let patch = op.patch;
       if (typeof patch === 'string') patch = { [patch]: op.value };
       if (!isObj(patch)) fail('updateElement needs patch object');
+      if (Object.hasOwn(patch, 'id')) fail('element id is immutable');
       const next = deepMerge(el, patch);
       if (next.segment && !p.segments.some((s) => s.id === next.segment)) fail(`unknown segment ${next.segment}`);
       Object.keys(next).forEach((k) => { el[k] = next[k]; });
@@ -524,6 +558,7 @@ export function applyOp(p, op) {
 
     case 'set': {
       const el = findEl(p, op.id);
+      if (pathParts(op.path)[0] === 'id') fail('element id is immutable');
       setPath(el, op.path, coerceValue(op.value));
       changed.push(el.id);
       return { changed };
@@ -644,10 +679,10 @@ export function applyOp(p, op) {
     case 'addSegment': {
       const s = op.segment || {};
       const ids = allIds(p);
-      if (!s.id) s.id = newId('seg', ids);
-      else if (ids.has(s.id)) fail(`id ${s.id} already used`);
+      const id = s.id || newId('seg', ids);
+      if (s.id && ids.has(s.id)) fail(`id ${s.id} already used`);
       const seg = {
-        id: s.id,
+        id,
         name: s.name || `seg ${p.segments.length + 1}`,
         start: Number(s.start ?? 0),
         duration: Number(s.duration ?? 2),
@@ -694,6 +729,7 @@ export function applyOp(p, op) {
     case 'keySet': {
       const el = findEl(p, op.id);
       if (!op.path) fail('keySet needs path');
+      pathParts(op.path);
       const t = Math.round(Number(op.t) * 1000) / 1000;
       if (!Number.isFinite(t)) fail('keySet needs t');
       const old = (el.keyframes || []).find((k) => k.path === op.path && Math.abs(k.t - t) < 1e-4);
@@ -790,7 +826,7 @@ export function applyOp(p, op) {
       if (!Array.isArray(op.pos) || op.pos.length !== 3) fail('cameraKey needs pos:[x,y,z]');
       const t = Math.round(Number(op.t) * 1000) / 1000;
       if (!Number.isFinite(t)) fail('cameraKey needs t');
-      const cam = activeCamera(p, true);
+      const cam = op.id ? cameraById(p, op.id) : activeCamera(p, true);
       // Keep the existing curve shape when only the position is being edited.
       const old = (cam.path || []).find((k) => Math.abs(k.t - t) <= 1e-4);
       cam.path = (cam.path || []).filter((k) => Math.abs(k.t - t) > 1e-4);
@@ -831,7 +867,7 @@ export function applyOp(p, op) {
     }
 
     case 'cameraSet': {
-      const cam = activeCamera(p, true);
+      const cam = op.id ? cameraById(p, op.id) : activeCamera(p, true);
       const patch = op.patch || {};
       const next = deepMerge(cam, patch);
       Object.keys(next).forEach((k) => { cam[k] = next[k]; });
@@ -847,7 +883,7 @@ export function applyOp(p, op) {
     case 'cameraPath': {
       // Whole-path write used by the 3D viewport (drag a node / pull a handle).
       if (!Array.isArray(op.path)) fail('cameraPath needs path[]');
-      const cam = activeCamera(p, true);
+      const cam = op.id ? cameraById(p, op.id) : activeCamera(p, true);
       cam.path = op.path
         .filter((k) => k && Array.isArray(k.pos) && k.pos.length === 3 && Number.isFinite(Number(k.t)))
         .map((k) => {
@@ -1015,7 +1051,7 @@ export function applyOp(p, op) {
 
     case 'objectPatch': {
       const obj = findObj(p, op.id);
-      const patch = isObj(op.patch) ? op.patch : {};
+      const patch = isObj(op.patch) ? { ...op.patch } : {};
       delete patch.id;
       delete patch.tracks;
       const next = deepMerge(obj, patch);
@@ -1072,7 +1108,7 @@ export function applyOp(p, op) {
 
     case 'batch': {
       const results = (op.ops || []).map((o) => applyOp(p, o));
-      return { changed: results.flatMap((r) => r.changed) };
+      return { changed: results.flatMap((r) => r.changed), results };
     }
 
     default: {
@@ -1096,13 +1132,17 @@ export function applyOp(p, op) {
 }
 
 export function applyOps(p, ops) {
+  if (!Array.isArray(ops) || ops.length > 1000) fail('ops must be an array of at most 1000 operations');
+  assertSafeData(ops);
   const changed = new Set();
+  const results = [];
   for (const op of ops) {
     const r = applyOp(p, op);
+    results.push(JSON.parse(JSON.stringify(r)));
     (r.changed || []).forEach((c) => changed.add(c));
   }
   // keep elements ordered by z for rendering
   p.elements.sort((a, b) => a.z - b.z || a.start - b.start);
-  if ((ops || []).some(touchesTiming)) syncDuration(p);
-  return { changed: [...changed] };
+  if (ops.some(touchesTiming)) syncDuration(p);
+  return { changed: [...changed], results };
 }

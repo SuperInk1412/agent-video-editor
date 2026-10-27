@@ -5,6 +5,8 @@
 // and layers are 1 cm apart so depth sorting matches the old z order.
 import { evalCamera, normalizeCamera } from './camera.js';
 import { PX_PER_M, normalizeScene } from './scene.js';
+import { objectPose } from './scene.js';
+import { applyLegacy } from './legacy.js';
 
 const M = (px) => Number(px || 0) / PX_PER_M;
 const N = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
@@ -17,8 +19,16 @@ export function migrateProject(p) {
   if (!p || p.sceneId) return p; // already v3
   const meta = p.meta || {};
   const objects = (p.elements || []).map((el) => migrateElement(el));
-  const camera = p.camera ? migrateCamera(p.camera, meta) : defaultOrthoCamera(meta);
-  if (camera) objects.unshift(camera);
+  const sources = p.cameras?.length ? p.cameras : p.camera ? [p.camera] : [];
+  const cameras = sources.length ? sources.map((cam) => migrateCamera(cam, meta)).filter(Boolean) : [defaultOrthoCamera(meta)];
+  const camera = cameras.find((cam) => cam.id === p.activeCameraId) || cameras[0];
+  const used = new Set(objects.map((object) => object.id));
+  const conflicts = [];
+  for (const obj of [...cameras, ...(p.scene?.objects || [])]) {
+    if (used.has(obj.id)) { conflicts.push(obj.id); continue; }
+    used.add(obj.id); objects.push(JSON.parse(JSON.stringify(obj)));
+  }
+  if (conflicts.length) throw new Error(`migration id conflicts: ${conflicts.join(', ')}`);
 
   const scene = normalizeScene({
     name: meta.title || 'root',
@@ -26,15 +36,23 @@ export function migrateProject(p) {
     background: meta.background || '#05070d',
     cameraId: camera?.id || null,
     objects,
-    annotations: (p.segments || []).map((s, i) => ({
+    annotations: [...(p.scene?.annotations || []), ...(p.segments || []).map((s, i) => ({
       id: s.id || `anno_${i + 1}`,
       t: N(s.start),
       duration: N(s.duration),
       text: [s.name, s.intent].filter(Boolean).join(' — '),
-    })),
+    }))],
   });
+  scene.cameraOrder = p.cameraOrder?.length ? p.cameraOrder.slice() : cameras.map((cam) => cam.id);
+  return { ...p, units: 'm', sceneId: 'root', scenes: { root: scene }, migration: {
+    version: 1, sourceSchema: p.schema, sourceRev: p.rev,
+    counts: { elements: p.elements?.length || 0, cameras: cameras.length, objects: p.scene?.objects?.length || 0 },
+    warnings: ['Scene tree remains an experimental read model. Legacy camera modifiers are evaluated from preserved source data.'],
+  } };
+}
 
-  return { ...p, units: 'm', sceneId: 'root', scenes: { root: scene } };
+export function evaluateMigratedObject(object, time, meta) {
+  return applyLegacy(objectPose(object, time), object, time, meta);
 }
 
 /** Project a world pivot through the legacy ortho camera, in project pixels. */
@@ -59,7 +77,8 @@ function groupKeys(keyframes) {
 
 function scalarTrack(keys, map) {
   return keys
-    .map((k) => ({ t: N(k.t), v: map(k.value), ...(k.ease ? { ease: k.ease } : {}) }))
+    .map((k) => ({ t: N(k.t), v: map(k.value), ...(k.ease ? { ease: k.ease } : {}),
+      ...(k.curve ? { curve: JSON.parse(JSON.stringify(k.curve)) } : {}) }))
     .sort((a, b) => a.t - b.t);
 }
 
@@ -101,6 +120,7 @@ function migrateElement(el) {
     tracks,
     style: convertStyle(el.style),
     src: el.src,
+    srcIn: el.srcIn ?? 0,
     segment: el.segment,
   };
 
@@ -182,6 +202,7 @@ function migrateCamera(cam, meta) {
       t,
       v: st.pos.map(r6),
       ...(k.ease ? { ease: k.ease } : {}),
+      ...(Array.isArray(k.speed) ? { speed: k.speed.map((point) => point.slice()) } : {}),
       ...(Array.isArray(k.out) && k.out.length === 3 ? { out: k.out.map(Number) } : {}),
       ...(Array.isArray(k.in) && k.in.length === 3 ? { in: k.in.map(Number) } : {}),
     });
@@ -213,7 +234,8 @@ function migrateCamera(cam, meta) {
       roll: rollKeys,
       ...(fovKeys.length ? { 'camera.fov': fovKeys } : {}),
     },
-    legacy: { shake: cam.shake || null },
+    visible: cam.visible !== false,
+    legacy: { shake: cam.shake || null, sourceCamera: JSON.parse(JSON.stringify(cam)) },
     camera: {
       projection: 'perspective',
       fov: N(cam.fov) || 62,

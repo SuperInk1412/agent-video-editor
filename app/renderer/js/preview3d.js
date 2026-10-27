@@ -275,9 +275,9 @@ export function objectVisibleAt(obj, t) {
 export function objectSize(obj, pose) {
   const g = obj?.geom && typeof obj.geom === 'object' ? obj.geom : {};
   return [
-    Math.max(0.001, Number(g.w) || 2) * Math.abs(pose.scale[0] || 1),
-    Math.max(0.001, Number(g.h) || 2) * Math.abs(pose.scale[1] || 1),
-    Math.max(0.001, Number(g.d) || 2) * Math.abs(pose.scale[2] || 1),
+    Math.max(0.001, Number(g.w) || 2) * Math.abs(pose.scale[0] ?? 1),
+    Math.max(0.001, Number(g.h) || 2) * Math.abs(pose.scale[1] ?? 1),
+    Math.max(0.001, Number(g.d) || 2) * Math.abs(pose.scale[2] ?? 1),
   ];
 }
 

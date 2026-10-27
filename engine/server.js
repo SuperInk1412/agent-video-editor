@@ -8,20 +8,31 @@ import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
-  paths, loadProject, saveProject, findProjectRoot, watchProject,
-  ensureProjectDirs, projectExists, withLock, PROJECT_FILE,
-} from '../core/store.js';
-import { normalizeProject, createProject } from '../core/schema.js';
-import { ensureSpace } from '../core/space.js';
-import { applyOps } from '../core/ops.js';
+  paths, findProjectRoot, watchProject,
+  ensureProjectDirs, projectExists, PROJECT_FILE, atomicJson,
+} from './storage.js';
+import { projectService } from './projects.js';
+import { errorData } from '../application/errors.js';
 import { probeMedia, mimeOf, fileExists } from './media.js';
-import { renderStill, renderVideo, blenderVersion, findBlender } from './blender.js';
+import { blenderVersion, findBlender } from './blender.js';
 import { analyzeBeats } from './beats.js';
-import { planProject, summarizeProject, STYLE_PRESETS } from './storyboard.js';
+import { summarizeProject, STYLE_PRESETS } from './storyboard.js';
 import { AgentRunner, findDsh, CLI_PATH } from './agent.js';
 import { createLogger } from './log.js';
-import { cachedCity, is3D } from './shot.js';
-import { bakeCameraTrack } from '../core/camera.js';
+import { worldSnapshot } from './shot.js';
+import { readPath, writePath, isWithin, pathDenied } from './path-policy.js';
+import { pipeline as streamPipeline } from 'node:stream/promises';
+import { Transform } from 'node:stream';
+import { randomUUID } from 'node:crypto';
+import { claimRuntime, connectRuntime } from './runtime.js';
+import { createJobService } from './jobs.js';
+import { readSelection, contextAt } from '../application/queries.js';
+import { OP_KINDS } from '../core/ops.js';
+import { mediaService } from './media-service.js';
+import { compute } from './compute.js';
+import { hashOf } from './media.js';
+import { PROJECT_SCHEMA, EDIT_SEMANTICS_VERSION, RENDER_PLAN_VERSION } from '../core/version.js';
+import { pruneCache } from './cache.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const APP_DIR = path.resolve(HERE, '..');
@@ -40,22 +51,34 @@ function readBody(req, limit = 40 * 1024 * 1024) {
     const chunks = [];
     req.on('data', (d) => {
       size += d.length;
-      if (size > limit) { reject(new Error('body too large')); req.destroy(); return; }
+      if (size > limit) { reject(Object.assign(new Error('body too large'), { status: 413 })); req.resume(); return; }
       chunks.push(d);
     });
     req.on('end', () => {
       const raw = Buffer.concat(chunks).toString('utf8');
       if (!raw) return resolve({});
-      try { resolve(JSON.parse(raw)); } catch (e) { reject(new Error(`bad json: ${e.message}`)); }
+      try {
+        const value = JSON.parse(raw);
+        if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('request body must be an object');
+        resolve(value);
+      } catch (e) { reject(Object.assign(new Error(`bad json: ${e.message}`), { status: 400 })); }
     });
     req.on('error', reject);
   });
 }
 
-function safeJoin(base, rel) {
-  const p = path.resolve(base, '.' + path.posix.sep + rel);
-  if (!p.startsWith(path.resolve(base))) return null;
-  return p;
+async function publishMedia(temporary, directory, filename) {
+  const ext = path.extname(filename);
+  const stem = path.basename(filename, ext);
+  for (let i = 0; ; i++) {
+    const name = i ? `${stem}-${i}${ext}` : filename;
+    try {
+      // Same-directory hard link publishes a complete file atomically without
+      // replacing another upload that chose the same human-readable name.
+      await fsp.link(temporary, path.join(directory, name));
+      return name;
+    } catch (e) { if (e.code !== 'EEXIST') throw e; }
+  }
 }
 
 async function serveFile(req, res, file, { range = false } = {}) {
@@ -65,12 +88,11 @@ async function serveFile(req, res, file, { range = false } = {}) {
   const mime = mimeOf(file);
   const head = { 'content-type': mime, 'cache-control': 'no-cache', 'accept-ranges': 'bytes', 'content-disposition': 'inline' };
   if (range && req.headers.range) {
-    const m = /bytes=(\d*)-(\d*)/.exec(req.headers.range);
-    let start = m && m[1] ? parseInt(m[1], 10) : 0;
-    let end = m && m[2] ? parseInt(m[2], 10) : st.size - 1;
-    if (Number.isNaN(start)) start = 0;
-    if (Number.isNaN(end)) end = st.size - 1;
-    if (start >= st.size) {
+    const m = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range);
+    const suffix = m && !m[1] && m[2] ? Number(m[2]) : null;
+    const start = suffix != null ? Math.max(0, st.size - suffix) : m?.[1] ? Number(m[1]) : NaN;
+    let end = suffix != null ? st.size - 1 : m?.[2] ? Number(m[2]) : st.size - 1;
+    if (!m || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || suffix === 0 || start < 0 || start >= st.size || end < start) {
       res.writeHead(416, { 'content-range': `bytes */${st.size}` });
       return res.end();
     }
@@ -80,10 +102,10 @@ async function serveFile(req, res, file, { range = false } = {}) {
       'content-range': `bytes ${start}-${end}/${st.size}`,
       'content-length': end - start + 1,
     });
-    return fs.createReadStream(file, { start, end }).pipe(res);
+    return streamPipeline(fs.createReadStream(file, { start, end }), res).catch(() => {});
   }
   res.writeHead(200, { ...head, 'content-length': st.size });
-  return fs.createReadStream(file).pipe(res);
+  return streamPipeline(fs.createReadStream(file), res).catch(() => {});
 }
 
 function openInBrowser(url, log) {
@@ -99,7 +121,7 @@ function openInBrowser(url, log) {
   }
 }
 
-export async function startServer({ root, port = 47100, open = false, onReady } = {}) {
+async function startOwnedServer({ root, port = 47100, open = false, onReady, importRoots = [], uploadLimit = 1024 * 1024 * 1024, releaseOwnership } = {}) {
   const projectRoot = path.resolve(root);
   if (!(await projectExists(projectRoot))) {
     throw new Error(`no ${PROJECT_FILE} in ${projectRoot}`);
@@ -107,12 +129,15 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
   const p = await ensureProjectDirs(projectRoot);
   const log = createLogger({ dir: projectRoot });
   log.info('engine starting', { root: projectRoot, pid: process.pid, version: '0.1.0' });
-  let project = await loadProject(projectRoot);
+  const projects = projectService(projectRoot);
+  const media = mediaService(projectRoot, importRoots);
+  let project = await projects.read();
   let lastRev = project.rev;
 
   const clients = new Set();
+  let eventId = 0;
   const broadcast = (type, data) => {
-    const payload = `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
+    const payload = `id: ${++eventId}\nevent: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
     for (const c of clients) {
       try { c.write(payload); } catch { /* dropped */ }
     }
@@ -120,60 +145,30 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
   const toast = (message, level = 'info') => broadcast('toast', { message, level, at: Date.now() });
   log.onLine((rec) => { if (rec.level !== 'debug') broadcast('log', rec); });
 
-  // ---- undo/redo (in-memory, per session) ----
-  // Every change to the file lands here, whoever made it (UI, AI, or a CLI
-  // write noticed by the watcher), so all of them can be undone from the UI.
-  const history = { undo: [], redo: [], max: 80 };
-  const snapshot = (proj) => JSON.stringify(proj);
-  const pushUndo = (proj) => {
-    history.undo.push(snapshot(proj));
-    if (history.undo.length > history.max) history.undo.shift();
-    history.redo.length = 0;
-  };
-
-  // ---- the one write path ----
-  // Writes run one at a time, under the cross-process lock, against the file
-  // on disk (not the in-memory copy), so a CLI/agent edit that the watcher has
-  // not picked up yet is never overwritten. `fn(current)` returns the next
-  // project (it may mutate and return its argument, a private copy); throwing
-  // writes nothing.
   let writeChain = Promise.resolve();
   const serialized = (fn) => {
     const run = writeChain.then(fn, fn);
     writeChain = run.catch(() => {});
     return run;
   };
-  const adoptDisk = (fresh) => {
+  const adoptDisk = (fresh, source = 'disk', transaction = {}) => {
     if (fresh.rev === lastRev) return false;
-    pushUndo(project);
     project = fresh;
     lastRev = fresh.rev;
-    broadcast('project', { project, source: 'disk', rev: fresh.rev });
+    broadcast('project', { project, source, rev: fresh.rev, transactionId: transaction.transactionId });
     updateStoryboardStep(fresh);
+    for (const step of pipeline.steps) if (step.sourceRev != null && step.sourceRev !== fresh.rev) {
+      step.status = 'todo'; step.detail = `项目已更新（原产物 rev ${step.sourceRev}）`;
+    }
     return true;
   };
-  const commit = (by, fn, { undo = 'push' } = {}) => serialized(() => withLock(projectRoot, async () => {
-    const current = await loadProject(projectRoot);
-    adoptDisk(current);
-    const work = JSON.parse(JSON.stringify(current));
-    const out = await fn(work);
-    const next = normalizeProject(out?.project || work);
-    next.rev = current.rev; // keep rev monotonic even when restoring a snapshot
-    const saved = await saveAndBroadcast(next, by);
-    if (undo === 'push') pushUndo(current);
-    return { saved, result: out?.result };
-  }));
-  // Anything that goes wrong while applying ops (or validating the result) is
-  // the caller's fault (400), not the engine's (500).
-  const applyOrReject = (cur, ops) => {
-    try {
-      return applyOps(cur, ops).changed;
-    } catch (e) {
-      e.rejected = true;
-      throw e;
-    }
-  };
-  const isRejection = (e) => !!(e?.rejected || e?.issues);
+  const transact = (input, source = 'ui') => serialized(async () => {
+    const result = await projects.transact(input, { actorId: source });
+    if (!result.dryRun) adoptDisk(result.project, source, result);
+    return result;
+  });
+  const transactionOptions = (body) => ({ expectedRev: body.expectedRev, requestId: body.requestId, dryRun: body.dryRun });
+  const isRejection = (e) => !!(e?.issues || e?.code === 'OP_INVALID');
 
   // ---- pipeline state ----
   const pipelineFile = path.join(p.vdm, 'pipeline.json');
@@ -230,14 +225,34 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
 
   // ---- render queue (one job at a time) ----
   const renderState = { running: false, kind: null, from: 0, to: 0, progress: 0, total: 0, startedAt: 0, out: null, error: null };
-  let renderAbort = null;
+  const finishedJobs = new Set();
+  const jobs = await createJobService(projectRoot, projects, (job) => {
+    broadcast('job', job);
+    if (jobs?.active && jobs.active.id !== job.id) return;
+    const running = !['succeeded', 'failed', 'cancelled', 'interrupted'].includes(job.status);
+    Object.assign(renderState, { running, jobId: job.id, sourceRev: job.sourceRev,
+      kind: job.kind, from: job.options.from, to: job.options.to,
+      progress: job.progress, total: job.total, out: job.artifact?.path || null,
+      status: job.status, error: job.error?.message || null });
+    broadcast('render', { ...renderState, done: job.status === 'succeeded', cancelled: job.status === 'cancelled', url: job.artifact?.url });
+    if (!running && !finishedJobs.has(job.id)) {
+      finishedJobs.add(job.id);
+      if (job.artifact) {
+        addArtifact({ ...job.artifact, label: `${job.kind === 'still' ? '预览帧' : '成片'} · rev ${job.sourceRev}` });
+        const full = job.kind === 'video' && job.options.from === 0 && job.options.to >= job.duration;
+        setStep(job.kind === 'still' ? 'stills' : full ? 'master' : 'render', { sourceRev: job.sourceRev,
+          status: job.sourceRev === project.rev ? 'done' : 'todo', detail: `${job.sourceRev === project.rev ? '' : '项目已更新，产物来自 '}rev ${job.sourceRev}` });
+      }
+    }
+  });
 
   const agent = new AgentRunner({
     root: projectRoot,
     onEvent: async (ev) => {
       if (ev.type === 'proposal') {
         try {
-          const { saved, result: changed } = await commit('ai', (cur) => ({ project: cur, result: applyOrReject(cur, ev.proposal.ops) }));
+          const tx = await transact({ ops: ev.proposal.ops, expectedRev: ev.baseRev, requestId: ev.runId }, 'ai');
+          const saved = tx.project, changed = tx.changedIds;
           log.info('agent applied', { ops: ev.proposal.ops.length, changed, rev: saved.rev, note: ev.proposal.note });
           broadcast('agent', { ...ev, applied: { changed, note: ev.proposal.note, rev: saved.rev } });
           addArtifact({ kind: 'ai', label: `AI 改了 ${changed.length} 项`, detail: ev.proposal.note });
@@ -258,7 +273,7 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
   // queued behind our own writes, so a save we just made is never mistaken for an external edit
   const unwatch = watchProject(projectRoot, () => serialized(async () => {
     try {
-      adoptDisk(await loadProject(projectRoot));
+      adoptDisk(await projects.read());
     } catch (e) {
       toast(`项目文件读取失败: ${e.message}`, 'error');
     }
@@ -271,19 +286,51 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
   }
   updateStoryboardStep(project);
 
-  async function saveAndBroadcast(next, by = 'ui') {
-    const saved = await saveProject(projectRoot, next, { by });
-    project = saved;
-    lastRev = saved.rev;
-    updateStoryboardStep(saved);
-    broadcast('project', { project: saved, source: by, rev: saved.rev });
-    return saved;
-  }
-
+  const instanceId = randomUUID(), token = randomUUID();
+  let worldKey, worldPromise;
   const server = http.createServer(async (req, res) => {
-    const url = new URL(req.url, 'http://127.0.0.1');
-    const pathname = decodeURIComponent(url.pathname);
+    let pathname = req.url;
     try {
+      const origin = `http://127.0.0.1:${server.address().port}`;
+      const host = new URL(`http://${req.headers.host || ''}`);
+      if (!['127.0.0.1', 'localhost'].includes(host.hostname) || host.port !== String(server.address().port)) return json(res, 403, { error: 'invalid host', code: 'ACCESS_DENIED' });
+      if (req.headers.origin && ![origin, `http://localhost:${server.address().port}`].includes(req.headers.origin)) return json(res, 403, { error: 'invalid origin', code: 'ACCESS_DENIED' });
+      const url = new URL(req.url, origin);
+      try { pathname = decodeURIComponent(url.pathname); } catch { return json(res, 400, { error: 'invalid URL encoding', code: 'INVALID_ARGUMENT' }); }
+      if (pathname === '/api/runtime' && req.method === 'GET') return json(res, 200, { root: projectRoot, instanceId, version: 1 });
+      if (pathname === '/api/rpc' && req.method === 'POST') {
+        if (req.headers.authorization !== `Bearer ${token}`) return json(res, 403, { error: 'runtime credential required', code: 'ACCESS_DENIED' });
+        const { method, params = {} } = await readBody(req);
+        let result;
+        switch (method) {
+          case 'project.read': result = await projects.read(); break;
+          case 'project.query': result = readSelection(await projects.read(), params); break;
+          case 'project.context': result = contextAt(await projects.read(), params); break;
+          case 'project.transact': result = await transact(params, 'local'); break;
+          case 'project.history': result = await projects.history(); break;
+          case 'job.submit': result = await jobs.submit(params); break;
+          case 'job.get': result = await jobs.get(params.id); break;
+          case 'job.list': result = await jobs.list(); break;
+          case 'job.cancel': result = await jobs.cancel(params.id); break;
+          case 'job.wait': result = await jobs.wait(params.id); break;
+          case 'artifact.read': result = await jobs.artifact(params.id, params); break;
+          case 'media.list': result = await media.list(params); break;
+          case 'media.probe': result = await media.probe(params); break;
+          case 'media.import': result = await media.import(params); break;
+          case 'cache.prune': result = await jobs.serial(async () => {
+            if (jobs.active || [...jobs.jobs.values()].some((job) => job.status === 'queued')) throw Object.assign(new Error('cannot prune cache while render jobs are pending'), { code: 'JOB_BUSY', status: 409 });
+            return pruneCache(projectRoot, params);
+          }); break;
+          case 'capabilities': result = { projectSchema: PROJECT_SCHEMA, semanticsVersion: EDIT_SEMANTICS_VERSION, renderPlanVersion: RENDER_PLAN_VERSION,
+            ops: OP_KINDS.filter((op) => !['restoreProject', 'replaceTimeline'].includes(op)),
+            models: ['elements', 'cameras', 'scene.objects'], sceneTree: 'experimental, read-only',
+            rendering: { concurrency: 1, backend: 'Blender', textLayout: 'approximate preview parity' },
+            blender: await blenderVersion().catch(() => null), revision: project.rev }; break;
+          case 'runtime.stop': result = { ok: true }; setImmediate(() => { void closeRuntime(); }); break;
+          default: return json(res, 400, { error: 'unknown runtime method', code: 'INVALID_ARGUMENT' });
+        }
+        return json(res, 200, result);
+      }
       // ---------------- SSE ----------------
       if (pathname === '/api/events') {
         res.writeHead(200, {
@@ -302,9 +349,16 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
 
       // ---------------- 3D world (shared by viewport + blender) ----------------
       if (pathname === '/api/world' && req.method === 'GET') {
-        const flight = is3D(project) ? bakeCameraTrack(project).map((c) => c.pos) : null;
-        const city = cachedCity(project.world, flight);
-        return json(res, 200, { hash: city.hash, city });
+        const snapshot = project;
+        const key = hashOf({ world: snapshot.world, cameras: snapshot.cameras, cameraOrder: snapshot.cameraOrder,
+          fps: snapshot.meta.fps, duration: snapshot.meta.duration });
+        if (!worldPromise || key !== worldKey) {
+          worldKey = key;
+          worldPromise = compute('world', snapshot);
+          worldPromise.catch(() => { if (worldKey === key) worldPromise = null; });
+        }
+        const city = await worldPromise;
+        return json(res, 200, { hash: city.hash, city, rev: snapshot.rev });
       }
 
       // ---------------- logs ----------------
@@ -351,22 +405,23 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
         if (!raw) return json(res, 400, { error: '请选择项目目录' });
         const dir = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(APP_DIR, raw);
         if (await projectExists(dir)) return json(res, 409, { error: `这个目录已经有项目：${dir}` });
-        const width = Math.max(1, Math.round(Number(body.width) || 1920));
-        const height = Math.max(1, Math.round(Number(body.height) || 1080));
-        const fps = Math.max(1, Math.round(Number(body.fps) || 24));
-        const duration = Math.max(0.1, Number(body.duration) || 12);
-        const project = createProject({
+        const options = {
           title: String(body.title || '').trim() || path.basename(dir) || '未命名项目',
-          fps, width, height, duration,
+          fps: Math.max(1, Math.round(Number(body.fps) || 24)),
+          width: Math.max(1, Math.round(Number(body.width) || 1920)),
+          height: Math.max(1, Math.round(Number(body.height) || 1080)),
+          duration: Math.max(0.1, Number(body.duration) || 12),
           background: /^#[0-9a-f]{6}$/i.test(String(body.background || '')) ? body.background : '#05070d',
-        });
-        ensureSpace(project);
+        };
         try {
-          await saveProject(dir, project, { by: 'ui' });
+          // Create through the same transaction service as every other write:
+          // it locks the new directory, writes the journal and publishes
+          // project.vdm.json atomically.
+          const tx = await projectService(dir).transact({ command: { type: 'initialize', options } }, { actorId: 'ui' });
+          return json(res, 200, { ok: true, dir, project: tx.project });
         } catch (e) {
           return json(res, 400, { error: e.message });
         }
-        return json(res, 200, { ok: true, dir, project });
       }
 
       if (pathname === '/api/projects' && req.method === 'GET') {
@@ -447,101 +502,55 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
       if (pathname === '/api/ops' && req.method === 'POST') {
         const body = await readBody(req);
         const ops = Array.isArray(body.ops) ? body.ops : [body];
-        if (!ops.length) return json(res, 400, { error: 'no ops' });
-        try {
-          const { saved, result: changed } = await commit(body.by || 'ui', (cur) => ({ project: cur, result: applyOrReject(cur, ops) }));
-          return json(res, 200, { ok: true, changed, rev: saved.rev, project: saved });
-        } catch (e) {
-          if (!isRejection(e)) throw e;
-          log.warn('ops rejected', { error: e.message, ops: ops.map((o) => o?.op).join(',') });
-          return json(res, 400, { error: e.message, code: e.code || 'OP_FAILED' });
-        }
+        const result = await transact({ ...transactionOptions(body), ops });
+        return json(res, 200, { ok: true, ...result, changed: result.changedIds });
       }
-
+      if (pathname === '/api/project' && req.method === 'GET') return json(res, 200, { project: await projects.read() });
       if (pathname === '/api/project' && req.method === 'POST') {
         const body = await readBody(req);
-        const replacement = normalizeProject(body.project);
-        const { saved } = await commit(body.by || 'ui', () => ({ project: replacement }));
-        return json(res, 200, { ok: true, project: saved });
+        return json(res, 200, { ok: true, ...await transact({ ...transactionOptions(body), command: { type: 'replace', project: body.project } }) });
       }
-
+      if (pathname === '/api/history' && req.method === 'GET') return json(res, 200, await projects.history());
       if ((pathname === '/api/undo' || pathname === '/api/redo') && req.method === 'POST') {
-        const isUndo = pathname === '/api/undo';
-        const empty = new Error(isUndo ? 'nothing to undo' : 'nothing to redo');
-        try {
-          const { saved } = await commit(isUndo ? 'undo' : 'redo', (cur) => {
-            const from = isUndo ? history.undo : history.redo;
-            const to = isUndo ? history.redo : history.undo;
-            if (!from.length) throw empty;
-            const target = JSON.parse(from.pop());
-            to.push(snapshot(cur));
-            return { project: target };
-          }, { undo: 'none' });
-          return json(res, 200, { ok: true, project: saved, undo: history.undo.length, redo: history.redo.length });
-        } catch (e) {
-          if (e === empty) return json(res, 409, { error: e.message });
-          throw e;
-        }
+        const body = await readBody(req);
+        return json(res, 200, { ok: true, ...await transact({ ...transactionOptions(body), command: { type: pathname.endsWith('/undo') ? 'undo' : 'redo' } }) });
       }
 
       // ---------------- media ----------------
       if (pathname === '/api/media' && req.method === 'GET') {
-        const mediaDir = path.join(projectRoot, 'media');
-        const out = [];
-        const walk = async (dir, prefix = '') => {
-          let entries = [];
-          try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; }
-          for (const e of entries) {
-            const rel = prefix ? `${prefix}/${e.name}` : e.name;
-            if (e.isDirectory()) await walk(path.join(dir, e.name), rel);
-            else out.push({ name: e.name, path: `media/${rel}`, size: 0 });
-          }
-        };
-        await walk(mediaDir);
-        for (const m of out) {
-          try { m.size = (await fsp.stat(path.join(projectRoot, m.path))).size; } catch { /* ignore */ }
-        }
-        return json(res, 200, { media: out });
+        const result = await media.list({ limit: 500 });
+        return json(res, 200, { ...result, media: result.items });
       }
-
-      if (pathname === '/api/import' && req.method === 'POST') {
-        const body = await readBody(req);
-        const files = Array.isArray(body.files) ? body.files : [];
-        const mediaDir = path.join(projectRoot, 'media');
-        await fsp.mkdir(mediaDir, { recursive: true });
-        const imported = [];
-        for (const f of files) {
-          const src = path.resolve(f);
-          if (!(await fileExists(src))) continue;
-          let name = path.basename(src);
-          let dest = path.join(mediaDir, name);
-          let i = 1;
-          while (await fileExists(dest)) {
-            const ext = path.extname(name);
-            name = `${path.basename(name, ext)}-${i++}${ext}`;
-            dest = path.join(mediaDir, name);
-          }
-          await fsp.copyFile(src, dest);
-          let info = null;
-          try { info = await probeMedia(dest); } catch { /* not media */ }
-          imported.push({ path: `media/${name}`, name, info });
-        }
-        return json(res, 200, { imported });
-      }
+      if (pathname === '/api/import' && req.method === 'POST') return json(res, 200, await media.import(await readBody(req)));
 
       if (pathname === '/api/upload' && req.method === 'POST') {
         const rawName = String(url.searchParams.get('name') || `upload-${Date.now()}.bin`);
         const ext = path.extname(rawName);
         const base = path.basename(rawName, ext).replace(/[^\w.\- ()一-龥]/g, '_').slice(0, 80);
-        const mediaDir = path.join(projectRoot, 'media');
-        await fsp.mkdir(mediaDir, { recursive: true });
-        let name = `${base}${ext}`;
-        let dest = path.join(mediaDir, name);
-        let i = 1;
-        while (await fileExists(dest)) { name = `${base}-${i++}${ext}`; dest = path.join(mediaDir, name); }
-        const chunks = [];
-        for await (const c of req) chunks.push(c);
-        await fsp.writeFile(dest, Buffer.concat(chunks));
+        await fsp.mkdir(path.join(projectRoot, 'media'), { recursive: true });
+        const mediaDir = await readPath(projectRoot, 'media');
+        let name;
+        const temporary = path.join(mediaDir, `.upload-${randomUUID()}`);
+        let size = 0;
+        const limit = new Transform({ transform(chunk, _encoding, done) {
+          size += chunk.length;
+          done(size > uploadLimit ? Object.assign(new Error('upload too large'), { status: 413 }) : null, chunk);
+        } });
+        const failed = (error) => limit.destroy(error);
+        const aborted = () => failed(new Error('upload aborted'));
+        req.once('error', failed);
+        req.once('aborted', aborted);
+        limit.once('error', () => { req.unpipe(limit); req.resume(); });
+        try {
+          req.pipe(limit);
+          await streamPipeline(limit, fs.createWriteStream(temporary, { flags: 'wx' }));
+          name = await publishMedia(temporary, mediaDir, `${base}${ext}`);
+        } finally {
+          req.off('error', failed);
+          req.off('aborted', aborted);
+          await fsp.rm(temporary, { force: true });
+        }
+        const dest = path.join(mediaDir, name);
         let info = null;
         try { info = await probeMedia(dest); } catch { /* not media */ }
         return json(res, 200, { imported: [{ path: `media/${name}`, name, info }] });
@@ -550,7 +559,7 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
       if (pathname === '/api/probe' && req.method === 'GET') {
         const src = url.searchParams.get('src');
         if (!src) return json(res, 400, { error: 'src required' });
-        const file = path.isAbsolute(src) ? src : path.join(projectRoot, src);
+        const file = await readPath(projectRoot, src);
         if (!(await fileExists(file))) return json(res, 404, { error: 'not found' });
         return json(res, 200, await probeMedia(file));
       }
@@ -560,19 +569,16 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
         const body = await readBody(req);
         const rel = body.src || project.meta.audio?.src;
         if (!rel) return json(res, 400, { error: 'no audio' });
-        const file = path.isAbsolute(rel) ? rel : path.join(projectRoot, rel);
+        const file = await readPath(projectRoot, rel);
         toast('分析节拍中…');
         const result = await analyzeBeats(file, { duration: body.duration || null, fps: project.meta.fps });
-        await commit('beats', (cur) => {
-          const ops = [
-            { op: 'setMeta', path: 'beats', value: result.beats },
-            { op: 'setMeta', path: 'tempo', value: result.tempo },
-          ];
-          if (!cur.meta.audio) ops.push({ op: 'setMeta', path: 'audio', value: { src: rel, offset: 0, gain: 0 } });
-          if (body.setDuration) ops.push({ op: 'setMeta', path: 'duration', value: Math.round(result.duration * 1000) / 1000 });
-          applyOps(cur, ops);
-          return { project: cur };
-        });
+        const ops = [
+          { op: 'setMeta', path: 'beats', value: result.beats },
+          { op: 'setMeta', path: 'tempo', value: result.tempo },
+        ];
+        if (!project.meta.audio) ops.push({ op: 'setMeta', path: 'audio', value: { src: rel, offset: 0, gain: 0 } });
+        if (body.setDuration) ops.push({ op: 'setMeta', path: 'duration', value: Math.round(result.duration * 1000) / 1000 });
+        await transact({ ...transactionOptions(body), ops }, 'beats');
         broadcast('beats', result);
         return json(res, 200, result);
       }
@@ -587,20 +593,8 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
           media, style: body.style || 'neon', brief: body.brief || '',
           seed: body.seed ?? 7, maxSegments: body.maxSegments || 12, duration: body.duration || null,
         };
-        let saved, made;
-        try {
-          ({ saved, result: made } = await commit('plan', (cur) => {
-            try {
-              return { project: cur, result: planProject(cur, opts) };
-            } catch (err) {
-              err.rejected = true;
-              throw err;
-            }
-          }));
-        } catch (e) {
-          if (!isRejection(e)) throw e;
-          return json(res, 400, { error: e.message });
-        }
+        const tx = await transact({ ...transactionOptions(body), command: { type: 'plan', options: opts } }, 'plan');
+        const saved = tx.project, made = { segments: saved.segments.length, elements: saved.elements.length };
         setStep('storyboard', { status: 'done', detail: `${made.segments} 个分镜 · ${made.elements} 个元素` });
         addArtifact({ kind: 'storyboard', label: `自动分镜 · ${made.segments} 段`, detail: opts.style });
         return json(res, 200, { ok: true, project: saved, steps: made.segments });
@@ -623,83 +617,24 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
 
       if (pathname === '/api/still' && req.method === 'POST') {
         const body = await readBody(req);
-        const time = Number(body.time ?? 0);
-        toast(`Blender 渲染第 ${time.toFixed(2)}s 预览帧…`);
-        const out = path.join(p.frames, `blender-${Date.now()}.png`);
-        const file = await renderStill({
-          dir: projectRoot, project, time, out,
-          scale: body.scale ?? 0.5, samples: body.samples ?? 8,
-          onLog: () => {},
-        });
-        const name = path.basename(file);
-        const art = { kind: 'still', label: `Blender 帧 @${time.toFixed(2)}s`, time, path: file, url: `/frames/${name}` };
-        addArtifact(art);
-        setStep('stills', { status: 'done', detail: `最新 Blender 帧 @${time.toFixed(2)}s` });
-        return json(res, 200, art);
+        const submitted = await jobs.submit({ kind: 'still', time: body.time ?? 0, scale: body.scale ?? 0.5,
+          samples: body.samples ?? 8, expectedRev: body.expectedRev, requestId: body.requestId });
+        const completed = await jobs.wait(submitted.id);
+        if (completed.status !== 'succeeded') throw Object.assign(new Error(completed.error?.message || completed.status), completed.error || {});
+        return json(res, 200, completed.artifact);
       }
-
-      // ---------------- render ----------------
       if (pathname === '/api/render' && req.method === 'POST') {
-        if (renderState.running) return json(res, 409, { error: 'render already running' });
         const body = await readBody(req);
-        const from = Number(body.from ?? 0);
-        const to = Number(body.to ?? project.meta.duration);
-        const scale = Number(body.scale ?? 1);
-        const crf = Number(body.crf ?? 18);
-        const full = from <= 0.001 && to >= project.meta.duration - 0.05;
-        const out = body.out
-          ? path.resolve(body.out)
-          : path.join(p.renders, `${full ? 'master' : 'part'}-${Date.now()}.mp4`);
-        Object.assign(renderState, {
-          running: true, kind: full ? 'master' : 'part', from, to, progress: 0,
-          total: Math.max(1, Math.round((to - from) * project.meta.fps)), startedAt: Date.now(), out, error: null,
-        });
-        renderAbort = new AbortController();
-        log.info('render start', { kind: renderState.kind, from, to, scale, total: renderState.total, out });
-        broadcast('render', renderState);
-        setStep(full ? 'master' : 'render', { status: 'running', detail: `${from.toFixed(1)}s → ${to.toFixed(1)}s` });
-
-        (async () => {
-          try {
-            const res2 = await renderVideo({
-              dir: projectRoot, project, from, to, out, scale, crf, signal: renderAbort.signal,
-              onLog: () => {},
-              onProgress: (ev) => {
-                if (ev.stage === 'frame') {
-                  renderState.progress = ev.frame;
-                  renderState.total = ev.total;
-                  broadcast('render', renderState);
-                } else if (ev.stage === 'built') {
-                  broadcast('render', { ...renderState, built: ev.sec });
-                }
-              },
-            });
-            Object.assign(renderState, { running: false, out: res2.out });
-            const name = path.basename(res2.out);
-            setStep(full ? 'master' : 'render', { status: 'done', detail: `${(to - from).toFixed(1)}s · ${name}` });
-            addArtifact({ kind: 'render', label: `${full ? '成片' : '片段'} ${from.toFixed(1)}–${to.toFixed(1)}s`, path: res2.out, url: `/renders/${name}` });
-            log.info('render done', { out: res2.out, frames: res2.frames, sec: (Date.now() - renderState.startedAt) / 1000 });
-            broadcast('render', { ...renderState, done: true, url: `/renders/${name}` });
-            toast(`渲染完成: ${name}`, 'success');
-          } catch (e) {
-            Object.assign(renderState, { running: false, error: e.message });
-            log.error('render failed', { error: e.message, log: e.log ? String(e.log).slice(-3000) : undefined });
-            setStep(full ? 'master' : 'render', { status: 'error', detail: e.message.slice(0, 120) });
-            broadcast('render', { ...renderState, error: e.message });
-            toast(`渲染失败: ${e.message}`, 'error');
-          } finally {
-            renderAbort = null;
-          }
-        })();
-        return json(res, 200, { ok: true, out, state: renderState });
+        const submitted = await jobs.submit({ kind: 'video', from: body.from ?? 0, to: body.to ?? project.meta.duration,
+          scale: body.scale ?? 1, crf: body.crf ?? 18, expectedRev: body.expectedRev, requestId: body.requestId });
+        return json(res, 200, { ok: true, jobId: submitted.id, state: renderState });
       }
-
       if (pathname === '/api/render/cancel' && req.method === 'POST') {
-        if (renderAbort) renderAbort.abort();
-        renderState.running = false;
-        broadcast('render', { ...renderState, cancelled: true });
-        return json(res, 200, { ok: true });
+        const body = await readBody(req);
+        const id = body.id || jobs.active?.id || renderState.jobId;
+        return json(res, 200, { ok: true, ...(id ? { job: await jobs.cancel(id) } : {}) });
       }
+      if (pathname === '/api/jobs' && req.method === 'GET') return json(res, 200, { jobs: await jobs.list() });
 
       // ---------------- agent ----------------
       if (pathname === '/api/agent' && req.method === 'POST') {
@@ -721,8 +656,9 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
         if (body.stillFrames) {
           for (const t of body.stillFrames) {
             const file = path.join(p.frames, `agent-${Date.now()}-${Math.round(t * 100)}.png`);
-            await renderStill({ dir: projectRoot, project, time: t, out: file, scale: 0.5, samples: 6, onLog: () => {} });
-            frames.push(file);
+            const submitted = await jobs.submit({ kind: 'still', time: t, scale: 0.5, samples: 6 });
+            const completed = await jobs.wait(submitted.id);
+            if (completed.artifact) frames.push(completed.artifact.path);
           }
         }
         const summary = summarizeProject(project, { segmentId: selection.segmentId, time: body.time ?? 0 });
@@ -753,32 +689,33 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
       if (pathname === '/' || pathname === '/index.html') {
         return serveFile(req, res, path.join(RENDERER, 'index.html'));
       }
-      if (pathname.startsWith('/app/')) return serveFile(req, res, safeJoin(APP_DIR, pathname) || '');
-      if (pathname.startsWith('/core/')) return serveFile(req, res, safeJoin(APP_DIR, pathname) || '');
+      if (pathname.startsWith('/app/')) return serveFile(req, res, await readPath(path.join(APP_DIR, 'app'), pathname.slice(5)));
+      if (pathname.startsWith('/core/')) return serveFile(req, res, await readPath(CORE, pathname.slice(6)));
       if (pathname.startsWith('/media/')) {
-        const file = safeJoin(path.join(projectRoot, 'media'), pathname.slice(7));
+        const file = await readPath(path.join(projectRoot, 'media'), pathname.slice(7));
         return file ? serveFile(req, res, file, { range: true }) : json(res, 400, { error: 'bad path' });
       }
       if (pathname.startsWith('/frames/')) {
-        const file = safeJoin(p.frames, pathname.slice(8));
+        const file = await readPath(p.frames, pathname.slice(8));
         return file ? serveFile(req, res, file) : json(res, 400, { error: 'bad path' });
       }
       if (pathname.startsWith('/renders/')) {
-        const file = safeJoin(p.renders, pathname.slice(9));
+        const file = await readPath(p.renders, pathname.slice(9));
         return file ? serveFile(req, res, file, { range: true }) : json(res, 400, { error: 'bad path' });
       }
       if (pathname.startsWith('/assets/')) {
-        const file = safeJoin(path.join(projectRoot, 'assets'), pathname.slice(8));
+        const file = await readPath(path.join(projectRoot, 'assets'), pathname.slice(8));
         return file ? serveFile(req, res, file) : json(res, 400, { error: 'bad path' });
       }
 
       return json(res, 404, { error: 'not found' });
     } catch (e) {
-      log.error('request failed', {
-        method: req.method, path: pathname, error: e.message, stack: String(e.stack || '').slice(0, 1200),
+      const status = e.status || (e.code === 'ENOENT' ? 404 : isRejection(e) ? 400 : 500);
+      log[status >= 500 ? 'error' : 'warn']('request failed', {
+        method: req.method, path: pathname, error: e.message, stack: status >= 500 ? String(e.stack || '').slice(0, 1200) : undefined,
         log: e.log ? String(e.log).slice(-3000) : undefined,
       });
-      if (!res.headersSent) json(res, 500, { error: e.message });
+      if (!res.headersSent) json(res, status, { error: e.message, ...errorData(e) });
       else res.end();
     }
   });
@@ -802,25 +739,44 @@ export async function startServer({ root, port = 47100, open = false, onReady } 
   }
 
   const actualPort = server.address().port;
-  const info = { port: actualPort, pid: process.pid, url: `http://127.0.0.1:${actualPort}/`, root: projectRoot, startedAt: Date.now() };
-  await fsp.writeFile(path.join(p.vdm, 'app.json'), JSON.stringify(info, null, 2));
+  const info = { instanceId, token, version: 1, port: actualPort, pid: process.pid, url: `http://127.0.0.1:${actualPort}/`, root: projectRoot, startedAt: Date.now() };
+  await atomicJson(p.app, info);
 
   if (open) openInBrowser(info.url, log);
   onReady?.(info);
 
-  return {
-    server, info, port: actualPort,
-    get project() { return project; },
-    async close() {
+  let closing;
+  function closeRuntime() {
+    return closing ||= (async () => {
       log.info('engine shutting down');
-      agent.cancel();
+      await agent.close();
+      await jobs.close();
+      await writeChain;
+      clearTimeout(pipelineTimer);
       unwatch();
-      for (const c of clients) { try { c.end(); } catch { /* ignore */ } }
+      for (const c of clients) { try { c.end(); } catch {} }
       clients.clear();
       await new Promise((r) => server.close(r));
-      await fsp.rm(path.join(p.vdm, 'app.json'), { force: true }).catch(() => {});
-    },
-  };
+      const record = await fsp.readFile(p.app, 'utf8').then(JSON.parse).catch(() => null);
+      if (record?.instanceId === instanceId) await fsp.rm(p.app, { force: true });
+      await releaseOwnership();
+    })();
+  }
+  return { server, info, port: actualPort, jobs, projects,
+    get project() { return project; }, close: closeRuntime };
+}
+
+export async function startServer(options = {}) {
+  const root = await fsp.realpath(options.root);
+  let releaseOwnership;
+  try { releaseOwnership = await claimRuntime(root); }
+  catch (e) {
+    if (options.attach === false) throw e;
+    const client = await connectRuntime(root, { start: false });
+    return { info: client.info, port: client.info.port, remote: true, close: async () => {} };
+  }
+  try { return await startOwnedServer({ ...options, root, releaseOwnership }); }
+  catch (e) { await releaseOwnership(); throw e; }
 }
 
 // direct run: node engine/server.js [--project <dir>] [--port N] [--open]

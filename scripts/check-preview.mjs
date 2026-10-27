@@ -8,6 +8,9 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createProject } from '../core/schema.js';
+import { applyOps } from '../core/ops.js';
+import { saveProject } from '../engine/storage.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..');
@@ -41,23 +44,17 @@ async function main() {
   const img = path.join(PROJECT, 'media', 'marker.png');
   await markerImage(img);
 
-  const project = {
-    schema: 'vdm.project/1',
-    rev: 1,
-    meta: {
-      title: 'orientation check', fps: 24, width: 1920, height: 1080, duration: 2,
-      background: '#000000', audio: null, beats: [], tempo: 0,
-      fx: { bloom: 0, ca: 0, grain: 0, vignette: 0, scanline: 0, grade: 0, contrast: 0, saturation: 1 },
-    },
-    segments: [],
-    elements: [{
+  const project = createProject({ title: 'orientation check', background: '#000000', duration: 2 });
+  applyOps(project, [
+    { op: 'setFx', fx: { bloom: 0, ca: 0, grain: 0, vignette: 0, scanline: 0, grade: 0, contrast: 0, saturation: 1 } },
+    { op: 'addElement', element: {
       id: 'el_1', name: 'marker', type: 'image', src: 'media/marker.png',
       start: 0, duration: 2, z: 0,
       transform: { x: 0, y: 0, scale: 1, rotation: 0, opacity: 1 },
       style: { fit: 'stretch' }, motion: { type: 'none', amount: 0 }, keyframes: [],
-    }],
-  };
-  await fs.writeFile(path.join(PROJECT, 'project.vdm.json'), JSON.stringify(project, null, 2));
+    } },
+  ]);
+  await saveProject(PROJECT, project, { by: 'check' });
 
   const evalJs = [
     'const p=window.__vdm.preview; p.render(0.5);',

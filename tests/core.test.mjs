@@ -7,7 +7,7 @@ import { createProject, normalizeProject, validateProject, elementsAt } from '..
 import { applyOp, applyOps, getPath, setPath, coerceValue } from '../core/ops.js';
 import { evalElement, motionDelta } from '../core/evaluate.js';
 import { sampleTrack, ease, kick, timecode } from '../core/time.js';
-import { saveProject, loadProject, mutateProject, watchProject } from '../core/store.js';
+import { saveProject, loadProject, mutateProject, watchProject } from '../engine/storage.js';
 import { extractProposal } from '../engine/agent.js';
 
 const fresh = () => normalizeProject(createProject({ title: 't', duration: 10 }));
