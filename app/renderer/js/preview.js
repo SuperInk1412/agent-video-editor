@@ -716,17 +716,21 @@ export class Preview {
     if (world) {
       const cyW = (Number(world.meta?.height) || 1080) / 200;
       const S = W / (Number(world.meta?.width) || 1920);
-      const c = world.camPos;
-      const dist = (L) => {
+      // Depth ALONG the view axis (clip w = view-space depth), not the distance
+      // to the centre: elements on one plane facing the camera have the same
+      // depth however far from the centre they sit, so the layer order holds
+      // (a full-frame backdrop must not jump in front of everything).
+      const vp = world.vp;
+      const depth = (L) => {
         let w = [(L.st.x || 0) / 100, cyW - (L.st.y || 0) / 100, L.st.z || 0];
         if (L.carry) {
           const m = L.carry;
           w = [0, 1, 2].map((i) => m[i] * w[0] + m[4 + i] * w[1] + m[8 + i] * w[2] + m[12 + i]);
         }
-        return Math.hypot(w[0] - c[0], w[1] - c[1], w[2] - c[2]);
+        return vp[3] * w[0] + vp[7] * w[1] + vp[11] * w[2] + vp[15];
       };
-      list = layers.map((L, i) => ({ L, i, d: dist(L) }))
-        .sort((a, b) => (Math.abs(a.d - b.d) > 1e-6 ? b.d - a.d : a.i - b.i))
+      list = layers.map((L, i) => ({ L, i, d: depth(L) }))
+        .sort((a, b) => (Math.abs(a.d - b.d) > 1e-4 ? b.d - a.d : a.i - b.i))
         .map((e) => e.L);
       for (const pr of [this.prog.tex, this.prog.shape]) {
         gl.useProgram(pr.program);
