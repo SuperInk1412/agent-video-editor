@@ -1,7 +1,7 @@
 # 改动日志 · 基础能力 + 效果预设（MV/预设 agent）
 
 每个提交一条。格式：日期 · 提交号 · 改了什么 · 为什么 · 文件 · 回退方式。
-分支：`agent/presets-groundwork`（起点 `bdab52e`，2026-10-27 rebase 到 `7b93562`，同日快进合并进 master）。设计与排期见 `docs/DESIGN-PRESETS.md`。
+分支：`agent/presets-groundwork`（起点 `bdab52e`，2026-10-27 rebase 到 `7b93562`，同日快进合并进 master；W3 rebase 到 `18ff573` 后再次快进合并）。设计与排期见 `docs/DESIGN-PRESETS.md`。
 
 | 日期 | 提交 | 改了什么 | 为什么 | 文件 | 回退 |
 |---|---|---|---|---|---|
