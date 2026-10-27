@@ -1536,8 +1536,8 @@ export class Timeline {
 
     // A mostly-horizontal drag still needs a visible band around its row.
     const padded = (a, b) => {
-      const left = Math.min(a.x, b.x);
-      const right = Math.max(a.x, b.x);
+      let left = Math.min(a.x, b.x);
+      let right = Math.max(a.x, b.x);
       let top = Math.min(a.y, b.y);
       let bottom = Math.max(a.y, b.y);
       if (bottom - top < 18) {
