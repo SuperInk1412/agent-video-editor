@@ -664,6 +664,8 @@ export class Preview {
     const is3d = !!(this.scene3d.city && cams.length);
     const layers = this.computeLayers(t);
     this.layers = layers;
+    this.layersAt = t;
+    this._worldMode = is3d;
     if (is3d) {
       // 2D elements are flat planes in the world: Scene3D calls back after its
       // own objects with the camera's view-projection, so they are drawn in the
@@ -845,9 +847,50 @@ export class Preview {
     gl.bindVertexArray(null);
   }
 
+  /**
+   * The four corners of a 2D layer in canvas pixels. In world mode they are
+   * projected through the last 3D view-projection, so picking follows a moved
+   * camera instead of the flat screen-space matrix.
+   */
+  _layerCorners(L) {
+    const pts = [[0, 0], [1, 0], [1, 1], [0, 1]].map(([u, v]) => M3.apply(L.M, u, v));
+    const s3 = this.scene3d;
+    if (!this._worldMode || !s3?.lastVP) return pts;
+    const W = this.canvas.width, H = this.canvas.height;
+    const meta = this.project?.meta || {};
+    const S = W / (Number(meta.width) || 1920);
+    const cyW = (Number(meta.height) || 1080) / 200;
+    const z = Number(L.st?.z) || 0;
+    const out = [];
+    for (const [x, y] of pts) {
+      const qx = (x - W / 2) / S;
+      const qy = (y - H / 2) / S;
+      const p = s3.projectPoint([qx / 100, cyW - qy / 100, z]);
+      if (!p) return null;
+      out.push([p.x * W / Math.max(1, s3.lastW), p.y * H / Math.max(1, s3.lastH)]);
+    }
+    return out;
+  }
+
   /** canvas-space hit test -> topmost element id */
   hitTest(cx, cy, t) {
-    const layers = this.layers?.length ? this.layers : this.computeLayers(t);
+    const layers = (this.layers && this.layersAt === t) ? this.layers : this.computeLayers(t);
+    if (this._worldMode && this.scene3d?.lastVP) {
+      const s3 = this.scene3d;
+      const meta = this.project?.meta || {};
+      const cyW = (Number(meta.height) || 1080) / 200;
+      const cam = s3.lastCam?.pos || [0, 0, 20];
+      // Nearest layer wins. Equal distance keeps the higher 2D layer on top.
+      const list = layers.map((L, i) => ({
+        L, i,
+        d: Math.hypot((L.st.x || 0) / 100 - cam[0], cyW - (L.st.y || 0) / 100 - cam[1], (L.st.z || 0) - cam[2]),
+      })).sort((a, b) => (Math.abs(a.d - b.d) > 1e-6 ? a.d - b.d : b.i - a.i));
+      for (const { L } of list) {
+        const poly = this._layerCorners(L);
+        if (poly && pointInPoly(cx, cy, poly)) return L.el.id;
+      }
+      return null;
+    }
     for (let i = layers.length - 1; i >= 0; i--) {
       const L = layers[i];
       const inv = M3.invert(L.M);
@@ -860,10 +903,11 @@ export class Preview {
   /** select rectangle in canvas space for the current layers */
   layerRects() {
     return (this.layers || []).map((L) => {
-      const pts = [[0, 0], [1, 0], [1, 1], [0, 1]].map(([x, y]) => M3.apply(L.M, x, y));
+      const pts = this._layerCorners(L);
+      if (!pts) return null;
       const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
       return { id: L.el.id, x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
-    });
+    }).filter(Boolean);
   }
 
   /** debug: the exact 2D canvas used as a text texture */
@@ -942,4 +986,15 @@ export class Preview {
     const offset = Number(this.project.meta.audio?.offset) || 0;
     try { a.currentTime = Math.max(0, at + offset); } catch { /* ignore */ }
   }
+}
+
+/** Even-odd point-in-polygon test for projected layer corners. */
+function pointInPoly(x, y, pts) {
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const [xi, yi] = pts[i];
+    const [xj, yj] = pts[j];
+    if (((yi > y) !== (yj > y)) && (x < ((xj - xi) * (y - yi)) / (yj - yi) + xi)) inside = !inside;
+  }
+  return inside;
 }

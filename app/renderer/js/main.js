@@ -1291,6 +1291,31 @@ async function boot() {
     select({ elementId: null, segmentId: null });
   };
 
+  // ---- 2D element values / viewport drag ----
+  const elPathBase = (el, path) => {
+    const prop = path.slice(path.lastIndexOf('.') + 1);
+    const v = path.startsWith('transform.') ? el?.transform?.[prop] : undefined;
+    return v == null ? ((prop === 'scale' || prop === 'opacity') ? 1 : 0) : Number(v);
+  };
+  const elValue = (el, path, t) => sampleTrack(el?.keyframes, path, t, elPathBase(el, path));
+  const elKeyed = (el, path) => (el?.keyframes || []).some((k) => k.path === path);
+  /** Live write for a viewport drag: keys stay keys, unkeyed values move the base. */
+  const setElLive = (el, path, t, value) => {
+    const prop = path.slice(path.lastIndexOf('.') + 1);
+    if (elKeyed(el, path)) {
+      const list = el.keyframes || (el.keyframes = []);
+      const at = Math.round(t * 1000) / 1000;
+      const k = list.find((x) => x.path === path && Math.abs(x.t - at) < 1e-3);
+      if (k) k.value = value;
+      else {
+        list.push({ t: at, path, value, ease: 'easeInOut' });
+        list.sort((a, b) => a.t - b.t);
+      }
+      return;
+    }
+    el.transform = { ...(el.transform || {}), [prop]: value };
+  };
+
   const nodeMenu = (index) => {
     const key = S.project.camera?.path?.[index];
     if (!key) return [];
@@ -1465,6 +1490,39 @@ async function boot() {
         }
       }
     }
+    // 2D element in the 3D viewport: drag it on its own depth plane. The
+    // screen delta is mapped to metres at the element's z, then back to pixels.
+    const elId = preview.hitTest(sx, sy, S.time);
+    if (elId) {
+      const el = S.project.elements.find((e) => e.id === elId);
+      select({ elementId: elId });
+      if (el) {
+        pause();
+        const z = elValue(el, 'transform.z', S.time);
+        const hit = preview.scene3d?.planeHit(sx, sy, [0, 0, z], [0, 0, 1]);
+        if (hit) {
+          drag = {
+            kind: 'element', id: elId, z, hit,
+            elX: elValue(el, 'transform.x', S.time),
+            elY: elValue(el, 'transform.y', S.time),
+            x: elValue(el, 'transform.x', S.time),
+            y: elValue(el, 'transform.y', S.time),
+            keyedX: elKeyed(el, 'transform.x'),
+            keyedY: elKeyed(el, 'transform.y'),
+            backup: JSON.stringify(el),
+            startCx: cx, startCy: cy,
+          };
+          try { canvas.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
+          updateOverlay();
+          e.preventDefault();
+          return;
+        }
+      }
+      drag = { kind: 'click', x: cx, y: cy };
+      try { canvas.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
+      e.preventDefault();
+      return;
+    }
     // timeline element in the 3D scene: pick it and start a keyed move
     const pick = preview.scene3d?.pickObject(S.project, S.time, sx, sy);
     if (pick) {
@@ -1501,13 +1559,14 @@ async function boot() {
         const hit = gizmo?.hit(sx, sy) || gizmo?.hitLive(sx, sy) || gizmo?.hitObjectKey(sx, sy);
         const axHit = hit ? null : gizmo?.hitObjectAxis(sx, sy);
         const obj = (hit || axHit) ? null : preview.scene3d?.pickObject(S.project, S.time, sx, sy);
+        const elHit = (hit || axHit || obj) ? null : preview.hitTest(sx, sy, S.time);
         const hoverId = obj?.id || null;
         if (gizmo && (gizmo.objHover !== hoverId || gizmo.axisHover !== (axHit?.axis || null))) {
           gizmo.objHover = hoverId;
           gizmo.axisHover = axHit?.axis || null;
           gizmo.draw();
         }
-        canvas.style.cursor = hit || axHit || obj ? 'pointer' : 'default';
+        canvas.style.cursor = hit || axHit || obj || elHit ? 'pointer' : 'default';
         return;
       }
       const hit = S.selection.camera ? gizmo?.hit(sx, sy) : null;
@@ -1532,6 +1591,25 @@ async function boot() {
       orbitEdit(dx, dy);
       preview.render(S.time);
       gizmo.draw();
+      return;
+    }
+    if (drag.kind === 'element') {
+      if (Math.abs(cx - drag.startCx) + Math.abs(cy - drag.startCy) < 3) return;
+      const w = preview.scene3d?.planeHit(sx, sy, [0, 0, drag.z], [0, 0, 1]);
+      if (!w) return;
+      const el = S.project.elements.find((x) => x.id === drag.id);
+      if (!el) return;
+      // The plane is in metres; transform.x/y are project pixels (100 px = 1 m).
+      const nx = drag.elX + (w[0] - drag.hit[0]) * 100;
+      const ny = drag.elY - (w[1] - drag.hit[1]) * 100;
+      const t = Math.round(S.time * 1000) / 1000;
+      setElLive(el, 'transform.x', t, nx);
+      setElLive(el, 'transform.y', t, ny);
+      drag.x = nx; drag.y = ny; drag.moved = true;
+      preview.render(S.time);
+      timeline?.setTime(S.time);
+      updateOverlay();
+      updateSelectionInfo();
       return;
     }
     if (drag.kind === 'click') {
@@ -1692,6 +1770,23 @@ async function boot() {
         });
       }
       gizmo.draw();
+    } else if (d.kind === 'element') {
+      if (d.moved) {
+        const t = Math.round(S.time * 1000) / 1000;
+        const rx = Math.round(d.x * 100) / 100;
+        const ry = Math.round(d.y * 100) / 100;
+        const patch = {};
+        const ops = [];
+        if (d.keyedX) ops.push({ op: 'keySet', id: d.id, path: 'transform.x', t, value: rx });
+        else patch.x = rx;
+        if (d.keyedY) ops.push({ op: 'keySet', id: d.id, path: 'transform.y', t, value: ry });
+        else patch.y = ry;
+        if (Object.keys(patch).length) ops.push({ op: 'updateElement', id: d.id, patch: { transform: patch } });
+        if (ops.length === 1) op(ops[0]);
+        else if (ops.length > 1) op({ op: 'batch', ops });
+      }
+      gizmo.draw();
+      updateOverlay();
     } else if (d.kind === 'click' && !d.moved) {
       const { sx, sy } = stageXY(e);
       gizmo.sel = -1;
@@ -1705,16 +1800,19 @@ async function boot() {
     const d = drag;
     if (!d?.backup) return false;
     drag = null;
-    const obj = (S.project?.scene?.objects || []).find((o) => o.id === d.id);
-    if (obj) {
-      const back = JSON.parse(d.backup);
-      for (const k of Object.keys(obj)) delete obj[k];
-      Object.assign(obj, back);
+    const back = JSON.parse(d.backup);
+    const target = d.kind === 'element'
+      ? S.project?.elements?.find((x) => x.id === d.id)
+      : (S.project?.scene?.objects || []).find((o) => o.id === d.id);
+    if (target) {
+      for (const k of Object.keys(target)) delete target[k];
+      Object.assign(target, back);
     }
     preview.render(S.time);
     timeline?.render(true);
     inspector?.render(S.project, S.selection, S.time);
     gizmo.draw();
+    updateOverlay();
     updateSelectionInfo();
     return true;
   }
