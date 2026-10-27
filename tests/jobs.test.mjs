@@ -56,6 +56,35 @@ test('queued jobs snapshot media content and retry across runtime restarts', asy
   await assert.rejects(restarted.submit({ ...input, time: 0.5 }), { code: 'REQUEST_ID_CONFLICT' });
 });
 
+test('render snapshots freeze audio elements and 3D media and deduplicate shared sources', async (t) => {
+  const { root, projects } = await fixture(t);
+  await fs.mkdir(path.join(root, 'media'));
+  const originals = { 'song.m4a': 'sound', 'picture.png': 'image', 'clip.mp4': 'video' };
+  for (const [name, content] of Object.entries(originals)) await fs.writeFile(path.join(root, 'media', name), content);
+  await projects.transact({ ops: [
+    { op: 'addElement', element: { id: 'sound', type: 'audio', src: 'media/song.m4a', duration: 1 } },
+    { op: 'objectAdd', object: { id: 'picture', type: 'image', src: 'media/picture.png', duration: 1 } },
+    { op: 'objectAdd', object: { id: 'video', type: 'video', src: 'media/clip.mp4', duration: 1 } },
+    { op: 'objectAdd', object: { id: 'shared', type: 'image', src: 'media/picture.png', duration: 1 } },
+  ] });
+  const jobs = await createJobService(root, projects, () => {}, { execute: async () => ({}) });
+  t.after(() => jobs.close());
+  const job = await jobs.submit({ kind: 'still', expectedRev: 2, requestId: 'all-media' });
+  await jobs.wait(job.id);
+  const snapshot = JSON.parse(await fs.readFile(path.join(root, '.vdm', 'jobs', job.id, 'project.json'), 'utf8'));
+  assert.equal(job.sources.length, 3);
+  const inputs = [...snapshot.elements.filter((el) => el.type === 'audio'), ...snapshot.scene.objects];
+  for (const name of Object.keys(originals)) await fs.writeFile(path.join(root, 'media', name), 'replaced');
+  for (const entry of inputs) {
+    const source = job.sources.find((item) => item.path === entry.src);
+    assert.ok(source, `missing snapshotted source for ${entry.id}`);
+    assert.equal(await fs.readFile(path.join(root, entry.src), 'utf8'), originals[path.basename(source.src)]);
+  }
+  assert.equal(snapshot.scene.objects.find((obj) => obj.id === 'picture').src, snapshot.scene.objects.find((obj) => obj.id === 'shared').src);
+  assert.equal((await projects.read()).elements.find((el) => el.id === 'sound').src, 'media/song.m4a', 'project references stay relative to original media');
+  assert.equal((await jobs.submit({ kind: 'still', expectedRev: 2, requestId: 'all-media' })).id, job.id, 'retry reuses the original input snapshot');
+});
+
 test('startup marks abandoned tasks interrupted; invalid time and stale revision fail', async (t) => {
   const { root, projects } = await fixture(t);
   const jobs = await createJobService(root, projects, () => {}, { execute: async () => ({}) });

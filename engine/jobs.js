@@ -53,7 +53,12 @@ export async function createJobService(root, projects, onEvent, { execute } = {}
       await fs.mkdir(path.join(work, 'inputs'), { recursive: true });
       const sources = new Map();
       try {
-        const entries = [...project.elements.filter((e) => ['image', 'video'].includes(e.type)), ...(project.meta.audio ? [project.meta.audio] : [])];
+        const mediaTypes = new Set(['image', 'video', 'audio']);
+        const entries = [
+          ...project.elements.filter((entry) => mediaTypes.has(entry.type)),
+          ...(project.scene?.objects || []).filter((entry) => mediaTypes.has(entry.type)),
+          ...(project.meta.audio ? [project.meta.audio] : []),
+        ];
         for (const entry of entries) {
           if (!entry.src) continue;
           if (!sources.has(entry.src)) {
