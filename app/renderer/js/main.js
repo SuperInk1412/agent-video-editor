@@ -2109,6 +2109,7 @@ async function boot() {
     onSourceLimit: (side) => toast(side === 'start'
       ? '左边界不能早于素材开头'
       : '已到素材结尾；右键该素材勾选「开启循环」后可继续拉长', 'info'),
+    onToast: (msg, level = 'info') => toast(msg, level),
     onSplit: () => splitAtPlayhead(),
     onTextEdit: (kind, id, ev) => openTextEditor(kind, id, ev),
     onToggleCurves: () => toggleCurvePanel(),
