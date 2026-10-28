@@ -423,11 +423,17 @@ body.tl-parent-dragging, body.tl-parent-dragging * { cursor: crosshair !importan
 .tl-elhead.poolsel.poolprimary,
 .tl-prop.poolsel.poolprimary,
 .tl-camprop.poolsel.poolprimary,
-.tl-elprop.poolsel.poolprimary { box-shadow: inset 0 0 0 1px var(--accent); }
+.tl-elprop.poolsel.poolprimary { background: var(--accent-bg-strong); box-shadow: inset 0 0 0 1px var(--accent); }
+.tl-camhead.poolsel.poolprimary > .tl-gutter,
+.tl-camhead.poolsel.poolprimary > .tl-track,
+.tl-objhead.poolsel.poolprimary > .tl-gutter,
+.tl-objhead.poolsel.poolprimary > .tl-track,
+.tl-elhead.poolsel.poolprimary > .tl-gutter,
+.tl-elhead.poolsel.poolprimary > .tl-track { background: var(--accent-bg-strong); }
 .tl-camhead.poolsel.poolprimary > .tl-gutter,
 .tl-objhead.poolsel.poolprimary > .tl-gutter,
 .tl-elhead.poolsel.poolprimary > .tl-gutter { box-shadow: inset 3px 0 0 var(--accent); }
-.blk.poolsel.poolprimary { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), 0 0 10px var(--accent-bg); }
+.blk.poolsel.poolprimary { background: var(--accent-bg-strong); border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), 0 0 10px var(--accent-bg); }
 .tl-key.poolsel { background: var(--edit); border-color: var(--surface-0); }
 .tl-key.poolsel.poolprimary { box-shadow: 0 0 0 1px var(--edit-border); }
 /* A diamond being dragged horizontally: same size, grab cursor, above peers. */

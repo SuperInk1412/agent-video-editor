@@ -120,7 +120,7 @@ body.look-mode #stageBox { box-shadow: 0 0 0 2px var(--edit); }
   display: none; pointer-events: none; z-index: 3; overflow: hidden;
 }
 #selPoly {
-  fill: none;
+  fill: var(--accent-bg-strong);
   stroke: var(--accent); stroke-width: 2.25; vector-effect: non-scaling-stroke;
   filter: drop-shadow(0 0 4px var(--accent-border)) drop-shadow(0 0 1px var(--on-accent));
 }
@@ -141,6 +141,7 @@ body.look-mode #stageBox { box-shadow: 0 0 0 2px var(--edit); }
   filter: drop-shadow(0 0 2px var(--accent-border));
 }
 #selExtra polygon.primary, #selExtra rect.primary {
+  fill: var(--accent-bg-strong);
   stroke: var(--accent); stroke-width: 2.5;
   filter: drop-shadow(0 0 5px var(--accent-border));
 }

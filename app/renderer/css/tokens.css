@@ -20,6 +20,7 @@
   --accent: #17d9ff;
   --accent-hover: #5fe6ff;
   --accent-bg: rgba(23, 217, 255, .12);
+  --accent-bg-strong: rgba(23, 217, 255, .20);
   --accent-border: rgba(23, 217, 255, .45);
   --on-accent: #001218;
   --primary-bg: #0f3443;
