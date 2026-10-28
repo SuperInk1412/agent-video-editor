@@ -1,12 +1,34 @@
 // Realtime preview: WebGL2 compositor that mirrors blender/vdm_build.py.
 // Layers -> scene FBO -> bloom chain -> composite (CA, grain, scanlines, vignette, grade).
-import { evalElement } from '/core/evaluate.js';
+//
+// 2D layers have two placement paths (PLAN-ui-round3 §2.5, task S2):
+//
+// - legacy (`el.node` absent): the original screen path. `u_px2w` + `u_z` lift
+//   the canvas-space quad onto the fixed camera-facing plane at `transform.z`,
+//   exactly as before this branch (the 907b9ec picture must not change).
+// - node (`el.node` present): `core/spatial.js::elementNode` / `frameOf` give
+//   the layer a world position + basis (`dir`/`roll`) + scale. A full 4x4 quad
+//   matrix replaces the placement, so the texture can face any direction and
+//   still be depth-tested against the 3D scene.
+//
+// Why a new vertex branch instead of reusing preview3d.js::planeProg: that
+// program bakes scene-object lighting/fog/srgb and uploads sRGB textures, while
+// 2D layers share the compositor's straight-alpha/glow path and canvas-space
+// text rasters. Reusing FRAG_TEX / FRAG_SHAPE keeps solid/shape/ellipse/radius
+// drawing identical; only the vertex placement differs.
+import { evalElement, motionDelta } from '/core/evaluate.js';
 import { clamp } from '/core/time.js';
 import { cameraTransform, evalCamera, cameraLayers } from '/core/camera.js';
 import { audioElements, audioVolume } from '/core/audio.js';
+import { elementNodeAt } from './node-at.js';
+import { frameOf } from '/core/spatial.js';
+import { basisFromDir } from '/core/scene.js';
 import { Scene3D } from './preview3d.js';
 import { elementCarrier, carrierMatrix } from '/core/hierarchy.js';
 import { clearCompiledTracks, compileProject } from '/core/tracks.js';
+import {
+  mul4, nodePlaneMatrix, orderLayers, planeOfFrame, transformPlane,
+} from './spatial-layers.js';
 
 const IDENTITY4 = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
 
@@ -24,17 +46,25 @@ uniform mat4 u_vp;
 uniform vec4 u_px2w;
 uniform float u_z;
 uniform mat4 u_carry;   // camera-parented elements: the camera's motion since binding (identity otherwise)
+uniform mat4 u_model;   // node planes (u_world > 1.5): unit quad -> world (spatial-layers.js)
 out vec2 v_uv;
 void main(){
   vec3 p = u_mat * vec3(a_pos, 1.0);
-  if (u_world > 0.5) {
+  v_uv = a_uv;
+  if (u_world > 1.5) {
+    // Node plane: the quad has a real world basis (dir + roll), so it is drawn
+    // with a 4x4 model instead of the screen-plane 2x3 matrix. a_pos/a_uv are
+    // 0..1, hence the -0.5 local offset; v is flipped because world y is up
+    // while textures keep v = 0 at the picture top.
+    gl_Position = u_vp * (u_model * vec4(a_pos - 0.5, 0.0, 1.0));
+    v_uv = vec2(a_uv.x, 1.0 - a_uv.y);
+  } else if (u_world > 0.5) {
     vec2 q = (p.xy - u_px2w.xy) / u_px2w.z;
     gl_Position = u_vp * (u_carry * vec4(q.x / 100.0, u_px2w.w - q.y / 100.0, u_z, 1.0));
   } else {
     vec2 ndc = vec2(p.x / u_res.x * 2.0 - 1.0, 1.0 - p.y / u_res.y * 2.0);
     gl_Position = vec4(ndc, 0.0, 1.0);
   }
-  v_uv = a_uv;
 }`;
 
 const FRAG_TEX = `#version 300 es
@@ -706,13 +736,22 @@ export class Preview {
     }
   }
 
-  /** compute draw list for time t (also used for hit testing) */
+  /**
+   * Compute the draw list for time t (also used for hit testing).
+   *
+   * Every layer keeps the legacy screen data (`M`, `w`, `h`, `uv`, `blend`) so
+   * the old path and the selection overlay stay untouched. An element whose
+   * `el.node` exists additionally carries the world plane (`node.frame`) that
+   * the node placement path draws and picks with; `el.z` stays the 2D layer
+   * order and never moves into `node.pivot.z` (PLAN §2.5).
+   */
   computeLayers(t) {
     const p = this.project;
     const gl = this.gl;
     const W = this.canvas.width, H = this.canvas.height;
     const S = W / (p.meta.width || 1920);
     const cx = W / 2, cy = H / 2;
+    const cyW = (Number(p.meta?.height) || 1080) / 200;
     const out = [];
     // the camera this frame is seen through (text is rasterised for its close-ups)
     const cam = this.scene3d.city ? (this.editMode && this.editCam ? this.editCam : evalCamera(p, t)) : null;
@@ -722,14 +761,24 @@ export class Preview {
       const st = evalElement(el, t, p.meta);
       if (st.opacity <= 0.002) continue;
       const rot = (st.rotation || 0) * Math.PI / 180;
+      // Unified space: el.node is the placement source of truth (core/spatial.js).
+      // A partial node falls back to the legacy derivation for missing fields,
+      // so it can never move an element by accident. node-at.js samples the
+      // migrated `pivot.* / scale.* / roll` keyframes on top of the base node
+      // (S4 convention, same reading as migrate-spatial.js::migratedNodeAt).
+      const nodeFrame = el.node ? frameOf(elementNodeAt(el, p.meta, t)) : null;
+      const push = (L) => {
+        if (nodeFrame) L.node = { frame: nodeFrame };
+        out.push(L);
+      };
       if (el.type === 'text') {
-        const tt = this._textTexture(el, st, el.style, this._textZoom(el, st, cam));
+        const tt = this._textTexture(el, st, el.style, this._textZoom(el, st, cam, nodeFrame));
         const w = tt.w / tt.zoom, h = tt.h / tt.zoom;
         const M = M3.mul(
           M3.mul(M3.mul(M3.T(cx + st.x * S, cy + st.y * S), M3.R(rot)), M3.S(st.scale, st.scale)),
           M3.mul(M3.T(-w / 2, -h / 2), M3.S(w, h)),
         );
-        out.push({ el, st, kind: 'tex', tex: tt.tex, uv: [0, 0, 1, 1], M, w, h, blend: el.style.blend });
+        push({ el, st, kind: 'tex', tex: tt.tex, uv: [0, 0, 1, 1], M, w, h, blend: el.style.blend });
       } else if (el.type === 'image' || el.type === 'video') {
         const a = this.assets.get(el.id);
         if (!a || !a.ready || !a.tex) continue;
@@ -742,7 +791,7 @@ export class Preview {
           M3.mul(M3.mul(M3.T(cx + st.x * S, cy + st.y * S), M3.R(rot)), M3.S(st.scale, st.scale)),
           M3.mul(M3.T(-w / 2, -h / 2), M3.S(w, h)),
         );
-        out.push({ el, st, kind: 'tex', tex: a.tex, uv, M, w, h, blend: el.style.blend, asset: a });
+        push({ el, st, kind: 'tex', tex: a.tex, uv, M, w, h, blend: el.style.blend, asset: a });
       } else if (el.type === 'solid' || el.type === 'shape') {
         const bw = (Number(el.style.w) || p.meta.width) * S;
         const bh = (Number(el.style.h) || p.meta.height) * S;
@@ -752,13 +801,59 @@ export class Preview {
           M3.mul(M3.T(-w / 2, -h / 2), M3.S(w, h)),
         );
         const col = hexRgb(el.style.fill || el.style.color || '#ffffff');
-        out.push({ el, st, kind: 'shape', M, w, h, color: [...col, st.opacity], radius: (Number(el.style.radius) || 0) * S, shape: el.style.shape === 'ellipse' ? 1 : 0, blend: el.style.blend });
+        push({ el, st, kind: 'shape', M, w, h, color: [...col, st.opacity], radius: (Number(el.style.radius) || 0) * S, shape: el.style.shape === 'ellipse' ? 1 : 0, blend: el.style.blend });
       }
     }
     out.sort((a, b) => a.el.z - b.el.z);
     // elements parented to a camera ride along with it (screen-locked)
     for (const L of out) if (L.el.parent) L.carry = carrierMatrix(elementCarrier(p, L.el, t));
+    // World plane of every layer for the shared draw / pick ordering (§2.5).
+    // Node layers use the SpatialNode frame; legacy layers keep the exact point
+    // + [0,0,1] normal the old _planeDist used, so the old picture keeps its
+    // order (a carried layer's raw normal is kept unscaled on purpose: the
+    // screen-locked pull-in must keep sorting those layers in front).
+    for (const L of out) {
+      L.plane = L.node
+        ? planeOfFrame(L.node.frame)
+        : { p: [(L.st.x || 0) / 100, cyW - (L.st.y || 0) / 100, L.st.z || 0], n: [0, 0, 1] };
+      if (L.carry) L.plane = transformPlane(L.plane, L.carry);
+    }
+    // Node placement (world matrix) for node layers; legacy layers never get one.
+    for (const L of out) if (L.node) this._nodePlane(L, t, S, p.meta);
     return out;
+  }
+
+  /**
+   * World quad matrix of a node layer (task 5): the SpatialNode placement
+   * replaces `transform.x/y/z/rotation/scale`, while evalElement still owns
+   * opacity/fades/text content and motion/punch come from `motionDelta`.
+   * Motion is applied inside the plane — screen px along the plane's unrolled
+   * axes, extra roll around the normal, size multiplier — so nothing is added
+   * twice.
+   */
+  _nodePlane(L, t, S, meta) {
+    const frame = L.node.frame;
+    const d = motionDelta(L.el, t, meta);
+    // Unrolled plane axes: the legacy screen path translates before rotating,
+    // so a node's own roll must not rotate its motion direction.
+    const base = basisFromDir(frame.basis[2], 0);
+    const dx = (Number(d.x) || 0) / 100; // project px -> metres
+    const dy = -(Number(d.y) || 0) / 100; // canvas y points down, world y up
+    const offset = [
+      -base.right[0] * dx + base.up[0] * dy,
+      -base.right[1] * dx + base.up[1] * dy,
+      -base.right[2] * dx + base.up[2] * dy,
+    ];
+    // Canvas pixels are sized for the default framing (100 px = 1 m at the
+    // screen plane), then the node scale expands the geometry.
+    const pxToM = 1 / (100 * S);
+    const width = L.w * pxToM * Math.abs(Number(frame.scale[0]) || 1);
+    const height = L.h * pxToM * Math.abs(Number(frame.scale[1]) || 1);
+    const plane = nodePlaneMatrix(frame, width, height, { offset, roll: d.rotation, scale: d.scale });
+    L.node.w = plane.w;
+    L.node.h = plane.h;
+    // Camera-parented (screen-locked) node layers fold the carry into the model.
+    L.node.model = L.carry ? mul4(L.carry, plane.model) : plane.model;
   }
 
   render(t) {
@@ -848,6 +943,10 @@ export class Preview {
    * 2D element layers. `world` = {vp, camPos, meta} draws them as planes in the
    * 3D space (depth-tested against the 3D objects, no depth writes, far to
    * near; equal depth keeps the layer order); null draws them flat on screen.
+   *
+   * Node layers (`layer.node.model`) use the world-plane branch, every other
+   * layer keeps the legacy screen path. `u_world` selects the branch in VERT:
+   * 0 = flat screen blit, 1 = legacy screen plane, 2 = node world plane.
    */
   _drawLayers(layers, W, H, world) {
     const gl = this.gl;
@@ -855,16 +954,12 @@ export class Preview {
     if (world) {
       const cyW = (Number(world.meta?.height) || 1080) / 200;
       const S = W / (Number(world.meta?.width) || 1920);
-      // Order by the distance from the camera to each element's PLANE: elements
-      // on one plane keep their layer order from any viewing angle (a
-      // full-frame backdrop stays behind the type even when the editor camera
-      // looks at the canvas obliquely); only different planes sort far to near.
-      list = layers.map((L, i) => ({ L, i, d: this._planeDist(L, world.camPos, cyW) }))
-        .sort((a, b) => (Math.abs(a.d - b.d) > 1e-4 ? b.d - a.d : a.i - b.i))
-        .map((e) => e.L);
+      // Same ordering as hitTest (spatial-layers.js): distance from the camera to
+      // each element's PLANE, far first; on one plane `el.z` decides, so a
+      // full-screen backdrop stays behind the type from any viewing angle.
+      list = orderLayers(layers, world.camPos);
       for (const pr of [this.prog.tex, this.prog.shape]) {
         gl.useProgram(pr.program);
-        gl.uniform1f(pr.u.u_world, 1);
         gl.uniformMatrix4fv(pr.u.u_vp, false, world.vp);
         gl.uniform4f(pr.u.u_px2w, W / 2, H / 2, S, cyW);
       }
@@ -879,12 +974,16 @@ export class Preview {
       for (const layer of list) {
         const b = BLEND[layer.blend] || BLEND.normal;
         b(gl);
+        const nodeMode = !!world && !!layer.node?.model;
+        const mode = nodeMode ? 2 : (world ? 1 : 0);
         if (layer.kind === 'tex') {
           const pr = this.prog.tex;
           gl.useProgram(pr.program);
           gl.uniformMatrix3fv(pr.u.u_mat, false, layer.M);
           gl.uniform2f(pr.u.u_res, W, H);
-          if (world) {
+          gl.uniform1f(pr.u.u_world, mode);
+          if (nodeMode) gl.uniformMatrix4fv(pr.u.u_model, false, layer.node.model);
+          else if (world) {
             gl.uniform1f(pr.u.u_z, layer.st.z || 0);
             gl.uniformMatrix4fv(pr.u.u_carry, false, layer.carry || IDENTITY4);
           }
@@ -896,11 +995,16 @@ export class Preview {
           gl.uniform1i(pr.u.u_tex, 0);
           gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
         } else {
+          // Solid/shape keeps the existing SDF fragment shader (rect / rounded
+          // rect / ellipse) — only its quad placement is swapped, so a node
+          // element gets a real world orientation without a second shape path.
           const pr = this.prog.shape;
           gl.useProgram(pr.program);
           gl.uniformMatrix3fv(pr.u.u_mat, false, layer.M);
           gl.uniform2f(pr.u.u_res, W, H);
-          if (world) {
+          gl.uniform1f(pr.u.u_world, mode);
+          if (nodeMode) gl.uniformMatrix4fv(pr.u.u_model, false, layer.node.model);
+          else if (world) {
             gl.uniform1f(pr.u.u_z, layer.st.z || 0);
             gl.uniformMatrix4fv(pr.u.u_carry, false, layer.carry || IDENTITY4);
           }
@@ -1000,13 +1104,36 @@ export class Preview {
   /**
    * The four corners of a 2D layer in canvas pixels. In world mode they are
    * projected through the last 3D view-projection, so picking follows a moved
-   * camera instead of the flat screen-space matrix.
+   * camera instead of the flat screen-space matrix. Node layers use their world
+   * quad matrix (which already carries a camera parent), legacy layers keep the
+   * canvas-space matrix + screen-plane conversion.
    */
   _layerCorners(L, rect = [0, 0, 1, 1]) {
     const [u0, v0, u1, v1] = rect;
+    const s3 = this.scene3d;
+    if (L.node?.model) {
+      // Node plane: uv rect -> local quad (a_pos - 0.5) -> world -> pixels. The
+      // v axis is flipped (world y is up, texture v = 0 is the picture top) so
+      // the corner order stays top-left, top-right, bottom-right, bottom-left.
+      if (!this._worldMode || !s3?.lastVP) return null;
+      const W = this.canvas.width, H = this.canvas.height;
+      const m = L.node.model;
+      const out = [];
+      for (const [u, v] of [[u0, v0], [u1, v0], [u1, v1], [u0, v1]]) {
+        const lx = u - 0.5, ly = 0.5 - v;
+        const w = [
+          m[0] * lx + m[4] * ly + m[12],
+          m[1] * lx + m[5] * ly + m[13],
+          m[2] * lx + m[6] * ly + m[14],
+        ];
+        const p = s3.projectPoint(w);
+        if (!p) return null;
+        out.push([p.x * W / Math.max(1, s3.lastW), p.y * H / Math.max(1, s3.lastH)]);
+      }
+      return out;
+    }
     const pts = [[u0, v0], [u1, v0], [u1, v1], [u0, v1]]
       .map(([u, v]) => M3.apply(L.M, u, v));
-    const s3 = this.scene3d;
     if (!this._worldMode || !s3?.lastVP) return pts;
     const W = this.canvas.width, H = this.canvas.height;
     const meta = this.project?.meta || {};
@@ -1030,40 +1157,29 @@ export class Preview {
   }
 
   /**
-   * Distance from the camera to a layer's plane (world-mode draw order and
-   * picking). Elements on one plane share the key from any viewing angle, so
-   * their layer order holds; only different planes sort by depth.
-   */
-  _planeDist(L, camPos, cyW) {
-    let w = [(L.st.x || 0) / 100, cyW - (L.st.y || 0) / 100, L.st.z || 0];
-    let n = [0, 0, 1];
-    if (L.carry) {
-      const m = L.carry;
-      w = [0, 1, 2].map((i) => m[i] * w[0] + m[4 + i] * w[1] + m[8 + i] * w[2] + m[12 + i]);
-      n = [m[8], m[9], m[10]];
-    }
-    const c = camPos || [0, cyW, 20];
-    return Math.abs((c[0] - w[0]) * n[0] + (c[1] - w[1]) * n[1] + (c[2] - w[2]) * n[2]);
-  }
-
-  /**
    * How much larger than in the default framing a text element appears through
    * `cam` (distance to its plane, fov change, its own scale), rounded up to a
    * few levels so a camera move re-rasterises only now and then. Screen-locked
    * elements are pulled in and keep their screen size, so they stay at 1.
+   * Node layers measure from their world frame instead of the fixed screen plane.
    */
-  _textZoom(el, st, cam) {
+  _textZoom(el, st, cam, nodeFrame = null) {
     if (!cam || el.parent) return 1;
     const meta = this.project?.meta || {};
     const cyW = (Number(meta.height) || 1080) / 200;
-    const w = [(st.x || 0) / 100, cyW - (st.y || 0) / 100, st.z || 0];
+    const point = nodeFrame
+      ? nodeFrame.pos
+      : [(st.x || 0) / 100, cyW - (st.y || 0) / 100, st.z || 0];
+    const scaleRef = nodeFrame
+      ? Math.max(1, Math.abs(Number(nodeFrame.scale?.[0]) || 1), Math.abs(Number(nodeFrame.scale?.[1]) || 1))
+      : Math.max(1, Math.abs(st.scale || 1));
     const f = [cam.look[0] - cam.pos[0], cam.look[1] - cam.pos[1], cam.look[2] - cam.pos[2]];
     const fl = Math.hypot(f[0], f[1], f[2]) || 1;
-    const depth = ((w[0] - cam.pos[0]) * f[0] + (w[1] - cam.pos[1]) * f[1] + (w[2] - cam.pos[2]) * f[2]) / fl;
+    const depth = ((point[0] - cam.pos[0]) * f[0] + (point[1] - cam.pos[1]) * f[1] + (point[2] - cam.pos[2]) * f[2]) / fl;
     if (!(depth > 0.05)) return 1;
     const halfDefault = Math.atan(((Number(meta.width) || 1920) / 200) / 20);
     const halfNow = ((Number(cam.fov) || 51.282) * Math.PI) / 360;
-    const z = (20 / depth) * (Math.tan(halfDefault) / Math.tan(halfNow)) * Math.max(1, Math.abs(st.scale || 1));
+    const z = (20 / depth) * (Math.tan(halfDefault) / Math.tan(halfNow)) * scaleRef;
     for (const level of [1, 1.5, 2, 3, 4, 6, 8]) if (z <= level * 1.05) return level;
     return 8;
   }
@@ -1075,11 +1191,12 @@ export class Preview {
       const meta = this.project?.meta || {};
       const cyW = (Number(meta.height) || 1080) / 200;
       const camPos = this.scene3d.lastCam?.pos || [0, cyW, 20];
-      // Same key as _drawLayers (distance to each element's plane): the
-      // nearest plane wins, and on one plane the top layer wins.
-      const list = layers.map((L, i) => ({ L, i, d: this._planeDist(L, camPos, cyW) }))
-        .sort((a, b) => (Math.abs(a.d - b.d) > 1e-4 ? a.d - b.d : b.i - a.i));
-      for (const { L } of list) {
+      // Same order as _drawLayers (spatial-layers.js), walked backwards: nearest
+      // plane first and, on one plane, the top el.z layer first — picking and
+      // the picture can never disagree about which layer is on top.
+      const list = orderLayers(layers, camPos);
+      for (let i = list.length - 1; i >= 0; i--) {
+        const L = list[i];
         const poly = this._layerCorners(L);
         if (poly && pointInPoly(cx, cy, poly)) return L.el.id;
       }
