@@ -14,6 +14,7 @@ import {
   cameraRef, objectRef, elementRef, propertyRef, keyframeRef, splitRef,
 } from '/core/selection.js';
 import { poolHostKeys } from '/core/timeline-keys.js';
+import { keyframeMoveOps } from '/core/keyframe-edit.js';
 import {
   planRowInsert, planInsertionZ, planMoveZ, renumber2D, poolAnchors, sameOrder,
 } from '/core/timeline-order.js';
@@ -54,7 +55,7 @@ const CLIP_META_MIN = 90;
 export class Timeline {
   constructor(root, {
     onSeek, onSelect, onOp, onPause, onElementMenu, onCameraMenu, onClipMenu, onSplit, onTextEdit,
-    onToggleCurves, isCurvesOpen, sourceDuration, onSourceLimit,
+    onToggleCurves, isCurvesOpen, sourceDuration, onSourceLimit, onToast,
   } = {}) {
     this.root = root;
     this.onSeek = onSeek;
@@ -70,6 +71,7 @@ export class Timeline {
     this.isCurvesOpen = isCurvesOpen;
     this.sourceDuration = sourceDuration;
     this.onSourceLimit = onSourceLimit;
+    this.onToast = onToast;
     this.project = null;
     this.time = 0;
     this.pool = emptySelection();
@@ -3087,11 +3089,12 @@ export class Timeline {
   }
 
   /**
-   * Press and wait: a tap runs `onTap`, a drag past `slop` hands the same press
-   * to the marquee. Keyframe diamonds and section / property gutters need both
-   * (click to select or toggle, drag to box-select).
+   * Press and wait: a tap runs `onTap`, a drag past `slop` is offered to
+   * `onDrag` first (keyframe diamonds move their selection horizontally) and
+   * falls back to the marquee. Keyframe diamonds and section / property
+   * gutters need both (click to select or toggle, drag to box-select).
    */
-  _deferGesture(ev, { slop = 4, onTap = null } = {}) {
+  _deferGesture(ev, { slop = 4, onTap = null, onDrag = null } = {}) {
     const start = { x: ev.clientX, y: ev.clientY };
     let handed = false;
     const samePointer = (e) => !e || e.pointerId == null || e.pointerId === ev.pointerId;
@@ -3106,6 +3109,7 @@ export class Timeline {
       if (Math.hypot(e.clientX - start.x, e.clientY - start.y) <= slop) return;
       handed = true;
       cleanup();
+      if (onDrag?.(e)) return;
       this._startMarquee(ev, { at: { x: e.clientX, y: e.clientY } });
     };
     const up = (e) => {
@@ -3162,6 +3166,172 @@ export class Timeline {
     return true;
   }
 
+  /**
+   * A horizontal drag on a diamond moves the whole keyframe pool by whole
+   * frames; a vertical drag keeps the old marquee gesture. An unselected
+   * diamond is selected first (Ctrl/Shift still toggle), then its pool is
+   * dragged: a multi-host pool keeps every key on its own host and track.
+   * Returns false when the press should fall back to the marquee.
+   */
+  _dragKeys(ev, node, at) {
+    const ref = keyframeRefOf(node);
+    if (!ref) return false;
+    // Only horizontal movement changes time; a mostly-vertical drag is still a
+    // box-select, like it was before keyframe dragging existed.
+    const dx = at.clientX - ev.clientX;
+    const dy = at.clientY - ev.clientY;
+    if (Math.abs(dx) <= Math.abs(dy)) return false;
+    if (!(this.pool?.kind === 'keyframe' && this.pool.ids.includes(ref))) {
+      this._selectKeyNode(node, ev);
+    }
+    if (this.pool?.kind !== 'keyframe' || !this.pool.ids.length) return false;
+    this._beginKeyframeDrag(ev, [...this.pool.ids], at.clientX);
+    return true;
+  }
+
+  /**
+   * One batch per drag, one undo step. The preview only writes `style.left` on
+   * the diamonds that are on screen (no render per pointermove); the commit
+   * recomputes the same frame-quantized times through core/keyframe-edit.js.
+   * Esc / pointercancel restores the preview and commits nothing.
+   */
+  _beginKeyframeDrag(ev, refs, atClientX = null) {
+    const list = [...new Set(refs.map(String))];
+    if (!list.length) return false;
+    this.onPause?.();
+    const fps = this._fps();
+    const pxPerFrame = Math.max(0.01, this.pps / fps);
+    const startX = ev.clientX;
+    const wanted = new Set(list);
+    const nodes = [];
+    const seen = new Set();
+    this.inner.querySelectorAll('.tl-key').forEach((node) => {
+      const ref = keyframeRefOf(node);
+      if (!ref || !wanted.has(ref) || seen.has(ref)) return;
+      const t = Number(node.dataset.t);
+      if (!Number.isFinite(t)) return;
+      seen.add(ref);
+      nodes.push({ ref, node, left: node.style.left });
+    });
+    for (const n of nodes) n.node.classList.add('dragging');
+
+    const framesAt = (clientX) => Math.round((clientX - startX) / pxPerFrame);
+    let lastFrames = null;
+    let done = false;
+    const samePointer = (e) => !e || e.pointerId == null || e.pointerId === ev.pointerId;
+
+    const resetPreview = () => {
+      for (const n of nodes) n.node.style.left = n.left;
+    };
+    const draw = (res) => {
+      if (res.error || !res.deltaFrames || !res.moves.length) {
+        resetPreview();
+        return;
+      }
+      const byRef = new Map(res.moves.map((m) => [m.ref, m.to]));
+      for (const n of nodes) {
+        const to = byRef.get(n.ref);
+        if (to != null) n.node.style.left = `${to * this.pps}px`;
+      }
+    };
+
+    const cleanup = () => {
+      done = true;
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', down);
+      window.removeEventListener('keydown', onKey, true);
+      this.inner.removeEventListener('lostpointercapture', lost);
+      for (const n of nodes) n.node.classList.remove('dragging');
+      try {
+        if (this.inner.hasPointerCapture(ev.pointerId)) this.inner.releasePointerCapture(ev.pointerId);
+      } catch { /* synthetic pointer / already released */ }
+    };
+
+    const move = (e) => {
+      if (done || !samePointer(e)) return;
+      const frames = framesAt(e.clientX);
+      if (frames === lastFrames) return;
+      lastFrames = frames;
+      draw(keyframeMoveOps(list, frames, this.project, fps));
+    };
+
+    const up = (e) => {
+      if (done || !samePointer(e)) return;
+      const frames = framesAt(e.clientX);
+      cleanup();
+      this._swallowNextClick();
+      const res = keyframeMoveOps(list, frames, this.project, fps);
+      if (res.error) {
+        resetPreview();
+        this.onToast?.(res.error, 'warn');
+        return;
+      }
+      if (!res.ops.length) {
+        resetPreview();
+        return;
+      }
+      if (!this.onOp) {
+        resetPreview();
+        return;
+      }
+      const oldPool = this.pool;
+      const remap = new Map(res.moves.map((m) => [m.ref, m.refNew]));
+      // adopt the new refs before the op lands: applyProject() prunes keyframe
+      // pool refs that no longer resolve, and the old times are about to vanish
+      this.pool = normalizeSelection({
+        kind: 'keyframe',
+        ids: oldPool.ids.map((id) => remap.get(id) || id),
+        primary: remap.get(oldPool.primary) || oldPool.primary,
+      });
+      this._selectPoolHost();
+      const pending = this.onOp(res.batch);
+      if (!pending?.then) return;
+      pending.then((ok) => {
+        if (ok) return; // applyProject() rebuilds the rows at the new times
+        this.pool = oldPool;
+        this._selectPoolHost();
+        resetPreview();
+      }).catch(() => {
+        this.pool = oldPool;
+        this._selectPoolHost();
+        resetPreview();
+      });
+    };
+
+    const down = () => {
+      if (done) return;
+      cleanup();
+      resetPreview();
+      this._swallowNextClick();
+    };
+
+    const onKey = (e) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopPropagation();
+      down();
+    };
+
+    const lost = () => down();
+
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', down);
+    window.addEventListener('keydown', onKey, true);
+    this.inner.addEventListener('lostpointercapture', lost);
+    try {
+      this.inner.setPointerCapture(ev.pointerId);
+    } catch { /* no active pointer */ }
+    // The move that crossed the slop threshold was dispatched before these
+    // listeners existed; preview it now so the diamond never lags one event.
+    if (atClientX != null) {
+      lastFrames = framesAt(atClientX);
+      draw(keyframeMoveOps(list, lastFrames, this.project, fps));
+    }
+    return true;
+  }
+
   /** A tap on a property gutter: pick the property and its host row. */
   _selectProperty(kind, id, path, ev) {
     const host = kind === 'cam' ? cameraRef(id) : kind === 'ob' ? objectRef(id) : elementRef(id);
@@ -3188,12 +3358,17 @@ export class Timeline {
       this._startScrub(ev);
       return;
     }
-    // A diamond is a click on release, but dragging it starts a marquee. The
-    // marquee may include element keys (`data-el`), not just camera/3D ones.
+    // A diamond is a click on release; a horizontal drag moves the keyframe
+    // pool, any other drag still starts a marquee. The marquee may include
+    // element keys (`data-el`), not just camera/3D ones.
     const keyNode = target.closest?.('.tl-key');
     if (keyNode && keyframeRefOf(keyNode)) {
       ev.preventDefault();
-      this._deferGesture(ev, { slop: 3, onTap: () => this._selectKeyNode(keyNode, ev) });
+      this._deferGesture(ev, {
+        slop: 3,
+        onTap: () => this._selectKeyNode(keyNode, ev),
+        onDrag: (e) => this._dragKeys(ev, keyNode, e),
+      });
       return;
     }
     // Section rows: a click anywhere on the row (gutter or lane) still toggles

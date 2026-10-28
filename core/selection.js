@@ -114,7 +114,7 @@ export function splitRef(ref) {
 
 const KEY_AXES = ['x', 'y', 'z'];
 
-function keyframeHost(project, split) {
+export function keyframeHost(project, split) {
   if (split.type === 'cam') {
     return (project?.cameras || []).find((c) => c.id === split.id)
       || (project?.camera?.id === split.id ? project.camera : null);
@@ -125,7 +125,7 @@ function keyframeHost(project, split) {
 
 const hasKeyAt = (list, t) => (list || []).some((k) => Math.abs(Number(k?.t) - t) <= 1e-4);
 
-function objectKeyTracks(obj, path, t) {
+export function objectKeyTracks(obj, path, t) {
   const tracks = obj?.tracks || {};
   return [path, ...KEY_AXES.map((a) => `${path}.${a}`)].filter((name) => hasKeyAt(tracks[name], t));
 }
