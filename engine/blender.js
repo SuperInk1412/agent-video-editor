@@ -13,7 +13,8 @@ import { elementLinkOverlayTable } from '../core/link-eval.js';
 import { encodeSequence, extractSequence, fileExists, hashOf, hashFile } from './media.js';
 import { is3D, writeShot } from './shot.js';
 import { prepareObjectSequences } from './media-objects.js';
-import { prepareFeeds } from './camfeed-render.js';
+import { jobFrames, prepareFeeds } from './camfeed-render.js';
+import { bakeElementPlacements } from './element-bake.js';
 import { programProject } from '../core/camfeed.js';
 import { buildAudioMix } from './audio-mix.js';
 import { which } from './which.js';
@@ -124,6 +125,11 @@ export async function runJob(dir, job, { onProgress, onLog, signal } = {}) {
   // (output:false) never reach the picture (engine/camfeed-render.js).
   const fed = programProject(await prepareFeeds(dir, job, runJob, { onLog, signal }));
   const seqProject = await prepareSequences(dir, fed, { onLog, signal });
+  // Node / spatially parented 2D elements: per-frame world matrices (3D route).
+  if (is3D(fed)) {
+    const fps = Number(seqProject.meta.fps) || 24;
+    bakeElementPlacements(seqProject, jobFrames(job, fps, Number(seqProject.meta.duration) || 0), fps);
+  }
   await fs.writeFile(projFile, JSON.stringify(seqProject, null, 2));
   const payload = { ...job, project: projFile, root: p.root };
   delete payload.projectData;

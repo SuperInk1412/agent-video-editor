@@ -12,6 +12,7 @@ so an animation render stays fast.
 """
 import bisect
 import bpy
+from mathutils import Matrix
 import json
 import math
 import struct
@@ -412,6 +413,19 @@ def element_link_overlay(el, t):
     idx = max(0, min(len(values) - 1, idx))
     value = values[idx]
     return value if isinstance(value, dict) else None
+
+
+def baked_world(el, t, meta):
+    """Baked plane matrix (engine/element-bake.js `_world`) at t, or None."""
+    bake = el.get('_world')
+    if not bake:
+        return None
+    frames = bake.get('frames') or []
+    if not frames:
+        return None
+    fps = float(meta.get('fps') or 24)
+    i = int(round(t * fps)) + 1 - int(bake.get('f0', 1))
+    return frames[max(0, min(len(frames) - 1, i))]
 
 
 def eval_element(el, t, meta):
@@ -1293,6 +1307,18 @@ class SceneBuilder:
             if el['type'] == 'camfeed' and tex is not None:
                 show_feed_frame(el, obj, tex, frame)
 
+            # Node placement / spatial parent: the world matrix baked in JS
+            # (engine/element-bake.js) replaces the screen-rig placement.
+            wm = baked_world(el, t, meta)
+            if wm:
+                M = Matrix([[wm[c * 4 + r] for c in range(4)] for r in range(4)])
+                # layer order on one plane: a hair along the normal, as the rig does
+                M = M @ Matrix.Translation((0.0, 0.0, self.layer_px * z))
+                # relative to the screen rig without waiting for a depsgraph
+                # update (matrix_world of a just-built parent is still stale)
+                P = obj.parent.matrix_basis if obj.parent else Matrix.Identity(4)
+                obj.matrix_basis = P.inverted() @ M
+
             if tex is not None and tex.image and tex.image.source == 'SEQUENCE':
                 # Blender reads file number clamp(frame - frame_start + 1, 0, n) + offset;
                 # pin frame_start to the current frame so that is exactly the element's
@@ -1319,6 +1345,10 @@ class SceneBuilder:
                         shadow_obj.data.offset_y = -kv * shadow_obj.data.size
                 except Exception:
                     pass
+
+            if wm and shadow_obj:
+                # the shadow rides the baked plane, offset in its own pixels
+                shadow_obj.matrix_basis = obj.matrix_basis @ Matrix.Translation((5.0, -5.0, -0.0004))
 
         return update
 

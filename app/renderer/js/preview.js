@@ -835,7 +835,7 @@ export class Preview {
       gl.clearDepth(1);
       gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
       this._viewer = id;
-      this.scene3d.draw(p, t, pair.cur.w, pair.cur.h, evalCameraWorld(p, t, cam));
+      this.scene3d.draw(p, t, pair.cur.w, pair.cur.h, evalCameraWorldWithLinks(p, t, cam));
       this._viewer = null;
       pair.drawn = true;
     }
