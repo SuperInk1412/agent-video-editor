@@ -897,6 +897,31 @@ export class Inspector {
     return this._sec('父级', {}, ...kids);
   }
 
+  /**
+   * 空间父级 summary for a 3D object / camera: `frameParent` is the unified
+   * matrix parent (core/spatial-parent.js), separate from the old 3D `obj.parent`
+   * shown in the 父级 section below. Header row, same shape as the 2D summary.
+   */
+  _spatialParentSummary(project, host) {
+    const par = host?.frameParent;
+    if (!par?.id) return null;
+    const parentId = String(par.id);
+    const parentHost = (project.elements || []).find((x) => x.id === parentId)
+      || (project.scene?.objects || []).find((x) => x.id === parentId)
+      || (project.cameras || []).find((x) => x.id === parentId);
+    const name = parentHost?.name || parentId;
+    const jump = () => {
+      if ((project.elements || []).some((x) => x.id === parentId)) this.opts.onSelect?.({ elementId: parentId });
+      else if ((project.scene?.objects || []).some((x) => x.id === parentId)) this.opts.onSelect?.({ objectId: parentId });
+      else if ((project.cameras || []).some((x) => x.id === parentId)) this.opts.onSelect?.({ camera: true });
+    };
+    const unparent = () => this.opts.onOp({ op: 'spatialUnparent', id: host.id });
+    return h('div', { class: 'hint pad insp-parent' },
+      h('span', { class: 'insp-parent-name' }, `空间父级：${name}`),
+      h('button', { type: 'button', class: 'mini', onclick: jump }, '转到父级'),
+      h('button', { type: 'button', class: 'mini', onclick: unparent }, '解除'));
+  }
+
   // ---------------------------------------------------------------- 3D object
   _renderObject(project, obj, time, multi = 0) {
     const id = obj.id;
@@ -910,6 +935,8 @@ export class Inspector {
     this._header({ type: 'object', badge: OBJ_LABELS[obj.type] || '3D 元素', name: obj.name || id, id, multi });
     const linksSummary = this._linksSummary(project, obj);
     if (linksSummary) this.root.appendChild(linksSummary);
+    const spatialParent = this._spatialParentSummary(project, obj);
+    if (spatialParent) this.root.appendChild(spatialParent);
     this.root.appendChild(h('div', { class: 'hint pad' },
       '内容、中心点、位置、缩放、不透明度已移到时间轴左侧：选中元素后点元素行的 ▾ 展开编辑。',
       '复制 / 删除 / 面向镜头 / 落地在元素行的 ⋯ 菜单里。'));
@@ -1111,6 +1138,8 @@ export class Inspector {
     });
     const linksSummary = this._linksSummary(project, cam);
     if (linksSummary) this.root.appendChild(linksSummary);
+    const spatialParent = this._spatialParentSummary(project, cam);
+    if (spatialParent) this.root.appendChild(spatialParent);
     this.root.appendChild(h('div', { class: 'hint pad' },
       '相机属性折叠在时间轴相机行里：点行首 ▾ 展开；位置是飞行路径关键帧，中心点 / 画面 / 透明度 / 缩放也能逐帧打点。'));
     this.root.appendChild(this._worldSection(project, true));
