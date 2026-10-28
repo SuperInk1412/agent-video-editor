@@ -133,6 +133,26 @@ Blender 侧这些效果由合成器节点组 `VDM_Composite` 完成。节点组�
   变焦（fov）仍会改变它的大小。取消时元素中心留在原处（x / y / z 及其关键帧平移，旋转不回写）。预览在 VERT 里乘 `u_carry`，
   Blender 用逐帧烘焙的 `shot.elementCarriers` 驱动 `VDM_Carry_<id>` 空物体。检查器 2D 元素「贴屏」开关绑定到当前激活相机。
 - **已知限制**：多相机分层（VSE）路径仍把 2D 元素作为贴屏层叠在最上面（不产生视差）；预览里 2D 元素点选已经按 `scene3d.lastVP` 投影，相机移动后命中与选中框一致。
+- **统一空间节点（显式迁移）**：2D 元素可以带 `el.node = { pivot, position, dir, roll, scale }`（米 / 度 / 倍），
+  带 `node` 时它是唯一的变换来源；`worldPos = pivot + basis(dir, roll) · position`。不带 `node` 仍是旧的
+  `transform` 只读派生，画面保持不变。迁移只走显式脚本，不自动写项目：
+  `node scripts/migrate-spatial.mjs --in <fixture> --out <新目录或 json> --mode preserve|world|hybrid [--dry-run]`；
+  输入输出都先 `validateProject`，拒绝写 `projects/`，旧字段保留在 `legacy`。目前**预览**已支持 `node`，
+  Blender / engine 仍走 legacy 2D 求值，迁移元素的成片差异要等下一批。
+- **空间父级（`parent.mode: "world"`）**：2D 子级可挂到 2D / 3D / 相机：
+  `el.parent = { id, mode: "world", inherit: { pos, rot, scale }, bind: { pivot, basis, scale } }`。
+  `bind` 是绑定时父级世界 frame，之后 `parentDelta = frame(t) · frame(bind)⁻¹` 带着子级走——
+  父级旋转会绕父级 pivot 公转，绑定时刻不跳。`spatialParent {id, parent, t, inherit?}` /
+  `spatialUnparent {id}` 只增删 `parent`，从不改子级本地值或关键帧。`@live` / 旧相机贴屏仍是渲染期
+  屏锁，不是世界父级，也不能当世界父级的目标。预览已接父级链；Blender / engine 尚未消费。
+- **属性父级（`el.links` / `ob.links` / `cam.links`）**：一条链接是
+  `{ id, to, from: { host: "el"|"ob"|"cam", id, path }, combine: "add"|"mul", bindParentValue, enabled }`。
+  `add`：`eff = local + parent(t) − bindParentValue`；`mul`：`eff = local × parent(t) / bindParentValue`。
+  只能连同单位（长度 / 角度 / 比例 / 数值）；父值沿父级自己的链接链读取，环和 >32 层链被拒绝；
+  `@live` 与相机 `position.*` 不可作来源。解除只删 link，本地值留在原地。ops：
+  `propLink {id, to, from, combine?, bindParentValue?, t}` / `propLinkPatch {id, to, patch}` /
+  `propUnlink {id, to}`。目前**预览的旧 2D 元素**已接（`elementOverlay`）；3D、相机和 Blender 求值
+  还没接入，数据会保留但不改变对应画面。
 - **编辑器剪贴板**：Ctrl+C / Ctrl+V 复制选中的 2D 元素和 3D 对象，保存在本机 localStorage，跨项目重启仍可用；
   粘贴时保持组内相对时间，落到当前播放头，2D 副本放到当前图层最上面。跨项目只带元素数据，`media/` 文件不会随剪贴板复制。
 - **时间轴列表顺序（编辑器状态）**：`meta.ui.timelineOrder` 是左侧统一列表自上而下的引用数组
@@ -182,6 +202,11 @@ Blender 侧这些效果由合成器节点组 `VDM_Composite` 完成。节点组�
 {"op":"splitElement","id":"cam_1","at":2.3}                    // 相机 id：切成两个镜头片段
 {"op":"splitAt","at":2.3,"ids":["el_a","el_b"]}   // 不传 ids：切开红线经过的所有元素
 {"op":"reorder","id":"el_x","z":5}
+{"op":"spatialParent","id":"el_x","parent":"ob_1","t":1.2}
+{"op":"spatialUnparent","id":"el_x"}
+{"op":"propLink","id":"el_x","to":"pivot.y","from":{"host":"el","id":"el_y","path":"pivot.x"},"combine":"add","t":1.2}
+{"op":"propLinkPatch","id":"el_x","to":"pivot.y","patch":{"combine":"mul","enabled":true}}
+{"op":"propUnlink","id":"el_x","to":"pivot.y"}
 {"op":"addSegment","segment":{"start":0,"duration":3,"name":"镜 01"}}
 {"op":"updateSegment","id":"seg_1","patch":{"status":"approved"}}
 {"op":"removeSegment","id":"seg_1"}
