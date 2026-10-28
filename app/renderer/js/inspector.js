@@ -10,6 +10,7 @@ import { RotBall } from './rotball.js';
 import { SpeedCurve, SPEED_PRESETS } from './speedcurve.js';
 import { attachNumberField, readNumber, writeNumber } from './numfield.js';
 import { widthFor, isWidth } from './field-width.js';
+import { frameWriteTime } from './timeline-math.js';
 import { h, icon, prefs } from './ui.js';
 
 const MOTIONS = ['none', 'in', 'out', 'left', 'right', 'up', 'down', 'drift', 'shake'];
@@ -93,6 +94,16 @@ export class Inspector {
     for (const fn of this._kfSync) {
       try { fn(); } catch { /* stale node */ }
     }
+  }
+
+  /**
+   * Time to write for a new key: the playhead frame's 3-decimal left edge
+   * (timeline-math.js frameWriteTime), so the ◆ and the timelane diamond agree
+   * at 24/30/60fps. Existing non-frame keys are only ever read, never rewritten.
+   */
+  _keyTime() {
+    const p = this._last?.project;
+    return frameWriteTime(this.opts.getTime(), p?.meta?.fps, p?.meta?.duration || 0);
   }
 
   _refresh() {
@@ -224,7 +235,7 @@ export class Inspector {
     return this._kfButton(
       () => this._elKeyState(paths),
       () => {
-        const t = Math.round(this.opts.getTime() * 1000) / 1000;
+        const t = this._keyTime();
         for (const path of paths) this.opts.onOp({ op: 'keySet', id: this._elId, path, t, value: this.opts.getTimeValue(path) });
       },
       () => {
@@ -389,9 +400,11 @@ export class Inspector {
     // playhead; otherwise it edits the base value.
     const keyed = (path) => (el.keyframes || []).some((k) => k.path === path);
     const kv = (path, base) => sampleTrack(el.keyframes, path, time, base);
+    // binding re-reads the pose at the playhead; keys land on the frame edge
     const tNow = () => Math.round(this.opts.getTime() * 1000) / 1000;
+    const keyT = () => this._keyTime();
     const edit = (path, patch) => (v) => {
-      if (keyed(path)) this._commit(`${el.id}:${path}`, { op: 'keySet', id: el.id, path, t: tNow(), value: v });
+      if (keyed(path)) this._commit(`${el.id}:${path}`, { op: 'keySet', id: el.id, path, t: keyT(), value: v });
       else set(path, patch(v));
     };
 
@@ -590,7 +603,10 @@ export class Inspector {
   /** 父级: pick a parent, inherit switches, keyable rotation/scale strength. */
   _renderParent(project, obj, time) {
     const id = obj.id;
+    // binding re-reads the pose at the playhead, so it keeps the exact time;
+    // strength keys are new keyframes and land on the frame edge
     const tNow = () => Math.round(this.opts.getTime() * 1000) / 1000;
+    const keyT = () => this._keyTime();
     const objs = project.scene?.objects || [];
     const par = obj.parent || null;
     const reparent = (extra) => this.opts.onOp({ op: 'objectParent', id, parent: par?.id, t: tNow(), ...extra });
@@ -626,7 +642,7 @@ export class Inspector {
           label, value: Math.round(Number(v) * 1000) / 1000, step: 0.01, min: 0, max: 1, percent: true,
           // Keyed channel: write a key at the playhead; otherwise change the base strength (re-binds at the playhead).
           onChange: (nv) => this._commit(`${id}:parent.${ch}`, track.length
-            ? { op: 'objectParentKey', id, channel: ch, t: tNow(), v: nv }
+            ? { op: 'objectParentKey', id, channel: ch, t: keyT(), v: nv }
             : { op: 'objectParent', id, parent: par.id, t: tNow(), strength: { [ch]: nv } }),
           keyer: {
             state: () => {
@@ -635,8 +651,8 @@ export class Inspector {
               const now = this.opts.getTime();
               return tr.some((k) => Math.abs(k.t - now) <= tol) ? 'on' : 'anim';
             },
-            set: () => this.opts.onOp({ op: 'objectParentKey', id, channel: ch, t: tNow(), v: Number(v) }),
-            unset: () => this.opts.onOp({ op: 'objectParentUnkey', id, channel: ch, t: atKey ? atKey.t : tNow() }),
+            set: () => this.opts.onOp({ op: 'objectParentKey', id, channel: ch, t: keyT(), v: Number(v) }),
+            unset: () => this.opts.onOp({ op: 'objectParentUnkey', id, channel: ch, t: atKey ? atKey.t : keyT() }),
           },
         }));
       }
@@ -653,7 +669,7 @@ export class Inspector {
     const id = obj.id;
     this._kind = `3d.${obj.type}`;
     const pose = objectPose(obj, time);
-    const tNow = () => Math.round(this.opts.getTime() * 1000) / 1000;
+    const tNow = () => this._keyTime();
     const key = (path, v) => this.opts.onOp({ op: 'objectKey', id, path, t: tNow(), v });
     const tol = 0.5 / (project.meta?.fps || 24);
     const liveObj = () => (this._last?.project?.scene?.objects || []).find((o) => o.id === id) || obj;
@@ -781,7 +797,7 @@ export class Inspector {
         }, ...EASES.map((e) => h('option', { value: e, selected: e === k.ease }, e))),
         h('button', {
           type: 'button', class: 'icon-btn mini', 'aria-label': '复制到播放头', 'data-tip': '复制到播放头\n在当前时间放一个同值关键帧',
-          onclick: () => this.opts.onOp({ op: 'keySet', id: el.id, path: k.path, t: round(time), value: k.value, ease: k.ease }),
+          onclick: () => this.opts.onOp({ op: 'keySet', id: el.id, path: k.path, t: this._keyTime(), value: k.value, ease: k.ease }),
         }, icon('plus', 'ic-sm')),
         h('button', {
           type: 'button', class: 'icon-btn mini danger', 'aria-label': '删除关键帧', 'data-tip': '删除这个关键帧',

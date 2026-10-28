@@ -18,7 +18,7 @@ import {
 } from '/core/timeline-order.js';
 import { attachNumberField, readNumber, writeNumber } from './numfield.js';
 import { h, icon, token, prefs } from './ui.js';
-import { normalizeFps, frameIndex, frameStart, frameBand, planRulerTicks } from './timeline-math.js';
+import { normalizeFps, frameIndex, frameStart, frameBand, planRulerTicks, frameWriteTime, frameClipEdit } from './timeline-math.js';
 
 const el = (tag, cls, html) => {
   const n = document.createElement(tag);
@@ -645,6 +645,30 @@ export class Timeline {
   _gutter() { return this._gutterW; }
   _trackX(t) { return this._gutter() + t * this.pps; }
   _fps() { return normalizeFps(this.project?.meta.fps); }
+
+  /**
+   * Time to write into the project for a new key or a dragged clip edge: the
+   * left edge of the frame under `t`, rounded up to the stored millisecond so
+   * frameIndex() still reads the same frame (round3 can drop one frame).
+   * Callers snap first (`_snap`: 0 / end / beats), so Alt — which turns the
+   * magnet off — still lands on the frame grid. A snap that lands exactly on
+   * the project end keeps its exact duration instead of rounding past the tail.
+   */
+  _frameTime(t = this.time) {
+    return frameWriteTime(t, this._fps(), this.project?.meta.duration || 0);
+  }
+
+  /** Quantized start/duration for a block drag; see frameClipEdit. */
+  _clipEdit(mode, start, duration, { maxDuration = null } = {}) {
+    return frameClipEdit({
+      mode,
+      start,
+      duration,
+      fps: this._fps(),
+      tail: this.project?.meta.duration || 0,
+      maxDuration,
+    });
+  }
 
   /**
    * Where the playhead line is drawn: the start of the frame under `t`, except
@@ -1421,14 +1445,20 @@ export class Timeline {
         return;
       }
       const ns = block._ns, nd = block._nd;
-      const changed = ns != null && (Math.abs(ns - orig.start) >= 1e-4 || Math.abs(nd - orig.duration) >= 1e-4);
+      const q = ns == null ? null : this._clipEdit(mode, ns, nd);
+      const changed = q != null
+        && (Math.abs(q.start - orig.start) >= 1e-4 || Math.abs(q.duration - orig.duration) >= 1e-4);
       if (!changed) {
         if (!active) this._activateCamera(cam.id);
         return;
       }
       const ops = [];
       if (!active) ops.push({ op: 'activateCamera', id: cam.id });
-      ops.push({ op: 'moveElement', id: cam.id, start: round3(ns), duration: round3(nd) });
+      // A move keeps the clip length exactly (keyframes travel with it); a trim
+      // keeps the opposite edge and lands the dragged edge on the frame grid.
+      ops.push(mode === 'move'
+        ? { op: 'moveElement', id: cam.id, start: q.start }
+        : { op: 'moveElement', id: cam.id, start: q.start, duration: q.duration });
       this.onOp?.(ops.length > 1 ? { op: 'batch', ops } : ops[0]);
     };
     window.addEventListener('pointermove', move);
@@ -1571,7 +1601,7 @@ export class Timeline {
       const { box, inp } = this._numBox(ax, ax.toUpperCase());
       inp.addEventListener('focus', () => this.onPause?.());
       inp.addEventListener('input', () => {
-        this._editTimes.set(camPosEditKey(cam.id), round3(this.time));
+        this._editTimes.set(camPosEditKey(cam.id), this._frameTime());
         this._schedule(camPosEditKey(cam.id), () => this._commitCamPos(cam.id));
       });
       inp.addEventListener('blur', () => { this._flush(camPosEditKey(cam.id)); this._syncProps(); });
@@ -1598,7 +1628,7 @@ export class Timeline {
     if (!cam || !posRow) return;
     const v = posRow.inputs.map((i) => readNumber(i));
     if (v.some((n) => !Number.isFinite(n))) return;
-    const t = this._editTimes.get(camPosEditKey(camId)) ?? round3(this.time);
+    const t = this._editTimes.get(camPosEditKey(camId)) ?? this._frameTime();
     const old = (cam.path || []).find((k) => Math.abs(k.t - t) <= 1e-4);
     this.onOp?.({ op: 'cameraKey', id: camId, t, pos: v, look: old?.look ?? null, fov: old?.fov ?? null });
   }
@@ -1607,7 +1637,7 @@ export class Timeline {
     const cam = this._camById(camId);
     if (!cam) return;
     this.onPause?.();
-    const t = round3(this.time);
+    const t = this._frameTime();
     const key = (cam.path || []).find((k) => Math.abs(k.t - t) < 1e-3);
     if (key) {
       this.onOp?.({ op: 'cameraRemove', id: camId, t: key.t });
@@ -1635,7 +1665,7 @@ export class Timeline {
         return { t, node: d };
       });
     }
-    for (const k of posRow.keys) k.node.classList.toggle('at', Math.abs(k.t - this.time) < 5e-4);
+    for (const k of posRow.keys) k.node.classList.toggle('at', Math.abs(k.t - this.time) < 1e-3);
   }
 
   _camVecRow(cam, path, label, dims, values, { step = 0.1, min, max, letter } = {}) {
@@ -1659,7 +1689,7 @@ export class Timeline {
       const editKey = `cam:${cam.id}:${path}`;
       inp.addEventListener('focus', () => this.onPause?.());
       inp.addEventListener('input', () => {
-        this._editTimes.set(editKey, round3(this.time));
+        this._editTimes.set(editKey, this._frameTime());
         this._schedule(editKey, () => this._commitCamParam(cam.id, path));
       });
       inp.addEventListener('blur', () => { this._flush(editKey); this._syncProps(); });
@@ -1709,7 +1739,7 @@ export class Timeline {
     const values = pr.inputs.map((i) => readNumber(i));
     if (!values.every(Number.isFinite)) return;
     const v = pr.dims === 1 ? values[0] : values;
-    const t = this._editTimes.get(`cam:${camId}:${path}`) ?? round3(this.time);
+    const t = this._editTimes.get(`cam:${camId}:${path}`) ?? this._frameTime();
     if (this._camHasTrack(cam, path)) {
       this.onOp?.({ op: 'cameraParamKey', id: camId, path, t, v });
     } else {
@@ -1722,7 +1752,7 @@ export class Timeline {
     const cam = this._camById(camId);
     if (!cam) return;
     const v = raw === 'true' ? true : raw === 'false' ? false : raw;
-    const t = round3(this.time);
+    const t = this._frameTime();
     if (this._camHasTrack(cam, path)) {
       this.onOp?.({ op: 'cameraParamKey', id: camId, path, t, v });
     } else {
@@ -1738,7 +1768,7 @@ export class Timeline {
     const cam = this._camById(camId);
     if (!cam) return;
     this.onPause?.();
-    const t = round3(this.time);
+    const t = this._frameTime();
     const track = cam.tracks?.[path] || [];
     if (track.some((k) => Math.abs(k.t - t) < 1e-3)) {
       this.onOp?.({ op: 'cameraParamUnkey', id: camId, path, t });
@@ -1767,7 +1797,7 @@ export class Timeline {
         return { t, node: d };
       });
     }
-    for (const k of pr.keys || []) k.node.classList.toggle('at', Math.abs(k.t - this.time) < 5e-4);
+    for (const k of pr.keys || []) k.node.classList.toggle('at', Math.abs(k.t - this.time) < 1e-3);
   }
 
   _camParamNumRow(cam, path, label, value, { step = 0.1, min, max, badge = '', keyable = true } = {}) {
@@ -1786,7 +1816,7 @@ export class Timeline {
     const editKey = `cam:${cam.id}:${path}`;
     inp.addEventListener('focus', () => this.onPause?.());
     inp.addEventListener('input', () => {
-      this._editTimes.set(editKey, round3(this.time));
+      this._editTimes.set(editKey, this._frameTime());
       this._schedule(editKey, () => {
         if (keyable) this._commitCamParam(cam.id, path);
         else {
@@ -1978,7 +2008,7 @@ export class Timeline {
       pr.keyedAtFocus = this._elTrack(e, path).length > 0;
     });
     inp.addEventListener('input', () => {
-      this._editTimes.set(`${e.id}:${path}`, round3(this.time));
+      this._editTimes.set(`${e.id}:${path}`, this._frameTime());
       this._schedule(`${e.id}:${path}`, () => this._commitElementNum(e.id, path));
     });
     inp.addEventListener('blur', () => { this._flush(`${e.id}:${path}`); pr.keyedAtFocus = null; this._syncProps(); });
@@ -2216,7 +2246,7 @@ export class Timeline {
       const { box, inp } = this._numBox('d', letter);
       inp.addEventListener('focus', () => this.onPause?.());
       inp.addEventListener('input', () => {
-        this._editTimes.set(`${o.id}:geom`, round3(this.time));
+        this._editTimes.set(`${o.id}:geom`, this._frameTime());
         this._schedule(`${o.id}:geom`, () => this._commitGeom(o.id));
       });
       inp.addEventListener('blur', () => { this._flush(`${o.id}:geom`); this._syncProps(); });
@@ -2245,7 +2275,7 @@ export class Timeline {
     hex.className = 'tl-hex';
     hex.spellcheck = false;
     color.addEventListener('input', () => {
-      this._editTimes.set(`${o.id}:color`, round3(this.time));
+      this._editTimes.set(`${o.id}:color`, this._frameTime());
       this._schedule(`${o.id}:color`, () => this._commitColor(o.id, color.value));
     });
     color.addEventListener('blur', () => { this._flush(`${o.id}:color`); this._syncProps(); });
@@ -2280,7 +2310,7 @@ export class Timeline {
       const { box, inp } = this._numBox(ax, ax.toUpperCase());
       inp.addEventListener('focus', () => this.onPause?.());
       inp.addEventListener('input', () => {
-        this._editTimes.set(`${o.id}:${path}`, round3(this.time));
+        this._editTimes.set(`${o.id}:${path}`, this._frameTime());
         this._schedule(`${o.id}:${path}`, () => this._commitVec(o.id, path));
       });
       inp.addEventListener('blur', () => { this._flush(`${o.id}:${path}`); this._syncProps(); });
@@ -2312,7 +2342,7 @@ export class Timeline {
     inp.dataset.unit = '%';
     inp.addEventListener('focus', () => this.onPause?.());
     inp.addEventListener('input', () => {
-      this._editTimes.set(`${o.id}:opacity`, round3(this.time));
+      this._editTimes.set(`${o.id}:opacity`, this._frameTime());
       this._schedule(`${o.id}:opacity`, () => this._commitOpacity(o.id));
     });
     inp.addEventListener('blur', () => { this._flush(`${o.id}:opacity`); this._syncProps(); });
@@ -2381,7 +2411,7 @@ export class Timeline {
         return { t, node: d };
       });
     }
-    for (const k of pr.keys || []) k.node.classList.toggle('at', Math.abs(k.t - this.time) < 5e-4);
+    for (const k of pr.keys || []) k.node.classList.toggle('at', Math.abs(k.t - this.time) < 1e-3);
   }
 
   _refreshElLane(pr, e) {
@@ -2401,7 +2431,7 @@ export class Timeline {
         return { t, node: d };
       });
     }
-    for (const k of pr.keys || []) k.node.classList.toggle('at', Math.abs(k.t - this.time) < 5e-4);
+    for (const k of pr.keys || []) k.node.classList.toggle('at', Math.abs(k.t - this.time) < 1e-3);
   }
 
   _syncProps(force = false) {
@@ -2527,7 +2557,7 @@ export class Timeline {
     if (!pr || !o) return;
     const v = pr.inputs.map((i) => readNumber(i));
     if (v.some((n) => !Number.isFinite(n))) return;
-    const t = this._editTimes.get(`${objId}:${path}`) ?? round3(this.time);
+    const t = this._editTimes.get(`${objId}:${path}`) ?? this._frameTime();
     if (this._hasTrack(o, path)) this.onOp?.({ op: 'objectKey', id: objId, path, t, v });
     else this.onOp?.({ op: 'objectPatch', id: objId, patch: { [path]: v } });
   }
@@ -2538,7 +2568,7 @@ export class Timeline {
     if (!pr || !o) return;
     const v = readNumber(pr.inputs[0]);
     if (!Number.isFinite(v)) return;
-    const t = this._editTimes.get(`${objId}:opacity`) ?? round3(this.time);
+    const t = this._editTimes.get(`${objId}:opacity`) ?? this._frameTime();
     if (this._hasTrack(o, 'opacity')) this.onOp?.({ op: 'objectKey', id: objId, path: 'opacity', t, v });
     else this.onOp?.({ op: 'objectPatch', id: objId, patch: { opacity: Math.max(0, Math.min(1, v)) } });
   }
@@ -2565,7 +2595,7 @@ export class Timeline {
     const o = this._obj(objId);
     if (!o) return;
     this.onPause?.();
-    const t = round3(this.time);
+    const t = this._frameTime();
     const track = o.tracks?.[path] || [];
     const at = track.some((k) => Math.abs(k.t - t) < 1e-3);
     if (at) {
@@ -2585,7 +2615,7 @@ export class Timeline {
     if (!Number.isFinite(v)) return;
     if (path === 'transform.opacity' || path === 'audio.volume') v = Math.max(0, Math.min(1, v));
     if (path === 'transform.scale') v = Math.max(0, v);
-    const t = this._editTimes.get(`${elId}:${path}`) ?? round3(this.time);
+    const t = this._editTimes.get(`${elId}:${path}`) ?? this._frameTime();
     const keyed = pr.keyedAtFocus ?? this._elTrack(e, path).length > 0;
     if (keyed) {
       this.onOp?.({ op: 'keySet', id: elId, path, t, value: v });
@@ -2603,7 +2633,7 @@ export class Timeline {
     const e = this._element(elId);
     if (!e) return;
     this.onPause?.();
-    const t = round3(this.time);
+    const t = this._frameTime();
     const keys = this._elTrack(e, path);
     if (keys.some((k) => Math.abs(Number(k.t) - t) < 1e-3)) {
       this.onOp?.({ op: 'keyRemove', id: elId, path, t });
@@ -3213,8 +3243,12 @@ export class Timeline {
           return;
         }
         const ns = objBlk._ns, nd = objBlk._nd;
-        if (ns == null || (Math.abs(ns - orig.start) < 1e-4 && Math.abs(nd - orig.duration) < 1e-4)) return;
-        this.onOp?.({ op: 'objectPatch', id, patch: { start: round3(ns), duration: round3(nd) } });
+        if (ns == null) return;
+        const q = this._clipEdit(mode, ns, nd);
+        if (Math.abs(q.start - orig.start) < 1e-4 && Math.abs(q.duration - orig.duration) < 1e-4) return;
+        this.onOp?.(mode === 'move'
+          ? { op: 'objectPatch', id, patch: { start: q.start } }
+          : { op: 'objectPatch', id, patch: { start: q.start, duration: q.duration } });
       };
       window.addEventListener('pointermove', move);
       window.addEventListener('pointerup', up);
@@ -3317,8 +3351,16 @@ export class Timeline {
         const hitSource = !!blk._sourceHit && moved;
         if (hitSource) this.onSourceLimit?.(mode === 'l' ? 'start' : 'end');
         const ns = blk._ns, nd = blk._nd;
-        if (ns == null || (Math.abs(ns - orig.start) < 1e-4 && Math.abs(nd - orig.duration) < 1e-4)) return;
-        this.onOp?.({ op: 'moveElement', id, start: round3(ns), duration: round3(nd) });
+        if (ns == null) return;
+        const q = this._clipEdit(mode, ns, nd, {
+          // The source end is not a frame boundary; it keeps its exact seconds.
+          // A left trim only extends away from that limit, so it needs no cap.
+          maxDuration: mode === 'r' && sourceLimit ? Math.max(0.08, sourceLimit - srcIn) : null,
+        });
+        if (Math.abs(q.start - orig.start) < 1e-4 && Math.abs(q.duration - orig.duration) < 1e-4) return;
+        this.onOp?.(mode === 'move'
+          ? { op: 'moveElement', id, start: q.start }
+          : { op: 'moveElement', id, start: q.start, duration: q.duration });
       };
       window.addEventListener('pointermove', move);
       window.addEventListener('pointerup', up);
