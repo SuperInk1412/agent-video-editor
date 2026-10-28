@@ -13,6 +13,9 @@ import {
   emptySelection, normalizeSelection, selectOne, pickSelection,
   cameraRef, objectRef, elementRef, propertyRef, keyframeRef, splitRef,
 } from '/core/selection.js';
+import {
+  planRowInsert, planInsertionZ, planMoveZ, renumber2D, poolAnchors, sameOrder,
+} from '/core/timeline-order.js';
 import { attachNumberField, readNumber, writeNumber } from './numfield.js';
 import { h, icon, token, prefs } from './ui.js';
 import { normalizeFps, frameIndex, frameStart, frameBand, planRulerTicks } from './timeline-math.js';
@@ -378,6 +381,16 @@ export class Timeline {
     if (this.filterCount) this.filterCount.textContent = `${shown} / ${total}`;
   }
 
+  /** Header row element for a selection ref ('cam:id' / 'ob:id' / 'el:id'). */
+  _rowOf(ref) {
+    const r = splitRef(ref);
+    if (!r) return null;
+    const q = CSS.escape(String(r.id));
+    return r.type === 'cam' ? this.inner.querySelector(`.tl-camhead[data-cam="${q}"]`)
+      : r.type === 'ob' ? this.inner.querySelector(`.tl-objhead[data-obj="${q}"]`)
+        : this.inner.querySelector(`.tl-elhead[data-el="${q}"]`);
+  }
+
   /**
    * Scroll a camera / element / object header row into view (vertically) and
    * its clip start (horizontally). Expansion and selection are untouched.
@@ -399,10 +412,7 @@ export class Timeline {
       }
     }
     if (!kind || id == null || !this.project) return false;
-    const q = CSS.escape(String(id));
-    const row = kind === 'camera' ? this.inner.querySelector(`.tl-camhead[data-cam="${q}"]`)
-      : kind === 'object' ? this.inner.querySelector(`.tl-objhead[data-obj="${q}"]`)
-        : this.inner.querySelector(`.tl-elhead[data-el="${q}"]`);
+    const row = this._rowOf(ref);
     if (!row || !row.getClientRects().length) return false;
 
     const sr = this.scroll.getBoundingClientRect();
@@ -419,6 +429,96 @@ export class Timeline {
     const viewR = this.scroll.scrollLeft + this.scroll.clientWidth;
     if (x < viewL + 8 || x > viewR - 40) this.scroll.scrollLeft = Math.max(0, x - this._gutter() - 40);
     return true;
+  }
+
+  // ------------------------------------------------------------ row insertion
+  // Every "new element" action (toolbar text/shape, asset quick add, media
+  // drop, audio add, 3D add) goes through these helpers via main.js so the row
+  // lands above the selection, `meta.ui.timelineOrder` is persisted in the
+  // same batch as the add, and the 2D z stack agrees with the display slot.
+
+  /** Selection anchor refs: pool hosts first (incl. non-active cameras), then the active camera. */
+  _anchorRefs() {
+    const out = poolAnchors(this.pool);
+    // A camera selection normally carries its cam host in the pool (the primary
+    // one even when another camera is active). Only legacy/empty camera
+    // selections fall back to the active camera.
+    if (this.cameraSel && !out.some((ref) => ref.startsWith('cam:'))) {
+      const id = this._activeCameraId();
+      if (id) out.push(cameraRef(id));
+    }
+    return out;
+  }
+
+  /** Current reconciled display order (before the new row exists). */
+  _orderNow() {
+    const p = this.project;
+    if (!p) return [];
+    const cams = Array.isArray(p.cameras) && p.cameras.length ? p.cameras : (p.camera ? [p.camera] : []);
+    const objs = Array.isArray(p.scene?.objects) ? p.scene.objects : [];
+    return this._reconcileOrder(p, cams, objs);
+  }
+
+  /**
+   * Where a new row with `ref` should go. Returns `{ index, order }`: `index`
+   * is one row above the topmost selected row (0 = top of the list) and
+   * `order` is the timelineOrder value to persist with the add.
+   */
+  rowInsertPlan(ref) {
+    return planRowInsert(this._orderNow(), this._anchorRefs(), ref);
+  }
+
+  /**
+   * z value + reorder ops for a new 2D element placed by `order` (the plan from
+   * rowInsertPlan). The element only needs `id`, `type` and `start`.
+   */
+  planElementInsertion(element, order) {
+    const els = this.project?.elements || [];
+    const byId = new Map(els.map((e) => [e.id, e]));
+    const stack = (order || []).map(String).filter((ref) => {
+      const s = splitRef(ref);
+      if (!s || s.type !== 'el') return false;
+      const e = byId.get(s.id);
+      if (!e) return s.id === element.id && element.type !== 'audio';
+      return e.type !== 'audio';
+    });
+    return planInsertionZ({ stack, elements: els, element });
+  }
+
+  /**
+   * After the add op applied and the new row exists: top insert scrolls (smoothly)
+   * to the top; otherwise reveal the row. A filter that hides the new row is
+   * cleared first so the reveal can actually land on it.
+   */
+  afterInsertRow({ index = 0, ref } = {}) {
+    if (!this.project || !ref) return;
+    if (this.filterText.trim()) {
+      const q = this.filterText.trim().toLowerCase();
+      const row = this._rowOf(ref);
+      if (row && !String(row.dataset.filter || '').includes(q)) {
+        this._setFilter('');
+        if (this.filterInput) this.filterInput.value = '';
+      }
+    }
+    if (!index) {
+      // Respect reduced-motion: the jump is still instant, just not animated.
+      const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
+      this.scroll.scrollTo({ top: 0, behavior: reduce ? 'auto' : 'smooth' });
+      return;
+    }
+    this.reveal(ref);
+  }
+
+  /** Left edge of the frame the playhead sits in (the display frame's start). */
+  frameStart(t) {
+    const fps = Math.max(1, Math.round(Number(this.project?.meta.fps) || 24));
+    const f = Math.max(0, Math.floor((Number(t) || 0) * fps + 1e-6));
+    return Math.floor((f / fps) * 1e6) / 1e6;
+  }
+
+  /** Playhead time snapped to the left edge of its display frame. */
+  playheadStart() {
+    return this.frameStart(this.time);
   }
 
   // ------------------------------------------------------------ name column width
@@ -467,11 +567,16 @@ export class Timeline {
   }
 
   // ------------------------------------------------------------ state
+  /**
+   * First load fits the whole project into view. Later calls (an edit, a new
+   * element, a duration change) must NOT refit: a long clip added at the end
+   * would otherwise reset the user's zoom/scroll. Double-clicking the ruler
+   * (`fit()`) is the explicit way to refit.
+   */
   setProject(p) {
     const firstLoad = !this.project;
-    const durChanged = this.project && this.project.meta.duration !== p.meta.duration;
     this.project = p;
-    if (firstLoad || durChanged) {
+    if (firstLoad) {
       this._fitOnce = true;
       this._layout();
     } else {
@@ -1160,7 +1265,11 @@ export class Timeline {
     }
   }
 
-  /** 2D element ops for a drop. Only the relative order of 2D rows matters. */
+  /**
+   * 2D element ops for a drop. Only the relative order of 2D rows matters; the
+   * midpoint / whole-stack renumber rules live in core/timeline-order.js and are
+   * shared with the insertion path in main.js.
+   */
   _elementOrderOps(oldOrder, newOrder, p, group) {
     const byRef = new Map((p.elements || []).map((e) => [elementRef(e.id), e]));
     const is2D = (ref) => {
@@ -1171,55 +1280,12 @@ export class Timeline {
     const new2D = newOrder.filter(is2D);
     if (sameOrder(old2D, new2D)) return [];
     const moved = (group || []).filter(is2D);
-    const zOf = (e) => Number(e?.z);
-    const startOf = (e) => (Number.isFinite(Number(e?.start)) ? Number(e.start) : 0);
-    const ops = [];
     if (moved.length === 1 && new2D.length > 1) {
-      const ref = moved[0];
-      const el = byRef.get(ref);
-      const idx = new2D.indexOf(ref);
-      if (el && idx >= 0) {
-        const above = idx > 0 ? byRef.get(new2D[idx - 1]) : null;
-        const below = idx < new2D.length - 1 ? byRef.get(new2D[idx + 1]) : null;
-        let z = NaN;
-        if (!above && below) {
-          const rest = new2D.filter((r) => r !== ref).map((r) => zOf(byRef.get(r))).filter(Number.isFinite);
-          z = rest.length ? Math.max(...rest) + 1 : 0;
-        } else if (above && !below) {
-          const rest = new2D.filter((r) => r !== ref).map((r) => zOf(byRef.get(r))).filter(Number.isFinite);
-          z = rest.length ? Math.min(...rest) - 1 : 0;
-        } else if (above && below) {
-          const za = zOf(above);
-          const zb = zOf(below);
-          if (Number.isFinite(za) && Number.isFinite(zb) && za > zb) z = (za + zb) / 2;
-        }
-        const oldZ = zOf(el);
-        let ok = Number.isFinite(z)
-          && (!Number.isFinite(oldZ) || Math.abs(z - oldZ) > 1e-9)
-          && new2D.every((r) => r === ref || Math.abs(zOf(byRef.get(r)) - z) > 1e-9);
-        if (ok) {
-          const sim = new2D.map((r) => ({
-            ref: r,
-            z: r === ref ? z : zOf(byRef.get(r)),
-            start: startOf(byRef.get(r)),
-          })).sort((a, b) => (b.z - a.z) || (a.start - b.start)).map((x) => x.ref);
-          ok = sameOrder(sim, new2D);
-        }
-        if (ok) ops.push({ op: 'reorder', id: el.id, z });
-      }
+      return planMoveZ({ stack: new2D, byRef, ref: moved[0] });
     }
-    if (!ops.length) {
-      // A group move (or a gap too tight for a midpoint): renumber the 2D
-      // stack bottom-to-top. This changes several z values but never the
-      // picture across different planes.
-      new2D.forEach((ref, i) => {
-        const el = byRef.get(ref);
-        if (!el) return;
-        const z = new2D.length - 1 - i;
-        if (Number(el.z) !== z) ops.push({ op: 'reorder', id: el.id, z });
-      });
-    }
-    return ops;
+    // A group move (or a single row in a one-row stack): renumber the 2D stack
+    // bottom-to-top. This changes several z values but never the picture.
+    return renumber2D(new2D, byRef);
   }
 
   /** Camera stack ops: only the relative order of camera rows matters. */
@@ -3369,7 +3435,6 @@ function setClipLoopMark(block, on) {
   block.insertBefore(ic, block.firstChild);
 }
 const round2 = (v) => Math.round(Number(v) * 100) / 100;
-const sameOrder = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
 const fmtTick = (t) => (t >= 60 ? `${Math.floor(t / 60)}:${String(Math.round(t % 60)).padStart(2, '0')}` : `${Math.round(t)}s`);
 const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 export { escapeHtml };
