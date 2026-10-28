@@ -397,18 +397,57 @@ def eval_element(el, t, meta):
     def g(path, default):
         return sample_track(kf, path, t, default)
 
-    st = {
-        'x': float(g('transform.x', tr.get('x', 0)) or 0),
-        'y': float(g('transform.y', tr.get('y', 0)) or 0),
-        'z': float(g('transform.z', tr.get('z', 0)) or 0),
-        'scale': float(g('transform.scale', tr.get('scale', 1)) or 0),
-        'rotation': float(g('transform.rotation', tr.get('rotation', 0)) or 0),
-        'opacity': float(g('transform.opacity', tr.get('opacity', 1)) or 0),
-        'glow': float(g('fx.glow', (el.get('fx') or {}).get('glow', 0)) or 0),
-        'text': g('style.text', (el.get('style') or {}).get('text', '')),
-        'size': float(g('style.size', (el.get('style') or {}).get('size', 96)) or 0),
-        'color': g('style.color', (el.get('style') or {}).get('color', '#ffffff')),
-    }
+    node = el.get('node')
+    if isinstance(node, dict):
+        # Migrated 2D element: the SpatialNode is the transform source. The 2D
+        # builder can represent flat planes only; for a tilted node we keep the
+        # pivot/scale/roll and leave the full 3D placement to the node renderer.
+        pivot = [
+            float(g('pivot.x', (node.get('pivot') or [0, 0, 0])[0]) or 0),
+            float(g('pivot.y', (node.get('pivot') or [0, 0, 0])[1]) or 0),
+            float(g('pivot.z', (node.get('pivot') or [0, 0, 0])[2]) or 0),
+        ]
+        position = [float(v or 0) for v in (node.get('position') or [0, 0, 0])[:3]]
+        while len(position) < 3:
+            position.append(0.0)
+        direction = [float(v or 0) for v in (node.get('dir') or [0, 0, 1])[:3]]
+        while len(direction) < 3:
+            direction.append(0.0)
+        flat = abs(direction[0]) < 1e-4 and abs(direction[1]) < 1e-4 and abs(direction[2]) > 0.999
+        fz = 1.0 if direction[2] >= 0 else -1.0
+        if flat:
+            # basisFromDir([0,0,fz]) = right [-fz,0,0], up [0,1,0], forward [0,0,fz]
+            wx = pivot[0] - fz * position[0]
+            wy = pivot[1] + position[1]
+            wz = pivot[2] + fz * position[2]
+        else:
+            wx, wy, wz = pivot
+        height = float(meta.get('height') or 1080)
+        st = {
+            'x': wx * PX_PER_M,
+            'y': (height / 2.0) - wy * PX_PER_M,
+            'z': wz,
+            'scale': float(g('scale.x', (node.get('scale') or [1, 1, 1])[0]) or 0),
+            'rotation': float(g('roll', node.get('roll', 0)) or 0),
+            'opacity': float(g('transform.opacity', tr.get('opacity', 1)) or 0),
+            'glow': float(g('fx.glow', (el.get('fx') or {}).get('glow', 0)) or 0),
+            'text': g('style.text', (el.get('style') or {}).get('text', '')),
+            'size': float(g('style.size', (el.get('style') or {}).get('size', 96)) or 0),
+            'color': g('style.color', (el.get('style') or {}).get('color', '#ffffff')),
+        }
+    else:
+        st = {
+            'x': float(g('transform.x', tr.get('x', 0)) or 0),
+            'y': float(g('transform.y', tr.get('y', 0)) or 0),
+            'z': float(g('transform.z', tr.get('z', 0)) or 0),
+            'scale': float(g('transform.scale', tr.get('scale', 1)) or 0),
+            'rotation': float(g('transform.rotation', tr.get('rotation', 0)) or 0),
+            'opacity': float(g('transform.opacity', tr.get('opacity', 1)) or 0),
+            'glow': float(g('fx.glow', (el.get('fx') or {}).get('glow', 0)) or 0),
+            'text': g('style.text', (el.get('style') or {}).get('text', '')),
+            'size': float(g('style.size', (el.get('style') or {}).get('size', 96)) or 0),
+            'color': g('style.color', (el.get('style') or {}).get('color', '#ffffff')),
+        }
     md = motion_delta(el, t, meta)
     st['x'] += md['x']
     st['y'] += md['y']

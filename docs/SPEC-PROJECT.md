@@ -137,8 +137,9 @@ Blender 侧这些效果由合成器节点组 `VDM_Composite` 完成。节点组�
   带 `node` 时它是唯一的变换来源；`worldPos = pivot + basis(dir, roll) · position`。不带 `node` 仍是旧的
   `transform` 只读派生，画面保持不变。迁移只走显式脚本，不自动写项目：
   `node scripts/migrate-spatial.mjs --in <fixture> --out <新目录或 json> --mode preserve|world|hybrid [--dry-run]`；
-  输入输出都先 `validateProject`，拒绝写 `projects/`，旧字段保留在 `legacy`。目前**预览**已支持 `node`，
-  Blender / engine 仍走 legacy 2D 求值，迁移元素的成片差异要等下一批。
+  输入输出都先 `validateProject`，拒绝写 `projects/`，旧字段保留在 `legacy`。**预览**已支持完整的
+  `node`；Blender 的 2D 构建器也支持平面节点（`dir` 为 ±Z、`position` 在平面内），迁移后的 miku
+  flat 元素可正常出片；倾斜 `node`、空间父级和属性链接在 Blender 仍走旧路径/未接。
 - **空间父级（`parent.mode: "world"`）**：2D 子级可挂到 2D / 3D / 相机：
   `el.parent = { id, mode: "world", inherit: { pos, rot, scale }, bind: { pivot, basis, scale } }`。
   `bind` 是绑定时父级世界 frame，之后 `parentDelta = frame(t) · frame(bind)⁻¹` 带着子级走——
