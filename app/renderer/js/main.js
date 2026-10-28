@@ -22,7 +22,7 @@ import { newId } from '/core/schema.js';
 import { sampleTrack } from '/core/time.js';
 import { clearCompiledTracks } from '/core/tracks.js';
 import {
-  emptySelection, normalizeSelection, selectOne, cameraRef, objectRef, elementRef, splitRef,
+  emptySelection, normalizeSelection, selectOne, legacyFields, cameraRef, objectRef, elementRef, splitRef,
   keyframeExists, keyframeDeleteOps,
 } from '/core/selection.js';
 
@@ -223,6 +223,10 @@ function applyProject(p, source) {
       return elIds.has(s.id);
     });
     S.selection.pool = normalizeSelection({ ...S.selection.pool, ids });
+    // The pool is the source of truth: after pruning, re-derive the legacy
+    // fields so the inspector / transport never point at a host that just
+    // disappeared (a Ctrl-mixed pool drops refs of any type).
+    S.selection = { ...S.selection, ...legacyFields(S.selection.pool) };
   }
   if (gizmo) gizmo.objSel = S.selection.objectId || null;
   preview.setProject(p);
@@ -286,31 +290,33 @@ function stepFrames(dir, { pauseFirst = false } = {}) {
 }
 
 // ---------------------------------------------------------------- selection
+/**
+ * Apply a selection. The pool is the source of truth: when one is present its
+ * primary fills in `elementId / objectId / camera`, so a single element pool
+ * can hold 2D elements, 3D objects and cameras at once. Explicit ids still win
+ * (legacyFields) and the backfill never clears one, so older callers keep
+ * working unchanged when they pass no pool.
+ */
 function select(sel = {}) {
-  let next;
-  if (sel.camera) {
-    next = { segmentId: null, elementId: null, objectId: null, camera: true };
-  } else if (sel.objectId) {
-    next = { segmentId: null, elementId: null, objectId: sel.objectId, camera: false };
-  } else {
-    next = {
-      segmentId: sel.segmentId ?? S.selection.segmentId,
-      elementId: sel.elementId ?? null,
-      objectId: sel.objectId ?? null,
-      camera: false,
-    };
-    if (sel.elementId) {
-      const el = S.project.elements.find((e) => e.id === sel.elementId);
-      if (el?.segment) next.segmentId = el.segment;
-    }
-  }
   let pool;
   if (sel.pool) pool = normalizeSelection(sel.pool);
   else if (sel.camera && S.project?.camera) pool = selectOne('element', cameraRef(S.project.camera.id));
   else if (sel.objectId) pool = selectOne('element', objectRef(sel.objectId));
   else if (sel.elementId) pool = selectOne('element', elementRef(sel.elementId));
   else pool = emptySelection();
-  S.selection = { ...next, pool };
+  const host = legacyFields(pool, {
+    elementId: sel.elementId, objectId: sel.objectId, camera: sel.camera,
+  });
+  let segmentId;
+  if (host.camera || host.objectId) segmentId = null;
+  else {
+    segmentId = sel.segmentId ?? S.selection.segmentId;
+    if (host.elementId) {
+      const el = S.project?.elements?.find((e) => e.id === host.elementId);
+      if (el?.segment) segmentId = el.segment;
+    }
+  }
+  S.selection = { segmentId, ...host, pool };
   if (gizmo) {
     gizmo.objSel = S.selection.objectId || null;
     gizmo.objHover = null;
@@ -763,8 +769,12 @@ function updateSelectionInfo() {
     return;
   }
   const pool = sel.pool;
-  const camIds = pool?.kind === 'element' ? pool.ids.map(splitRef).filter((r) => r?.type === 'cam').map((r) => r.id) : [];
-  const camId = camIds[0] || (sel.camera ? (p?.activeCameraId || p?.camera?.id) : null);
+  // The pool primary is the host the transport badge names, even in a mixed
+  // cam / ob / el selection.
+  const primary = pool?.kind ? splitRef(pool.primary) : null;
+  const camId = primary?.type === 'cam'
+    ? primary.id
+    : (!pool?.ids?.length && sel.camera ? (p?.activeCameraId || p?.camera?.id) : null);
   const cam = camId ? ((p?.cameras || []).find((c) => c.id === camId) || (p?.camera?.id === camId ? p.camera : null)) : null;
   if (cam) {
     show('相机', 'badge-camera', cam.name || cam.id, cam.id);
@@ -3191,10 +3201,15 @@ async function boot() {
         }
         return;
       }
-      if (S.selection.elementId) { e?.preventDefault(); op({ op: 'removeElement', id: S.selection.elementId }); S.selection.elementId = null; }
-      else if (S.selection.objectId) {
+      // v1 deletes only the primary host of the pool: one element / object at a
+      // time, never a cross-type batch, even when cam / ob / el are mixed.
+      const primary = S.selection.pool?.kind === 'element' ? splitRef(S.selection.pool.primary) : null;
+      const elementId = primary?.type === 'el' ? primary.id : (primary ? null : S.selection.elementId);
+      const objectId = primary?.type === 'ob' ? primary.id : (primary ? null : S.selection.objectId);
+      if (elementId) { e?.preventDefault(); op({ op: 'removeElement', id: elementId }); S.selection.elementId = null; }
+      else if (objectId) {
         e?.preventDefault();
-        const obj = (S.project?.scene?.objects || []).find((o) => o.id === S.selection.objectId);
+        const obj = (S.project?.scene?.objects || []).find((o) => o.id === objectId);
         if (obj) requestObjectDelete(obj);
       }
     },

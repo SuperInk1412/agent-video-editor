@@ -10,6 +10,7 @@ import { RotBall } from './rotball.js';
 import { SpeedCurve, SPEED_PRESETS } from './speedcurve.js';
 import { attachNumberField, readNumber, writeNumber } from './numfield.js';
 import { widthFor, isWidth } from './field-width.js';
+import { splitRef } from '/core/selection.js';
 import { h, icon, prefs } from './ui.js';
 
 const MOTIONS = ['none', 'in', 'out', 'left', 'right', 'up', 'down', 'drift', 'shake'];
@@ -72,19 +73,28 @@ export class Inspector {
     const active = document.activeElement;
     if (this._ballDragging || this._speedDragging) return;
     if (this.root.contains(active) && /INPUT|TEXTAREA|SELECT/.test(active?.tagName || '')) { this._syncKeys(); return; }
-    const key = `${project.rev}|${sel?.camera ? 'cam' : ''}|${sel?.elementId}|${sel?.objectId}|${sel?.segmentId}|${Math.round(time * 10)}`;
+    // The pool primary is what the panel edits; legacy single-selection fields
+    // stay as a fallback for callers that pass no pool. A cam / ob / el mixed
+    // selection still shows only the primary entity (plus a count).
+    const primary = sel?.pool?.kind ? splitRef(sel.pool.primary) : null;
+    const multi = sel?.pool?.kind === 'element' && sel.pool.ids.length > 1 ? sel.pool.ids.length : 0;
+    const key = `${project.rev}|${primary ? `${primary.type}:${primary.id}` : (sel?.camera ? 'cam' : '')}|${sel?.elementId}|${sel?.objectId}|${sel?.segmentId}|${multi}|${Math.round(time * 10)}`;
     if (key === this.lastRenderKey) { this._syncKeys(); return; }
     this.lastRenderKey = key;
     this.root.innerHTML = '';
     this._kfSync = [];
     this._elId = null;
     this.root.classList.add('insp');
-    const object = (project.scene?.objects || []).find((o) => o.id === sel?.objectId);
-    const element = project.elements.find((e) => e.id === sel?.elementId);
-    if (object) this._renderObject(project, object, time);
-    else if (element) this._renderElement(project, element, time);
+    const objectId = primary?.type === 'ob' ? primary.id : (primary ? null : sel?.objectId);
+    const elementId = primary?.type === 'el' ? primary.id : (primary ? null : sel?.elementId);
+    const camera = primary ? primary.type === 'cam' : !!sel?.camera;
+    const object = (project.scene?.objects || []).find((o) => o.id === objectId);
+    const element = project.elements.find((e) => e.id === elementId);
+    const cam = camera ? ((project.cameras || []).find((c) => c.id === primary?.id) || project.camera) : null;
+    if (object) this._renderObject(project, object, time, multi);
+    else if (element) this._renderElement(project, element, time, multi);
     else if (sel?.segmentId) this._renderSegment(project, sel.segmentId);
-    else if (sel?.camera && project.camera) this._renderCamera(project, time);
+    else if (cam) this._renderCamera(project, time, cam, multi);
     else this._renderProject(project);
   }
 
@@ -106,7 +116,7 @@ export class Inspector {
    * Sticky header: type badge · name (click to rename) · dim id · icon actions.
    * actions: [{ icon, label, tip, danger, run }]
    */
-  _header({ type, badge, name, id, onRename, actions = [] }) {
+  _header({ type, badge, name, id, onRename, actions = [], multi = 0 }) {
     const nameBtn = onRename
       ? h('button', { type: 'button', class: 'insp-name', 'data-tip': '单击改名', 'aria-label': `名称：${name}，单击改名` }, name || '—')
       : h('span', { class: 'insp-name static', title: name }, name || '—');
@@ -141,6 +151,9 @@ export class Inspector {
       h('span', { class: `badge${type ? ` badge-${type}` : ''} insp-kind` }, badge),
       nameBtn,
       id ? h('span', { class: 'insp-id', title: id }, id) : null,
+      multi > 1 ? h('span', {
+        class: 'insp-multi', 'data-tip': '多选：面板、Delete 都只作用于最后选中的那个（primary）',
+      }, `${multi} 个选中`) : null,
       actions.length ? h('div', { class: 'insp-actions' }, ...actions.map((a) => h('button', {
         type: 'button', class: `icon-btn${a.danger ? ' danger' : ''}`,
         'aria-label': a.label, 'data-tip': a.tip || a.label, onclick: a.run,
@@ -362,12 +375,12 @@ export class Inspector {
   }
 
   // ---------------------------------------------------------------- 2D element
-  _renderElement(project, el, time) {
+  _renderElement(project, el, time, multi = 0) {
     this._elId = el.id;
     this._kind = el.type;
     const set = (path, patch) => this._commit(`${el.id}:${path}`, { op: 'updateElement', id: el.id, patch });
     this._header({
-      type: el.type, badge: EL_LABELS[el.type] || el.type, name: el.name, id: el.id,
+      type: el.type, badge: EL_LABELS[el.type] || el.type, name: el.name, id: el.id, multi,
       onRename: (v) => set('name', { name: v }),
       actions: [
         {
@@ -649,7 +662,7 @@ export class Inspector {
   }
 
   // ---------------------------------------------------------------- 3D object
-  _renderObject(project, obj, time) {
+  _renderObject(project, obj, time, multi = 0) {
     const id = obj.id;
     this._kind = `3d.${obj.type}`;
     const pose = objectPose(obj, time);
@@ -658,7 +671,7 @@ export class Inspector {
     const tol = 0.5 / (project.meta?.fps || 24);
     const liveObj = () => (this._last?.project?.scene?.objects || []).find((o) => o.id === id) || obj;
 
-    this._header({ type: 'object', badge: OBJ_LABELS[obj.type] || '3D 元素', name: obj.name || id, id });
+    this._header({ type: 'object', badge: OBJ_LABELS[obj.type] || '3D 元素', name: obj.name || id, id, multi });
     this.root.appendChild(h('div', { class: 'hint pad' },
       '内容、中心点、位置、缩放、不透明度已移到时间轴左侧：选中元素后点元素行的 ▾ 展开编辑。',
       '复制 / 删除 / 面向镜头 / 落地在元素行的 ⋯ 菜单里。'));
@@ -849,11 +862,12 @@ export class Inspector {
     );
   }
 
-  _renderCamera(project, time) {
-    const cam = project.camera;
+  _renderCamera(project, time, cam = project.camera, multi = 0) {
+    if (!cam) return;
     this._kind = 'camera';
     this._header({
-      type: 'camera', badge: '镜头', name: cam.name || '镜头', id: `${cam.path.length} 关键点 · FOV ${round(cam.fov, 0)}°`,
+      type: 'camera', badge: '镜头', name: cam.name || '镜头',
+      id: `${(cam.path || []).length} 关键点 · FOV ${round(cam.fov, 0)}°`, multi,
       actions: [{ icon: 'film', label: '渲染', tip: '渲染\n从头到尾渲染这个镜头', run: () => this.opts.onRenderAll?.() }],
     });
     this.root.appendChild(h('div', { class: 'hint pad' },

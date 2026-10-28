@@ -173,6 +173,25 @@ export function keyframeDeleteOps(refs, project) {
   return ops;
 }
 
+/**
+ * Legacy single-selection fields (`elementId / objectId / camera`) for a pool.
+ * A pool is homogeneous in *kind*, but its element ids mix `cam:` / `ob:` /
+ * `el:` refs, so the primary decides which legacy field is set. Explicit values
+ * win: the pool only fills what the caller left empty and never clears an
+ * explicit id, so callers can pass `{ objectId, pool }` and keep both.
+ */
+export function legacyFields(pool, explicit = {}) {
+  const elementId = explicit.elementId || null;
+  const objectId = explicit.objectId || null;
+  const camera = !!explicit.camera;
+  if (elementId || objectId || camera) return { elementId, objectId, camera };
+  const split = splitRef(primaryRef(pool));
+  if (!split) return { elementId: null, objectId: null, camera: false };
+  if (split.type === 'cam') return { elementId: null, objectId: null, camera: true };
+  if (split.type === 'ob') return { elementId: null, objectId: split.id, camera: false };
+  return { elementId: split.id, objectId: null, camera: false };
+}
+
 /** Legacy single-selection fields -> the element pool used before P4. */
 export function poolFromSelection(sel) {
   if (sel?.pool) return normalizeSelection(sel.pool);
