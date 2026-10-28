@@ -518,7 +518,7 @@ export class Timeline {
 
   /** Playhead time snapped to the left edge of its display frame. */
   playheadStart() {
-    return this.frameStart(this.time);
+    return this._displayTime();
   }
 
   // ------------------------------------------------------------ name column width
