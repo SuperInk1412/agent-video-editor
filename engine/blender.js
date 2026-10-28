@@ -15,7 +15,6 @@ import { is3D, writeShot } from './shot.js';
 import { prepareObjectSequences } from './media-objects.js';
 import { jobFrames, prepareFeeds } from './camfeed-render.js';
 import { bakeElementPlacements } from './element-bake.js';
-import { programProject } from '../core/camfeed.js';
 import { buildAudioMix } from './audio-mix.js';
 import { which } from './which.js';
 import { runProcess } from './process.js';
@@ -121,9 +120,8 @@ export async function runJob(dir, job, { onProgress, onLog, signal } = {}) {
   const jobFile = path.join(p.cache, 'jobs', `${jobId}.json`);
   const projFile = path.join(p.cache, 'jobs', `${jobId}-project.json`);
 
-  // Camera feeds render their source cameras first; feed-only cameras
-  // (output:false) never reach the picture (engine/camfeed-render.js).
-  const fed = programProject(await prepareFeeds(dir, job, runJob, { onLog, signal }));
+  // Camera feeds render their source cameras first (engine/camfeed-render.js).
+  const fed = await prepareFeeds(dir, job, runJob, { onLog, signal });
   const seqProject = await prepareSequences(dir, fed, { onLog, signal });
   // Node / spatially parented 2D elements: per-frame world matrices (3D route).
   if (is3D(fed)) {

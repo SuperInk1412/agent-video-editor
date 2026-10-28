@@ -17,7 +17,7 @@ import { paths } from './storage.js';
 import { fileExists, hashOf } from './media.js';
 import { cameraAtTime } from '../core/camera.js';
 import {
-  elementsFor, feedPlan, hiddenFeeds, isFeed, normalizeFeed, programProject, sourceProject,
+  elementsFor, feedPlan, hiddenFeeds, isFeed, normalizeFeed, sourceProject,
 } from '../core/camfeed.js';
 
 const NEUTRAL_FX = { bloom: 0, ca: 0, grain: 0, vignette: 0, scanline: 0, grade: 0, contrast: 0, saturation: 1 };
@@ -125,11 +125,10 @@ export async function prepareFeeds(dir, job, runPass, { onLog, signal } = {}) {
   }
 
   attach(resolved, null);
-  const program = programProject(resolved);
   for (const el of resolved.elements) {
     if (!isFeed(el)) continue;
     if (!el._feedDir) el._feedDir = ''; // source never rendered: the builder hides it
-    el._feedHidden = hiddenRuns(program, plan, el, range, fps);
+    el._feedHidden = hiddenRuns(resolved, plan, el, range, fps);
   }
-  return programProject(resolved);
+  return resolved;
 }

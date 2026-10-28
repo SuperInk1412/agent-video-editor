@@ -1,123 +1,151 @@
-// Screen lock (贴屏) retirement (docs/DESIGN-CAMFEED-PARENTS.md §2).
+// Screen lock (贴屏) retirement (docs/DESIGN-TRANSFORM-UNIFY.md §1.2).
 //
-// A screen-locked element (`el.parent = {id: camera | '@live', kind: 'camera'}`)
-// rode the live camera so it stayed put on screen. The same picture is built
-// from camera feeds instead — a HUD rig far from the scene:
+// A screen-locked element (`el.parent = {id: camera | '@live', kind: 'camera',
+// bind: {pos, basis}}`) rode the camera rigidly: world(t) = now(t) · bind⁻¹ · x.
+// A spatial parent to that camera with the same bind pose is the same map, so
+// each lock becomes spatial parents to the shot cameras:
 //
-//   ob_hud (empty, x = HUD_OFFSET)
-//    ├─ cam_hud   static, the lock's bind pose, output, top of the stack
-//    ├─ camfeed × N   one per original shot (its clip), full frame, below the HUD
-//    └─ the formerly locked elements, at their own transforms
-//   original cameras -> output: false (they only feed now)
+//   '@live'      the element is split at every shot cut inside its window and
+//                each piece is parented to the camera on air in that piece
+//   camera id    one piece, parented to that camera
 //
-// Every child hangs off ob_hud through a spatial parent bound with the rig at
-// the origin, then the rig moves to HUD_OFFSET, so all of it can be moved later.
+// No camera feeds and no full-screen rig are created. A project saved with the
+// earlier HUD-rig migration (ob_hud / cam_hud / el_feed_*) is first turned back
+// into locks, then migrated as above.
 //
-// Exact when the binds share one pose and the shots keep the bind's FOV and a
-// default picture transform (the usual case, e.g. projects/miku-swiss); the
-// report lists what was approximated.
+// Exact, including the lock's pull-in toward the lens (kept through the bind
+// scale, so nothing in the scene covers the element). A shot whose FOV is
+// animated scales its subtitles, as the lock did; the report lists those shots.
 //
 // Pure ESM, no `node:*`.
 import { applyOps } from './ops.js';
-import { cameraLayers, cameraRange } from './camera.js';
-import { defaultCamera } from './space.js';
+import { cameraAtTime, cameraLayers, cameraRange, evalCamera } from './camera.js';
 import { isRecord } from './json.js';
 
-export const HUD_OFFSET = 20000; // metres along +x: beyond every camera's far plane
+/** Metres in front of the lens the retired lock drew its elements (render only). */
+const SCREEN_LOCK_DEPTH = 1;
 
 const isLock = (el) => isRecord(el?.parent) && el.parent.id && el.parent.mode !== 'world';
+const r6 = (v) => Math.round(Number(v) * 1e6) / 1e6;
 
-const unique = (base, taken) => {
-  if (!taken.has(base)) return base;
-  let i = 2;
-  while (taken.has(`${base}_${i}`)) i++;
-  return `${base}_${i}`;
-};
+const sub = (a, b) => a.map((v, i) => v - b[i]);
+const norm = (a) => { const l = Math.hypot(...a) || 1; return a.map((v) => v / l); };
+const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
 
-function allIds(project) {
-  return new Set([
-    ...(project.elements || []).map((e) => e.id),
-    ...(project.scene?.objects || []).map((o) => o.id),
-    ...(project.cameras || []).map((c) => c.id),
-    ...(project.segments || []).map((s) => s.id),
-  ].map(String));
+/** Lens basis [right, up, forward] of a camera looking from pos to look (roll 0). */
+function lensBasis(pos, look) {
+  const f = norm(sub(look, pos));
+  let r = cross(f, [0, 1, 0]);
+  if (Math.hypot(...r) < 1e-9) r = [1, 0, 0];
+  r = norm(r);
+  return [r, cross(r, f), f];
 }
 
-const r6 = (v) => Math.round(Number(v) * 1e6) / 1e6;
-const samePose = (a, b) => [a.pos, ...a.basis].flat().every((v, i) => Math.abs(v - [b.pos, ...b.basis].flat()[i]) < 1e-6);
+/**
+ * Undo the earlier HUD-rig migration (in place): the rig, its camera and its
+ * feeds are removed and the elements under it become '@live' locks again,
+ * bound to the HUD camera's pose relative to the rig. Returns how many
+ * elements were restored.
+ */
+export function undoHudRig(project) {
+  const objects = project.scene?.objects || [];
+  const rig = objects.find((o) => o.type === 'empty' && String(o.id).startsWith('ob_hud') && o.name === 'HUD 机位');
+  if (!rig) return 0;
+  const cams = project.cameras || [];
+  const hud = cams.find((c) => String(c.id).startsWith('cam_hud') && c.frameParent?.id === rig.id);
+  const under = (el) => el.parent?.mode === 'world' && el.parent.id === rig.id;
+  const feeds = (project.elements || []).filter((el) => under(el) && el.type === 'camfeed' && String(el.id).startsWith('el_feed_'));
+  const locked = (project.elements || []).filter((el) => under(el) && !feeds.includes(el));
+  // The HUD camera sat at the lock's bind pose relative to the rig at the origin.
+  const key = hud?.path?.[0];
+  const pos = key?.pos || [0, (Number(project.meta?.height) || 1080) / 200, 20];
+  const look = key?.look || [pos[0], pos[1], pos[2] - 20];
+  const bind = { pos: pos.map(r6), basis: lensBasis(pos, look).map((v) => v.map(r6)), depth: r6(Math.hypot(...sub(look, pos))) };
+  for (const el of locked) el.parent = { id: '@live', kind: 'camera', bind };
+  project.elements = (project.elements || []).filter((el) => !feeds.includes(el));
+  if (hud) {
+    project.cameras = cams.filter((c) => c !== hud);
+    if (Array.isArray(project.cameraOrder)) project.cameraOrder = project.cameraOrder.filter((id) => id !== hud.id);
+    if (project.activeCameraId === hud.id) project.activeCameraId = project.cameraOrder?.[0] || project.cameras[0]?.id || null;
+    project.camera = project.cameras.find((c) => c.id === project.activeCameraId) || project.cameras[0] || null;
+  }
+  project.scene.objects = objects.filter((o) => o !== rig);
+  for (const c of project.cameras || []) delete c.output;
+  return locked.length;
+}
+
+/** [[start, end, cameraId], ...] pieces of [t0, t1) by the camera on air ('@live'). */
+function livePieces(project, t0, t1) {
+  const cuts = new Set([t0, t1]);
+  for (const c of cameraLayers(project)) {
+    const r = cameraRange(project, c);
+    for (const t of [r.start, r.end]) if (t > t0 + 1e-6 && t < t1 - 1e-6) cuts.add(r6(t));
+  }
+  const times = [...cuts].sort((a, b) => a - b);
+  const out = [];
+  for (let i = 0; i < times.length - 1; i++) {
+    const cam = cameraAtTime(project, (times[i] + times[i + 1]) / 2);
+    if (!cam) continue;
+    const last = out[out.length - 1];
+    if (last && last[2] === cam.id) last[1] = times[i + 1];
+    else out.push([times[i], times[i + 1], cam.id]);
+  }
+  return out;
+}
+
+/** Does a camera's FOV change inside [t0, t1)? (subtitles on it change size) */
+function fovMoves(project, camId, t0, t1) {
+  const cam = (project.cameras || []).find((c) => c.id === camId);
+  if (!cam) return false;
+  const solo = { ...project, camera: cam, cameras: [cam], cameraOrder: [cam.id], activeCameraId: cam.id };
+  const f0 = evalCamera(solo, t0).fov;
+  for (let i = 1; i <= 8; i++) if (Math.abs(evalCamera(solo, t0 + ((t1 - t0) * i) / 8).fov - f0) > 1e-3) return true;
+  return false;
+}
 
 /**
- * Convert every screen lock of `project` (in place). Returns null when there is
- * none, otherwise a report:
- *   { elements, feeds, hudCamera, rig, approximations: [text...] }
+ * Convert every screen lock of `project` in place. Returns null when there is
+ * none, otherwise { elements, pieces, restoredHud, fovShots: [camera ids] }.
  */
 export function migrateScreenLocks(project) {
+  const restoredHud = undoHudRig(project);
   const locked = (project.elements || []).filter(isLock);
-  if (!locked.length) return null;
-  const meta = project.meta || {};
-  const notes = [];
-  const binds = locked.map((el) => {
-    const b = el.parent.bind || {};
-    return {
-      pos: Array.isArray(b.pos) ? b.pos.map(Number) : [0, (Number(meta.height) || 1080) / 200, 20],
-      basis: Array.isArray(b.basis) && b.basis.length === 3 ? b.basis.map((v) => v.map(Number)) : [[1, 0, 0], [0, 1, 0], [0, 0, -1]],
-      depth: Number(b.depth) || 20,
+  if (!locked.length) return restoredHud ? { elements: 0, pieces: 0, restoredHud, fovShots: [] } : null;
+  let pieces = 0;
+  const fovShots = new Set();
+  for (const el of locked) {
+    const lock = el.parent;
+    const b = isRecord(lock.bind) ? lock.bind : {};
+    // The lock drew the element pulled toward the lens (scaled by
+    // SCREEN_LOCK_DEPTH / depth about the camera), which keeps it in front of
+    // the scene. A bind scale of depth / SCREEN_LOCK_DEPTH with scale
+    // inheritance is the same map, so occlusion matches too.
+    const pull = Math.max(1e-3, Number(b.depth) || 20) / SCREEN_LOCK_DEPTH;
+    const bind = {
+      pivot: Array.isArray(b.pos) ? b.pos.map(r6) : [0, (Number(project.meta?.height) || 1080) / 200, 20],
+      basis: Array.isArray(b.basis) && b.basis.length === 3 ? b.basis.map((v) => v.map(r6)) : [[1, 0, 0], [0, 1, 0], [0, 0, -1]],
+      scale: [pull, pull, pull].map(r6),
     };
-  });
-  const bind = binds[0];
-  const odd = binds.filter((b) => !samePose(b, bind)).length;
-  if (odd) notes.push(`${odd} 个贴屏元素的绑定机位与第一个不同，统一按第一个机位放置`);
-  const specific = locked.filter((el) => el.parent.id !== '@live').length;
-  const shots = cameraLayers(project).filter((c) => c.output !== false);
-  if (specific && shots.length > 1) notes.push(`${specific} 个元素原来绑定在某一台相机上，现在在所有镜头里都钉在画面上`);
-  for (const c of shots) {
-    const pp = c.picturePivot || [0.5, 0.5];
-    const po = c.pictureOffset || [0, 0];
-    const sc = c.scale || [1, 1, 1];
-    const tr = c.tracks || {};
-    if (Math.abs(pp[0] - 0.5) > 1e-6 || Math.abs(pp[1] - 0.5) > 1e-6 || Math.abs(po[0]) > 1e-6 || Math.abs(po[1]) > 1e-6
-      || Math.abs(sc[0] - 1) > 1e-6 || Math.abs(sc[1] - 1) > 1e-6
-      || ['scale', 'picturePivot', 'pictureOffset', 'opacity'].some((k) => Array.isArray(tr[k]) && tr[k].length)) {
-      notes.push(`相机 ${c.name || c.id} 的画面变换没有带到投屏上`);
+    delete el.parent;
+    const start = Number(el.start) || 0;
+    const end = start + (Number(el.duration) || 0);
+    const parts = lock.id === '@live' ? livePieces(project, start, end) : [[start, end, String(lock.id)]];
+    // Split at the cuts, last cut first so the left part keeps the id.
+    const ids = [el.id];
+    const cuts = parts.slice(1).map((p) => p[0]);
+    for (const at of cuts.slice().reverse()) {
+      const { element } = applyOps(project, [{ op: 'splitElement', id: el.id, at }]).results?.[0]
+        || { element: null };
+      if (element) ids.splice(1, 0, element.id);
     }
+    // ids now follow the parts left to right (each split inserted its right half).
+    parts.forEach(([t0, t1, cam], i) => {
+      const host = (project.elements || []).find((x) => x.id === ids[i]);
+      if (!host) return;
+      host.parent = { id: cam, mode: 'world', inherit: { pos: true, rot: true, scale: true }, bind };
+      if (fovMoves(project, cam, t0, t1)) fovShots.add(cam);
+      pieces++;
+    });
   }
-
-  for (const el of locked) delete el.parent;
-
-  const taken = allIds(project);
-  const rig = unique('ob_hud', taken); taken.add(rig);
-  const cam = unique('cam_hud', taken); taken.add(cam);
-  const fwd = bind.basis[2];
-  const look = bind.pos.map((v, i) => r6(v + fwd[i] * bind.depth));
-  const base = defaultCamera(meta);
-  const duration = Number(meta.duration) || 0;
-  const zMin = Math.min(0, ...(project.elements || []).map((e) => Number(e.z) || 0));
-
-  const ops = [
-    { op: 'objectAdd', object: { id: rig, type: 'empty', name: 'HUD 机位', pivot: [0, 0, 0] } },
-    { op: 'addCamera', index: 0, camera: {
-      ...base, id: cam, name: 'HUD 相机', output: true,
-      path: [{ t: 0, pos: bind.pos.map(r6), look }],
-    } },
-  ];
-  const feeds = [];
-  shots.forEach((c, i) => {
-    const r = cameraRange(project, c);
-    const start = Math.max(0, r.start);
-    const end = Math.min(duration || r.end, r.end);
-    if (!(end > start)) return;
-    const id = unique(`el_feed_${c.id}`, taken); taken.add(id);
-    feeds.push(id);
-    ops.push({ op: 'addElement', element: {
-      id, type: 'camfeed', name: `投屏 · ${c.name || c.id}`, start, duration: r6(end - start),
-      z: zMin - 1 - i, feed: { camera: c.id, delay: 0 }, style: { fit: 'stretch' },
-      transform: { opacity: Number.isFinite(Number(c.opacity)) ? Number(c.opacity) : 1 },
-    } });
-    ops.push({ op: 'cameraPatch', id: c.id, patch: { output: false } });
-  });
-  for (const id of [cam, ...feeds, ...locked.map((el) => el.id)]) ops.push({ op: 'spatialParent', id, parent: rig, t: 0 });
-  ops.push({ op: 'objectPatch', id: rig, patch: { pivot: [HUD_OFFSET, 0, 0] } });
-  ops.push({ op: 'activateCamera', id: cam });
-  applyOps(project, ops);
-  return { elements: locked.length, feeds: feeds.length, hudCamera: cam, rig, approximations: notes };
+  return { elements: locked.length, pieces, restoredHud, fovShots: [...fovShots] };
 }

@@ -1,8 +1,9 @@
 // Camera feed check (docs/DESIGN-CAMFEED-PARENTS.md).
 //
-// A feed-only camera (cam_2, output:false) films a red-top / blue-bottom marker.
-// The output camera (cam_1) sits 100 m to the side and films a full-frame
-// camfeed element of cam_2, so the picture must show the marker the right way
+// A hidden source camera (cam_src) films a red-top / blue-bottom marker: hidden
+// cameras never reach the picture but still feed. The picture camera (cam_1)
+// sits 100 m to the side and films a full-frame camfeed element of cam_src,
+// so the picture must show the marker the right way
 // up even though cam_1 never sees the marker itself.
 //
 //   node scripts/check-camfeed.mjs            preview (Electron, WebGL)
@@ -61,7 +62,8 @@ export async function buildProject(dir, { delay = 0 } = {}) {
   ]);
   const src = project.cameras.find((c) => c.id === 'cam_src');
   applyOps(project, [
-    { op: 'cameraPatch', id: src.id, patch: { output: false, path: [{ ...key }] } },
+    // hidden: it never reaches the picture but still feeds (camera stack rules only)
+    { op: 'cameraPatch', id: src.id, patch: { visible: false, path: [{ ...key }] } },
     { op: 'cameraPatch', id: out.id, patch: { path: [{ ...key, pos: [key.pos[0] + SIDE, key.pos[1], key.pos[2]], look: [key.look[0] + SIDE, key.look[1], key.look[2]] }] } },
     { op: 'activateCamera', id: out.id },
     { op: 'addElement', element: {

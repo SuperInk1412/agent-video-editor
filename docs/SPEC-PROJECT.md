@@ -128,11 +128,12 @@ Blender 侧这些效果由合成器节点组 `VDM_Composite` 完成。节点组�
 - 预览：2D 图层在 Scene3D 画完自己的物体后，用同一个视图投影矩阵画进世界（编辑视口、相机分层、鱼眼同样适用）。
 - Blender（单相机路径）：2D 构建器（同一套 `eval_element`）把元素建进 3D 场景，挂在 `VDM_Screen` 支架下（位于画面平面中心、缩放 1/100）；
   空世界用 0.8 的像素滤镜（与 2D 一致）。
-- **贴屏已取消**（2026-10-28）：`elementParent` / `elementUnparent` 会被拒绝。旧项目里的贴屏元素在打开时迁到 **HUD 机位**
-  （`core/screen-lock-migrate.js`）：远处一个空元素下挂静止的 HUD 相机、每个原镜头片段一个铺满画面的投屏元素、原贴屏元素；
-  原镜头相机改为 `output:false`。见 `docs/DESIGN-CAMFEED-PARENTS.md`。
+- **贴屏已取消**（2026-10-28）：`elementParent` / `elementUnparent` 会被拒绝。旧项目里的贴屏元素在打开时迁移
+  （`core/screen-lock-migrate.js`）：按镜头切段，每段用空间父级挂到当时出画的镜头相机上，绑定机位就是原贴屏的绑定机位，
+  另外用绑定缩放保留原来"拉到镜头前 1 m"的效果，所以遮挡关系也不变。曾经被 HUD 机位方案迁移并存盘的项目，会先还原再按这个方式迁移。
+  见 `docs/DESIGN-TRANSFORM-UNIFY.md` §1.2。
 - **相机投屏 `type:"camfeed"`**：`el.feed = { camera, delay: 0|1 }`，平面显示来源相机的原始画面（不含全局后期）。
-  `delay:0` 来源相机自己拍不到；`delay:1` 显示上一帧，谁都能拍到。相机 `output:false` = 只给投屏用、不进最终画面。
+  `delay:0` 来源相机自己拍不到；`delay:1` 显示上一帧，谁都能拍到。出画只看相机栈规则；隐藏的相机照样能当投屏来源。
   预览：来源相机先渲到离屏纹理；Blender：来源相机先单独渲成图片序列（`.vdm/cache/feeds`）。
 - **已知限制**：多相机分层（VSE）路径仍把 2D 元素作为贴屏层叠在最上面（不产生视差）；预览里 2D 元素点选已经按 `scene3d.lastVP` 投影，相机移动后命中与选中框一致。
 - **统一空间节点（显式迁移）**：2D 元素可以带 `el.node = { pivot, position, dir, roll, scale }`（米 / 度 / 倍），

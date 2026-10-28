@@ -15,9 +15,9 @@
 // Visibility is decided once per project, not per time, so the preview and the
 // Blender pre-passes always agree on who films what.
 //
-// `cam.output === false` marks a camera that only feeds camfeed elements: it is
-// dropped from the final picture (camera stack / current shot) by
-// `programProject()` before the camera code sees the project.
+// Which camera reaches the final picture is decided by the camera stack alone
+// (order, clip range, visibility, opacity), never by feeds: a hidden camera or
+// one outside its clip still feeds (docs/DESIGN-TRANSFORM-UNIFY.md §1.1).
 
 export const FEED_TYPE = 'camfeed';
 export const FEED_DELAYS = [0, 1];
@@ -42,7 +42,6 @@ export function feedIssues(el, at = 'element') {
 }
 
 export const isFeed = (el) => el?.type === FEED_TYPE;
-export const isOutputCamera = (cam) => !!cam && cam.output !== false;
 
 function cameraList(project) {
   if (Array.isArray(project?.cameras) && project.cameras.length) return project.cameras;
@@ -129,24 +128,6 @@ export function hiddenFeeds(plan, camId) {
 }
 
 /**
- * The project as the final picture sees it: cameras with `output: false` are
- * removed from `cameras`, `cameraOrder` and the active alias. When every camera
- * is feed-only the project is returned unchanged (nothing would render).
- */
-export function programProject(project) {
-  const cams = cameraList(project);
-  if (!cams.some((c) => !isOutputCamera(c))) return project;
-  const keep = cams.filter(isOutputCamera);
-  if (!keep.length) return project;
-  const ids = new Set(keep.map((c) => c.id));
-  const out = { ...project, cameras: keep };
-  if (Array.isArray(project.cameraOrder)) out.cameraOrder = project.cameraOrder.filter((id) => ids.has(id));
-  if (!ids.has(project.activeCameraId)) out.activeCameraId = (out.cameraOrder?.[0]) || keep[0].id;
-  out.camera = keep.find((c) => c.id === out.activeCameraId) || keep[0];
-  return out;
-}
-
-/**
  * The project as source camera `camId` sees it: that camera alone, live for the
  * whole project (its clip range only limits where it is cut into the picture,
  * not what it films), and visible even when it is feed-only.
@@ -154,7 +135,7 @@ export function programProject(project) {
 export function sourceProject(project, camId) {
   const cam = cameraList(project).find((c) => c.id === camId);
   if (!cam) return null;
-  const solo = { ...cam, output: true, visible: true };
+  const solo = { ...cam, visible: true };
   delete solo.start;
   delete solo.duration;
   return { ...project, cameras: [solo], cameraOrder: [solo.id], activeCameraId: solo.id, camera: solo };

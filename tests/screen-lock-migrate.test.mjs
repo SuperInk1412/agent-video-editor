@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { applyOp } from '../core/ops.js';
+import { applyOp, applyOps } from '../core/ops.js';
 import { createProject, normalizeProject, validateProject } from '../core/schema.js';
 import { ensureSpace } from '../core/space.js';
 import { evalElement } from '../core/evaluate.js';
@@ -8,8 +8,10 @@ import { cameraFrame } from '../core/hierarchy.js';
 import { evalCameraWorld } from '../core/spatial-parent.js';
 import { frameOf } from '../core/spatial.js';
 import { elementWorldNode } from '../app/renderer/js/node-at.js';
-import { feedPlan, programProject } from '../core/camfeed.js';
-import { migrateScreenLocks, HUD_OFFSET } from '../core/screen-lock-migrate.js';
+import { migrateScreenLocks } from '../core/screen-lock-migrate.js';
+
+// docs/DESIGN-TRANSFORM-UNIFY.md §1.2: a screen lock becomes spatial parents to
+// the shot cameras (split at the cuts) — no feeds, no full-screen rig.
 
 const sub = (a, b) => a.map((v, i) => v - b[i]);
 const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
@@ -26,7 +28,7 @@ function project(c, x) {
   return [(dot(d, r) / dot(d, f)) * k, (dot(d, u) / dot(d, f)) * k];
 }
 
-/** Three cut shots (different places) and a subtitle locked to the live shot. */
+/** Three cut shots (different places, moving) and a subtitle locked to the live shot. */
 function rig() {
   const p = normalizeProject(createProject({ title: 'hud', duration: 6 }));
   ensureSpace(p);
@@ -46,65 +48,90 @@ function rig() {
   return { p, el: element.id };
 }
 
-/** Where the retired screen lock drew a local point at t: rigid camera carry. */
-function lockedWorld(p, el, t, x) {
-  const now = cameraFrame(p, '@live', t);
-  const b = el.parent.bind;
-  const d = sub(x, b.pos);
-  // Rd = now.basis(cols) · bind.basis(cols)ᵀ applied to d
-  const local = [0, 1, 2].map((i) => dot(d, b.basis[i]));
-  return [0, 1, 2].map((r) => now.pos[r] + now.basis[0][r] * local[0] + now.basis[1][r] * local[1] + now.basis[2][r] * local[2]);
+const TIMES = [0.3, 1.9, 2.5, 3.7, 4.2, 5.8];
+
+/** Where the retired screen lock drew the element centre at each time (rigid carry). */
+function lockedScreen(p, elId) {
+  const el = p.elements.find((e) => e.id === elId);
+  return TIMES.map((t) => {
+    const st = evalElement(el, t, p.meta);
+    const x = [st.x / 100, p.meta.height / 200 - st.y / 100, st.z];
+    const now = cameraFrame(p, '@live', t);
+    const b = el.parent.bind;
+    const local = [0, 1, 2].map((i) => dot(sub(x, b.pos), b.basis[i]));
+    const w = [0, 1, 2].map((r) => now.pos[r] + now.basis[0][r] * local[0] + now.basis[1][r] * local[1] + now.basis[2][r] * local[2]);
+    return project(evalCameraWorld(p, t), w);
+  });
 }
 
-test('screen locks become a HUD rig that films the shots through feeds', () => {
+/** The same, after the migration: the piece on screen at t, through the live camera. */
+function migratedScreen(p, text) {
+  return TIMES.map((t) => {
+    const piece = p.elements.find((e) => e.style?.text === text && t >= e.start - 1e-6 && t < e.start + e.duration - 1e-6);
+    assert.ok(piece, `a piece covers ${t}`);
+    return project(evalCameraWorld(p, t), frameOf(elementWorldNode(p, piece, t)).pos);
+  });
+}
+
+const sameScreen = (a, b) => a.forEach((s, i) => assert.ok(
+  Math.abs(s[0] - b[i][0]) < 1e-6 && Math.abs(s[1] - b[i][1]) < 1e-6, `@${TIMES[i]}: ${b[i]} vs ${s}`));
+
+test('a live lock is split at the cuts and parented to each shot camera', () => {
   const { p, el } = rig();
-  const shots = p.cameras.map((c) => c.id);
   const report = migrateScreenLocks(p);
-  assert.equal(report.elements, 1);
-  assert.equal(report.feeds, 3);
-  assert.deepEqual(report.approximations, []);
+  assert.deepEqual(report, { elements: 1, pieces: 3, restoredHud: 0, fovShots: [] });
   assert.deepEqual(validateProject(p), []);
-  const e = p.elements.find((x) => x.id === el);
-  assert.equal(e.parent.mode, 'world', 'the subtitle is a spatial child of the rig');
-  assert.equal(e.parent.id, report.rig);
-  for (const id of shots) assert.equal(p.cameras.find((c) => c.id === id).output, false, id);
-  const prog = programProject(p);
-  assert.deepEqual(prog.cameras.map((c) => c.id), [report.hudCamera]);
-  assert.equal(p.cameraOrder[0], report.hudCamera);
-  const feeds = p.elements.filter((x) => x.type === 'camfeed');
-  const clipStart = { cam_1: 0, cam_s1: 2, cam_s2: 4 };
-  assert.deepEqual(feeds.map((f) => [f.feed.camera, f.start, f.duration]).sort(), shots.map((id) => [id, clipStart[id], 2]).sort());
-  assert.deepEqual(feedPlan(p).sources.sort(), shots.slice().sort());
+  const pieces = p.elements.filter((e) => e.style?.text === '字幕').sort((a, b) => a.start - b.start);
+  assert.equal(pieces[0].id, el, 'the first piece keeps the id');
+  assert.deepEqual(pieces.map((e) => [e.start, e.duration, e.parent.id, e.parent.mode]),
+    [[0, 2, 'cam_1', 'world'], [2, 2, 'cam_s1', 'world'], [4, 2, 'cam_s2', 'world']]);
+  assert.equal(p.elements.some((e) => e.type === 'camfeed'), false, 'no feeds');
+  assert.equal(p.cameras.length, 3, 'no new camera');
   assert.equal(migrateScreenLocks(p), null, 'idempotent');
 });
 
 test('the subtitle stays at the same place on screen in every shot', () => {
   const { p, el } = rig();
-  const before = [];
-  const times = [0.3, 1.9, 2.5, 3.7, 4.2, 5.8];
-  for (const t of times) {
-    const e = p.elements.find((x) => x.id === el);
-    const st = evalElement(e, t, p.meta);
-    const local = [st.x / 100, p.meta.height / 200 - st.y / 100, st.z];
-    before.push(project(evalCameraWorld(p, t), lockedWorld(p, e, t, local)));
-  }
+  const before = lockedScreen(p, el);
   migrateScreenLocks(p);
-  const prog = programProject(p);
-  times.forEach((t, i) => {
-    const e = p.elements.find((x) => x.id === el);
-    const pos = frameOf(elementWorldNode(p, e, t)).pos;
-    assert.ok(pos[0] > HUD_OFFSET - 100, 'lives in the HUD rig');
-    const now = project(evalCameraWorld(prog, t), pos);
-    assert.ok(Math.abs(now[0] - before[i][0]) < 1e-6 && Math.abs(now[1] - before[i][1]) < 1e-6, `@${t}: ${now} vs ${before[i]}`);
-  });
+  sameScreen(before, migratedScreen(p, '字幕'));
 });
 
-test('a feed fills the HUD frame exactly where the shot used to be', () => {
+test('a project saved with the HUD rig is restored, then migrated the same way', () => {
+  const { p, el } = rig();
+  const before = lockedScreen(p, el);
+  // Rebuild what the earlier migration saved: rig, HUD camera, one feed per shot.
+  const lock = p.elements.find((e) => e.id === el).parent;
+  delete p.elements.find((e) => e.id === el).parent;
+  const base = JSON.parse(JSON.stringify(p.cameras.find((c) => c.id === 'cam_1')));
+  delete base.start; delete base.duration;
+  const look = lock.bind.pos.map((v, i) => v + lock.bind.basis[2][i] * 19.5);
+  const ops = [
+    { op: 'objectAdd', object: { id: 'ob_hud', type: 'empty', name: 'HUD 机位', pivot: [0, 0, 0] } },
+    { op: 'addCamera', index: 0, camera: { ...base, id: 'cam_hud', name: 'HUD 相机', path: [{ t: 0, pos: lock.bind.pos, look }] } },
+  ];
+  for (const [cam, start] of [['cam_1', 0], ['cam_s1', 2], ['cam_s2', 4]]) {
+    ops.push({ op: 'addElement', element: { id: `el_feed_${cam}`, type: 'camfeed', start, duration: 2, z: -5, feed: { camera: cam, delay: 0 } } });
+    ops.push({ op: 'cameraPatch', id: cam, patch: { output: false } });
+  }
+  for (const id of ['cam_hud', 'el_feed_cam_1', 'el_feed_cam_s1', 'el_feed_cam_s2', el]) ops.push({ op: 'spatialParent', id, parent: 'ob_hud', t: 0 });
+  ops.push({ op: 'objectPatch', id: 'ob_hud', patch: { pivot: [20000, 0, 0] } }, { op: 'activateCamera', id: 'cam_hud' });
+  applyOps(p, ops);
+
+  const report = migrateScreenLocks(p);
+  assert.equal(report.restoredHud, 1);
+  assert.equal(report.pieces, 3);
+  assert.equal(p.scene.objects.some((o) => o.id === 'ob_hud'), false);
+  assert.equal(p.cameras.some((c) => c.id === 'cam_hud'), false);
+  assert.equal(p.elements.some((e) => e.type === 'camfeed'), false);
+  assert.ok(p.cameras.every((c) => c.output === undefined), 'feed-only flags are gone');
+  assert.deepEqual(validateProject(p), []);
+  sameScreen(before, migratedScreen(p, '字幕'));
+});
+
+test('a shot with an animated FOV is reported', () => {
   const { p } = rig();
-  migrateScreenLocks(p);
-  const prog = programProject(p);
-  const feed = p.elements.find((x) => x.type === 'camfeed');
-  const pos = frameOf(elementWorldNode(p, feed, 1)).pos;
-  const s = project(evalCameraWorld(prog, 1), pos);
-  assert.ok(Math.hypot(...s) < 1e-6, 'feed centred in the HUD picture');
+  applyOp(p, { op: 'cameraParamKey', id: 'cam_s1', path: 'fov', t: 2, v: 50 });
+  applyOp(p, { op: 'cameraParamKey', id: 'cam_s1', path: 'fov', t: 4, v: 30 });
+  assert.deepEqual(migrateScreenLocks(p).fovShots, ['cam_s1']);
 });

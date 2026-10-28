@@ -26,7 +26,7 @@ import { elementWorldParent } from '/core/spatial-parent.js';
 import { frameOf } from '/core/spatial.js';
 import { basisFromDir } from '/core/scene.js';
 import { Scene3D } from './preview3d.js';
-import { feedPlan, hiddenFeeds, normalizeFeed, programProject } from '/core/camfeed.js';
+import { feedPlan, hiddenFeeds, normalizeFeed } from '/core/camfeed.js';
 import { clearCompiledTracks, compileProject } from '/core/tracks.js';
 import {
   mul4, nodePlaneMatrix, orderLayers, planeOfFrame, transformPlane,
@@ -692,8 +692,7 @@ export class Preview {
   /** Cameras that contribute to the viewport, in timeline order (top -> bottom). */
   /** Cameras on screen at t (camera clips: only those whose start/duration covers t). */
   _cameraLayers(t = this.time) {
-    // Feed-only cameras (output:false) never reach the picture (core/camfeed.js).
-    return cameraLayers(programProject(this.project), this.soloCameras, t);
+    return cameraLayers(this.project, this.soloCameras, t);
   }
 
   /** Full-frame picture transform: scale around pivot, then offset. */

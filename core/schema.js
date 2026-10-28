@@ -391,7 +391,6 @@ export function validateProject(p) {
     if (!record(c, at)) return;
     id(c.id, `${at}.id`, camIds);
     if (c.fov !== undefined) number(c.fov, `${at}.fov`, { min: 1, max: 360 });
-    if (c.output !== undefined && typeof c.output !== 'boolean') push(`${at}.output`, 'must be boolean');
     if (c.start !== undefined) number(c.start, `${at}.start`, { min: 0 });
     if (c.duration !== undefined) number(c.duration, `${at}.duration`, { min: 0, exclusive: true });
     for (const name of ['center', 'scale']) if (c[name] !== undefined) vector(c[name], `${at}.${name}`, 3);
