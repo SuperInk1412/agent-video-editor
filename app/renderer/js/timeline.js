@@ -10,9 +10,10 @@ import { objectPose } from '/core/scene.js';
 import { childrenOf } from '/core/hierarchy.js';
 import { pathPos, cameraTransform, cameraParamValue, cameraRange } from '/core/camera.js';
 import {
-  emptySelection, normalizeSelection, selectOne, pickSelection,
+  emptySelection, normalizeSelection, selectOne, pickSelection, legacyFields,
   cameraRef, objectRef, elementRef, propertyRef, keyframeRef, splitRef,
 } from '/core/selection.js';
+import { poolHostKeys } from '/core/timeline-keys.js';
 import {
   planRowInsert, planInsertionZ, planMoveZ, renumber2D, poolAnchors, sameOrder,
 } from '/core/timeline-order.js';
@@ -100,6 +101,11 @@ export class Timeline {
     this._objHeads = new Map();
     this._elHeads = new Map();
     this.expandedEls = new Set();
+    // "Keyed only" pass (U): the row expansion / group state from before the
+    // pass, restored by the second U. `_keyedOnly` itself forces every group
+    // into keyed mode and hides the group label rows.
+    this._keyedOnly = false;
+    this._keyedSnapshot = null;
     this._snapOn = prefs.get('snap', true) !== false;
     this._gutterW = clampGutter(prefs.get('tlGutter', GUTTER_DEFAULT));
     this.filterText = '';
@@ -296,6 +302,7 @@ export class Timeline {
       keyed.classList.add('shake');
     });
     keyed.addEventListener('animationend', () => keyed.classList.remove('shake'));
+    this._keyedBtn = keyed;
     this._snapBtn = btn('magnet', '吸附', '吸附到 0 / 结尾 / 节拍（拖动时按住 Alt 临时关闭）', null,
       () => this.setSnap(!this._snapOn), { 'aria-pressed': 'false' });
     const split = btn('scissors', '切开', '在播放头切开', 'Ctrl+D', () => this.onSplit?.());
@@ -320,6 +327,7 @@ export class Timeline {
       zOut, this._zoomRange, zIn, this._zoomLabel, zFit);
     this.root.appendChild(this.toolbar);
     this._syncSnapBtn();
+    this._syncKeyedBtn();
     this._syncZoomUi();
   }
 
@@ -339,6 +347,13 @@ export class Timeline {
 
   _syncSnapBtn() {
     this._snapBtn?.setAttribute('aria-pressed', String(this._snapOn));
+  }
+
+  /** Toolbar 仅带键 button reflects the keyed-only pass (U). */
+  _syncKeyedBtn() {
+    if (!this._keyedBtn) return;
+    this._keyedBtn.setAttribute('aria-pressed', String(this._keyedOnly));
+    this._keyedBtn.classList.toggle('on', this._keyedOnly);
   }
 
   _syncCurvesBtn() {
@@ -593,14 +608,35 @@ export class Timeline {
           : sel?.elementId ? selectOne('element', elementRef(sel.elementId))
             : emptySelection()
     ));
+    // The pool primary drives the legacy fields, so a mixed cam / ob / el pool
+    // still highlights exactly one row. Main derives the same values.
+    const host = legacyFields(this.pool, {
+      elementId: sel?.elementId, objectId: sel?.objectId, camera: sel?.camera,
+    });
     this.segmentId = sel?.segmentId || null;
-    this.elementId = sel?.elementId || null;
-    this.objectId = sel?.objectId || null;
-    this.cameraSel = !!sel?.camera;
+    this.elementId = host.elementId;
+    this.objectId = host.objectId;
+    this.cameraSel = host.camera;
     if (this.objectId !== prev || this.elementId !== prevEl) this.propSel = null;
     // Selection alone never opens a property group. A second click on the
     // already-selected row does that (see _down / viewport click handling).
     this._paintSelection();
+  }
+
+  /**
+   * Adopt the pool primary as the timeline's own single-selection fields and
+   * tell main. Every pick path goes through here: a Ctrl toggle that removes a
+   * host has to move the legacy selection to the surviving primary, otherwise
+   * Delete / the inspector would keep acting on the ref that just left the pool.
+   */
+  _selectPoolHost(explicit = {}) {
+    const host = legacyFields(this.pool, explicit);
+    this.elementId = host.elementId;
+    this.objectId = host.objectId;
+    this.cameraSel = host.camera;
+    const segmentId = host.elementId ? (this._element(host.elementId)?.segment || null) : null;
+    this.onSelect?.({ ...host, segmentId, pool: this.pool });
+    return host;
   }
 
   setTime(t) {
@@ -1088,28 +1124,33 @@ export class Timeline {
     // a text element/object wants the double-click for inline text editing.
     const toggleAfterClick = (kind === 'el' || kind === 'ob') && wasInPool && wasSelected && !additive;
 
-    if (kind === 'el') {
+    if (kind === 'cam') {
+      if (additive) {
+        // Ctrl/Cmd-click appends or toggles the camera in the shared element
+        // pool. Activation stays on the plain-click path, so building a mixed
+        // cam / ob / el selection never changes the live picture.
+        this._pickPool('element', ref, ev);
+        this.propSel = null;
+        this._selectPoolHost();
+        this._paintSelection();
+        return;
+      }
+    } else if (kind === 'el') {
       if (!wasInPool || additive) this._pickPool('element', ref, ev);
       else if (this.pool?.kind === 'element' && this.pool.ids.includes(ref)) {
         // Preserve the multi-selection but make the grabbed row its primary.
         this.pool = normalizeSelection({ ...this.pool, primary: ref });
       }
-      this.elementId = id;
-      this.objectId = null;
-      this.cameraSel = false;
       this.propSel = null;
-      this.onSelect?.({ elementId: id, segmentId: this._element(id)?.segment || null, pool: this.pool });
+      this._selectPoolHost();
       this._paintSelection();
     } else if (kind === 'ob') {
       if (!wasInPool || additive) this._pickPool('element', ref, ev);
       else if (this.pool?.kind === 'element' && this.pool.ids.includes(ref)) {
         this.pool = normalizeSelection({ ...this.pool, primary: ref });
       }
-      this.objectId = id;
-      this.elementId = null;
-      this.cameraSel = false;
       this.propSel = null;
-      this.onSelect?.({ objectId: id, pool: this.pool });
+      this._selectPoolHost();
       this._paintSelection();
     }
     // Cameras are activated on pointerup (activation is an op and a render
@@ -1399,6 +1440,16 @@ export class Timeline {
     const orig = { start: range.start, duration: range.duration };
     const active = this._activeCameraId() === cam.id;
     const wasSelected = this.cameraSel && !ev.ctrlKey && !ev.metaKey && !ev.shiftKey && active;
+    if (ev.ctrlKey || ev.metaKey || ev.shiftKey) {
+      // Ctrl/Cmd-click on a camera clip: add / toggle it in the shared element
+      // pool. It must not activate or start a trim drag, so building a mixed
+      // selection never changes the live shot.
+      this._pickPool('element', cameraRef(cam.id), ev);
+      this.propSel = null;
+      this._selectPoolHost();
+      this._paintSelection();
+      return;
+    }
     // Select on pointerdown, but do not activate through an op here: an op
     // reply re-renders the timeline and detaches the block mid-drag. Activation
     // is batched with the move on pointerup instead (one save / one undo).
@@ -1470,8 +1521,8 @@ export class Timeline {
     // One "位置" property (path keys) plus the rest of the base transform.
     // The camera transform group stays open by default: it is what users edit
     // most, while lens/shake/DOF stay folded with summaries.
-    host.appendChild(this._sectionRow('变换', 'camPos'));
-    const xformMode = this.sections.camPos;
+    this._appendSection(host, '变换', 'camPos');
+    const xformMode = this._groupMode('camPos');
     if (xformMode !== 'collapsed') {
       const tr = cameraTransform(cam, this.time);
       const show = (path) => xformMode === 'full' || this._camTracked(cam, path);
@@ -1506,8 +1557,8 @@ export class Timeline {
     const lensSummary = `FOV ${Math.round(fov)}°${fov >= 180 ? ' · 鱼眼' : ''}`;
     const shakeSummary = `${round2(shakeAmp)}m · ${round2(shakeFreq)}Hz`;
     const dofSummary = `f/${round2(fstop)} · 模糊 ${Math.round((cam.motionBlur.shutter || 0) * 360)}°`;
-    host.appendChild(this._sectionRow('镜头 / 构图', 'camMain', lensSummary));
-    const lensMode = this.sections.camMain;
+    this._appendSection(host, '镜头 / 构图', 'camMain', lensSummary);
+    const lensMode = this._groupMode('camMain');
     if (lensMode !== 'collapsed') {
       const show = (path) => lensMode === 'full' || this._camTracked(cam, path);
       if (show('fov')) {
@@ -1540,8 +1591,8 @@ export class Timeline {
       }
     }
 
-    host.appendChild(this._sectionRow('抖动', 'camShake', shakeSummary));
-    const shakeMode = this.sections.camShake;
+    this._appendSection(host, '抖动', 'camShake', shakeSummary);
+    const shakeMode = this._groupMode('camShake');
     if (shakeMode !== 'collapsed') {
       const show = (path) => shakeMode === 'full' || this._camTracked(cam, path);
       if (show('shake.amp')) {
@@ -1566,8 +1617,8 @@ export class Timeline {
       }
     }
 
-    host.appendChild(this._sectionRow('景深 / 模糊', 'camDof', dofSummary));
-    const dofMode = this.sections.camDof;
+    this._appendSection(host, '景深 / 模糊', 'camDof', dofSummary);
+    const dofMode = this._groupMode('camDof');
     if (dofMode !== 'collapsed') {
       const show = (path) => dofMode === 'full' || this._camTracked(cam, path);
       if (show('dof.enabled')) {
@@ -1955,8 +2006,10 @@ export class Timeline {
 
     if (!open) return;
     if (e.type === 'audio') {
-      host.appendChild(this._sectionRow('声音', 'audio'));
-      if (this.sections.audio !== 'collapsed') {
+      this._appendSection(host, '声音', 'audio');
+      const mode = this._groupMode('audio');
+      if (mode === 'collapsed') return;
+      if (mode === 'full' || this._elTrack(e, 'audio.volume').length > 0) {
         host.appendChild(this._elementNumRow(e, 'audio.volume', '音量', {
           step: 0.01, axis: 'd', letter: '', unit: '0..1', min: 0, max: 1,
           title: '音量 0..1；◆ 在当前时间打关键帧',
@@ -1964,9 +2017,9 @@ export class Timeline {
       }
       return;
     }
-    host.appendChild(this._sectionRow('变换', 'transform', 'px / m'));
-    if (this.sections.transform === 'collapsed') return;
-    const mode = this.sections.transform;
+    this._appendSection(host, '变换', 'transform', 'px / m');
+    const mode = this._groupMode('transform');
+    if (mode === 'collapsed') return;
     const show = (path) => mode === 'full' || this._elTrack(e, path).length > 0;
     if (show('transform.x')) host.appendChild(this._elementNumRow(e, 'transform.x', 'X', { step: 0.1, axis: 'x', letter: 'X', unit: 'px' }));
     if (show('transform.y')) host.appendChild(this._elementNumRow(e, 'transform.y', 'Y', { step: 0.1, axis: 'y', letter: 'Y', unit: 'px' }));
@@ -2096,14 +2149,18 @@ export class Timeline {
     }
 
     if (!open) return;
-    host.appendChild(this._sectionRow('内容', 'content'));
-    if (this.sections.content === 'full') {
-      host.appendChild(this._geomRow(o));
-      host.appendChild(this._colorRow(o));
+    // Content rows (geometry / colour) are not keyable, so the keyed-only pass
+    // hides the whole group, label included.
+    if (!this._keyedOnly) {
+      host.appendChild(this._sectionRow('内容', 'content'));
+      if (this.sections.content === 'full') {
+        host.appendChild(this._geomRow(o));
+        host.appendChild(this._colorRow(o));
+      }
     }
-    host.appendChild(this._sectionRow('变换', 'transform', 'm / 倍'));
-    if (this.sections.transform !== 'collapsed') {
-      const mode = this.sections.transform;
+    this._appendSection(host, '变换', 'transform', 'm / 倍');
+    const mode = this._groupMode('transform');
+    if (mode !== 'collapsed') {
       const show = (path) => mode === 'full' || this._propKeys(o, path).length > 0;
       if (show('pivot')) host.appendChild(this._vecRow(o, 'pivot', '中心点'));
       if (show('position')) host.appendChild(this._vecRow(o, 'position', '位置'));
@@ -2132,75 +2189,75 @@ export class Timeline {
     return (cam?.tracks?.[path] || []).length > 0;
   }
 
-  _camGroupKeyed(cam, group) {
-    if (!cam) return false;
-    if (group === 'transform') {
-      return (cam.path || []).length > 0
-        || ['center', 'opacity', 'scale', 'picturePivot', 'pictureOffset']
-          .some((p) => this._camTracked(cam, p));
-    }
-    if (group === 'lens') {
-      return ['fov', 'lookAhead', 'bankGain', 'maxRoll', 'roll'].some((p) => this._camTracked(cam, p));
-    }
-    if (group === 'shake') {
-      return ['shake.amp', 'shake.freq', 'shake.speedGain'].some((p) => this._camTracked(cam, p));
-    }
-    if (group === 'dofMb') {
-      return ['dof.enabled', 'dof.fstop'].some((p) => this._camTracked(cam, p));
-    }
-    return false;
-  }
-
-  _objGroupKeyed(o, group) {
-    if (!o) return false;
-    if (group === 'transform') {
-      return ['pivot', 'position', 'scale', 'opacity'].some((p) => this._propKeys(o, p).length > 0);
-    }
-    return false; // content (primitive / geom / color) is not keyable
-  }
-
-  /** U: show only the properties carrying keys for the selected element. */
+  /**
+   * U: keep only the hosts of the current pool that actually carry keys, with
+   * every group label row hidden and every group in keyed mode. A second U
+   * restores the expansion / group / scroll state from before the pass; the
+   * pool and the filter are never touched. Returns false when nothing has keys,
+   * so the toolbar keeps its shake and the shortcut stays unhandled.
+   *
+   * `core/timeline-keys.js` owns the "which host has keys / which groups must
+   * stay open" rules, so the pass sees exactly the rows this timeline can draw.
+   */
   applyKeyedFilter() {
-    const pool = this.pool;
-    if (pool.kind !== 'element') return false;
-    const refs = pool.ids.map(splitRef).filter(Boolean);
-    const objects = refs.filter((r) => r.type === 'ob');
-    if (objects.length) {
-      for (const r of objects) this.expanded.add(r.id);
-      this.sections.content = 'collapsed';
-      this.sections.transform = objects.some((r) => this._objGroupKeyed(this._obj(r.id), 'transform'))
-        ? 'keyed' : 'collapsed';
-      this.render(true);
-      return true;
+    if (this._keyedOnly) return this.exitKeyedOnly();
+    const keyed = poolHostKeys(this.project, this.pool).filter((s) => s.keyed);
+    if (!keyed.length) return false;
+    this._keyedSnapshot = {
+      sections: { ...this.sections },
+      expanded: [...this.expanded],
+      expandedEls: [...this.expandedEls],
+      openCams: [...this.openCams],
+      scrollTop: this.scroll.scrollTop,
+      scrollLeft: this.scroll.scrollLeft,
+    };
+    this._keyedOnly = true;
+    // Only keyed hosts open. Cameras get their page opened but are never
+    // activated: activation would change the live picture.
+    this.expanded = new Set(keyed.filter((s) => s.type === 'ob').map((s) => s.id));
+    this.expandedEls = new Set(keyed.filter((s) => s.type === 'el').map((s) => s.id));
+    this.openCams = new Set(keyed.filter((s) => s.type === 'cam').map((s) => s.id));
+    this._syncKeyedBtn();
+    this.render(true);
+    return true;
+  }
+
+  /** Second U: leave the keyed-only pass and restore the pre-pass state. */
+  exitKeyedOnly() {
+    if (!this._keyedOnly) return false;
+    const snap = this._keyedSnapshot;
+    this._keyedSnapshot = null;
+    this._keyedOnly = false;
+    if (snap) {
+      this.sections = { ...snap.sections };
+      this.expanded = new Set(snap.expanded);
+      this.expandedEls = new Set(snap.expandedEls);
+      this.openCams = new Set(snap.openCams);
     }
-    const elements = refs.filter((r) => r.type === 'el');
-    if (elements.length) {
-      for (const r of elements) this.expandedEls.add(r.id);
-      this.sections.transform = elements.some((r) => {
-        const e = this._element(r.id);
-        return ['transform.x', 'transform.y', 'transform.z', 'transform.scale', 'transform.rotation', 'transform.opacity']
-          .some((p) => this._elTrack(e, p).length > 0);
-      }) ? 'keyed' : 'collapsed';
-      this.render(true);
-      return true;
+    this._scrollTo = null;
+    this._syncKeyedBtn();
+    this.render(true);
+    if (snap) {
+      this.scroll.scrollTop = snap.scrollTop;
+      this.scroll.scrollLeft = snap.scrollLeft;
     }
-    const cams = refs.filter((r) => r.type === 'cam');
-    if (cams.length) {
-      const primary = splitRef(pool.primary);
-      const id = (primary?.type === 'cam' && cams.some((r) => r.id === primary.id)) ? primary.id : cams[0].id;
-      const cam = this._camById(id);
-      if (!cam) return false;
-      // U opens every selected camera; sections are shared, so they follow the
-      // primary one. Other open camera pages stay open.
-      for (const r of cams) if (this._camById(r.id)) this.openCams.add(r.id);
-      for (const g of ['transform', 'lens', 'shake', 'dofMb']) {
-        const key = g === 'transform' ? 'camPos' : g === 'lens' ? 'camMain' : g === 'shake' ? 'camShake' : 'camDof';
-        this.sections[key] = this._camGroupKeyed(cam, g) ? 'keyed' : 'collapsed';
-      }
-      this.render(true);
-      return true;
-    }
-    return false;
+    return true;
+  }
+
+  /**
+   * Effective mode of a property group. The keyed-only pass forces 'keyed' for
+   * every group without writing `sections`, so exiting restores what was there.
+   */
+  _groupMode(key) {
+    return this._keyedOnly ? 'keyed' : this.sections[key];
+  }
+
+  /** Section label row; skipped entirely during the keyed-only pass. */
+  _appendSection(host, title, key, hint = '') {
+    if (this._keyedOnly) return null;
+    const row = this._sectionRow(title, key, hint);
+    host.appendChild(row);
+    return row;
   }
 
   _sectionRow(title, key, hint = '') {
@@ -3093,21 +3150,13 @@ export class Timeline {
     if (!ref) return false;
     this._pickPool('keyframe', ref, ev);
     if (node.dataset.cam) {
-      this.cameraSel = true;
-      this.elementId = null; this.segmentId = null; this.objectId = null;
-      this.onSelect?.({ camera: true, pool: this.pool });
+      this._selectPoolHost();
     } else if (node.dataset.el) {
-      const id = node.dataset.el;
-      this.elementId = id;
-      this.objectId = null; this.segmentId = null; this.cameraSel = false;
-      this.propSel = { elId: id, path: node.dataset.path };
-      this.onSelect?.({ elementId: id, pool: this.pool });
+      this.propSel = { elId: node.dataset.el, path: node.dataset.path };
+      this._selectPoolHost();
     } else if (node.dataset.obj) {
-      const id = node.dataset.obj;
-      this.objectId = id;
-      this.elementId = null; this.segmentId = null; this.cameraSel = false;
-      this.propSel = { objId: id, path: node.dataset.path };
-      this.onSelect?.({ objectId: id, pool: this.pool });
+      this.propSel = { objId: node.dataset.obj, path: node.dataset.path };
+      this._selectPoolHost();
     }
     this._paintSelection();
     return true;
@@ -3117,21 +3166,9 @@ export class Timeline {
   _selectProperty(kind, id, path, ev) {
     const host = kind === 'cam' ? cameraRef(id) : kind === 'ob' ? objectRef(id) : elementRef(id);
     this._pickPool('property', propertyRef(host, path), ev);
-    if (kind === 'cam') {
-      this.cameraSel = true;
-      this.elementId = null; this.segmentId = null; this.objectId = null;
-      this.onSelect?.({ camera: true, pool: this.pool });
-    } else if (kind === 'ob') {
-      this.objectId = id;
-      this.elementId = null; this.segmentId = null; this.cameraSel = false;
-      this.propSel = { objId: id, path };
-      this.onSelect?.({ objectId: id, pool: this.pool });
-    } else {
-      this.elementId = id;
-      this.objectId = null; this.segmentId = null; this.cameraSel = false;
-      this.propSel = { elId: id, path };
-      this.onSelect?.({ elementId: id, pool: this.pool });
-    }
+    if (kind === 'ob') this.propSel = { objId: id, path };
+    else if (kind === 'el') this.propSel = { elId: id, path };
+    this._selectPoolHost();
     this._paintSelection();
   }
 
@@ -3201,10 +3238,8 @@ export class Timeline {
     if (objBlk) {
       const id = objBlk.dataset.obj;
       const wasSelected = this.objectId === id && !ev.ctrlKey && !ev.metaKey && !ev.shiftKey;
-      this.objectId = id;
       this._pickPool('element', objectRef(id), ev);
-      this.elementId = null; this.segmentId = null; this.cameraSel = false;
-      this.onSelect?.({ objectId: id, pool: this.pool });
+      this._selectPoolHost();
       this._paintSelection();
       const item = this._obj(id);
       if (!item) return;
@@ -3287,11 +3322,9 @@ export class Timeline {
     if (blk) {
       const id = blk.dataset.id;
       const wasSelected = this.elementId === id && !ev.ctrlKey && !ev.metaKey && !ev.shiftKey;
-      this.elementId = id;
       this._pickPool('element', elementRef(id), ev);
-      this.objectId = null; this.segmentId = null; this.cameraSel = false;
       this.propSel = null;
-      this.onSelect?.({ elementId: id, segmentId: this.project.elements.find((e) => e.id === id)?.segment || null, pool: this.pool });
+      this._selectPoolHost();
       this._paintSelection();
 
       const p = this.project;
