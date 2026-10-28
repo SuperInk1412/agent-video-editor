@@ -867,7 +867,7 @@ export class CurvePanel {
     if (!seg) return null;
     let best = null;
     for (const handle of curveHandles(this.curve)) {
-      const hp = this._handlePos(g, seg, handle);
+      const hp = this._handlePos(seg, g, handle);
       if (!hp) continue;
       const d = Math.hypot(hp.x - x, hp.y - y);
       if (d <= 15 && (!best || d < best.d)) best = { handle, d };

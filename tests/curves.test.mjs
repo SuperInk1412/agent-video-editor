@@ -93,6 +93,34 @@ test('ops: keyCurve attaches and clears a curve on the left key', () => {
   }), /no keyframe at 9/);
 });
 
+test('ops: keyCurve on an element stays on its path when two paths share a time', () => {
+  const p = fresh();
+  const { element } = applyOp(p, { op: 'addElement', element: { type: 'solid', start: 0, duration: 4 } });
+  const id = element.id;
+  // transform.y is keyed first and owns the key at t=0; a path-agnostic lookup
+  // (the old code) would hand transform.z's curve to transform.y.
+  for (const path of ['transform.y', 'transform.z']) {
+    applyOp(p, { op: 'keySet', id, path, t: 0, value: 0 });
+    applyOp(p, { op: 'keySet', id, path, t: 2, value: 1 });
+  }
+  applyOp(p, {
+    op: 'keyCurve', host: 'element', id, path: 'transform.z', from: 0, to: 2,
+    curve: { type: 'bezier', preset: 'easeIn', p1: [0.42, 0], p2: [1, 1] },
+  });
+  const at = (path) => p.elements[0].keyframes.find((k) => k.path === path && k.t === 0);
+  assert.ok(at('transform.z').curve, 'transform.z gets the curve');
+  assert.equal(at('transform.z').curve.preset, 'easeIn');
+  assert.equal(at('transform.y').curve, undefined, 'transform.y keeps its own key');
+  // a path that has no key at `from` must not borrow another path's key
+  assert.throws(() => applyOp(p, {
+    op: 'keyCurve', host: 'element', id, path: 'transform.x', from: 0, to: 2, curve: null,
+  }), /no keyframe at 0/);
+  // clearing goes back through the same path
+  applyOp(p, { op: 'keyCurve', host: 'element', id, path: 'transform.z', from: 0, to: 2, curve: null });
+  assert.equal(at('transform.z').curve, undefined);
+  assert.equal(at('transform.y').curve, undefined);
+});
+
 test('curves: preset formulas match the reference 257-point samples', () => {
   for (const group of AM.groups) {
     const curve = presetCurve(group.preset);

@@ -860,8 +860,12 @@ export function applyOp(p, op) {
       let keys;
       let changedId;
       if (host === 'element') {
+        // Element keyframes are one flat list across every property path, so
+        // the segment lookup must stay on `path`: another path with a key at
+        // the same time (transform.y / transform.z often share t) would
+        // otherwise receive the curve.
         const el = findEl(p, op.id);
-        keys = el.keyframes || (el.keyframes = []);
+        keys = (el.keyframes || []).filter((k) => k.path === path);
         changedId = el.id;
       } else if (host === 'object') {
         const o = findObj(p, op.id);
