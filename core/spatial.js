@@ -413,7 +413,7 @@ function rebasis(L, basis) {
 }
 
 /** Roll (degrees) of a basis relative to basisFromDir(basis.forward, 0). */
-function rollOf(basis) {
+export function rollOf(basis) {
   const b0 = basisFromDir(basis.forward, 0);
   return (Math.atan2(V.dot(basis.right, b0.up), V.dot(basis.right, b0.right)) * 180) / Math.PI;
 }
@@ -493,9 +493,20 @@ export function findSpatialHost(project, id) {
   return key ? hostIndex(project).get(key) || null : null;
 }
 
-/** Parent id stored on any host, or null. `@live` is just another id here. */
+/**
+ * Parent id stored on any host, or null. `@live` is just another id here.
+ *
+ * 2D elements store their spatial parent in `parent`; 3D objects and cameras
+ * keep the old 3D hierarchy field `parent` for its own (different) graph and
+ * write the unified spatial parent into `frameParent` instead
+ * (core/spatial-parent.js). `frameParent` wins so the two graphs cannot be
+ * confused when an object has both.
+ */
 export function spatialParentId(host) {
-  const id = host?.parent?.id;
+  const rec = host?.frameParent?.id != null && String(host.frameParent.id) !== ''
+    ? host.frameParent
+    : host?.parent;
+  const id = rec?.id;
   return id != null && String(id) !== '' ? String(id) : null;
 }
 
