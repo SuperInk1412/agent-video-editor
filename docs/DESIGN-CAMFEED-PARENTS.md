@@ -101,11 +101,22 @@ HUD 空元素（远离场景，比如 x = 10 km）
 
 ## 7. 进度登记（B）
 
-- 2026-10-28 · 分支 `agent/camfeed`（基于 master `6c2ec5f`），未合入 master。
-- `98d4e64` 投屏核心：`core/camfeed.js`（`el.feed`、`cam.output`、`feedPlan` 断环、`programProject` / `sourceProject`），9 条单测。
+- 2026-10-28 · 分支 `agent/camfeed`（基于 master `6c2ec5f`），未合入 master。- `98d4e64` 投屏核心：`core/camfeed.js`（`el.feed`、`cam.output`、`feedPlan` 断环、`programProject` / `sourceProject`），9 条单测。
 - `7734c41` 预览投屏：每个来源相机一对离屏纹理（当前帧 / 上一帧），按依赖顺序先渲；`scripts/check-camfeed.mjs` 像素检查。
 - `127b02d` **修复（master 上就有的问题）**：Blender 3D 路线里 2D 平面（混合材质）不写 Mist，合成器的雾把所有 2D 元素涂成纯雾色——空世界项目的成片整片一个颜色。2D 平面改到单独的视图层（3D 世界作 holdout），雾只作用于 3D。
 - `498a726` 成片投屏：来源相机先单独渲（去全局后期，缓存在 `.vdm/cache/feeds`），投屏平面逐帧读 `f_<帧-delay>.png`；`check-camfeed --blender` 6/6 PASS。
 - `64aac91` Blender 2D 世界矩阵烘焙：带 `el.node` 或空间父级的 2D 元素逐帧烘焙平面矩阵（与预览同一个 `nodePlaneMatrix`）；`scripts/check-render-parity.mjs` 预览 vs Blender 0/144 格不同。
 - `e83808d` 父子只剩一种：空间父级加 `strength` / `strengthKeys`；打开项目时 `obj.parent` 迁移成 `obj.frameParent`（单测：迁移前后姿态差 < 1e-5）；`objectParent*` 保留名字但写空间父级；新 op `spatialParentKey` / `spatialParentUnkey`。**行为变化**：解除父级保留子级自己的数值（空间父级规则），不再烘焙世界位置。
 - `4c0fdf9` 贴屏退役：打开项目时把贴屏元素迁到 HUD 机位（`core/screen-lock-migrate.js`）；`elementParent` / `elementUnparent` 拒绝并提示用投屏。miku-swiss 副本对拍：预览 48×27 网格最大差 7/255；Blender 场景对齐到 0.02 px，字幕偏差 ≤ 0.5 px（960 宽），PSNR 31–36 dB。
+
+### A 侧进度（2026-10-28）
+
+- `35b523a` 把 B 的 `agent/camfeed`（9 个提交，基于属性链接 master）合入 master；
+  B 的 420 条单测、`check:preview` / `check:evaluate` / `blender:check` /
+  `check-render-parity` / `check-camfeed` 均 PASS。
+- 右键相机「创建投屏元素」：按相机片段范围建 `type:"camfeed"` 元素（默认 delay 0、置顶），并选中它。
+- 时间轴相机行：`output:false` 显示「仅投屏」标记，点击恢复出画；相机菜单和相机检查器都能切 `output`。
+- camfeed 检查器补「来源相机 / 延迟一帧」，修改写 `updateElement {feed}`。
+- 2D 元素的屏幕锁 carry 从视口拖拽里删除；`elementCarrier` 暂留空桩给测试。
+- **未做**：空间父级 `strength` 的时间轴行（读 `parentStrengthAt`，写 `spatialParentKey/Unkey`）。
+- 注：`35b523a` 之后，打开旧项目会按 §2 在内存里迁到 HUD 机位；真实 `projects/miku-swiss` 仍是原文件，保存前请先备份。
