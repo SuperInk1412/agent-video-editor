@@ -64,6 +64,19 @@
 
 /* ---------------- rows ---------------- */
 .tl-inner { position: relative; padding-bottom: 10px; }
+.tl-rows { position: relative; }
+.tl-rows .tl-elhead > .tl-gutter,
+.tl-rows .tl-camhead > .tl-gutter,
+.tl-rows .tl-objhead > .tl-gutter { cursor: grab; user-select: none; }
+.tl-rows .tl-elhead > .tl-gutter input,
+.tl-rows .tl-objhead > .tl-gutter input { cursor: text; user-select: text; }
+.tl-row-dragging, .tl-row-dragging * { cursor: grabbing !important; }
+.tl-row.tl-row-drag { opacity: .42; }
+.tl-dropline {
+  position: absolute; left: 0; right: 0; height: 2px; margin-top: -1px;
+  background: var(--accent); box-shadow: 0 0 8px var(--accent-border);
+  pointer-events: none; z-index: 4;
+}
 .tl-row { display: flex; align-items: stretch; height: 28px; border-bottom: 1px solid var(--border-subtle); }
 .tl-row.tl-filtered { display: none; }
 .tl-ruler { height: var(--tl-ruler-h); position: sticky; top: 0; z-index: 6; background: var(--surface-1); }

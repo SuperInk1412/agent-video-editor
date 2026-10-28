@@ -90,6 +90,17 @@ export class Timeline {
     this._snapOn = prefs.get('snap', true) !== false;
     this._gutterW = clampGutter(prefs.get('tlGutter', GUTTER_DEFAULT));
     this.filterText = '';
+    // One unified row list (audio / cameras / 2D / 3D). The display order is
+    // persisted in meta.ui.timelineOrder; only 2D rows (el.z) and camera rows
+    // (cameraOrder) are semantic, 3D/audio rows are display-only.
+    this.viewOrder = [];
+    this._rankCam = new Map();
+    this._rank2D = new Map();
+    this._rowDragging = false;
+    this._rowCommitting = false;
+    this._rowDrag = null;
+    this._dropLine = null;
+    this._rowDragTimer = null;
     this._build();
     window.addEventListener('resize', () => this._layout());
   }
@@ -113,14 +124,9 @@ export class Timeline {
     this.rulerTrack = el('div', 'tl-track');
     this.rulerRow.append(this.rulerGutter, this.rulerTrack);
 
-    this.camHead = el('div', 'tl-row tl-sechead tl-camsec');
-    this.camHeadGutter = el('div', 'tl-gutter', '<span>相机</span>');
-    this.camHeadTrack = el('div', 'tl-track');
-    this.camHead.append(this.camHeadGutter, this.camHeadTrack);
-
-    this.camsWrap = el('div', 'tl-cams');
-    this.sndWrap = el('div', 'tl-snds');
-    this.elsWrap = el('div', 'tl-els');
+    // One host for every header row + its expanded property rows. The order is
+    // meta.ui.timelineOrder, reconciled against z / cameraOrder on each render.
+    this.rowsWrap = el('div', 'tl-rows');
     this.playhead = el('div', 'tl-playhead');
     const splitBtn = h('button', {
       type: 'button', class: 'tl-split', 'aria-label': '在播放头切开', 'data-tip': '单击切开 · 拖动移动播放头', 'data-kbd': 'Ctrl+D',
@@ -159,7 +165,7 @@ export class Timeline {
     this.playhead.appendChild(splitBtn);
     this.playheadLayer = el('div', 'tl-playhead-layer');
     this.playheadLayer.appendChild(this.playhead);
-    this.inner.append(this.rulerRow, this.sndWrap, this.camHead, this.camsWrap, this.elsWrap);
+    this.inner.append(this.rulerRow, this.rowsWrap);
 
     // Native horizontal scrollbars span the whole footer, including the sticky
     // property gutter (--tl-gutter). Draw our own track starting at the gutter so the
@@ -342,34 +348,23 @@ export class Timeline {
 
   /**
    * Hide header rows (camera / 2D / audio / 3D) whose name or id does not
-   * contain the filter text; their expanded property rows follow them and a
-   * section header hides when nothing under it matches.
+   * contain the filter text. Their expanded property rows follow the header in
+   * the same unified list and hide with it.
    */
   _applyFilter() {
     const q = this.filterText.trim().toLowerCase();
-    const rows = [...this.sndWrap.children, this.camHead, ...this.camsWrap.children, ...this.elsWrap.children];
+    const rows = [...this.rowsWrap.children];
     let total = 0;
     let shown = 0;
-    let sec = null;
-    let secHits = 0;
     let visible = true;
-    const closeSec = () => { if (sec) sec.classList.toggle('tl-filtered', !!q && secHits === 0); };
     for (const r of rows) {
-      if (r.classList.contains('tl-sechead')) {
-        closeSec();
-        sec = r;
-        secHits = 0;
-        visible = true;
-        continue;
-      }
       if (r.dataset.filter != null) {
         total++;
         visible = !q || r.dataset.filter.includes(q);
-        if (visible) { shown++; secHits++; }
+        if (visible) shown++;
       }
       r.classList.toggle('tl-filtered', !visible);
     }
-    closeSec();
     if (this.filterCount) this.filterCount.textContent = `${shown} / ${total}`;
   }
 
@@ -595,6 +590,9 @@ export class Timeline {
   render(force = false) {
     const p = this.project;
     if (!p) return;
+    // A rebuild while a row is being dragged would detach the header rows the
+    // pointer handler is measuring. Defer until the drop (or the click) ends.
+    if (this._rowDragging) { this._renderPending = true; return; }
     if (!this.pps) { this._layout(); return; }
     const active = document.activeElement;
     const focusedHere = this._rowFocused(active)
@@ -671,51 +669,46 @@ export class Timeline {
       this.rulerTrack.appendChild(bt);
     }
 
-    // camera / element rows follow; segments live in the data only
-
-    // camera stack: a section header + one row per camera (top of the stack
-    // first). The expanded camera is always the active one.
+    // camera / element rows follow; segments live in the data only. One list:
+    // the saved display order is reconciled against the real 2D layer order (z)
+    // and the camera stack (cameraOrder), then every header + its expanded
+    // property rows is appended in that order. 3D and audio rows are display
+    // only — their position never feeds the renderer.
     const cams = Array.isArray(p.cameras) && p.cameras.length ? p.cameras : (p.camera ? [p.camera] : []);
-    this.camHeadGutter.innerHTML = cams.length
-      ? `<span>相机</span><span class="tl-sub">${cams.length} 台</span>`
-      : '<span>相机 · 无</span>';
-    this.camHeadGutter.classList.toggle('dim', !cams.length);
-    this.camsWrap.innerHTML = '';
+    this.rowsWrap.innerHTML = '';
     this._camPos = null;
     this._camPropRows = [];
-    if (this.camOpenId && p.activeCameraId && this.camOpenId !== p.activeCameraId) this.camOpenId = null;
-    if (this.camOpenId && !cams.some((c) => c.id === this.camOpenId)) this.camOpenId = null;
-    for (const cam of cams) this._cameraGroup(cam, p);
-
-    // soundtrack/audio elements sit directly under the ruler, always visible
-    this.elsWrap.innerHTML = '';
-    this.sndWrap.innerHTML = '';
     this._propRows = [];
     this._elPropRows = [];
     this._objHeads = new Map();
     this._elHeads = new Map();
-    const allEls = [...p.elements].sort((a, b) => b.z - a.z);
-    const auds = allEls.filter((e) => e.type === 'audio');
-    const els = allEls.filter((e) => e.type !== 'audio');
-    if (auds.length) {
-      const head = el('div', 'tl-row tl-sechead');
-      head.append(
-        el('div', 'tl-gutter', `<span>声音</span><span class="tl-sub">${auds.length} 条</span>`),
-        el('div', 'tl-track'),
-      );
-      this.sndWrap.appendChild(head);
-      for (const e of auds) this._elementGroup(e, this.sndWrap);
+    if (this.camOpenId && p.activeCameraId && this.camOpenId !== p.activeCameraId) this.camOpenId = null;
+    if (this.camOpenId && !cams.some((c) => c.id === this.camOpenId)) this.camOpenId = null;
+
+    const order = this._reconcileOrder(p, cams, objs);
+    this.viewOrder = order;
+    const elById = new Map(p.elements.map((e) => [elementRef(e.id), e]));
+    const camById = new Map(cams.map((c) => [cameraRef(c.id), c]));
+    const objById = new Map(objs.map((o) => [objectRef(o.id), o]));
+    const twoDRefs = order.filter((ref) => {
+      const e = elById.get(ref);
+      return e && e.type !== 'audio';
+    });
+    const camRefs = order.filter((ref) => camById.has(ref));
+    this._rank2D = new Map(twoDRefs.map((ref, i) => [ref, i]));
+    this._rankCam = new Map(camRefs.map((ref, i) => [ref, i]));
+    for (const ref of order) {
+      if (ref.startsWith('cam:')) {
+        const cam = camById.get(ref);
+        if (cam) this._cameraGroup(cam, p, this.rowsWrap);
+      } else if (ref.startsWith('ob:')) {
+        const o = objById.get(ref);
+        if (o) this._objectGroup(o, this.rowsWrap);
+      } else {
+        const e = elById.get(ref);
+        if (e) this._elementGroup(e, this.rowsWrap);
+      }
     }
-    if (els.length) {
-      const head = el('div', 'tl-row tl-sechead');
-      head.append(
-        el('div', 'tl-gutter', `<span>元素 · 2D</span><span class="tl-sub">${els.length} 个</span>`),
-        el('div', 'tl-track'),
-      );
-      this.elsWrap.appendChild(head);
-      for (const e of els) this._elementGroup(e);
-    }
-    this._build3D(p, objs);
 
     this._applyFilter();
     this.setTime(this.time);
@@ -727,15 +720,103 @@ export class Timeline {
     }
   }
 
-  _build3D(p, objs) {
-    if (!objs.length) return;
-    const head = el('div', 'tl-row tl-sechead');
-    head.append(
-      el('div', 'tl-gutter', `<span>元素 · 3D</span><span class="tl-sub">${objs.length} 个</span>`),
-      el('div', 'tl-track'),
+  // ------------------------------------------------------------ row order
+  /**
+   * The order the timeline showed before meta.ui.timelineOrder existed:
+   * soundtrack, camera stack, 2D elements, 3D objects.
+   */
+  _defaultOrder(p, cams, objs) {
+    const zOf = (e) => (Number.isFinite(Number(e?.z)) ? Number(e.z) : 0);
+    const startOf = (e) => (Number.isFinite(Number(e?.start)) ? Number(e.start) : 0);
+    const els = [...(p.elements || [])].sort((a, b) => (zOf(b) - zOf(a)) || (startOf(a) - startOf(b)));
+    const order = [];
+    for (const e of els) if (e.type === 'audio') order.push(elementRef(e.id));
+    const camById = new Map(cams.map((c) => [c.id, c]));
+    const camIds = Array.isArray(p.cameraOrder) && p.cameraOrder.length ? p.cameraOrder : cams.map((c) => c.id);
+    const seenCams = new Set();
+    for (const id of camIds) {
+      if (!camById.has(id) || seenCams.has(id)) continue;
+      seenCams.add(id);
+      order.push(cameraRef(id));
+    }
+    for (const c of cams) if (!seenCams.has(c.id)) order.push(cameraRef(c.id));
+    for (const e of els) if (e.type !== 'audio') order.push(elementRef(e.id));
+    for (const o of objs) order.push(objectRef(o.id));
+    return order;
+  }
+
+  /**
+   * Saved display order + current project. Real orders win inside their slots:
+   * 2D rows are sorted by el.z, camera rows by cameraOrder. Audio/3D rows keep
+   * whatever slot the user dragged them to.
+   */
+  _reconcileOrder(p, cams, objs) {
+    const items = new Map();
+    for (const c of cams) items.set(cameraRef(c.id), { kind: 'cam', item: c });
+    for (const e of (p.elements || [])) items.set(elementRef(e.id), { kind: e.type === 'audio' ? 'audio' : 'el', item: e });
+    for (const o of objs) items.set(objectRef(o.id), { kind: 'ob', item: o });
+
+    const saved = Array.isArray(p.meta?.ui?.timelineOrder) ? p.meta.ui.timelineOrder : [];
+    const order = [];
+    const seen = new Set();
+    for (const raw of saved) {
+      const ref = String(raw);
+      if (items.has(ref) && !seen.has(ref)) { order.push(ref); seen.add(ref); }
+    }
+
+    const lastWhere = (pred) => {
+      for (let i = order.length - 1; i >= 0; i--) if (pred(order[i])) return i;
+      return -1;
+    };
+    for (const ref of this._defaultOrder(p, cams, objs)) {
+      if (seen.has(ref)) continue;
+      const kind = items.get(ref)?.kind;
+      let at;
+      if (kind === 'audio') at = lastWhere((r) => items.get(r)?.kind === 'audio') + 1;
+      else if (kind === 'cam') {
+        at = lastWhere((r) => items.get(r)?.kind === 'cam') + 1;
+        if (!at) at = lastWhere((r) => items.get(r)?.kind === 'audio') + 1;
+      } else if (kind === 'el') {
+        at = lastWhere((r) => items.get(r)?.kind === 'el') + 1;
+        if (!at) at = lastWhere((r) => items.get(r)?.kind === 'cam') + 1;
+        if (!at) at = lastWhere((r) => items.get(r)?.kind === 'audio') + 1;
+      } else {
+        at = order.length;
+      }
+      at = Math.max(0, Math.min(order.length, at));
+      order.splice(at, 0, ref);
+      seen.add(ref);
+    }
+
+    const camIdx = new Map();
+    const camIds = Array.isArray(p.cameraOrder) && p.cameraOrder.length ? p.cameraOrder : cams.map((c) => c.id);
+    camIds.forEach((id, i) => { if (!camIdx.has(id)) camIdx.set(id, i); });
+    const zOf = (ref) => {
+      const z = Number(items.get(ref)?.item?.z);
+      return Number.isFinite(z) ? z : 0;
+    };
+    const startOf = (ref) => {
+      const s = Number(items.get(ref)?.item?.start);
+      return Number.isFinite(s) ? s : 0;
+    };
+    const sortSlots = (pred, cmp) => {
+      const idxs = [];
+      const refs = [];
+      order.forEach((ref, i) => {
+        if (pred(ref)) { idxs.push(i); refs.push(ref); }
+      });
+      refs.sort(cmp);
+      idxs.forEach((idx, i) => { order[idx] = refs[i]; });
+    };
+    sortSlots(
+      (ref) => items.get(ref)?.kind === 'cam',
+      (a, b) => ((camIdx.get(a.slice(4)) ?? 1e9) - (camIdx.get(b.slice(4)) ?? 1e9)),
     );
-    this.elsWrap.appendChild(head);
-    for (const o of objs) this._objectGroup(o);
+    sortSlots(
+      (ref) => items.get(ref)?.kind === 'el',
+      (a, b) => ((zOf(b) - zOf(a)) || (startOf(a) - startOf(b))),
+    );
+    return order;
   }
 
   // ------------------------------------------------------------ camera stack
@@ -785,39 +866,327 @@ export class Timeline {
     if (!same) this.render(true);
   }
 
-  _startCameraDrag(id, startY, row) {
-    const rows = [...this.camsWrap.querySelectorAll('.tl-camhead[data-cam]')];
-    if (rows.length < 2) { this._activateCamera(id); return; }
-    const from = rows.findIndex((r) => r.dataset.cam === id);
-    if (from < 0) return;
-    let target = from;
-    let moved = false;
-    row.classList.add('cam-dragging');
-    const move = (e) => {
-      if (!moved && Math.abs(e.clientY - startY) < 4) return;
-      moved = true;
-      let best = Infinity;
-      rows.forEach((r, i) => {
-        const b = r.getBoundingClientRect();
-        const d = Math.abs(e.clientY - (b.top + b.height / 2));
-        if (d < best) { best = d; target = i; }
-      });
-    };
-    const up = () => {
-      window.removeEventListener('pointermove', move);
-      window.removeEventListener('pointerup', up);
-      window.removeEventListener('pointercancel', up);
-      row.classList.remove('cam-dragging');
-      if (moved && target !== from) this.onOp?.({ op: 'reorderCamera', id, index: target });
-      // 拖动后激活被拖的相机；单击（没移动）也算选中
-      this._activateCamera(id);
-    };
-    window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', up);
-    window.addEventListener('pointercancel', up);
+  /** Every header row in DOM order, with its pool ref. */
+  _headerRows() {
+    if (!this.rowsWrap) return [];
+    const out = [];
+    for (const row of this.rowsWrap.querySelectorAll('.tl-camhead[data-cam], .tl-elhead[data-el], .tl-objhead[data-obj]')) {
+      const cam = row.dataset.cam;
+      const elId = row.dataset.el;
+      const obj = row.dataset.obj;
+      if (cam) out.push({ row, ref: cameraRef(cam), kind: 'cam', id: cam });
+      else if (elId) out.push({ row, ref: elementRef(elId), kind: 'el', id: elId });
+      else if (obj) out.push({ row, ref: objectRef(obj), kind: 'ob', id: obj });
+    }
+    return out;
   }
 
-  _cameraGroup(cam, p) {
+  /**
+   * Drag a header row up/down. The drag reorders the display list, then derives
+   * the real orders from it: 2D element rows write el.z, camera rows write
+   * cameraOrder, everything else is display-only. One drop = one batch op
+   * (meta.ui.timelineOrder + real orders) = one undo step.
+   */
+  _startRowDrag(ev, header) {
+    const p = this.project;
+    if (!p || this._rowCommitting) return;
+    const hit = this._headerRows().find((x) => x.row === header);
+    if (!hit) return;
+    const { ref, kind, id } = hit;
+    const additive = !!(ev.ctrlKey || ev.metaKey || ev.shiftKey);
+    const downDetail = Number(ev.detail) || 0;
+    const wasInPool = this.pool?.kind === 'element' && this.pool.ids.includes(ref);
+    const wasSelected = kind === 'cam'
+      ? (this.cameraSel && this._activeCameraId() === id)
+      : kind === 'el' ? this.elementId === id : this.objectId === id;
+    // A plain second click on the same row toggles its property pages, unless
+    // a text element/object wants the double-click for inline text editing.
+    const toggleAfterClick = (kind === 'el' || kind === 'ob') && wasInPool && wasSelected && !additive;
+
+    if (kind === 'el') {
+      if (!wasInPool || additive) this._pickPool('element', ref, ev);
+      else if (this.pool?.kind === 'element' && this.pool.ids.includes(ref)) {
+        // Preserve the multi-selection but make the grabbed row its primary.
+        this.pool = normalizeSelection({ ...this.pool, primary: ref });
+      }
+      this.elementId = id;
+      this.objectId = null;
+      this.cameraSel = false;
+      this.propSel = null;
+      this.onSelect?.({ elementId: id, segmentId: this._element(id)?.segment || null, pool: this.pool });
+      this._paintSelection();
+    } else if (kind === 'ob') {
+      if (!wasInPool || additive) this._pickPool('element', ref, ev);
+      else if (this.pool?.kind === 'element' && this.pool.ids.includes(ref)) {
+        this.pool = normalizeSelection({ ...this.pool, primary: ref });
+      }
+      this.objectId = id;
+      this.elementId = null;
+      this.cameraSel = false;
+      this.propSel = null;
+      this.onSelect?.({ objectId: id, pool: this.pool });
+      this._paintSelection();
+    }
+    // Cameras are activated on pointerup (activation is an op and a render
+    // mid-drag would detach the row being measured).
+
+    let group = [ref];
+    if (kind !== 'cam' && (wasInPool || additive)) {
+      const ids = new Set(this.pool.ids);
+      const fromPool = this.viewOrder.filter((r) => ids.has(r));
+      if (fromPool.length) group = fromPool;
+    }
+    const groupSet = new Set(group);
+    if (!groupSet.has(ref)) groupSet.add(ref);
+
+    const headers = this._headerRows();
+    const domOrder = headers.map((x) => x.ref);
+    let baseOrder = this.viewOrder.slice();
+    if (baseOrder.length !== domOrder.length || baseOrder.some((r, i) => r !== domOrder[i])) baseOrder = domOrder;
+    const moving = baseOrder.filter((r) => groupSet.has(r));
+    const rest = baseOrder.filter((r) => !groupSet.has(r));
+    const restHeaders = headers.filter((x) => !groupSet.has(x.ref));
+    const groupRows = headers.filter((x) => groupSet.has(x.ref));
+    const canDrag = !this.filterText.trim();
+    const downY = ev.clientY;
+    let lastY = downY;
+    let moved = false;
+    let target = 0;
+
+    // If a previous drag lost its pointerup (window blur etc.), do not leave
+    // its timer/line behind.
+    if (this._rowDragTimer) { clearInterval(this._rowDragTimer); this._rowDragTimer = null; }
+    if (this._dropLine) { this._dropLine.remove(); this._dropLine = null; }
+    this._rowDragging = true;
+    const line = el('div', 'tl-dropline');
+    line.hidden = true;
+    this.rowsWrap.appendChild(line);
+    this._dropLine = line;
+
+    const updateTarget = (y) => {
+      lastY = y;
+      let at = restHeaders.length;
+      for (let i = 0; i < restHeaders.length; i++) {
+        const r = restHeaders[i].row.getBoundingClientRect();
+        if (y < r.top + r.height / 2) { at = i; break; }
+      }
+      target = at;
+      let top = 0;
+      if (at < restHeaders.length) top = restHeaders[at].row.offsetTop;
+      else {
+        const kids = this.rowsWrap.children;
+        for (let i = kids.length - 1; i >= 0; i--) {
+          if (kids[i] === line) continue;
+          top = kids[i].offsetTop + kids[i].offsetHeight;
+          break;
+        }
+      }
+      line.style.top = `${top}px`;
+      line.hidden = false;
+    };
+
+    const tick = () => {
+      if (!moved) return;
+      const sr = this.scroll.getBoundingClientRect();
+      const edge = 26;
+      let dy = 0;
+      if (lastY < sr.top + edge) dy = -Math.min(18, (sr.top + edge - lastY) / 1.2);
+      else if (lastY > sr.bottom - edge) dy = Math.min(18, (lastY - (sr.bottom - edge)) / 1.2);
+      if (dy) {
+        this.scroll.scrollTop += dy;
+        updateTarget(lastY);
+      }
+    };
+
+    const onMove = (e) => {
+      lastY = e.clientY;
+      if (!canDrag) return;
+      if (!moved) {
+        if (Math.abs(e.clientY - downY) < 4) return;
+        moved = true;
+        this.root.classList.add('tl-row-dragging');
+        for (const x of groupRows) x.row.classList.add('tl-row-drag');
+        if (!this._rowDragTimer) this._rowDragTimer = setInterval(tick, 16);
+      }
+      updateTarget(e.clientY);
+    };
+
+    const cleanup = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+      if (this._rowDragTimer) { clearInterval(this._rowDragTimer); this._rowDragTimer = null; }
+      line.remove();
+      this._dropLine = null;
+      this._rowDrag = null;
+      this._rowDragging = false;
+      this.root.classList.remove('tl-row-dragging');
+      for (const x of groupRows) x.row.classList.remove('tl-row-drag');
+    };
+
+    const onUp = (e) => {
+      const didMove = moved;
+      cleanup();
+      if (!didMove) {
+        if (kind === 'cam') this._activateCamera(id);
+        else if (toggleAfterClick) {
+          if (kind === 'el') {
+            const isText = this._element(id)?.type === 'text';
+            if (!(downDetail > 1 && isText)) this._toggleElementExpand(id);
+          } else {
+            const onName = !!ev.target?.closest?.('.tl-objname');
+            const isText = this._obj(id)?.type === 'text';
+            if (!(downDetail > 1 && (isText || onName))) this._toggleExpand(id);
+          }
+        }
+        if (this._renderPending) { this._renderPending = false; this.render(true); }
+        return;
+      }
+      const next = rest.slice();
+      next.splice(Math.max(0, Math.min(next.length, target)), 0, ...moving);
+      if (next.length !== baseOrder.length || next.some((r, i) => r !== baseOrder[i])) {
+        // Only a real camera-vs-camera reorder activates the dragged camera.
+        // A cross-type camera drag is display-only and must not change the
+        // active (live) camera, otherwise the picture would change.
+        const oldCam = baseOrder.filter((r) => r.startsWith('cam:'));
+        const newCam = next.filter((r) => r.startsWith('cam:'));
+        this._commitRowOrder(next, baseOrder, {
+          cameraId: kind === 'cam' && !sameOrder(oldCam, newCam) ? id : null,
+          group: [...groupSet],
+        });
+      } else if (this._renderPending) {
+        this._renderPending = false;
+        this.render(true);
+      }
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+  }
+
+  /** Commit one drop: display order + real z/camera order + optional activation. */
+  async _commitRowOrder(newOrder, oldOrder, { cameraId, group, project } = {}) {
+    const p = project || this.project;
+    if (!p) return;
+    const ops = [];
+    if (!sameOrder(newOrder, oldOrder)) ops.push({ op: 'setMeta', path: 'ui.timelineOrder', value: newOrder });
+    ops.push(...this._elementOrderOps(oldOrder, newOrder, p, group || []));
+    ops.push(...this._cameraOrderOps(oldOrder, newOrder, p));
+    if (cameraId && this._activeCameraId() !== cameraId) ops.push({ op: 'activateCamera', id: cameraId });
+    if (!ops.length) {
+      if (cameraId) this._activateCamera(cameraId);
+      return;
+    }
+    this._rowCommitting = true;
+    const pending = this.onOp?.({ op: 'batch', ops });
+    if (!pending?.then) {
+      this._rowCommitting = false;
+      this.viewOrder = newOrder;
+      this.render(true);
+      if (cameraId) this._activateCamera(cameraId);
+      return;
+    }
+    let res = null;
+    try { res = await pending; } catch { res = null; } finally { this._rowCommitting = false; }
+    if (!res) {
+      this.viewOrder = oldOrder;
+      this.render(true);
+      if (cameraId) this._activateCamera(cameraId);
+      return;
+    }
+    const alreadyRendered = sameOrder(this.viewOrder, newOrder);
+    this.viewOrder = newOrder;
+    if (cameraId) this._activateCamera(cameraId);
+    if (!alreadyRendered || this._renderPending) {
+      this._renderPending = false;
+      this.render(true);
+    }
+  }
+
+  /** 2D element ops for a drop. Only the relative order of 2D rows matters. */
+  _elementOrderOps(oldOrder, newOrder, p, group) {
+    const byRef = new Map((p.elements || []).map((e) => [elementRef(e.id), e]));
+    const is2D = (ref) => {
+      const e = byRef.get(ref);
+      return !!e && e.type !== 'audio';
+    };
+    const old2D = oldOrder.filter(is2D);
+    const new2D = newOrder.filter(is2D);
+    if (sameOrder(old2D, new2D)) return [];
+    const moved = (group || []).filter(is2D);
+    const zOf = (e) => Number(e?.z);
+    const startOf = (e) => (Number.isFinite(Number(e?.start)) ? Number(e.start) : 0);
+    const ops = [];
+    if (moved.length === 1 && new2D.length > 1) {
+      const ref = moved[0];
+      const el = byRef.get(ref);
+      const idx = new2D.indexOf(ref);
+      if (el && idx >= 0) {
+        const above = idx > 0 ? byRef.get(new2D[idx - 1]) : null;
+        const below = idx < new2D.length - 1 ? byRef.get(new2D[idx + 1]) : null;
+        let z = NaN;
+        if (!above && below) {
+          const rest = new2D.filter((r) => r !== ref).map((r) => zOf(byRef.get(r))).filter(Number.isFinite);
+          z = rest.length ? Math.max(...rest) + 1 : 0;
+        } else if (above && !below) {
+          const rest = new2D.filter((r) => r !== ref).map((r) => zOf(byRef.get(r))).filter(Number.isFinite);
+          z = rest.length ? Math.min(...rest) - 1 : 0;
+        } else if (above && below) {
+          const za = zOf(above);
+          const zb = zOf(below);
+          if (Number.isFinite(za) && Number.isFinite(zb) && za > zb) z = (za + zb) / 2;
+        }
+        const oldZ = zOf(el);
+        let ok = Number.isFinite(z)
+          && (!Number.isFinite(oldZ) || Math.abs(z - oldZ) > 1e-9)
+          && new2D.every((r) => r === ref || Math.abs(zOf(byRef.get(r)) - z) > 1e-9);
+        if (ok) {
+          const sim = new2D.map((r) => ({
+            ref: r,
+            z: r === ref ? z : zOf(byRef.get(r)),
+            start: startOf(byRef.get(r)),
+          })).sort((a, b) => (b.z - a.z) || (a.start - b.start)).map((x) => x.ref);
+          ok = sameOrder(sim, new2D);
+        }
+        if (ok) ops.push({ op: 'reorder', id: el.id, z });
+      }
+    }
+    if (!ops.length) {
+      // A group move (or a gap too tight for a midpoint): renumber the 2D
+      // stack bottom-to-top. This changes several z values but never the
+      // picture across different planes.
+      new2D.forEach((ref, i) => {
+        const el = byRef.get(ref);
+        if (!el) return;
+        const z = new2D.length - 1 - i;
+        if (Number(el.z) !== z) ops.push({ op: 'reorder', id: el.id, z });
+      });
+    }
+    return ops;
+  }
+
+  /** Camera stack ops: only the relative order of camera rows matters. */
+  _cameraOrderOps(oldOrder, newOrder, p) {
+    const oldCam = oldOrder.filter((r) => r.startsWith('cam:'));
+    const newCam = newOrder.filter((r) => r.startsWith('cam:'));
+    if (sameOrder(oldCam, newCam)) return [];
+    const ids = newCam.map((r) => r.slice(4));
+    const work = (Array.isArray(p.cameras) ? p.cameras : []).map((c) => c.id);
+    if (!work.length && Array.isArray(p.cameraOrder)) work.push(...p.cameraOrder);
+    const ops = [];
+    for (let i = 0; i < ids.length; i++) {
+      if (work[i] === ids[i]) continue;
+      const from = work.indexOf(ids[i]);
+      if (from < 0) continue;
+      work.splice(from, 1);
+      work.splice(i, 0, ids[i]);
+      ops.push({ op: 'reorderCamera', id: ids[i], index: i });
+    }
+    return ops;
+  }
+
+  _cameraGroup(cam, p, host = this.rowsWrap) {
     const activeId = p.activeCameraId || p.camera?.id || null;
     const open = this.camOpenId === cam.id;
     const row = el('div', 'tl-row tl-objhead tl-camhead tl-camrow');
@@ -845,6 +1214,10 @@ export class Timeline {
     const name = el('span', 'tl-objname');
     name.textContent = cam.name || '相机';
     const kind = el('span', 'tl-objkind badge badge-camera', '相机');
+    const camRank = this._rankCam?.get(cameraRef(cam.id));
+    kind.dataset.tip = camRank == null
+      ? '相机'
+      : `相机叠层：从上往下第 ${camRank + 1} / ${this._rankCam.size} 层；拖到另一台相机上下会改叠层（并激活），拖过其它类型只改显示`;
     g.append(eye, caret, dot, name, kind);
 
     const track = el('div', 'tl-track');
@@ -864,8 +1237,8 @@ export class Timeline {
     });
     track.appendChild(block);
     row.append(g, track);
-    this.camsWrap.appendChild(row);
-    if (open) this._cameraRows(cam, this.camsWrap);
+    host.appendChild(row);
+    if (open) this._cameraRows(cam, host);
   }
 
   /**
@@ -1366,7 +1739,7 @@ export class Timeline {
     return row;
   }
 
-  _elementGroup(e, host = this.elsWrap) {
+  _elementGroup(e, host = this.rowsWrap) {
     const open = this.expandedEls.has(e.id);
     const row = el('div', 'tl-row tl-elhead');
     row.dataset.el = e.id;
@@ -1390,7 +1763,13 @@ export class Timeline {
     name.dataset.tip = e.type === 'text' ? '双击时间块或画面编辑文字内容'
       : e.type === 'audio' ? '声音元素：展开可给音量打关键帧' : (e.name || e.id);
     const kind = el('span', `tl-objkind badge badge-${e.type}`, TYPE_LABEL[e.type] || e.type);
-    kind.dataset.tip = e.type === 'audio' ? '声音 / 音乐（不参与画面）' : '画面元素（纵深 z 单位：米）';
+    kind.dataset.tip = e.type === 'audio'
+      ? '声音不参与画面；上下拖动只改列表显示，不影响声音'
+      : '2D 图层：列表越靠上越高；同一平面才看得出；拖过相机/3D/声音只改显示';
+    const rank2D = this._rank2D?.get(elementRef(e.id));
+    if (e.type !== 'audio' && rank2D != null) {
+      kind.dataset.tip = `2D 图层：当前第 ${rank2D + 1} / ${this._rank2D.size} 个（越靠上越高；同面才看得出；拖过相机/3D/声音只改显示）`;
+    }
     g.append(caret, eye, dot, name, kind);
 
     const track = el('div', 'tl-track');
@@ -1493,7 +1872,7 @@ export class Timeline {
     return row;
   }
 
-  _objectGroup(o) {
+  _objectGroup(o, host = this.rowsWrap) {
     const open = this.expanded.has(o.id);
     const row = el('div', 'tl-row tl-objhead');
     row.dataset.obj = o.id;
@@ -1523,6 +1902,7 @@ export class Timeline {
       g.append(caret, eye, dot, name);
     }
     const kind = el('span', 'tl-objkind badge badge-object', o.type === 'empty' ? '空' : '3D');
+    kind.dataset.tip = '3D 物体按深度遮挡；上下拖动只改列表显示，不影响画面';
     const kids = childrenOf(this.project, o.id).length;
     if (kids) {
       const badge = el('span', 'tl-objkids', `${kids} 子级`);
@@ -1551,7 +1931,7 @@ export class Timeline {
     block.append(...clipHandles());
     track.appendChild(block);
     row.append(g, track);
-    this.elsWrap.appendChild(row);
+    host.appendChild(row);
     this._objHeads.set(o.id, { row, g, eye, name, dot, block });
     if (o.type === 'text') {
       row.addEventListener('dblclick', (ev) => {
@@ -1563,19 +1943,19 @@ export class Timeline {
     }
 
     if (!open) return;
-    this.elsWrap.appendChild(this._sectionRow('内容', 'content'));
+    host.appendChild(this._sectionRow('内容', 'content'));
     if (this.sections.content === 'full') {
-      this.elsWrap.appendChild(this._geomRow(o));
-      this.elsWrap.appendChild(this._colorRow(o));
+      host.appendChild(this._geomRow(o));
+      host.appendChild(this._colorRow(o));
     }
-    this.elsWrap.appendChild(this._sectionRow('变换', 'transform', 'm / 倍'));
+    host.appendChild(this._sectionRow('变换', 'transform', 'm / 倍'));
     if (this.sections.transform !== 'collapsed') {
       const mode = this.sections.transform;
       const show = (path) => mode === 'full' || this._propKeys(o, path).length > 0;
-      if (show('pivot')) this.elsWrap.appendChild(this._vecRow(o, 'pivot', '中心点'));
-      if (show('position')) this.elsWrap.appendChild(this._vecRow(o, 'position', '位置'));
-      if (show('scale')) this.elsWrap.appendChild(this._vecRow(o, 'scale', '缩放'));
-      if (show('opacity')) this.elsWrap.appendChild(this._opacityRow(o));
+      if (show('pivot')) host.appendChild(this._vecRow(o, 'pivot', '中心点'));
+      if (show('position')) host.appendChild(this._vecRow(o, 'position', '位置'));
+      if (show('scale')) host.appendChild(this._vecRow(o, 'scale', '缩放'));
+      if (show('opacity')) host.appendChild(this._opacityRow(o));
     }
   }
 
@@ -2473,43 +2853,13 @@ export class Timeline {
       this._paintSelection();
       return;
     }
-    // camera row header: select/activate + vertical drag to reorder the stack
-    const camHead = target.closest?.('.tl-camhead[data-cam]');
-    if (camHead && !target.closest?.('.blk.cam')) {
-      this._startCameraDrag(camHead.dataset.cam, ev.clientY, camHead);
-      return;
-    }
-    // 2D element header: select without moving the clip. A second plain click
-    // on the already-selected row toggles its property pages instead.
-    const elHead = target.closest?.('.tl-elhead[data-el]');
-    if (elHead && !target.closest?.('.blk.el')) {
-      const id = elHead.dataset.el;
-      const dblText = ev.detail > 1 && this._element(id)?.type === 'text';
-      if (this.elementId === id && !ev.ctrlKey && !ev.metaKey && !ev.shiftKey && !dblText) {
-        this._toggleElementExpand(id);
-        return;
-      }
-      this.elementId = id;
-      this._pickPool('element', elementRef(id), ev);
-      this.objectId = null; this.segmentId = null; this.cameraSel = false;
-      this.propSel = null;
-      this.onSelect?.({ elementId: id, pool: this.pool });
-      this._paintSelection();
-      return;
-    }
-    const objHead = target.closest?.('.tl-objhead');
-    if (objHead && !target.closest?.('.blk.ob') && !target.closest?.('.blk.cam')) {
-      const id = objHead.dataset.obj;
-      const dblText = ev.detail > 1 && this._obj(id)?.type === 'text';
-      if (this.objectId === id && !ev.ctrlKey && !ev.metaKey && !ev.shiftKey && !dblText) {
-        this._toggleExpand(id);
-        return;
-      }
-      this.objectId = id;
-      this._pickPool('element', objectRef(this.objectId), ev);
-      this.elementId = null; this.segmentId = null; this.cameraSel = false;
-      this.onSelect?.({ objectId: this.objectId, pool: this.pool });
-      this._paintSelection();
+    // Any header row in the left list: press + drag vertically to reorder.
+    // 2D rows change el.z, camera rows change cameraOrder, 3D/audio rows only
+    // move in the display list. Click without movement keeps the old behaviour
+    // (select / second click expands / camera activates).
+    const head = target.closest?.('.tl-gutter')?.closest?.('.tl-camhead[data-cam], .tl-elhead[data-el], .tl-objhead[data-obj]');
+    if (head) {
+      this._startRowDrag(ev, head);
       return;
     }
     const objBlk = target.closest?.('.blk.ob');
@@ -2760,6 +3110,7 @@ function setClipLoopMark(block, on) {
   block.insertBefore(ic, block.firstChild);
 }
 const round2 = (v) => Math.round(Number(v) * 100) / 100;
+const sameOrder = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
 const fmtTick = (t) => (t >= 60 ? `${Math.floor(t / 60)}:${String(Math.round(t % 60)).padStart(2, '0')}` : `${Math.round(t)}s`);
 const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 export { escapeHtml };
