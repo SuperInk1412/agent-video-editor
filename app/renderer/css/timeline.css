@@ -290,6 +290,36 @@ body.tl-parent-dragging, body.tl-parent-dragging * { cursor: crosshair !importan
 .tl-num i:empty { display: none; }
 .tl-scalar { grid-column: span 3; }
 .tl-keyspace { width: 22px; }
+
+/* ---------------- property links (PLAN-ui-round3 §4.2) ---------------- */
+/* A 20px `↳` column leads every linkable property row; rows that cannot be
+   linked keep a placeholder of the same width so the name column never jumps.
+   The button is the first grid item, so the label and value columns keep their
+   order; only this row's template gets the extra first track. */
+.tl-linkbtn {
+  justify-self: center; display: grid; place-items: center;
+  width: 20px; height: 20px; padding: 0; flex: 0 0 20px;
+  font-size: var(--fs-sm); line-height: 1;
+  color: var(--text-disabled); background: transparent;
+  border: 1px solid transparent; border-radius: var(--r-sm); cursor: pointer;
+}
+.tl-linkbtn:hover { color: var(--accent); background: var(--accent-bg); border-color: var(--accent-border); }
+.tl-linkbtn.on { color: var(--accent); background: var(--accent-bg); border-color: var(--accent-border); }
+.tl-linkflag { width: 20px; }
+.tl-linkrow .tl-linkbtn, .tl-linkrow .tl-linkflag { grid-column: 1; }
+.tl-prop.tl-linkrow .tl-gutter {
+  grid-template-columns: 20px 54px repeat(3, minmax(0, 1fr)) 24px;
+}
+.tl-camxform.tl-linkrow .tl-gutter,
+.tl-camposrow.tl-linkrow .tl-gutter {
+  grid-template-columns: 20px clamp(56px, calc(var(--tl-gutter, 340px) - 268px), 96px) repeat(3, minmax(0, 1fr)) 24px;
+}
+.tl-camxform.tl-linkrow .tl-kf { grid-column: 6; }
+.tl-camparamrow.tl-linkrow .tl-gutter {
+  grid-template-columns: 20px clamp(72px, calc(var(--tl-gutter, 340px) - 260px), 104px) 110px minmax(0, 1fr) 24px;
+}
+.tl-camparamrow.tl-linkrow .tl-camfish { grid-column: 4; }
+.tl-camparamrow.tl-linkrow .tl-kf { grid-column: 5; }
 .tl-color { width: 100%; height: var(--h-sm); padding: 1px; }
 .tl-kf {
   width: 22px; height: 22px; padding: 0; font-size: var(--fs-xs); color: var(--text-disabled);
