@@ -166,6 +166,7 @@
           <div class="st-mid">
             <button id="btnGrid" class="btn ghost mini" aria-pressed="true" data-tip="网格" data-kbd="G"><svg class="ic ic-sm" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-grid"/></svg><span>网格</span></button>
             <button id="btnSafe" class="btn ghost mini" aria-pressed="false" data-tip="安全框&#10;90% 字幕安全框 · 93% 动作安全框 · 中心十字（不进成片）"><svg class="ic ic-sm" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-safe-frame"/></svg><span>安全框</span></button>
+            <button id="followHint" class="btn ghost mini" type="button" data-tip="跟随中；点击脱离，保持当前视角" hidden></button>
             <span id="stageHint" class="hint"></span>
           </div>
           <div class="st-right">
@@ -180,6 +181,7 @@
               <polygon id="selPoly" points=""></polygon>
             </svg>
             <div id="selLabel"></div>
+            <svg id="feedHints" viewBox="0 0 1920 1080" preserveAspectRatio="none" aria-hidden="true" hidden></svg>
             <svg id="safeArea" viewBox="0 0 1920 1080" preserveAspectRatio="none" aria-hidden="true" hidden>
               <rect class="sa-action" x="67.2" y="37.8" width="1785.6" height="1004.4"></rect>
               <rect class="sa-title" x="96" y="54" width="1728" height="972"></rect>

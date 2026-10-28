@@ -276,6 +276,9 @@ export class PathGizmo {
     if (!project || this.opts.visible?.() === false) return;
     const time = this.opts.time();
     this._sceneObjects(ctx, project, time);
+    // Following a camera is a shot view: keep object handles, but the camera
+    // path itself (and its grid/frustum) would cover the picture.
+    if (this.opts.following?.()) return;
     const cam = this.camera();
     if (!cam || !Array.isArray(cam.path) || !cam.path.length) return;
     const k = this.scale;

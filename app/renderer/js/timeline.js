@@ -2100,6 +2100,16 @@ export class Timeline {
     }
     const parentBtn = e.type === 'audio' ? null : this._parentButton('el', e);
     g.append(eye, parentBtn || '', caret, dot, name, kind);
+    if (e.type === 'camfeed') {
+      // The clip has its own menu; the header should open the same one so
+      // "跟随投屏来源" is reachable from the row as well.
+      row.addEventListener('contextmenu', (ev) => {
+        if (ev.target.closest?.('button, input, textarea, .handle')) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        this.onClipMenu?.(e.id, ev.clientX, ev.clientY);
+      });
+    }
 
     const track = el('div', 'tl-track');
     const b = el('div', `blk el t-${e.type}`);

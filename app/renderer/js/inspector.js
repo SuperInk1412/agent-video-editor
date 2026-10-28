@@ -3,6 +3,7 @@
 // (label | control | ◆) with vector rows, unit suffixes and three-state keyframe buttons.
 import { sampleTrack } from '/core/time.js';
 import { objectPose, sampleChannel } from '/core/scene.js';
+import { normalizeFeed } from '/core/camfeed.js';
 import { parentStrengthAt, spatialAncestors, wouldSpatialCycle } from '/core/spatial.js';
 import { MEDIA_TYPES, FITS, ALIGNS, mediaSpec, textSpec } from '/core/objects-media.js';
 import { normalizeWorld } from '/core/world.js';
@@ -730,13 +731,20 @@ export class Inspector {
       const options = [{ value: '', label: '（未选择）' }].concat(
         (project.cameras || []).map((c) => ({ value: c.id, label: c.name || c.id })),
       );
+      const source = normalizeFeed(el.feed).camera;
+      const select = h('select', { 'aria-label': '来源相机' }, ...options.map((o) => h('option', {
+        value: o.value, selected: String(o.value) === String(source),
+      }, o.label)));
+      select.addEventListener('change', () => this.opts.onOp({
+        op: 'updateElement', id: el.id, patch: { feed: { camera: select.value, delay } },
+      }));
+      const follow = h('button', {
+        type: 'button', class: 'btn ghost mini', 'data-tip': '进入编辑视口的选择模式，并跟随这块投屏的来源相机 (F5)',
+      }, '跟随');
+      follow.disabled = !source;
+      follow.addEventListener('click', () => this.opts.onFollowCamera?.(source));
       this.root.appendChild(this._sec('投屏', {},
-        this._field({
-          label: '来源相机', type: 'select', value: el.feed?.camera || '', options,
-          onChange: (v) => this.opts.onOp({
-            op: 'updateElement', id: el.id, patch: { feed: { camera: v, delay } },
-          }),
-        }),
+        this._row('来源相机', h('span', { class: 'follow-row' }, select, follow), null, 'w-full'),
         this._field({
           label: '延迟一帧', type: 'checkbox', value: delay === 1,
           onChange: (v) => this.opts.onOp({
@@ -1213,6 +1221,15 @@ export class Inspector {
     this.root.appendChild(this._parentTools(project, cam, 'cam'));
     this.root.appendChild(h('div', { class: 'hint pad' },
       '相机属性折叠在时间轴相机行里：点行首 ▾ 展开；位置是飞行路径关键帧，中心点 / 画面 / 透明度 / 缩放也能逐帧打点。'));
+    const feeds = (project.elements || []).filter((e) => e.type === 'camfeed'
+      && normalizeFeed(e.feed).camera === cam.id);
+    this.root.appendChild(this._sec('这台相机的投屏', { key: 'camfeeds', count: feeds.length },
+      ...(feeds.length ? feeds.map((f) => {
+        const delayed = normalizeFeed(f.feed).delay === 1;
+        const btn = h('button', { type: 'button', class: 'btn ghost mini', 'data-tip': '把编辑视角飞到这块投屏前（不跟随）' }, '飞到');
+        btn.addEventListener('click', () => this.opts.onFlyToFeed?.(f.id));
+        return this._row(`${f.name || f.id}${delayed ? ' · 上一帧' : ''}`, btn, null, 'w-full');
+      }) : [h('div', { class: 'hint' }, '还没有投屏元素使用这台相机。')])));
     this.root.appendChild(this._worldSection(project, true));
   }
 

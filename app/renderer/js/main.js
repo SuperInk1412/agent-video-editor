@@ -14,14 +14,16 @@ import { Outliner } from './outliner.js';
 import { showMenu, hideMenu, initTooltips, icon, prefs } from './ui.js';
 import { initLayout, markTab, Timecode, StatusBar, LogDrawer } from './shell.js';
 import { frameStep } from './timeline-math.js';
-import { initCommands, register as registerCommand, dispatch as dispatchCommand, openPalette, openShortcuts } from './commands.js';
+import { initCommands, register as registerCommand, dispatch as dispatchCommand, runCommand, openPalette, openShortcuts } from './commands.js';
 import { pathPos, cameraTransform, cameraRange } from '/core/camera.js';
+import { normalizeFeed } from '/core/camfeed.js';
 import { curveSegments } from '/core/curves.js';
 import { ancestors, childrenOf } from '/core/hierarchy.js';
 import {
-  evalCameraWorldWithLinks, objectLocalPointWithLinks,
+  elementWorldNodeWithLinks, evalCameraWorldWithLinks, objectLocalPointWithLinks,
   objectLocalVectorWithLinks, objectWorldPoseWithLinks,
 } from '/core/link-eval.js';
+import { frameOf } from '/core/spatial.js';
 import { defaultCamera } from '/core/space.js';
 import { newId } from '/core/schema.js';
 import { sampleTrack } from '/core/time.js';
@@ -50,6 +52,8 @@ const S = {
   dpr: Math.min(2, window.devicePixelRatio || 1),
   editMode: false,
   editCam: null,
+  followCam: null,
+  feedHints: false,
   viewMode: 'select',
   grid: true,
   keys: new Set(),
@@ -264,6 +268,8 @@ function applyProject(p, source) {
   outliner?.render(); assetsPanel?.syncProject();
   updateProjectMeta(p);
   if (!p.camera && S.editMode) setEditMode(false);
+  if (S.followCam && !cameraById(S.followCam)) S.followCam = null;
+  if (S.editMode) { syncFollowCam(); syncViewControls(); }
   updateOverlay();
   if (prevDuration !== p.meta.duration || S.time > p.meta.duration) setTime(S.time);
 }
@@ -1018,7 +1024,11 @@ function updateOverlay() {
   const box = $('#selBox');
   const poly = $('#selPoly');
   const label = $('#selLabel');
-  if (!box || !poly || !label || !preview || !S.project) return;
+  if (!box || !poly || !label || !preview || !S.project) {
+    const fh = document.getElementById('feedHints');
+    if (fh) fh.toggleAttribute('hidden', true);
+    return;
+  }
   const SVG = 'http://www.w3.org/2000/svg';
   let extra = document.getElementById('selExtra');
   if (!extra) {
@@ -1092,6 +1102,51 @@ function updateOverlay() {
   }
   box.style.display = drawn ? 'block' : 'none';
   if (!drawn) label.style.display = 'none';
+  updateFeedHints();
+}
+
+/** F3 overlay: outline every camfeed plane in the current view and name its source. */
+function updateFeedHints() {
+  const svg = document.getElementById('feedHints');
+  if (!svg) return;
+  if (!S.feedHints || !S.project || !preview?.layers?.length) {
+    svg.toggleAttribute('hidden', true);
+    svg.replaceChildren();
+    return;
+  }
+  const W = preview.canvas.width;
+  const H = preview.canvas.height;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  const polys = new Map(preview.layerPolygons(true).map((p) => [p.id, p.points]));
+  const cams = new Map((S.project.cameras || []).map((c) => [c.id, c]));
+  const stage = $('#stage');
+  const cssScale = stage?.clientWidth ? stage.clientWidth / Math.max(1, W) : 1;
+  const font = Math.min(30, Math.max(10, 12 / Math.max(0.05, cssScale)));
+  const frag = document.createDocumentFragment();
+  for (const el of S.project.elements || []) {
+    if (el.type !== 'camfeed' || el.visible === false) continue;
+    const points = polys.get(el.id);
+    if (!points?.length) continue;
+    const xs = points.map((p) => p[0]);
+    const ys = points.map((p) => p[1]);
+    if (Math.max(...xs) <= 0 || Math.min(...xs) >= W || Math.max(...ys) <= 0 || Math.min(...ys) >= H) continue;
+    const feed = normalizeFeed(el.feed);
+    const delay = feed.delay === 1;
+    const shape = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+    shape.setAttribute('points', points.map((p) => `${p[0]},${p[1]}`).join(' '));
+    shape.setAttribute('class', `feed-hint-poly${delay ? ' delay' : ''}`);
+    frag.appendChild(shape);
+    const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    text.setAttribute('x', String(Math.max(4, Math.min(...xs))));
+    text.setAttribute('y', String(Math.max(font, Math.min(...ys) - 6)));
+    text.setAttribute('font-size', String(font));
+    text.setAttribute('class', `feed-hint-label${delay ? ' delay' : ''}`);
+    const cam = cams.get(feed.camera);
+    text.textContent = `投屏 · ${cam?.name || feed.camera || '未指定来源'}${delay ? ' · 上一帧' : ''}`;
+    frag.appendChild(text);
+  }
+  svg.replaceChildren(frag);
+  svg.toggleAttribute('hidden', !svg.childNodes.length);
 }
 
 const SEL_TYPE = {
@@ -1191,8 +1246,116 @@ function axisClosestS(ray, p, a) {
   return c + b * tRay;
 }
 
+function cameraById(id) {
+  if (id == null) return null;
+  const p = S.project;
+  return (p?.cameras || []).find((c) => c.id === id) || (p?.camera?.id === id ? p.camera : null);
+}
+
+/**
+ * Keep the free editor camera on the followed camera's current pose. The edit
+ * viewport still draws through `S.editCam`, so picking and dragging keep
+ * working; the camera path gizmo is hidden while following (pathgizmo.js).
+ */
+function syncFollowCam() {
+  if (!S.followCam || !S.editMode || !S.project) return false;
+  const cam = cameraById(S.followCam);
+  if (!cam) { S.followCam = null; syncViewControls(); return false; }
+  const c = evalCameraWorldWithLinks(S.project, S.time, cam);
+  S.editCam = {
+    pos: c.pos.slice(), look: c.look.slice(),
+    roll: Number(c.roll) || 0, fov: Number(c.fov) || 50,
+  };
+  preview.editCam = S.editCam;
+  return true;
+}
+
+/** Stop following without moving the view: it is already at the camera pose. */
+function stopFollow() {
+  if (!S.followCam) return false;
+  S.followCam = null;
+  syncViewControls();
+  if (preview && S.project) {
+    preview.render(S.time);
+    gizmo?.draw();
+    updateOverlay();
+  }
+  return true;
+}
+
+/** Enter edit-select mode and lock the viewport to camera `id` over time. */
+function followCamera(id, { selectHost = false } = {}) {
+  const cam = cameraById(id);
+  if (!cam) { toast('找不到这台相机', 'warn'); return false; }
+  if (!S.editMode) setEditMode(true);
+  setViewMode('select');
+  if (selectHost) {
+    const ref = cameraRef(cam.id);
+    select({ pool: normalizeSelection({ kind: 'element', ids: [ref], primary: ref }) });
+  }
+  S.followCam = cam.id;
+  const range = cameraRange(S.project, cam);
+  if (S.time < range.start - 1e-6 || S.time >= range.end - 1e-6) {
+    setTime(range.start);
+    if (S.playing) {
+      S.playFrom = S.time;
+      S.playWall = performance.now();
+      preview.setAudioTime(S.time);
+    }
+  }
+  syncFollowCam();
+  preview.render(S.time);
+  gizmo?.draw();
+  updateOverlay();
+  syncViewControls();
+  return true;
+}
+
+/**
+ * Fly the free editor camera in front of a camfeed plane. This is a one-shot
+ * move, never a follow; it keeps the feed inside the same time range.
+ */
+function flyToFeed(id) {
+  const el = S.project?.elements?.find((e) => e.id === id && e.type === 'camfeed');
+  if (!el) return false;
+  if (!S.editMode) setEditMode(true);
+  else setViewMode('select');
+  S.followCam = null;
+  const start = Number(el.start) || 0;
+  const end = start + (Number(el.duration) || 0);
+  if (S.time < start - 1e-6 || S.time >= end - 1e-6) setTime(start);
+  const frame = frameOf(elementWorldNodeWithLinks(S.project, el, S.time));
+  const fwd = frame.basis[2];
+  const cur = S.editCam?.pos || evalCameraWorldWithLinks(S.project, S.time).pos;
+  const side = (cur[0] - frame.pos[0]) * fwd[0]
+    + (cur[1] - frame.pos[1]) * fwd[1]
+    + (cur[2] - frame.pos[2]) * fwd[2] >= 0 ? 1 : -1;
+  const fov = Number(S.editCam?.fov) || 50;
+  // A 2D plane's world width is its project-pixel width / 100 m, multiplied by
+  // the node scale (same rule as preview.js::_nodePlane). Using frame.scale
+  // alone would put the camera 1 m in front of a full-screen feed.
+  const meta = S.project.meta || {};
+  // camfeed layers are always full-frame (preview.js uses W/H for the layer),
+  // so the plane size is the project frame size times the node scale.
+  const pxW = Number(meta.width) || 1920;
+  const pxH = Number(meta.height) || 1080;
+  const size = Math.max(0.5, (Math.max(pxW, pxH) / 100)
+    * Math.max(Math.abs(frame.scale[0]) || 1, Math.abs(frame.scale[1]) || 1));
+  const dist = Math.max(1.2, (size / 2) / Math.tan((fov * Math.PI) / 360) * 1.25);
+  const pos = frame.pos.map((v, i) => v + fwd[i] * dist * side);
+  S.editCam = { pos, look: frame.pos.slice(), roll: 0, fov };
+  preview.editCam = S.editCam;
+  preview.render(S.time);
+  gizmo?.draw();
+  updateOverlay();
+  syncViewControls();
+  toast(`已飞到「${el.name || el.id}」前`, 'info');
+  return true;
+}
+
 function setEditMode(on) {
   if (on && !S.project?.camera) { toast('这个项目没有相机'); return; }
+  S.followCam = null;
   S.editMode = !!on;
   preview.editMode = S.editMode;
   if (S.editMode) {
@@ -1212,6 +1375,9 @@ function setEditMode(on) {
 /** Edit viewport modes: 'select' (pick / drag / context menu) or 'move' (camera). */
 function setViewMode(mode) {
   S.viewMode = mode === 'move' ? 'move' : 'select';
+  // Moving the camera is the explicit way out of a follow. The eye is already
+  // on the followed camera's pose, so the free camera starts exactly there.
+  if (S.viewMode === 'move') S.followCam = null;
   syncViewControls();
   document.body.classList.toggle('body-move', S.editMode && S.viewMode === 'move');
   const stage = $('#stage');
@@ -1982,6 +2148,15 @@ function syncViewControls() {
     vm.hidden = !S.editMode;
     vm.querySelectorAll('[data-mode]').forEach((b) => b.setAttribute('aria-pressed', b.dataset.mode === S.viewMode ? 'true' : 'false'));
   }
+  const followHint = $('#followHint');
+  if (followHint) {
+    const cam = S.followCam ? cameraById(S.followCam) : null;
+    followHint.hidden = !cam;
+    if (cam) {
+      followHint.textContent = `跟随 ${cam.name || cam.id} ×`;
+      followHint.dataset.tip = '正在跟随这台相机；点击脱离，保持当前视角（切移动模式也会脱离）';
+    }
+  }
   syncGridButton();
 }
 
@@ -2089,6 +2264,7 @@ async function boot() {
     time: () => S.time,
     editMode: () => S.editMode,
     grid: () => S.grid,
+    following: () => !!S.followCam,
     visible: () => S.editMode || !!S.selection.camera || !!S.selection.objectId,
     projectPoint: (p) => preview.scene3d.projectPoint(p),
     viewCam: () => preview.scene3d.lastCam,
@@ -2394,7 +2570,15 @@ async function boot() {
     const at = Math.round(S.time * 1000) / 1000;
     const can = at > el.start + 0.02 && at < el.start + el.duration - 0.02;
     const isMedia = el.type === 'video' || el.type === 'audio';
+    const feedSource = el.type === 'camfeed' ? normalizeFeed(el.feed).camera : '';
+    const feedCam = feedSource ? cameraById(feedSource) : null;
     showContextMenu(x, y, [
+      ...(el.type === 'camfeed' ? [{
+        label: '跟随投屏来源', icon: 'camera', kbd: 'F5',
+        disabled: !feedSource,
+        title: feedSource ? `来源相机：${feedCam?.name || feedSource}` : '这块投屏还没有选择来源相机',
+        run: () => followCamera(feedSource, { selectHost: true }),
+      }] : []),
       {
         label: can ? `在播放头切分（${at.toFixed(2)}s）` : '在播放头切分（播放头不在素材内）',
         icon: 'scissors', kbd: 'S / Ctrl+D',
@@ -2460,6 +2644,7 @@ async function boot() {
         },
       },
       { label: '激活相机', icon: 'camera', run: () => { op({ op: 'activateCamera', id }); select({ camera: true }); } },
+      { label: '跟随此相机', icon: 'camera', kbd: 'F5', run: () => { followCamera(id, { selectHost: true }); } },
       { label: '创建投屏元素', icon: 'film', run: () => { createCamfeed(); } },
       (() => {
         const at = Math.round(S.time * 1000) / 1000;
@@ -2528,6 +2713,8 @@ async function boot() {
     canGoBack: () => canGoBackLink(),
     onBack: () => goBackLink(),
     onToast: (msg, level = 'info') => toast(msg, level),
+    onFollowCamera: (id) => followCamera(id, { selectHost: true }),
+    onFlyToFeed: (id) => flyToFeed(id),
     // ◆ records what the property is at the playhead (its keyed value, or the base)
     getTimeValue: (path) => {
       const el = S.project.elements.find((e) => e.id === S.selection.elementId);
@@ -2642,6 +2829,7 @@ async function boot() {
   $('#btnRenderMenu').onclick = (e) => showMenu(0, 0, renderMenuItems(), { anchor: e.currentTarget.parentElement });
   $('#btnViewEdit').onclick = () => { if (!S.editMode) setEditMode(true); };
   $('#btnViewCam').onclick = () => { if (S.editMode) setEditMode(false); };
+  $('#followHint').onclick = () => { stopFollow(); };
   $('#btnCommand').onclick = () => document.dispatchEvent(new CustomEvent('vdm:command-palette'));
   // stage toolbar
   $('#viewMode').querySelectorAll('[data-mode]').forEach((b) => { b.onclick = () => setViewMode(b.dataset.mode); });
@@ -3442,6 +3630,13 @@ async function boot() {
       openTextEditor('element', el.id, e);
       return;
     }
+    // A camfeed is a normal 2D element, but double-clicking it is the shortcut
+    // into its source camera. The topmost element wins, so text on the feed
+    // still opens the text editor (DESIGN-TRANSFORM-UNIFY §1.4).
+    if (el?.type === 'camfeed') {
+      const source = normalizeFeed(el.feed).camera;
+      if (source) { followCamera(source, { selectHost: true }); return; }
+    }
     const pick = preview.scene3d?.pickObject(S.project, S.time, sx, sy);
     const obj = pick ? (S.project.scene?.objects || []).find((o) => o.id === pick.id) : null;
     if (obj?.type === 'text') openTextEditor('object', obj.id, e);
@@ -3671,6 +3866,17 @@ async function boot() {
     run: (e) => { e?.preventDefault(); setEditMode(!S.editMode); },
   });
   registerCommand({
+    id: 'view.follow', title: '跟随选中的相机', group: '视口', keys: 'F5', icon: 'camera',
+    keywords: 'follow camera feed tracking', keyBlocked: 'toast',
+    match: (e) => e.key === 'F5',
+    when: () => !!selectedCameraId() || '先选中一台相机',
+    run: (e) => { e?.preventDefault(); followCamera(selectedCameraId()); },
+  });
+  registerCommand({
+    id: 'view.feedHints', title: '高亮投屏（按住）', sheetTitle: '按住高亮投屏', group: '视口',
+    keys: 'F3', match: false, palette: false,
+  });
+  registerCommand({
     id: 'view.selectMove', title: '选择 / 移动', sheetTitle: '编辑视口内 选择 / 移动', group: '视口', keys: 'Alt', icon: 'move',
     keywords: 'select move orbit fly',
     match: (e) => e.key === 'Alt' && !e.repeat,
@@ -3809,8 +4015,26 @@ async function boot() {
     dispatchCommand(e);
   });
 
+  // F3 is a hold-to-inspect key, not a command: show every camfeed plane while
+  // it is down, including in the normal camera view (before Tab).
+  window.addEventListener('keydown', (e) => {
+    if (e.key !== 'F3' || e.repeat) return;
+    if (document.querySelector('.modal:not([hidden])')) return;
+    if (/INPUT|TEXTAREA|SELECT/.test(e.target.tagName) || e.target.isContentEditable) return;
+    e.preventDefault();
+    S.feedHints = true;
+    updateOverlay();
+  });
+  window.addEventListener('keyup', (e) => {
+    if (e.key !== 'F3') return;
+    S.feedHints = false;
+    updateOverlay();
+  });
   window.addEventListener('keyup', (e) => S.keys.delete(e.code));
-  window.addEventListener('blur', () => S.keys.clear());
+  window.addEventListener('blur', () => {
+    S.keys.clear();
+    if (S.feedHints) { S.feedHints = false; updateOverlay(); }
+  });
 
   // events
   const es = new EventSource('/api/events');
@@ -3868,8 +4092,14 @@ async function boot() {
     last = now;
     if (S.playing) {
       const t = S.playFrom + (now - S.playWall) / 1000;
-      if (t >= (S.project?.meta.duration || 12)) {
-        if (S.loop) {
+      const projectEnd = S.project?.meta.duration || 12;
+      // Following a camera stops with its clip, even when loop is on: the
+      // point of the follow is to watch that camera's shot, not the project.
+      const cam = S.followCam ? cameraById(S.followCam) : null;
+      const followEnd = cam ? Math.min(projectEnd, cameraRange(S.project, cam).end) : null;
+      const limit = followEnd ?? projectEnd;
+      if (t >= limit) {
+        if (S.loop && !cam) {
           // wrap to 0 and keep playing
           S.playFrom = 0;
           S.playWall = now;
@@ -3877,7 +4107,7 @@ async function boot() {
           timeline.setTime(0);
           updateTimecode(0);
           preview.playAudio(0);
-        } else { setTime(S.project.meta.duration); pause(); }
+        } else { setTime(limit); pause(); }
       } else {
         S.time = t;
         timeline.setTime(t);
@@ -3886,7 +4116,10 @@ async function boot() {
     }
     if (S.project && (S.playing || S.editMode || now - lastDraw > 100)) {
       lastDraw = now;
-      if (S.editMode) flyEdit(dt);
+      if (S.editMode) {
+        syncFollowCam();
+        flyEdit(dt);
+      }
       preview.render(S.time);
       gizmo?.draw();
       updateOverlay();
@@ -3902,6 +4135,12 @@ async function boot() {
     select: (s) => select(s),
     setEditMode: (on) => setEditMode(on),
     setViewMode: (m) => setViewMode(m),
+    followCamera: (id) => followCamera(id),
+    stopFollow: () => stopFollow(),
+    flyToFeed: (id) => flyToFeed(id),
+    setFeedHints: (on) => { S.feedHints = !!on; updateOverlay(); },
+    selectedCameraId: () => selectedCameraId(),
+    runCommand: (id) => runCommand(id),
     addElement: addSceneElement,
     add2DElement: (kind) => add2DElement(kind),
     addMediaFile: (m, kind, start) => addMediaFile(m, kind, start),

@@ -145,6 +145,33 @@ body.look-mode #stageBox { box-shadow: 0 0 0 2px var(--edit); }
   stroke: var(--accent); stroke-width: 2.5;
   filter: drop-shadow(0 0 5px var(--accent-border));
 }
+/* F3: camfeed planes in the current view, with their source camera name. */
+#feedHints {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  pointer-events: none; z-index: 4; overflow: hidden;
+}
+#feedHints[hidden] { display: none; }
+#feedHints .feed-hint-poly {
+  fill: none;
+  stroke: var(--accent); stroke-width: 2; vector-effect: non-scaling-stroke;
+  filter: drop-shadow(0 0 4px var(--accent-border));
+}
+#feedHints .feed-hint-poly.delay {
+  fill: none; stroke: var(--edit);
+  filter: drop-shadow(0 0 4px var(--edit-border));
+}
+#feedHints .feed-hint-label {
+  font-family: var(--font-ui); font-weight: 600;
+  fill: var(--accent); stroke: var(--canvas-bg); stroke-width: 3px;
+  paint-order: stroke fill;
+}
+#feedHints .feed-hint-label.delay { fill: var(--edit); }
+#followHint {
+  border-color: var(--edit-border); background: var(--edit-bg); color: var(--edit);
+  white-space: nowrap;
+}
+#followHint[hidden] { display: none; }
+#followHint:hover { border-color: var(--edit); }
 #safeArea {
   position: absolute; inset: 0; width: 100%; height: 100%;
   pointer-events: none; z-index: 5; overflow: visible;

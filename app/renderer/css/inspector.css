@@ -140,6 +140,11 @@ button.insp-name:hover { background: var(--surface-2); border-color: var(--borde
 .insp .vec.vec-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .insp .vec.vec-1 { grid-template-columns: minmax(0, 1fr); }
 
+/* camfeed source camera + [跟随] on the same row */
+.insp .follow-row { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.insp .follow-row select { flex: 1 1 auto; min-width: 0; }
+.insp .follow-row .btn { flex: 0 0 auto; }
+
 /* ---------------- property links (PLAN-ui-round3 §4.2) ---------------- */
 /* `↳` next to an input; lit = the property has a property parent. */
 .insp .link-btn {
