@@ -4,7 +4,9 @@
 import { sampleTrack } from '/core/time.js';
 import { objectPose, sampleChannel } from '/core/scene.js';
 import { normalizeFeed } from '/core/camfeed.js';
-import { parentStrengthAt, spatialAncestors, wouldSpatialCycle } from '/core/spatial.js';
+import { cameraValueWithLinks, objectPoseWithLinks, writeBackLocalValue } from '/core/links.js';
+import { cameraRotationAt, parentStrengthAt, spatialAncestors, wouldSpatialCycle } from '/core/spatial.js';
+import { basisFromRotation, rotationFromDirRoll } from '/core/rotation.js';
 import { MEDIA_TYPES, FITS, ALIGNS, mediaSpec, textSpec } from '/core/objects-media.js';
 import { normalizeWorld } from '/core/world.js';
 import { RotBall } from './rotball.js';
@@ -37,6 +39,7 @@ const PATH_LABELS = {
   'transform.x': 'X', 'transform.y': 'Y', 'transform.z': '纵深', 'transform.scale': '缩放',
   'transform.rotation': '旋转', 'transform.opacity': '不透明度', 'style.size': '字号', 'style.color': '颜色',
   'style.fill': '填充', 'fx.glow': '辉光', 'audio.volume': '音量', dir: '朝向', roll: '自转',
+  'rotation.x': '旋转 X', 'rotation.y': '旋转 Y', 'rotation.z': '旋转 Z',
   'pivot.x': '中心点 X', 'pivot.y': '中心点 Y', 'pivot.z': '中心点 Z',
   'position.x': '位置 X', 'position.y': '位置 Y', 'position.z': '位置 Z',
   'scale.x': '缩放 X', 'scale.y': '缩放 Y', 'scale.z': '缩放 Z',
@@ -481,6 +484,25 @@ export class Inspector {
     return this._row(label, h('div', { class: 'ro', title: text }, text), undefined, 'w-full');
   }
 
+  /**
+   * One rotation row, three cells (X / Y / Z degrees). Each cell carries its own
+   * property-link `↳`; one ◆ keys/removes the whole triple because rotation is
+   * authored as a pose (the timeline has per-axis diamonds for single axes).
+   */
+  _rotationRow({ label = '三轴旋转', items, kfNode = null }) {
+    const boxes = items.map((it) => {
+      const box = this._num({
+        axis: it.axis, value: it.value, step: 0.5,
+        aria: `${label} ${it.axis.toUpperCase()}`, onChange: it.onChange,
+      });
+      return it.link
+        ? h('span', { class: 'vec-cell rot-cell' }, box, this._linkButton(it.link))
+        : box;
+    });
+    const linked = items.some((it) => it.link && this._linked(it.link));
+    return this._row(label, h('div', { class: 'vec vec-3' }, ...boxes), kfNode, 'w-full', null, linked);
+  }
+
   /** the selected element's key on `path` within half a frame of the playhead */
   _keyAtPlayhead(path) {
     const p = this._last?.project;
@@ -641,26 +663,65 @@ export class Inspector {
         })),
       });
     };
-    const dirVec = () => {
-      const dir = Array.isArray(el.node?.dir) ? el.node.dir : [0, 0, 1];
-      const setDir = (i) => (v) => {
-        const next = (Array.isArray(el.node?.dir) ? el.node.dir : [0, 0, 1]).slice();
-        next[i] = Number(v) || 0;
-        const len = Math.hypot(next[0], next[1], next[2]);
-        if (!(len > 1e-9)) return;
-        this._commit(`${el.id}:dir`, {
+    // Three-axis rotation (DESIGN-TRANSFORM-UNIFY §2). The node may still carry
+    // only dir/roll from before 2c; show the equivalent angles and write a full
+    // rotation on the first edit so the pose cannot jump.
+    const nodeRot = node
+      ? (Array.isArray(node.rotation) ? node.rotation.slice() : rotationFromDirRoll(node.dir, node.roll))
+      : null;
+    const rotAxes = ['x', 'y', 'z'];
+    const writeNodeRotation = (next) => {
+      if (!node || !el.node) return;
+      const anyKeyed = rotAxes.some((ax) => (el.keyframes || []).some((k) => k.path === `rotation.${ax}`));
+      if (!anyKeyed) {
+        this._commit(`${el.id}:rotation`, {
           op: 'updateElement', id: el.id,
-          patch: { node: { ...el.node, dir: next.map((n) => n / len) } },
+          patch: { node: { ...el.node, rotation: next.slice() } },
+        }, 60);
+        return;
+      }
+      const t = keyT();
+      const ops = [];
+      if (!Array.isArray(el.node.rotation)) {
+        ops.push({ op: 'updateElement', id: el.id, patch: { node: { ...el.node, rotation: next.slice() } } });
+      }
+      for (const ax of rotAxes) {
+        const i = rotAxes.indexOf(ax);
+        const local = localElementRowValue(project, el, `rotation.${ax}`, time, next[i]);
+        ops.push({
+          op: 'keySet', id: el.id, path: `rotation.${ax}`, t,
+          value: Number.isFinite(local) ? local : next[i],
         });
-      };
-      return this._vec({
-        label: '朝向',
-        items: ['x', 'y', 'z'].map((ax, i) => ({
-          axis: ax, value: round(dir[i], 3), step: 0.01, aria: `朝向 ${ax.toUpperCase()}`,
-          onChange: setDir(i),
-        })),
-      });
+      }
+      this._commit(`${el.id}:rotation`, ops.length === 1 ? ops[0] : { op: 'batch', ops }, 60);
     };
+    const rotKf = node ? this._kfButton(
+      () => {
+        if (rotAxes.some((ax) => this._keyAtPlayhead(`rotation.${ax}`))) return 'on';
+        return rotAxes.some((ax) => (el.keyframes || []).some((k) => k.path === `rotation.${ax}`)) ? 'anim' : 'none';
+      },
+      () => {
+        const t = keyT();
+        const ops = [];
+        if (!Array.isArray(el.node.rotation)) {
+          ops.push({ op: 'updateElement', id: el.id, patch: { node: { ...el.node, rotation: nodeRot.slice() } } });
+        }
+        for (const ax of rotAxes) {
+          const i = rotAxes.indexOf(ax);
+          const local = localElementRowValue(project, el, `rotation.${ax}`, time, nodeRot[i]);
+          ops.push({ op: 'keySet', id: el.id, path: `rotation.${ax}`, t, value: Number.isFinite(local) ? local : nodeRot[i] });
+        }
+        this.opts.onOp(ops.length === 1 ? ops[0] : { op: 'batch', ops });
+      },
+      () => {
+        const ops = [];
+        for (const ax of rotAxes) {
+          const k = this._keyAtPlayhead(`rotation.${ax}`);
+          if (k) ops.push({ op: 'keyRemove', id: el.id, path: `rotation.${ax}`, t: k.t });
+        }
+        if (ops.length) this.opts.onOp({ op: 'batch', ops });
+      },
+    ) : null;
     const opacityField = this._field({
       label: '不透明度', value: round(kv('transform.opacity', el.transform.opacity), 3),
       step: 0.01, min: 0, max: 1, percent: true, kf: true, path: kp('transform.opacity'),
@@ -670,15 +731,29 @@ export class Inspector {
       this._field({ label: '跟随节拍', value: el.punch || 0, step: 0.05, min: 0, max: 2, onChange: (v) => set('punch', { punch: v }) }),
     ];
     if (node) {
-      // Unified SpatialNode editor: pivot / position / orientation / xyz scale.
+      const rotBallHost = h('div', { class: 'rotball-wrap' });
+      new RotBall(rotBallHost, {
+        rotation: nodeRot,
+        time,
+        onStart: () => { this._ballDragging = true; },
+        onEnd: () => { this._ballDragging = false; },
+        onChange: (next) => writeNodeRotation(next),
+      });
+      // Unified SpatialNode editor: pivot / position / three-axis rotation /
+      // xyz scale. The rotation ball is the free-hand tool; the three cells stay
+      // exact and linkable.
       this.root.appendChild(this._sec('变换', {},
         nodeVec('pivot', '中心点', 0.05, 'm'),
         nodeVec('position', '位置', 0.05, 'm'),
-        dirVec(),
-        this._field({
-          label: '绕轴自转', unit: '°', value: round(node.roll, 2), step: 0.5,
-          kf: true, path: 'roll', link: link('roll'), onChange: edit('roll', null),
+        this._rotationRow({
+          label: '三轴旋转',
+          kfNode: rotKf,
+          items: rotAxes.map((ax, i) => ({
+            axis: ax, value: round(kv(`rotation.${ax}`, nodeRot[i]), 2),
+            link: link(`rotation.${ax}`), onChange: edit(`rotation.${ax}`),
+          })),
         }),
+        rotBallHost,
         nodeVec('scale', '缩放', 0.01, ''),
         opacityField,
         ...bindRows,
@@ -1004,7 +1079,7 @@ export class Inspector {
   _renderObject(project, obj, time, multi = 0) {
     const id = obj.id;
     this._kind = `3d.${obj.type}`;
-    const pose = objectPose(obj, time);
+    const pose = objectPoseWithLinks(project, obj, time);
     const tNow = () => this._keyTime();
     const key = (path, v) => this.opts.onOp({ op: 'objectKey', id, path, t: tNow(), v });
     const tol = 0.5 / (project.meta?.fps || 24);
@@ -1019,38 +1094,110 @@ export class Inspector {
       '内容、中心点、位置、缩放、不透明度已移到时间轴左侧：选中元素后点元素行的 ▾ 展开编辑。',
       '复制 / 删除 / 面向镜头 / 落地在元素行的 ⋯ 菜单里。'));
 
-    const dirKeys = (obj.tracks?.dir || []).filter((k) => Array.isArray(k.v));
+    const poseRot = Array.isArray(pose.rotation)
+      ? pose.rotation.slice()
+      : rotationFromDirRoll(pose.dir, pose.roll);
+    const rotAxes = ['x', 'y', 'z'];
+    const objRotAt = (o, at) => {
+      const p = objectPoseWithLinks(project, o, at);
+      return Array.isArray(p.rotation) ? p.rotation : rotationFromDirRoll(p.dir, p.roll);
+    };
+    const objLocalRotAt = (o, at) => {
+      const p = objectPose(o, at);
+      return Array.isArray(p.rotation) ? p.rotation : rotationFromDirRoll(p.dir, p.roll);
+    };
+    const writeObjRotation = (next) => {
+      const objNow = liveObj();
+      const t = tNow();
+      const localRot = rotAxes.map((ax, i) => {
+        const local = writeBackLocalValue(project, { host: 'ob', id }, `rotation.${ax}`, t, next[i]);
+        return Number.isFinite(local) ? local : next[i];
+      });
+      const keyed = rotAxes.some((ax) => (objNow.tracks?.[`rotation.${ax}`] || []).length);
+      if (!keyed) {
+        this._commit(`${id}:rotation`, { op: 'objectPatch', id, patch: { rotation: localRot } }, 40);
+        return;
+      }
+      const ops = [];
+      if (!Array.isArray(objNow.rotation)) {
+        ops.push({ op: 'objectPatch', id, patch: { rotation: localRot.slice() } });
+      }
+      for (const ax of rotAxes) {
+        ops.push({ op: 'objectKey', id, path: `rotation.${ax}`, t, v: localRot[rotAxes.indexOf(ax)] });
+      }
+      this._commit(`${id}:rotation`, ops.length === 1 ? ops[0] : { op: 'batch', ops }, 40);
+    };
+    const setObjRotAxis = (i) => (v) => {
+      const objNow = liveObj();
+      const path = `rotation.${rotAxes[i]}`;
+      const t = tNow();
+      const local = writeBackLocalValue(project, { host: 'ob', id }, path, t, v);
+      const value = Number.isFinite(local) ? local : v;
+      if ((objNow.tracks?.[path] || []).length) {
+        key(path, value);
+        return;
+      }
+      const base = objLocalRotAt(objNow, t);
+      base[i] = value;
+      this.opts.onOp({ op: 'objectPatch', id, patch: { rotation: base } });
+    };
+    const objRotKf = this._kfButton(
+      () => {
+        const o = liveObj();
+        const now = this.opts.getTime();
+        const lists = rotAxes.map((ax) => o.tracks?.[`rotation.${ax}`] || []);
+        if (lists.some((tr) => tr.some((k) => Math.abs(k.t - now) <= tol))) return 'on';
+        return lists.some((tr) => tr.length) ? 'anim' : 'none';
+      },
+      () => {
+        const t = tNow();
+        const rot = objLocalRotAt(liveObj(), t);
+        const ops = [];
+        const objNow = liveObj();
+        if (!Array.isArray(objNow.rotation)) {
+          ops.push({ op: 'objectPatch', id, patch: { rotation: rot.slice() } });
+        }
+        for (const ax of rotAxes) {
+          ops.push({ op: 'objectKey', id, path: `rotation.${ax}`, t, v: rot[rotAxes.indexOf(ax)] });
+        }
+        this.opts.onOp(ops.length === 1 ? ops[0] : { op: 'batch', ops });
+      },
+      () => {
+        const now = this.opts.getTime();
+        const ops = [];
+        for (const ax of rotAxes) {
+          const k = (liveObj().tracks?.[`rotation.${ax}`] || []).find((x) => Math.abs(x.t - now) <= tol);
+          if (k) ops.push({ op: 'objectUnkey', id, path: `rotation.${ax}`, t: k.t });
+        }
+        if (ops.length) this.opts.onOp({ op: 'batch', ops });
+      },
+    );
+    const rotTimes = new Set();
+    for (const ax of rotAxes) for (const k of liveObj().tracks?.[`rotation.${ax}`] || []) rotTimes.add(k.t);
+    const rotKeys = [...rotTimes].map((t) => ({
+      t, dir: basisFromRotation(objRotAt(liveObj(), t)).forward,
+    }));
     const ballHost = h('div', { class: 'rotball-wrap' });
     new RotBall(ballHost, {
-      dir: pose.dir,
-      keys: dirKeys,
+      rotation: poseRot,
+      keys: rotKeys,
       time,
       onStart: () => { this._ballDragging = true; },
       onEnd: () => { this._ballDragging = false; },
-      onChange: (d) => this._commit(`${id}:dir`, { op: 'objectKey', id, path: 'dir', t: tNow(), v: d }, 90),
+      onChange: (rot) => writeObjRotation(rot),
     });
-    this.root.appendChild(this._sec('朝向', { tag: obj.parent?.id ? '本地' : null },
-      ballHost,
-      this._field({
-        label: '绕轴自转', unit: '°', value: Math.round(pose.roll * 10) / 10, step: 1,
-        link: { kind: 'ob', id, path: 'roll' },
-        onChange: (v) => key('roll', v),
-        keyer: {
-          state: () => {
-            const tr = liveObj().tracks?.roll || [];
-            if (!tr.length) return 'none';
-            const now = this.opts.getTime();
-            return tr.some((k) => Math.abs(k.t - now) <= tol) ? 'on' : 'anim';
-          },
-          set: () => key('roll', Math.round(objectPose(liveObj(), this.opts.getTime()).roll * 1000) / 1000),
-          unset: () => {
-            const now = this.opts.getTime();
-            const k = (liveObj().tracks?.roll || []).find((x) => Math.abs(x.t - now) <= tol);
-            if (k) this.opts.onOp({ op: 'objectUnkey', id, path: 'roll', t: k.t });
-          },
-        },
+    this.root.appendChild(this._sec('三轴旋转', { tag: obj.parent?.id ? '本地' : null },
+      this._rotationRow({
+        label: '旋转°',
+        kfNode: objRotKf,
+        items: rotAxes.map((axis, i) => ({
+          axis, value: Math.round(poseRot[i] * 10) / 10,
+          link: { kind: 'ob', id, path: `rotation.${axis}` },
+          onChange: setObjRotAxis(i),
+        })),
       }),
-      h('div', { class: 'hint' }, '拖球面上的点改朝向（写 dir 关键帧）；旋转球和速度曲线留在属性面板，其余基础属性在时间轴左侧。'),
+      ballHost,
+      h('div', { class: 'hint' }, '拖球面改三个角；时间轴上每个轴单独打帧。X 俯仰 · Y 转身 · Z 画面内。'),
     ));
 
     if (MEDIA_TYPES.has(obj.type)) this.root.appendChild(this._renderMedia(obj));
@@ -1219,6 +1366,60 @@ export class Inspector {
     const spatialParent = this._spatialParentSummary(project, cam);
     if (spatialParent) this.root.appendChild(spatialParent);
     this.root.appendChild(this._parentTools(project, cam, 'cam'));
+    const camRot = ['x', 'y', 'z'].map((ax, i) => {
+      const linked = cameraValueWithLinks(project, cam, `rotation.${ax}`, time);
+      return Number.isFinite(linked) ? linked : cameraRotationAt(cam, time)[i];
+    });
+    const rotAxes = ['x', 'y', 'z'];
+    const setCamRotAxis = (i) => (v) => {
+      const path = `rotation.${rotAxes[i]}`;
+      const t = this._keyTime();
+      const local = writeBackLocalValue(project, { host: 'cam', id: cam.id }, path, t, v);
+      const value = Number.isFinite(local) ? local : v;
+      if ((cam.tracks?.[path] || []).length) {
+        this.opts.onOp({ op: 'cameraParamKey', id: cam.id, path, t, v: value });
+        return;
+      }
+      const rot = cameraRotationAt(cam, this.opts.getTime()).slice();
+      rot[i] = value;
+      this.opts.onOp({ op: 'cameraSet', id: cam.id, patch: { rotation: rot } });
+    };
+    const camRotKf = this._kfButton(
+      () => {
+        if (rotAxes.some((ax) => (cam.tracks?.[`rotation.${ax}`] || [])
+          .some((k) => Math.abs(k.t - this.opts.getTime()) <= 0.5 / (project.meta?.fps || 24)))) return 'on';
+        return rotAxes.some((ax) => (cam.tracks?.[`rotation.${ax}`] || []).length) ? 'anim' : 'none';
+      },
+      () => {
+        const t = this._keyTime();
+        const rot = cameraRotationAt(cam, t);
+        this.opts.onOp({
+          op: 'batch',
+          ops: rotAxes.map((ax, i) => ({ op: 'cameraParamKey', id: cam.id, path: `rotation.${ax}`, t, v: rot[i] })),
+        });
+      },
+      () => {
+        const ops = [];
+        for (const ax of rotAxes) {
+          const k = (cam.tracks?.[`rotation.${ax}`] || [])
+            .find((x) => Math.abs(x.t - this.opts.getTime()) <= 1e-3);
+          if (k) ops.push({ op: 'cameraParamUnkey', id: cam.id, path: `rotation.${ax}`, t: k.t });
+        }
+        if (ops.length) this.opts.onOp({ op: 'batch', ops });
+      },
+    );
+    this.root.appendChild(this._sec('三轴旋转', {},
+      this._rotationRow({
+        label: '旋转°',
+        kfNode: camRotKf,
+        items: rotAxes.map((axis, i) => ({
+          axis, value: round(camRot[i], 2),
+          link: { kind: 'cam', id: cam.id, path: `rotation.${axis}` },
+          onChange: setCamRotAxis(i),
+        })),
+      }),
+      h('div', { class: 'hint' }, '相机自己的三轴偏移：X 低头 · Y 右摇 · Z 画面旋转（与旧手动 roll 叠加，迁移后并入 Z）。'),
+    ));
     this.root.appendChild(h('div', { class: 'hint pad' },
       '相机属性折叠在时间轴相机行里：点行首 ▾ 展开；位置是飞行路径关键帧，中心点 / 画面 / 透明度 / 缩放也能逐帧打点。'));
     const feeds = (project.elements || []).filter((e) => e.type === 'camfeed'

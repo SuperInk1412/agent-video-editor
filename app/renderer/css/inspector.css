@@ -145,6 +145,13 @@ button.insp-name:hover { background: var(--surface-2); border-color: var(--borde
 .insp .follow-row select { flex: 1 1 auto; min-width: 0; }
 .insp .follow-row .btn { flex: 0 0 auto; }
 
+/* three-axis rotation: keep three readable cells in the narrow right panel */
+.insp .rot-cell { gap: 1px; }
+.insp .rot-cell > .link-btn { flex: 0 0 12px; width: 12px; height: 15px; font-size: 9px; }
+.insp .rot-cell .nbox { padding: 0 1px; gap: 1px; }
+.insp .rot-cell .nbox .ax { font-size: 8px; width: 7px; text-align: center; }
+.insp .rot-cell input { font-size: var(--fs-sm); }
+
 /* ---------------- property links (PLAN-ui-round3 §4.2) ---------------- */
 /* `↳` next to an input; lit = the property has a property parent. */
 .insp .link-btn {
@@ -246,7 +253,7 @@ button.insp-name:hover { background: var(--surface-2); border-color: var(--borde
 
 /* ---------------- rotation ball / speed curve ---------------- */
 .rotball-wrap { display: flex; justify-content: center; padding: 4px 0; }
-.rotball { display: block; cursor: crosshair; border-radius: 50%; }
+.rotball { display: block; cursor: crosshair; }
 .speed-wrap { padding: 4px 0 8px; border-radius: var(--r-sm); background: var(--surface-0); margin: 2px 0 6px; }
 .speedcurve { display: block; margin: 0 auto; }
 .speed-wrap .row-btns { padding: 2px 6px 0; display: flex; gap: 4px; margin: 4px 0 0; }

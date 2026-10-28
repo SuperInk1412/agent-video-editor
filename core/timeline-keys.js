@@ -22,19 +22,21 @@ const EL_TRANSFORM = [
   // Migrated node rows (core/migrate-spatial.js rewrites x/y/z/scale/rotation).
   'pivot.x', 'pivot.y', 'pivot.z', 'position.x', 'position.y', 'position.z',
   'scale.x', 'scale.y', 'scale.z', 'roll',
+  'rotation.x', 'rotation.y', 'rotation.z',
 ];
 const EL_AUDIO = ['audio.volume'];
-const OB_TRANSFORM = ['pivot', 'position', 'scale', 'opacity'];
+const OB_TRANSFORM = ['pivot', 'position', 'scale', 'rotation.x', 'rotation.y', 'rotation.z', 'opacity'];
 // Camera groups mirror the timeline's camera row builders. `path` keys are the
 // 位置 row of the 变换 group.
 const CAM_GROUPS = {
   camPos: ['center', 'picturePivot', 'pictureOffset', 'opacity', 'scale'],
+  camRot: ['rotation.x', 'rotation.y', 'rotation.z'],
   camMain: ['fov', 'lookAhead', 'bankGain', 'maxRoll', 'roll'],
   camShake: ['shake.amp', 'shake.freq', 'shake.speedGain'],
   camDof: ['dof.enabled', 'dof.fstop'],
 };
 
-export const CAMERA_GROUPS = ['camPos', 'camMain', 'camShake', 'camDof'];
+export const CAMERA_GROUPS = ['camPos', 'camRot', 'camMain', 'camShake', 'camDof'];
 
 const collect = (keyed, paths, groups, group, list) => {
   for (const path of list) {

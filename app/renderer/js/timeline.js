@@ -7,6 +7,8 @@
 // its attributes are folded inside the camera row.
 import { timecode, sampleTrack } from '/core/time.js';
 import { objectPose } from '/core/scene.js';
+import { cameraRotationAt } from '/core/spatial.js';
+import { rotationFromDirRoll } from '/core/rotation.js';
 import { childrenOf } from '/core/hierarchy.js';
 import { feedElements, normalizeFeed } from '/core/camfeed.js';
 import { pathPos, cameraTransform, cameraParamValue, cameraRange } from '/core/camera.js';
@@ -72,10 +74,12 @@ const EL_LINK_ROW_PATH = Object.freeze({
   'position.x': null, 'position.y': null,
   'scale.x': 'transform.scale', 'scale.y': 'transform.scale', scale: 'transform.scale',
   roll: 'transform.rotation', opacity: 'transform.opacity',
+  'rotation.x': 'rotation.x', 'rotation.y': 'rotation.y', 'rotation.z': 'rotation.z',
   'audio.volume': 'audio.volume',
 });
 const OB_LINK_ROW_PATH = (path) => {
   if (path === 'opacity' || path === 'roll') return path;
+  if (/^rotation\.[xyz]$/.test(path)) return path;
   return /^(pivot|position|scale)\./.test(path) ? path.slice(0, path.indexOf('.')) : null;
 };
 const CAM_LINK_ROW_PATH = (path) => {
@@ -124,7 +128,7 @@ export class Timeline {
     this.expanded = new Set();
     this.sections = {
       content: 'full', transform: 'full', audio: 'full', camPos: 'full',
-      camMain: 'collapsed', camShake: 'collapsed', camDof: 'collapsed',
+      camRot: 'full', camMain: 'collapsed', camShake: 'collapsed', camDof: 'collapsed',
     };
     this.propSel = null;
     this._scrollTo = null;
@@ -730,6 +734,7 @@ export class Timeline {
     this._syncPlayhead();
     this._syncFrameBand();
     this._syncProps(true);
+    this.onTimeChange?.();
   }
 
   fit() {
@@ -1650,6 +1655,26 @@ export class Timeline {
     }
 
     const fov = this._camValue(cam, 'fov');
+    // Three-axis rotation offset (core/rotation.js). The old manual roll row
+    // below is kept until the 2c migration folds it into rotation.z.
+    const camRot = AX.map((ax) => {
+      const value = this._camValue(cam, `rotation.${ax}`, this.time);
+      return Number.isFinite(value) ? value : 0;
+    });
+    this._appendSection(host, '三轴旋转', 'camRot', 'X / Y / Z');
+    const rotMode = this._groupMode('camRot');
+    if (rotMode !== 'collapsed') {
+      const showRot = (path) => rotMode === 'full' || this._camTracked(cam, path);
+      AX.forEach((axis, i) => {
+        if (!showRot(`rotation.${axis}`)) return;
+        host.appendChild(this._camParamNumRow(cam, `rotation.${axis}`, `旋转 ${axis.toUpperCase()}°`, camRot[i], {
+          step: 0.5,
+        }));
+      });
+      if (rotMode === 'full') {
+        host.appendChild(this._camHintRow('X 俯仰 · Y 转身 · Z 画面内旋转（与旧手动 roll 同号，先叠加）'));
+      }
+    }
     const lookAhead = this._camValue(cam, 'lookAhead');
     const bankGain = this._camValue(cam, 'bankGain');
     const maxRoll = this._camValue(cam, 'maxRoll');
@@ -1901,6 +1926,16 @@ export class Timeline {
     if (!values.every(Number.isFinite)) return;
     let v = pr.dims === 1 ? values[0] : values;
     const t = this._editTimes.get(`cam:${camId}:${path}`) ?? this._frameTime();
+    if (path.startsWith('rotation.')) {
+      const i = AX.indexOf(path.slice(9));
+      if (i < 0) return;
+      const local = writeBackLocalValue(this.project, { host: 'cam', id: camId }, path, t, Number(v));
+      const rot = cameraRotationAt(cam, t).slice();
+      rot[i] = Number.isFinite(local) ? local : Number(v);
+      if (this._camHasTrack(cam, path)) this.onOp?.({ op: 'cameraParamKey', id: camId, path, t, v: rot[i] });
+      else this.onOp?.({ op: 'cameraSet', id: camId, patch: { rotation: rot } });
+      return;
+    }
     // Camera rows display effective values; store the local value so the same
     // picture remains after the edit. center -> pivot.*, scale -> scale.*.
     if (path === 'center' || path === 'scale') {
@@ -1947,7 +1982,9 @@ export class Timeline {
       this.onOp?.({ op: 'cameraParamUnkey', id: camId, path, t });
       return;
     }
-    const v = cameraParamValue(cam, path, t);
+    const v = path.startsWith('rotation.')
+      ? cameraRotationAt(cam, t)[AX.indexOf(path.slice(9))]
+      : cameraParamValue(cam, path, t);
     this.onOp?.({ op: 'cameraParamKey', id: camId, path, t, v });
   }
 
@@ -2169,7 +2206,9 @@ export class Timeline {
         ['scale.x', '缩放 X', { step: 0.01, axis: 'x', letter: 'X', unit: '', min: 0 }],
         ['scale.y', '缩放 Y', { step: 0.01, axis: 'y', letter: 'Y', unit: '', min: 0 }],
         ['scale.z', '缩放 Z', { step: 0.01, axis: 'z', letter: 'Z', unit: '', min: 0 }],
-        ['roll', '旋转°', { step: 0.5, axis: 'd', letter: '', unit: '°' }],
+        ['rotation.x', '旋转 X°', { step: 0.5, axis: 'x', letter: 'X', unit: '°' }],
+        ['rotation.y', '旋转 Y°', { step: 0.5, axis: 'y', letter: 'Y', unit: '°' }],
+        ['rotation.z', '旋转 Z°', { step: 0.5, axis: 'z', letter: 'Z', unit: '°' }],
       ];
       for (const [path, label, opts] of nodeRows) {
         if (show(path)) host.appendChild(this._elementNumRow(e, path, label, opts));
@@ -2322,8 +2361,87 @@ export class Timeline {
       if (show('pivot')) host.appendChild(this._vecRow(o, 'pivot', '中心点'));
       if (show('position')) host.appendChild(this._vecRow(o, 'position', '位置'));
       if (show('scale')) host.appendChild(this._vecRow(o, 'scale', '缩放'));
+      for (const axis of AX) {
+        if (show(`rotation.${axis}`)) host.appendChild(this._objectRotationRow(o, axis));
+      }
       if (show('opacity')) host.appendChild(this._opacityRow(o));
     }
+  }
+
+  /** One 3D-object rotation axis; base `obj.rotation[i]` or a per-axis track. */
+  _objectRotationRow(o, axis) {
+    const path = `rotation.${axis}`;
+    const pose = objectPoseWithLinks(this.project, o, this.time);
+    const rot = Array.isArray(pose.rotation) ? pose.rotation : rotationFromDirRoll(pose.dir, pose.roll);
+    const row = el('div', 'tl-row tl-prop tl-linkrow');
+    row.dataset.obj = o.id;
+    row.dataset.path = path;
+    const g = el('div', 'tl-gutter');
+    g.dataset.obj = o.id;
+    g.appendChild(this._linkButton('ob', o, objectRowLinkPaths(path)));
+    g.appendChild(el('span', 'tl-plabel', `旋转 ${axis.toUpperCase()}°`));
+    const { box, inp } = this._numBox(axis, axis.toUpperCase());
+    box.classList.add('tl-scalar');
+    inp.step = '0.5';
+    writeNumber(inp, rot[AX.indexOf(axis)], { force: true });
+    inp.addEventListener('focus', () => this.onPause?.());
+    inp.addEventListener('input', () => {
+      this._editTimes.set(`${o.id}:${path}`, this._frameTime());
+      this._schedule(`${o.id}:${path}`, () => this._commitObjectRotation(o.id, axis));
+    });
+    inp.addEventListener('blur', () => { this._flush(`${o.id}:${path}`); this._syncProps(); });
+    g.appendChild(box);
+    const kf = kfButton();
+    kf.dataset.tip = '在当前时间打帧 / 删帧';
+    kf.addEventListener('click', (e) => { e.stopPropagation(); this._toggleObjectRotationKey(o.id, axis); });
+    g.appendChild(kf);
+    const lane = el('div', 'tl-track');
+    row.append(g, lane);
+    this._propRows.push({ objId: o.id, path, kind: 'rotation', axis, inputs: [inp], kf, lane, row, sig: '' });
+    return row;
+  }
+
+  _commitObjectRotation(objId, axis) {
+    const obj = this._obj(objId);
+    const pr = this._propRows.find((x) => x.objId === objId && x.path === `rotation.${axis}`);
+    if (!obj || !pr) return;
+    let v = readNumber(pr.input);
+    if (!Number.isFinite(v)) return;
+    const path = `rotation.${axis}`;
+    const t = this._editTimes.get(`${objId}:${path}`) ?? this._frameTime();
+    const local = writeBackLocalValue(this.project, { host: 'ob', id: objId }, path, t, v);
+    if (Number.isFinite(local)) v = local;
+    if ((obj.tracks?.[path] || []).length) {
+      this.onOp?.({ op: 'objectKey', id: objId, path, t, v });
+      return;
+    }
+    const pose = objectPose(obj, t);
+    const rot = Array.isArray(obj.rotation)
+      ? obj.rotation.slice()
+      : rotationFromDirRoll(pose.dir, pose.roll);
+    rot[AX.indexOf(axis)] = v;
+    this.onOp?.({ op: 'objectPatch', id: objId, patch: { rotation: rot } });
+  }
+
+  _toggleObjectRotationKey(objId, axis) {
+    const obj = this._obj(objId);
+    if (!obj) return;
+    this.onPause?.();
+    const path = `rotation.${axis}`;
+    const t = this._frameTime();
+    const track = obj.tracks?.[path] || [];
+    if (track.some((k) => Math.abs(k.t - t) < 1e-3)) {
+      this.onOp?.({ op: 'objectUnkey', id: objId, path, t });
+      return;
+    }
+    const pose = objectPose(obj, t);
+    const rot = Array.isArray(pose.rotation) ? pose.rotation : rotationFromDirRoll(pose.dir, pose.roll);
+    const ops = [];
+    // A first key needs a base pose too, otherwise the other two axes fall back
+    // to 0 and the object jumps before/after this key.
+    if (!Array.isArray(obj.rotation)) ops.push({ op: 'objectPatch', id: objId, patch: { rotation: rot } });
+    ops.push({ op: 'objectKey', id: objId, path, t, v: rot[AX.indexOf(axis)] });
+    this.onOp?.(ops.length === 1 ? ops[0] : { op: 'batch', ops });
   }
 
   _groupOpen(key) {
@@ -2749,6 +2867,9 @@ export class Timeline {
         if (pr.hex && document.activeElement !== pr.hex) pr.hex.value = color;
       } else if (pr.kind === 'opacity') {
         set(pr.inputs[0], pose.opacity);
+      } else if (pr.kind === 'rotation') {
+        const rot = Array.isArray(pose.rotation) ? pose.rotation : rotationFromDirRoll(pose.dir, pose.roll);
+        set(pr.inputs[0], rot[AX.indexOf(pr.axis)]);
       } else {
         const arr = pose[pr.path] || [0, 0, 0];
         pr.inputs.forEach((inp, i) => set(inp, arr[i]));
@@ -2799,6 +2920,10 @@ export class Timeline {
           const linked = cameraValueWithLinks(this.project, cam, `${group}.${ax}`, t);
           return Number.isFinite(linked) ? linked : tr[pr.path][i];
         });
+      } else if (pr.path.startsWith('rotation.')) {
+        const i = AX.indexOf(pr.path.slice(9));
+        const value = this._camValue(cam, pr.path, t);
+        values = [Number.isFinite(value) ? value : cameraRotationAt(cam, t)[i]];
       } else {
         const value = this._camValue(cam, pr.path, t);
         values = pr.dims === 1 ? [value] : (value || []);
@@ -2973,6 +3098,22 @@ export class Timeline {
     const local = this._elValue(e, path, t);
     const target = elementRowTarget(e, path);
     const value = target ? rowToTarget(e, this.project?.meta, target, local, path) : local;
+    // A rotation key on a node that still carries only dir/roll needs a base
+    // rotation first; otherwise the other two axes read 0 and the pose jumps.
+    if (keyPath.startsWith('rotation.') && e.node && !Array.isArray(e.node.rotation)) {
+      const rot = AX.map((ax) => {
+        const v = this._elValue(e, `rotation.${ax}`, t);
+        return Number.isFinite(v) ? v : 0;
+      });
+      this.onOp?.({
+        op: 'batch',
+        ops: [
+          { op: 'updateElement', id: elId, patch: { node: { ...e.node, rotation: rot } } },
+          { op: 'keySet', id: elId, path: keyPath, t, value: value == null ? local : value },
+        ],
+      });
+      return;
+    }
     this.onOp?.({ op: 'keySet', id: elId, path: keyPath, t, value: value == null ? local : value });
   }
 

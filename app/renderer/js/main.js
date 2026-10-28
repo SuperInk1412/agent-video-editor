@@ -24,6 +24,7 @@ import {
   objectLocalVectorWithLinks, objectWorldPoseWithLinks,
 } from '/core/link-eval.js';
 import { frameOf } from '/core/spatial.js';
+import { rotationFromDirRoll } from '/core/rotation.js';
 import { defaultCamera } from '/core/space.js';
 import { newId } from '/core/schema.js';
 import { sampleTrack } from '/core/time.js';
@@ -2753,6 +2754,8 @@ async function boot() {
   });
   // keep the F2 drawer's x axis glued to the timeline while zooming/scrolling
   timeline.onViewChange = () => { if (curvePanel?.isOpen()) curvePanel.draw(); };
+  // ...and its playhead line glued to the timeline's on every seek / playback tick
+  timeline.onTimeChange = () => curvePanel?.syncTime();
 
   inspector = new Inspector($('#panelInsp'), {
     onOp: (o) => op(o),
@@ -2778,7 +2781,12 @@ async function boot() {
         if (dot > 0) {
           const group = path.slice(0, dot);
           const i = 'xyz'.indexOf(path.slice(dot + 1));
-          if (i >= 0 && Array.isArray(node[group]) && Number.isFinite(Number(node[group][i]))) {
+          if (i >= 0 && group === 'rotation') {
+            const rot = Array.isArray(node.rotation)
+              ? node.rotation
+              : rotationFromDirRoll(node.dir, node.roll);
+            if (Number.isFinite(Number(rot[i]))) return Number(rot[i]);
+          } else if (i >= 0 && Array.isArray(node[group]) && Number.isFinite(Number(node[group][i]))) {
             return Number(node[group][i]);
           }
         }
@@ -3324,6 +3332,32 @@ async function boot() {
         return;
       }
     }
+    // rotation ring: drag around the projected X/Y/Z ring at the pivot
+    const rot = gizmo?.hitObjectRotation(sx, sy);
+    if (rot) {
+      const obj = (S.project.scene?.objects || []).find((o) => o.id === gizmo.objSel);
+      if (obj) {
+        pause();
+        select({ objectId: obj.id });
+        const pose = objectWorldPoseWithLinks(S.project, obj, S.time);
+        const startRot = Array.isArray(pose.rotation)
+          ? pose.rotation.slice()
+          : rotationFromDirRoll(pose.dir, pose.roll);
+        const k = gizmo.scale;
+        const angle = Math.atan2(sy / k - rot.center[1], sx / k - rot.center[0]);
+        gizmo.rotHover = rot.axis;
+        drag = {
+          kind: 'objrot', id: obj.id, axis: rot.axis, center: rot.center,
+          startAngle: angle, lastAngle: angle, total: 0, startRot, next: startRot.slice(),
+          keyed: (obj.tracks?.[`rotation.${rot.axis}`] || []).length > 0,
+          backup: JSON.stringify(obj), x: cx, y: cy, moved: false,
+        };
+        try { canvas.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
+        gizmo.draw();
+        e.preventDefault();
+        return;
+      }
+    }
     // move-gizmo arrow: constrained drag along one world axis
     const ax = gizmo?.hitObjectAxis(sx, sy);
     if (ax) {
@@ -3390,15 +3424,18 @@ async function boot() {
         if (S.viewMode === 'move') { canvas.style.cursor = 'grab'; return; }
         const hit = gizmo?.hit(sx, sy) || gizmo?.hitLive(sx, sy) || gizmo?.hitObjectKey(sx, sy);
         const axHit = hit ? null : gizmo?.hitObjectAxis(sx, sy);
-        const obj = (hit || axHit) ? null : preview.scene3d?.pickObject(S.project, S.time, sx, sy);
-        const elHit = (hit || axHit || obj) ? null : preview.hitTest(sx, sy, S.time);
+        const rotHit = (hit || axHit) ? null : gizmo?.hitObjectRotation(sx, sy);
+        const obj = (hit || axHit || rotHit) ? null : preview.scene3d?.pickObject(S.project, S.time, sx, sy);
+        const elHit = (hit || axHit || rotHit || obj) ? null : preview.hitTest(sx, sy, S.time);
         const hoverId = obj?.id || null;
-        if (gizmo && (gizmo.objHover !== hoverId || gizmo.axisHover !== (axHit?.axis || null))) {
+        if (gizmo && (gizmo.objHover !== hoverId || gizmo.axisHover !== (axHit?.axis || null)
+          || gizmo.rotHover !== (rotHit?.axis || null))) {
           gizmo.objHover = hoverId;
           gizmo.axisHover = axHit?.axis || null;
+          gizmo.rotHover = rotHit?.axis || null;
           gizmo.draw();
         }
-        canvas.style.cursor = hit || axHit || obj || elHit ? 'pointer' : 'default';
+        canvas.style.cursor = hit || axHit || rotHit || obj || elHit ? 'pointer' : 'default';
         return;
       }
       const hit = S.selection.camera ? gizmo?.hit(sx, sy) : null;
@@ -3510,6 +3547,29 @@ async function boot() {
       timeline?.setTime(S.time);
       return;
     }
+    if (drag.kind === 'objrot') {
+      const k = gizmo?.scale || 1;
+      const angle = Math.atan2(sy / k - drag.center[1], sx / k - drag.center[0]);
+      let dA = angle - drag.lastAngle;
+      if (dA > Math.PI) dA -= Math.PI * 2;
+      if (dA < -Math.PI) dA += Math.PI * 2;
+      drag.total += dA;
+      drag.lastAngle = angle;
+      if (Math.abs(drag.total) < 1e-4) return;
+      const obj = (S.project.scene?.objects || []).find((o) => o.id === drag.id);
+      if (!obj) return;
+      const next = drag.startRot.slice();
+      const i = 'xyz'.indexOf(drag.axis);
+      next[i] = Math.round((drag.startRot[i] + (drag.total * 180) / Math.PI) * 100) / 100;
+      drag.next = next;
+      if (drag.keyed) setLiveKey(obj, `rotation.${drag.axis}`, next[i]);
+      else obj.rotation = next;
+      drag.moved = true;
+      preview.render(S.time);
+      gizmo.draw();
+      updateSelectionInfo();
+      return;
+    }
     if (drag.kind === 'objaxis') {
       if (Math.abs(cx - drag.x) + Math.abs(cy - drag.y) < 2) return;
       const s = axisClosestS(preview.scene3d.ray(sx, sy), drag.p0, drag.axis);
@@ -3598,6 +3658,17 @@ async function boot() {
       if (d.moved && d.pivot) {
         op({ op: 'objectKey', id: d.id, path: 'pivot', t: d.keyT, v: d.pivot });
       }
+      gizmo.draw();
+    } else if (d.kind === 'objrot') {
+      if (d.moved && d.next) {
+        const t = Math.round(S.time * 1000) / 1000;
+        if (d.keyed) {
+          op({ op: 'objectKey', id: d.id, path: `rotation.${d.axis}`, t, v: d.next['xyz'.indexOf(d.axis)] });
+        } else {
+          op({ op: 'objectPatch', id: d.id, patch: { rotation: d.next } });
+        }
+      }
+      gizmo.rotHover = null;
       gizmo.draw();
     } else if (d.kind === 'objaxis') {
       if (d.moved && d.pivot) {

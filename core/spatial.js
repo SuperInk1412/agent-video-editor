@@ -229,13 +229,18 @@ const cameraProject = (cam) => ({
 function cameraState(cam, t, opts = null) {
   if (!cam) return null;
   const at = Number.isFinite(Number(t)) ? Number(t) : 0;
-  return applyCameraRotation(evalCamera(cameraProject(normalizeCamera(cam)), at, opts), cameraRotationAt(cam, at));
+  return applyCameraRotation(evalCamera(cameraProject(normalizeCamera(cam)), at, opts), cameraRotationAt(cam, at, opts));
 }
 
-/** A camera's three-axis rotation offset at t (base `cam.rotation` + 'rotation.x/y/z' tracks). */
-export function cameraRotationAt(cam, t) {
+/**
+ * A camera's three-axis rotation offset at t (base `cam.rotation` +
+ * 'rotation.x/y/z' tracks). `opts.param` lets link-aware callers resolve the
+ * effective channel in one place (core/link-eval.js).
+ */
+export function cameraRotationAt(cam, t, opts = null) {
   const tr = cam?.tracks || {};
-  return sampleRotation(cam?.rotation, (path, fb) => sampleChannel(tr[path], t, fb));
+  const param = opts && typeof opts.param === 'function' ? opts.param : null;
+  return sampleRotation(cam?.rotation, (path, fb) => (param ? param(cam, path, t) : sampleChannel(tr[path], t, fb)));
 }
 
 /**

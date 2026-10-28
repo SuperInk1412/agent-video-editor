@@ -265,7 +265,7 @@ export function evalCameraWorld(project, t = 0, cam = null, opts = null) {
   // The camera's three-axis rotation is an offset in its own frame (core/rotation.js).
   const base = applyCameraRotation(cam
     ? evalCamera({ camera: host, cameras: [host], activeCameraId: host.id }, at, opts)
-    : evalCamera(project, at, opts), cameraRotationAt(host, at));
+    : evalCamera(project, at, opts), cameraRotationAt(host, at, opts));
   const parent = worldFrameParent(host);
   if (!parent) return base;
   const resolved = hostFrameAt(project, parent.id, at, opts);

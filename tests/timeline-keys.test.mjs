@@ -134,3 +134,28 @@ test('keyedSections lists the groups that must stay open', () => {
   assert.deepEqual(keyedSections(hostKeys(p, objectRef('ob_empty'))), []);
   assert.deepEqual(keyedSections(null), []);
 });
+
+test('three-axis rotation keys open the rotation rows (and camera camRot)', () => {
+  const p = project();
+  const el = { ...p.elements[3], keyframes: [{ t: 0, path: 'rotation.z', value: 10 }] };
+  const ek = elementHostKeys(el);
+  assert.equal(ek.keyed, true);
+  assert.ok(ek.paths.has('rotation.z'));
+  assert.deepEqual(ek.groups, new Set(['transform']));
+
+  const ob = { ...p.scene.objects[0], tracks: { 'rotation.x': [{ t: 0, v: 10 }] } };
+  const ok = objectHostKeys(ob);
+  assert.equal(ok.keyed, true);
+  assert.ok(ok.paths.has('rotation.x'));
+  assert.deepEqual(ok.groups, new Set(['transform']));
+
+  const cam = {
+    ...p.cameras[0],
+    tracks: { 'rotation.y': [{ t: 0, v: 20 }] },
+  };
+  const ck = cameraHostKeys(cam);
+  assert.equal(ck.keyed, true);
+  assert.ok(ck.paths.has('rotation.y'));
+  assert.deepEqual(ck.groups, new Set(['camPos', 'camRot']));
+  assert.deepEqual(keyedSections(ck), ['camPos', 'camRot']);
+});

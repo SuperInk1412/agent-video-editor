@@ -143,6 +143,11 @@ Blender 侧这些效果由合成器节点组 `VDM_Composite` 完成。节点组�
   输入输出都先 `validateProject`，拒绝写 `projects/`，旧字段保留在 `legacy`。**预览**已支持完整的
   `node`；Blender 的 2D 构建器也支持平面节点（`dir` 为 ±Z、`position` 在平面内），迁移后的 miku
   flat 元素可正常出片；倾斜 `node` 仍是平面近似，Blender 的 2D 空间父级尚未接入（属性链接已接，见下）。
+- **三轴旋转**（`core/rotation.js`）：2D 节点 `node.rotation = [x,y,z]` + 关键帧 `rotation.x/y/z`；
+  3D 物体 `obj.rotation` + `tracks['rotation.x/y/z']`；相机 `cam.rotation` +
+  `tracks['rotation.x/y/z']`（相机作为自身坐标内的偏移）。有 `rotation` 或任一轴关键帧时它优先，
+  `dir/roll` 只是派生视图；没有时旧字段照常生效。单位度，先 Z、再 X、最后 Y（`R = Ry · Rx · Rz`），
+  Z 与旧 2D `transform.rotation` / 节点 `roll` 同号。
 - **空间父级（`mode: "world"`）**：2D 元素、3D 物体、相机都可以当子级，父级也可以是其中任意一类。
   记录形状相同，宿主字段不同：
   `el.parent = ob.frameParent = cam.frameParent = { id, mode: "world", inherit: { pos, rot, scale }, bind: { pivot, basis, scale } }`。
@@ -162,7 +167,8 @@ Blender 侧这些效果由合成器节点组 `VDM_Composite` 完成。节点组�
   只能连同单位（长度 / 角度 / 比例 / 数值）；父值沿父级自己的链接链读取，环和 >32 层链被拒绝；
   `@live` 与相机 `position.*` 不可作来源。解除只删 link，本地值留在原地。ops：
   `propLink {id, to, from, combine?, bindParentValue?, t}` / `propLinkPatch {id, to, patch}` /
-  `propUnlink {id, to}`。
+  `propUnlink {id, to}`。三轴旋转的 `rotation.x/y/z` 是角度目标，对象 / 相机 / 带 `node` 的 2D
+  元素都可作为来源和子级；旧 2D 元素在迁移前仍只暴露 `roll`。
 - **属性链接的求值顺序**：本地值 / 关键帧 → 属性链接（`eff`）→ 空间父级 → 运动预设 / 淡出。
   所有画面入口共用 `core/link-eval.js`，因此属性行显示的值、预览和成片一致：
   旧 2D 用 `elementOverlay`（进 `evalElement`），带 `node` 的 2D 用

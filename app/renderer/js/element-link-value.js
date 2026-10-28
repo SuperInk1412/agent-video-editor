@@ -15,12 +15,13 @@
 // that decides which path a row's ◆ / input writes.
 import { isRecord } from '../../../core/json.js';
 import { resolveEffectiveValue, resolveLocalValue, writeBackLocalValue } from '../../../core/links.js';
+import { rotationFromDirRoll } from '../../../core/rotation.js';
 import { elementRowLinkPaths } from './link-menu.js';
 
 const PX_PER_M = 100;
 
 const centerY = (meta) => (Number(meta?.height) || 1080) / 2 / PX_PER_M;
-const NODE_ROW_RE = /^(pivot|position|scale)\.[xyz]$|^roll$|^opacity$/;
+const NODE_ROW_RE = /^(pivot|position|scale|rotation)\.[xyz]$|^roll$|^opacity$/;
 const isNodeRowPath = (path) => NODE_ROW_RE.test(String(path ?? ''));
 
 /** Link target path behind a 2D row (`transform.x` -> `pivot.x`). */
@@ -95,6 +96,16 @@ export function nodeRowPatch(el, rowPath, rowValue, meta = {}) {
   const node = { ...el.node };
   if (target === 'roll') {
     node.roll = v;
+    return { node };
+  }
+  if (target.startsWith('rotation.')) {
+    const i = 'xyz'.indexOf(target.slice(9));
+    if (i < 0) return null;
+    const arr = Array.isArray(node.rotation)
+      ? node.rotation.slice()
+      : rotationFromDirRoll(node.dir, node.roll);
+    arr[i] = v;
+    node.rotation = arr;
     return { node };
   }
   if (target.startsWith('pivot.') || target.startsWith('position.')) {

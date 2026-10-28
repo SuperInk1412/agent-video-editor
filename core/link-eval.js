@@ -21,6 +21,7 @@ import { PX_PER_M } from './scene.js';
 import {
   cameraValueWithLinks, elementOverlay, objectPoseWithLinks, resolveEffectiveValue,
 } from './links.js';
+import { dirRollFromRotation, rotationFromDirRoll } from './rotation.js';
 import {
   elementLocalNode, elementWorldNode, evalCameraWorld, objectLocalPoint, objectLocalVector,
   objectWorldPose,
@@ -87,6 +88,22 @@ export function elementNodeWithLinks(project, el, t) {
   if (hasLink(el, 'roll')) {
     const value = elementValue(project, el, 'roll', t);
     if (isNum(value)) out.roll = Number(value);
+  }
+  const rotPaths = ['rotation.x', 'rotation.y', 'rotation.z'];
+  if (rotPaths.some((path) => hasLink(el, path))) {
+    const base = Array.isArray(out.rotation)
+      ? out.rotation.slice()
+      : rotationFromDirRoll(out.dir, out.roll);
+    for (let i = 0; i < 3; i += 1) {
+      const path = rotPaths[i];
+      if (!hasLink(el, path)) continue;
+      const value = elementValue(project, el, path, t);
+      if (isNum(value)) base[i] = Number(value);
+    }
+    out.rotation = base;
+    const rr = dirRollFromRotation(base);
+    out.dir = rr.dir;
+    out.roll = rr.roll;
   }
   return out;
 }
@@ -177,7 +194,10 @@ export function elementLinkOverlay(project, el, t) {
     out.z = wz;
   }
   if (hasLink(el, 'scale.x')) out.scale = node.scale[0];
-  if (hasLink(el, 'roll')) out.rotation = node.roll;
+  if (hasLink(el, 'roll')
+    || hasLink(el, 'rotation.x') || hasLink(el, 'rotation.y') || hasLink(el, 'rotation.z')) {
+    out.rotation = node.roll;
+  }
   if (hasLink(el, 'opacity')) out.opacity = clamp(elementValue(project, el, 'opacity', t));
   if (hasLink(el, 'style.size')) out.size = elementValue(project, el, 'style.size', t);
   if (hasLink(el, 'fx.glow')) out.glow = elementValue(project, el, 'fx.glow', t);

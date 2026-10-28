@@ -1,8 +1,8 @@
-// Rotation ball: drag a point on a sphere to set an element/object direction.
-// Directions are unit vectors (`dir` tracks); key dots show existing direction
-// keys. The widget is display-only — the inspector owns the op scheduling.
-// Colours come from the design tokens (docs/DESIGN.md §3) via ui.js token().
+// Rotation ball: drag a point on a sphere to set the three-axis rotation.
+// The widget is display-only — the inspector owns the op scheduling; it emits
+// `[x, y, z]` degrees (core/rotation.js), preserving the current in-plane spin.
 import { token } from './ui.js';
+import { basisFromRotation, rotationFromDirRoll, normalizeRotation } from '/core/rotation.js';
 
 const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
@@ -21,7 +21,7 @@ function projectDir(d) {
 }
 
 export class RotBall {
-  constructor(host, { dir, keys = [], time = 0, onChange, onStart, onEnd } = {}) {
+  constructor(host, { rotation = null, dir = null, roll = 0, keys = [], time = 0, onChange, onStart, onEnd } = {}) {
     this.canvas = document.createElement('canvas');
     this.canvas.className = 'rotball';
     this.canvas.width = SIZE * 2;
@@ -30,7 +30,10 @@ export class RotBall {
     this.canvas.style.height = `${SIZE}px`;
     host.appendChild(this.canvas);
     this.ctx = this.canvas.getContext('2d');
-    this.dir = (Array.isArray(dir) ? dir : [0, 0, -1]).slice();
+    this.rotation = Array.isArray(rotation)
+      ? normalizeRotation(rotation)
+      : rotationFromDirRoll(Array.isArray(dir) ? dir : [0, 0, 1], roll);
+    this.dir = basisFromRotation(this.rotation).forward;
     this.keys = keys;
     this.time = time;
     this.onChange = onChange;
@@ -77,8 +80,9 @@ export class RotBall {
 
   _move(e) {
     this.dir = this._dirAt(e);
+    this.rotation = rotationFromDirRoll(this.dir, this.rotation[2]);
     this.draw();
-    this.onChange?.(this.dir.slice());
+    this.onChange?.(this.rotation.slice());
   }
 
   _pt(d) {
@@ -196,9 +200,9 @@ export class RotBall {
     ctx.save();
     ctx.globalAlpha = 0.8;
     ctx.fillStyle = token('--text-2');
-    ctx.font = `11px ${token('--font-mono') || 'monospace'}`;
+    ctx.font = `10.5px ${token('--font-mono') || 'monospace'}`;
     ctx.textAlign = 'center';
-    ctx.fillText('拖动 = 朝向', SIZE / 2, SIZE - 4);
+    ctx.fillText('拖动 = 三轴旋转', SIZE / 2, SIZE - 7);
     ctx.restore();
   }
 }

@@ -48,6 +48,7 @@ import { isRecord, pathParts } from './json.js';
 import { clamp, sampleTrack } from './time.js';
 import { PX_PER_M, basisFromDir, objectPose, sampleAxes, sampleChannel } from './scene.js';
 import { cameraParamValue, cameraTransform } from './camera.js';
+import { dirRollFromRotation, rotationFromDirRoll } from './rotation.js';
 
 /** Longest property-link chain (same limit as the spatial hierarchy). */
 export const MAX_LINK_DEPTH = 32;
@@ -111,6 +112,7 @@ const NODE_TARGETS = Object.freeze([
   target('pivot.x', 'length'), target('pivot.y', 'length'), target('pivot.z', 'length'),
   target('position.x', 'length'), target('position.y', 'length'), target('position.z', 'length'),
   target('roll', 'angle'),
+  target('rotation.x', 'angle'), target('rotation.y', 'angle'), target('rotation.z', 'angle'),
   target('scale.x', 'ratio'), target('scale.y', 'ratio'), target('scale.z', 'ratio'),
   target('opacity', 'ratio'),
 ]);
@@ -135,6 +137,7 @@ const NODE_ELEMENT_TARGETS = Object.freeze([...NODE_TARGETS, ...ELEMENT_EXTRA_TA
 const CAMERA_TARGETS = Object.freeze([
   target('pivot.x', 'length'), target('pivot.y', 'length'), target('pivot.z', 'length'),
   target('roll', 'angle'),
+  target('rotation.x', 'angle'), target('rotation.y', 'angle'), target('rotation.z', 'angle'),
   target('scale.x', 'ratio'), target('scale.y', 'ratio'), target('scale.z', 'ratio'),
   target('opacity', 'ratio'),
   target('fov', 'angle'),
@@ -516,6 +519,14 @@ function objectLocal(obj, path, t) {
     return isNum(value) ? Number(value) : null;
   }
   if (path === 'roll') return num(sampleChannel(tracks.roll, t, num(obj.rot?.roll, 0)), 0);
+  if (path.startsWith('rotation.')) {
+    const i = 'xyz'.indexOf(path.slice(9));
+    if (i < 0) return null;
+    const pose = objectPose(obj, t);
+    const base = Array.isArray(pose.rotation) ? pose.rotation : rotationFromDirRoll(pose.dir, pose.roll);
+    const value = sampleChannel(tracks[path], t, base[i]);
+    return isNum(value) ? Number(value) : null;
+  }
   if (path === 'opacity') return num(sampleChannel(tracks.opacity, t, num(obj.opacity, 1)), 1);
   return null;
 }
@@ -532,6 +543,13 @@ function cameraLocal(cam, path, t) {
     return i < 0 ? null : num(st.scale[i], 1);
   }
   if (path === 'opacity') return num(st.opacity, 1);
+  if (path.startsWith('rotation.')) {
+    const i = 'xyz'.indexOf(path.slice(9));
+    if (i < 0) return null;
+    const base = Array.isArray(cam.rotation) ? cam.rotation : [0, 0, 0];
+    const value = sampleChannel(cam?.tracks?.[path], t, base[i]);
+    return isNum(value) ? Number(value) : null;
+  }
   // position.* resolves to null on purpose: the camera position is path
   // animation (PLAN-ui-round3 §3.3), not a linkable scalar.
   if (['roll', 'fov', 'maxRoll', 'lookAhead', 'bankGain', 'dof.fstop'].includes(path)
@@ -556,6 +574,12 @@ function elementLocal(el, meta, path, t) {
     // element keyframes (`pivot.z`, `position.x`, `scale.x`, `roll`, …) as
     // PLAN-ui-round3 §2.3 converts them.
     if (path === 'roll') return num(sampleTrack(keys, 'roll', t, num(node.roll, 0)), 0);
+    if (path.startsWith('rotation.')) {
+      const i = 'xyz'.indexOf(path.slice(9));
+      if (i < 0) return null;
+      const base = Array.isArray(node.rotation) ? node.rotation : rotationFromDirRoll(node.dir, node.roll);
+      return num(sampleTrack(keys, path, t, base[i]), base[i]);
+    }
     const dot = path.indexOf('.');
     const group = dot < 0 ? path : path.slice(0, dot);
     const axis = dot < 0 ? '' : path.slice(dot + 1);
@@ -610,6 +634,16 @@ function setElementValue(el, track, t, value, setBase) {
 
 function writeNodeField(node, path, value) {
   if (path === 'roll') { node.roll = value; return; }
+  if (path.startsWith('rotation.')) {
+    const i = 'xyz'.indexOf(path.slice(9));
+    if (i < 0) return;
+    const base = Array.isArray(node.rotation)
+      ? node.rotation.slice()
+      : rotationFromDirRoll(node.dir, node.roll);
+    base[i] = value;
+    node.rotation = base;
+    return;
+  }
   const dot = path.indexOf('.');
   const group = dot < 0 ? path : path.slice(0, dot);
   const i = 'xyz'.indexOf(dot < 0 ? '' : path.slice(dot + 1));
@@ -722,6 +756,21 @@ function writeObjectLocal(obj, path, t, value) {
       obj.rot = { ...(isRecord(obj.rot) ? obj.rot : {}), roll: v };
     });
   }
+  if (path.startsWith('rotation.')) {
+    const i = 'xyz'.indexOf(path.slice(9));
+    if (i < 0) return false;
+    if (Array.isArray(tracks[path]) && tracks[path].length) {
+      upsertChannelKey(tracks, path, t, value);
+      return true;
+    }
+    const pose = objectPose(obj, t);
+    const base = Array.isArray(obj.rotation)
+      ? obj.rotation.slice()
+      : rotationFromDirRoll(pose.dir, pose.roll);
+    base[i] = value;
+    obj.rotation = base;
+    return true;
+  }
   if (path === 'opacity') {
     const v = clamp(value);
     return setChannelValue(tracks, 'opacity', t, v, (nv) => { obj.opacity = nv; });
@@ -763,6 +812,18 @@ function writeCameraLocal(cam, path, t, value) {
     return setChannelValue(tracks, 'opacity', t, v, (nv) => { cam.opacity = nv; });
   }
   if (path === 'roll') return setChannelValue(tracks, 'roll', t, value, (v) => { cam.roll = v; });
+  if (path.startsWith('rotation.')) {
+    const i = 'xyz'.indexOf(path.slice(9));
+    if (i < 0) return false;
+    if (Array.isArray(tracks[path]) && tracks[path].length) {
+      upsertChannelKey(tracks, path, t, value);
+      return true;
+    }
+    const base = Array.isArray(cam.rotation) ? cam.rotation.slice() : [0, 0, 0];
+    base[i] = value;
+    cam.rotation = base;
+    return true;
+  }
   if (path === 'fov') {
     const v = clamp(value, 1, 360);
     // A path key may carry fov; writing a track key overrides it without
@@ -979,6 +1040,19 @@ export function objectPoseWithLinks(project, obj, t) {
   if (hasLink(obj, 'roll')) {
     const v = value('roll');
     if (Number.isFinite(v)) { out.roll = v; moved = true; }
+  }
+  if (['rotation.x', 'rotation.y', 'rotation.z'].some((p) => hasLink(obj, p))) {
+    const base = Array.isArray(out.rotation) ? out.rotation.slice() : rotationFromDirRoll(out.dir, out.roll);
+    for (let i = 0; i < 3; i += 1) {
+      const path = `rotation.${'xyz'[i]}`;
+      if (!hasLink(obj, path)) continue;
+      const v = value(path);
+      if (Number.isFinite(v)) { base[i] = v; moved = true; }
+    }
+    out.rotation = base;
+    const rr = dirRollFromRotation(base);
+    out.dir = rr.dir;
+    out.roll = rr.roll;
   }
   if (hasLink(obj, 'opacity')) {
     const v = value('opacity');

@@ -26,6 +26,7 @@ export class PathGizmo {
     this.objSel = null;
     this.objHover = null;
     this.axisHover = null;
+    this.rotHover = null;
     this.hover = null;
   }
 
@@ -559,6 +560,7 @@ export class PathGizmo {
       ctx.fillStyle = active ? '#ffffff' : color;
       ctx.fillText(axis.toUpperCase(), p1[0] + 5 * k, p1[1] - 4 * k);
     }
+    this._objectRotRings(ctx, obj, time);
   }
 
   /** Hit test the move-gizmo arrows (outer 80% only, so the box stays grabbable). */
@@ -584,6 +586,80 @@ export class PathGizmo {
       const t = Math.max(0.3, Math.min(1.05, ((sx / k - p0[0]) * dx + (sy / k - p0[1]) * dy) / l2));
       const d = Math.hypot(p0[0] + dx * t - sx / k, p0[1] + dy * t - sy / k);
       if (d <= 7 && (!best || d < best.d)) best = { axis, d, len, pivot: pose.pivot };
+    }
+    return best;
+  }
+
+  /** World basis of one rotation ring: u/v span the plane perpendicular to axis. */
+  _rotRingBasis(axis) {
+    if (axis === 'x') return [[0, 1, 0], [0, 0, 1]];
+    if (axis === 'y') return [[1, 0, 0], [0, 0, 1]];
+    return [[1, 0, 0], [0, 1, 0]];
+  }
+
+  _rotRingPoints(pose, axis, r) {
+    const [u, v] = this._rotRingBasis(axis);
+    const pts = [];
+    for (let i = 0; i <= 64; i++) {
+      const a = (i / 64) * Math.PI * 2;
+      const c = Math.cos(a), s = Math.sin(a);
+      pts.push(this.project([
+        pose.pivot[0] + (u[0] * c + v[0] * s) * r,
+        pose.pivot[1] + (u[1] * c + v[1] * s) * r,
+        pose.pivot[2] + (u[2] * c + v[2] * s) * r,
+      ]));
+    }
+    return pts;
+  }
+
+  /** X/Y/Z rotation rings around the selected 3D object's pivot. */
+  _objectRotRings(ctx, obj, time) {
+    const pose = this._worldPose(obj, time);
+    const r = this._axisLen(pose) * 0.82;
+    const colors = { x: '#ff5c7a', y: '#4ade80', z: '#5aa9ff' };
+    for (const axis of ['x', 'y', 'z']) {
+      const pts = this._rotRingPoints(pose, axis, r);
+      ctx.save();
+      ctx.strokeStyle = this.rotHover === axis ? '#ffffff' : colors[axis];
+      ctx.lineWidth = this.rotHover === axis ? 2.2 : 1.25;
+      ctx.globalAlpha = 0.75;
+      ctx.beginPath();
+      let pen = false;
+      for (const p of pts) {
+        if (!p) { pen = false; continue; }
+        if (pen) ctx.lineTo(p[0], p[1]); else { ctx.moveTo(p[0], p[1]); pen = true; }
+      }
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  /** Hit test rotation rings; returns `{axis, center, r}` in logical canvas px. */
+  hitObjectRotation(sx, sy) {
+    const project = this.opts.project();
+    const obj = (project?.scene?.objects || []).find((o) => o.id === this.objSel);
+    if (!obj) return null;
+    const time = this.opts.time();
+    const start = Number(obj.start) || 0;
+    if (time < start - 1e-6 || time >= start + (Number(obj.duration) || 0)) return null;
+    const pose = this._worldPose(obj, time);
+    const center = this.project(pose.pivot);
+    if (!center) return null;
+    const k = this.scale;
+    const r = this._axisLen(pose) * 0.82;
+    let best = null;
+    for (const axis of ['x', 'y', 'z']) {
+      const pts = this._rotRingPoints(pose, axis, r);
+      for (let i = 1; i < pts.length; i++) {
+        const a = pts[i - 1], b = pts[i];
+        if (!a || !b) continue;
+        const dx = b[0] - a[0], dy = b[1] - a[1];
+        const l2 = dx * dx + dy * dy;
+        if (l2 < 1e-9) continue;
+        const t = Math.max(0, Math.min(1, ((sx / k - a[0]) * dx + (sy / k - a[1]) * dy) / l2));
+        const d = Math.hypot(a[0] + dx * t - sx / k, a[1] + dy * t - sy / k);
+        if (d <= 6 && (!best || d < best.d)) best = { axis, d, center: [center[0], center[1]], r };
+      }
     }
     return best;
   }

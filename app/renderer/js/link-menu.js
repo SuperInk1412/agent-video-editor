@@ -41,6 +41,7 @@ export const LINK_PROP_LABELS = Object.freeze({
   'pivot.x': '中心点 X', 'pivot.y': '中心点 Y', 'pivot.z': '中心点 Z',
   'position.x': '位置 X', 'position.y': '位置 Y', 'position.z': '位置 Z',
   roll: '旋转°',
+  'rotation.x': '旋转 X°', 'rotation.y': '旋转 Y°', 'rotation.z': '旋转 Z°',
   'scale.x': '缩放 X', 'scale.y': '缩放 Y', 'scale.z': '缩放 Z',
   opacity: '不透明度',
   'style.size': '字号', 'fx.glow': '辉光', 'audio.volume': '音量',
@@ -118,7 +119,7 @@ export function elementRowLinkPaths(el, rowPath) {
   const path = String(rowPath ?? '');
   // A node element can expose the node paths directly (unified four-attribute
   // rows: pivot.* / position.* / scale.* / roll / opacity).
-  if (isRecord(el?.node) && /^(pivot|position|scale)\.[xyz]$|^roll$|^opacity$/.test(path)) return [path];
+  if (isRecord(el?.node) && /^(pivot|position|scale|rotation)\.[xyz]$|^roll$|^opacity$/.test(path)) return [path];
   switch (path) {
     case 'transform.x': return ['pivot.x'];
     case 'transform.y': return ['pivot.y'];
@@ -139,6 +140,7 @@ export function objectRowLinkPaths(rowPath) {
   }
   if (path === 'opacity') return ['opacity'];
   if (path === 'roll') return ['roll'];
+  if (/^rotation\.[xyz]$/.test(path)) return [path];
   return [];
 }
 
