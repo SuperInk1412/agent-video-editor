@@ -17,6 +17,7 @@
 // text rasters. Reusing FRAG_TEX / FRAG_SHAPE keeps solid/shape/ellipse/radius
 // drawing identical; only the vertex placement differs.
 import { evalElement, motionDelta } from '/core/evaluate.js';
+import { elementOverlay } from '/core/links.js';
 import { clamp } from '/core/time.js';
 import { cameraTransform, evalCamera, cameraLayers } from '/core/camera.js';
 import { audioElements, audioVolume } from '/core/audio.js';
@@ -758,7 +759,7 @@ export class Preview {
     for (const el of p.elements) {
       if (el.visible === false) continue;
       if (t < el.start - 1e-6 || t >= el.start + el.duration - 1e-6) continue;
-      const st = evalElement(el, t, p.meta);
+      const st = evalElement(el, t, p.meta, elementOverlay(p, el, t));
       if (st.opacity <= 0.002) continue;
       const rot = (st.rotation || 0) * Math.PI / 180;
       // Unified space: el.node is the placement source of truth (core/spatial.js).
@@ -1256,7 +1257,7 @@ export class Preview {
   debugTextTexture(id) {
     const el = this.project?.elements.find((e) => e.id === id);
     if (!el) return null;
-    const st = evalElement(el, this.time, this.project.meta);
+    const st = evalElement(el, this.time, this.project.meta, elementOverlay(this.project, el, this.time));
     const entry = this._textTexture(el, st, el.style);
     return entry?.canvas ? entry.canvas.toDataURL('image/png') : null;
   }
