@@ -8,6 +8,7 @@
 import { timecode, sampleTrack } from '/core/time.js';
 import { objectPose } from '/core/scene.js';
 import { childrenOf } from '/core/hierarchy.js';
+import { feedElements, normalizeFeed } from '/core/camfeed.js';
 import { pathPos, cameraTransform, cameraParamValue, cameraRange } from '/core/camera.js';
 import {
   emptySelection, normalizeSelection, selectOne, pickSelection, legacyFields,
@@ -1497,15 +1498,15 @@ export class Timeline {
       ? '相机'
       : `相机叠层：从上往下第 ${camRank + 1} / ${this._rankCam.size} 层；拖到另一台相机上下会改叠层（并激活），拖过其它类型只改显示`;
     g.append(eye, this._parentButton('cam', cam), caret, dot, name, kind);
-    if (cam.output === false) {
-      const out = el('button', 'tl-camoutput on', '仅投屏');
-      out.type = 'button';
-      out.dataset.tip = '仅作投屏来源，不直接出画；点击恢复出画';
-      out.addEventListener('click', (e) => {
-        e.stopPropagation();
-        this.onOp?.({ op: 'cameraPatch', id: cam.id, patch: { output: true } });
-      });
-      g.append(out);
+    const feeds = feedElements(p).filter((e) => normalizeFeed(e.feed).camera === cam.id);
+    if (feeds.length) {
+      // A hint, not a switch: feeds never decide which camera reaches the
+      // picture (DESIGN-TRANSFORM-UNIFY §1.1). Hidden cameras still feed.
+      const badge = el('span', 'tl-feeds', `被投屏 ×${feeds.length}`);
+      const names = feeds.map((e) => e.name || e.id);
+      badge.dataset.tip = `这台相机被 ${feeds.length} 个投屏元素使用：${names.slice(0, 4).join('、')}`
+        + `${names.length > 4 ? '…' : ''}\n隐藏或移出镜头时间段都不影响它给投屏供画面`;
+      g.append(badge);
     }
 
     const track = el('div', 'tl-track');

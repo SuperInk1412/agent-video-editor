@@ -1213,12 +1213,6 @@ export class Inspector {
     this.root.appendChild(this._parentTools(project, cam, 'cam'));
     this.root.appendChild(h('div', { class: 'hint pad' },
       '相机属性折叠在时间轴相机行里：点行首 ▾ 展开；位置是飞行路径关键帧，中心点 / 画面 / 透明度 / 缩放也能逐帧打点。'));
-    this.root.appendChild(this._field({
-      label: '仅作投屏来源',
-      type: 'checkbox',
-      value: cam.output === false,
-      onChange: (v) => this.opts.onOp({ op: 'cameraPatch', id: cam.id, patch: { output: !v } }),
-    }));
     this.root.appendChild(this._worldSection(project, true));
   }
 

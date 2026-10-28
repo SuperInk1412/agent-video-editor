@@ -223,14 +223,13 @@ body.tl-scrubbing, body.tl-scrubbing * { cursor: ew-resize !important; user-sele
 }
 .tl-objname input { font-size: var(--fs-sm); padding: 1px 4px; }
 .tl-objkind { margin-left: auto; flex: 0 0 auto; }
-/* Feed-only camera marker: visible in the row; click restores direct output. */
-.tl-camoutput {
+/* Hint only: feeds never remove a camera from the picture. */
+.tl-feeds {
   flex: 0 0 auto; margin-left: 4px; padding: 0 5px; height: 18px;
   border: 1px solid var(--edit-border); border-radius: var(--r-sm);
   background: var(--edit-bg); color: var(--edit);
-  font-size: var(--fs-xs); line-height: 16px; cursor: pointer;
+  font-size: var(--fs-xs); line-height: 16px; white-space: nowrap;
 }
-.tl-camoutput:hover { background: var(--surface-3); }
 .tl-objparent { color: var(--edit); font-size: var(--fs-xs); flex: 0 0 auto; }
 .tl-objparentbtn {
   display: grid; place-items: center; width: 18px; height: 22px; flex: 0 0 18px; padding: 0;

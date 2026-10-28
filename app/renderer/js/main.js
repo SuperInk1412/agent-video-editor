@@ -2461,11 +2461,6 @@ async function boot() {
       },
       { label: '激活相机', icon: 'camera', run: () => { op({ op: 'activateCamera', id }); select({ camera: true }); } },
       { label: '创建投屏元素', icon: 'film', run: () => { createCamfeed(); } },
-      {
-        label: cam.output === false ? '恢复直接出画' : '仅作投屏来源（不出画）',
-        icon: cam.output === false ? 'eye' : 'eye-off',
-        run: () => op({ op: 'cameraPatch', id, patch: { output: cam.output === false } }),
-      },
       (() => {
         const at = Math.round(S.time * 1000) / 1000;
         const range = cameraRange(S.project, cam);

@@ -33,7 +33,10 @@
   这样可以做"无限隧道"之类的反馈效果，而不会递归。
 - 编辑器的自由视角（编辑模式）不是来源相机，能看到所有投屏。
 
-### 1.2 只供投屏的相机：`output: false`
+### 1.2 只供投屏的相机：`output: false`（已退役）
+
+> 2026-10-28 已被 `b6c6217` 与 `DESIGN-TRANSFORM-UNIFY.md` §1.1 取代：出画只看相机栈，
+> 投屏不决定相机是否出画；`cam.output` 已删除，时间轴只保留"被投屏 ×N"提示角标。
 
 相机新增字段 `output`（默认 `true`）。`output: false` 的相机**不直接出画**：不进最终画面的相机栈和切镜头，只给投屏当来源。
 时间轴上仍然显示、可以编辑；相机行上标"仅投屏"。
@@ -95,7 +98,8 @@ HUD 空元素（远离场景，比如 x = 10 km）
 ## 6. 分工
 
 - **B**：上面 1–6 的数据、求值、预览、成片、迁移、属性面板（`inspector.js`）。
-- **A**：右键相机"创建投屏元素"菜单、时间轴相机行"仅投屏"标记与开关、时间轴里贴屏相关入口的删除、空间父级 strength 的时间轴行。
+- **A**：右键相机"创建投屏元素"菜单、时间轴里贴屏相关入口的删除、空间父级 strength 的时间轴行。
+  （相机行"仅投屏"标记与开关已在 `b6c6217` 后删除，改为"被投屏 ×N"提示角标。）
 - 共享文件登记：`app/renderer/js/preview.js`（B 改投屏绘制和去掉 carry）、`core/spatial-parent.js`（B 加 strength）、
   `core/schema.js` / `core/contracts.js`（追加 `camfeed`、`output`）、`engine/shot.js`、`engine/blender.js`、`blender/vdm_build.py`。
 
@@ -115,7 +119,7 @@ HUD 空元素（远离场景，比如 x = 10 km）
   B 的 420 条单测、`check:preview` / `check:evaluate` / `blender:check` /
   `check-render-parity` / `check-camfeed` 均 PASS。
 - 右键相机「创建投屏元素」：按相机片段范围建 `type:"camfeed"` 元素（默认 delay 0、置顶），并选中它。
-- 时间轴相机行：`output:false` 显示「仅投屏」标记，点击恢复出画；相机菜单和相机属性面板都能切 `output`。
+- 时间轴相机行：早期用 `output:false` 显示「仅投屏」标记并点击恢复出画；`b6c6217` 删除 `output` 后改为只读的「被投屏 ×N」提示角标，相机菜单和相机属性面板里的 `output` 开关一并删除。
 - camfeed 属性面板补「来源相机 / 延迟一帧」，修改写 `updateElement {feed}`。
 - 2D 元素的屏幕锁 carry 从视口拖拽里删除；`elementCarrier` 暂留空桩给测试。
 - **未做**：空间父级 `strength` 的时间轴行（读 `parentStrengthAt`，写 `spatialParentKey/Unkey`）。
