@@ -26,7 +26,6 @@ import { elementWorldParent } from '/core/spatial-parent.js';
 import { frameOf } from '/core/spatial.js';
 import { basisFromDir } from '/core/scene.js';
 import { Scene3D } from './preview3d.js';
-import { elementCarrier, carrierMatrix } from '/core/hierarchy.js';
 import { feedPlan, hiddenFeeds, normalizeFeed, programProject } from '/core/camfeed.js';
 import { clearCompiledTracks, compileProject } from '/core/tracks.js';
 import {
@@ -775,6 +774,15 @@ export class Preview {
     }
   }
 
+  /** Camera states of the feed sources whose feed is on screen at t. */
+  _liveFeedCameras(p, t) {
+    const ids = new Set((p.elements || [])
+      .filter((el) => el.type === 'camfeed' && el.visible !== false
+        && t >= el.start - 1e-6 && t < el.start + el.duration - 1e-6)
+      .map((el) => normalizeFeed(el.feed).camera));
+    return (p.cameras || []).filter((c) => ids.has(c.id)).map((c) => evalCameraWorldWithLinks(p, t, c));
+  }
+
   /** Layers the camera being drawn may film: its hidden live feeds removed. */
   _visibleLayers(layers) {
     if (!this._viewer || !this._feedPlan) return layers;
@@ -800,13 +808,20 @@ export class Preview {
   _renderFeeds(p, t, layers) {
     const plan = feedPlan(p);
     this._feedPlan = plan;
-    if (!plan.sources.length) {
+    // Only sources with a feed on screen now are drawn (a cut sequence turned
+    // into feeds has one live source at a time); the others free their targets.
+    const live = new Set((p.elements || [])
+      .filter((el) => el.type === 'camfeed' && el.visible !== false
+        && t >= el.start - 1e-6 && t < el.start + el.duration - 1e-6)
+      .map((el) => normalizeFeed(el.feed).camera));
+    const sources = plan.sources.filter((id) => live.has(id));
+    if (!sources.length) {
       if (this.feedTargets.size) this._clearFeedTargets();
       return;
     }
     const gl = this.gl;
     for (const id of [...this.feedTargets.keys()]) {
-      if (plan.sources.includes(id)) continue;
+      if (sources.includes(id)) continue;
       const pair = this.feedTargets.get(id);
       this._freeTarget(pair.cur); this._freeTarget(pair.prev);
       this.feedTargets.delete(id);
@@ -825,7 +840,7 @@ export class Preview {
     this.scene3d.onElements = layers.length
       ? (vp, camPos) => this._drawLayers(this._visibleLayers(layers), W, H, { vp, camPos, meta: p.meta })
       : null;
-    for (const id of plan.sources) {
+    for (const id of sources) {
       const cam = (p.cameras || []).find((c) => c.id === id);
       if (!cam) continue;
       const pair = this._feedTarget(id);
@@ -863,6 +878,10 @@ export class Preview {
     const out = [];
     // the camera this frame is seen through (text is rasterised for its close-ups)
     const cam = this.scene3d.city ? (this.editMode && this.editCam ? this.editCam : evalCameraWorldWithLinks(p, t)) : null;
+    // Feed sources on screen now also film the text: rasterise for the closest view.
+    const feedCams = cam ? this._liveFeedCameras(p, t) : [];
+    const zoomFor = (el, st, nodeFrame) => feedCams.reduce(
+      (z, c) => Math.max(z, this._textZoom(el, st, c, nodeFrame)), this._textZoom(el, st, cam, nodeFrame));
     for (const el of p.elements) {
       if (el.visible === false) continue;
       if (t < el.start - 1e-6 || t >= el.start + el.duration - 1e-6) continue;
@@ -885,7 +904,7 @@ export class Preview {
         out.push(L);
       };
       if (el.type === 'text') {
-        const tt = this._textTexture(el, st, el.style, this._textZoom(el, st, cam, nodeFrame));
+        const tt = this._textTexture(el, st, el.style, zoomFor(el, st, nodeFrame));
         const w = tt.w / tt.zoom, h = tt.h / tt.zoom;
         const M = M3.mul(
           M3.mul(M3.mul(M3.T(cx + st.x * S, cy + st.y * S), M3.R(rot)), M3.S(st.scale, st.scale)),
@@ -929,11 +948,6 @@ export class Preview {
       }
     }
     out.sort((a, b) => a.el.z - b.el.z);
-    // Elements with the legacy camera screen lock ride along with it. A world
-    // spatial parent (mode:'world') is a matrix parent already folded into the
-    // node frame: elementCarrier returns null for it (core/hierarchy.js).
-    const carrierParam = cameraParamResolver(p);
-    for (const L of out) if (L.el.parent) L.carry = carrierMatrix(elementCarrier(p, L.el, t, { param: carrierParam }));
     // World plane of every layer for the shared draw / pick ordering (§2.5).
     // Node layers use the SpatialNode frame; legacy layers keep the exact point
     // + [0,0,1] normal the old _planeDist used, so the old picture keeps its
@@ -943,7 +957,6 @@ export class Preview {
       L.plane = L.node
         ? planeOfFrame(L.node.frame)
         : { p: [(L.st.x || 0) / 100, cyW - (L.st.y || 0) / 100, L.st.z || 0], n: [0, 0, 1] };
-      if (L.carry) L.plane = transformPlane(L.plane, L.carry);
     }
     // Node placement (world matrix) for node layers; legacy layers never get one.
     for (const L of out) if (L.node) this._nodePlane(L, t, S, p.meta);
@@ -979,8 +992,7 @@ export class Preview {
     const plane = nodePlaneMatrix(frame, width, height, { offset, roll: d.rotation, scale: d.scale });
     L.node.w = plane.w;
     L.node.h = plane.h;
-    // Camera-parented (screen-locked) node layers fold the carry into the model.
-    L.node.model = L.carry ? mul4(L.carry, plane.model) : plane.model;
+    L.node.model = plane.model;
   }
 
   render(t) {
@@ -1275,10 +1287,6 @@ export class Preview {
       const qx = (x - W / 2) / S;
       const qy = (y - H / 2) / S;
       let w = [qx / 100, cyW - qy / 100, z];
-      if (L.carry) {
-        const m = L.carry;
-        w = [0, 1, 2].map((i) => m[i] * w[0] + m[4 + i] * w[1] + m[8 + i] * w[2] + m[12 + i]);
-      }
       const p = s3.projectPoint(w);
       if (!p) return null;
       out.push([p.x * W / Math.max(1, s3.lastW), p.y * H / Math.max(1, s3.lastH)]);

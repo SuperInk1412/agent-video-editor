@@ -644,38 +644,7 @@ def _embed_elements(scene, opts, shot=None):
     scene.collection.objects.link(rig)
     with bpy.context.temp_override(scene=scene):
         SceneBuilder(project, opts).build(scene=scene, embed=rig)
-    _carry_elements(scene, rig, (shot or {}).get('elementCarriers') or [])
     return rig
-
-
-def _carry_elements(scene, rig, carriers):
-    """Camera-parented elements: carry empty (baked camera motion since binding)
-    -> a copy of the screen rig -> the element's objects (text, plane, shadow)."""
-    from mathutils import Matrix
-    for entry in carriers:
-        eid = str(entry.get('id'))
-        frames = entry.get('frames') or []
-        if not frames:
-            continue
-        carry = bpy.data.objects.new('VDM_Carry_' + eid, None)
-        carry.rotation_mode = 'QUATERNION'
-        scene.collection.objects.link(carry)
-        for fr in frames:
-            carry.location = Vector(fr['loc'])
-            carry.rotation_quaternion = Matrix(fr['rot']).to_quaternion()
-            k = float(fr.get('scale', 1.0))
-            carry.scale = (k, k, k)
-            carry.keyframe_insert('location', frame=int(fr['f']))
-            carry.keyframe_insert('rotation_quaternion', frame=int(fr['f']))
-            carry.keyframe_insert('scale', frame=int(fr['f']))
-        screen = bpy.data.objects.new('VDM_Screen_' + eid, None)
-        screen.location = rig.location
-        screen.scale = rig.scale
-        screen.parent = carry
-        scene.collection.objects.link(screen)
-        for ob in list(rig.children):
-            if ob.name == eid or ob.name.startswith(eid + '_shadow'):
-                ob.parent = screen
 
 
 def _plane_layer(scene, rig):
@@ -688,7 +657,7 @@ def _plane_layer(scene, rig):
     3D objects still cover them, and the compositor lays it over the fogged
     world. Matches the viewport, where 2D layers are never fogged."""
     plane_objs = set()
-    roots = [rig] + [ob for ob in scene.objects if ob.name.startswith(('VDM_Carry_', 'VDM_Screen_'))]
+    roots = [rig]
 
     def walk(ob):
         plane_objs.add(ob)

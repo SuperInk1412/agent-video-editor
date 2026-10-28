@@ -322,14 +322,13 @@ test('spatial-parent: a camera parent pans and rolls the 2D child (not the scree
   near(rolled.pos, [0, cy + 2, 10], 1e-6, 'camera roll orbits the child around the camera');
   near(dist(rolled.pos, [0, cy, 20]), Math.hypot(2, 10), 1e-6, 'radius from the camera kept');
 
-  // @live is not a world parent: the legacy carrier keeps working, and the
-  // world unparent refuses to silently drop the screen lock.
+  // The screen lock is retired (docs/DESIGN-CAMFEED-PARENTS.md §2): no new
+  // locks, and a leftover lock record is neither a world parent nor carried.
   const hud = addEl(p, { transform: { x: 300, y: 380, z: 1 } });
-  applyOp(p, { op: 'elementParent', id: hud.id, parent: '@live', t: 0 });
+  assert.throws(() => applyOp(p, { op: 'elementParent', id: hud.id, parent: '@live', t: 0 }), /贴屏已取消/);
+  elOf(p, hud.id).parent = { id: '@live', kind: 'camera', bind: { pos: [0, cy, 20], basis: [[1, 0, 0], [0, 1, 0], [0, 0, -1]], depth: 20 } };
   assert.equal(elementWorldParent(elOf(p, hud.id)), null);
-  assert.notEqual(elementCarrier(p, elOf(p, hud.id), 0), null);
-  assert.throws(() => applyOp(p, { op: 'spatialUnparent', id: hud.id }), /screen\/legacy camera parent/);
-  assert.equal(elOf(p, hud.id).parent.id, '@live', 'the screen lock survives');
+  assert.equal(elementCarrier(p, elOf(p, hud.id), 0), null);
 });
 
 // ---------------------------------------------------------------- legacy child
@@ -407,7 +406,7 @@ test('spatial-parent: rejects self, missing hosts, cycles, depth and non-element
 
   // A screen-locked element is not a stable world frame.
   const live = addEl(p, nodeEl([0, cy, 0]));
-  applyOp(p, { op: 'elementParent', id: live.id, parent: '@live', t: 0 });
+  elOf(p, live.id).parent = { id: '@live', kind: 'camera', bind: { pos: [0, cy, 20], basis: [[1, 0, 0], [0, 1, 0], [0, 0, -1]], depth: 20 } };
   assert.throws(() => applyOp(p, { op: 'spatialParent', id: b.id, parent: live.id }), /screen-locked/);
 });
 

@@ -406,7 +406,7 @@ export function applySpatialParentOp(project, op, api = {}) {
       const pid = op.parent == null ? '' : String(op.parent);
       if (!pid) fail('spatialParent needs a parent id');
       if (pid === String(child.host.id)) fail(`element ${child.host.id} cannot be its own spatial parent`);
-      if (pid === SCREEN_PARENT) fail('spatialParent does not take @live (use elementParent for the screen lock)');
+      if (pid === SCREEN_PARENT) fail('spatialParent does not take @live (the screen lock is retired; use a camera feed / HUD rig)');
       const kind = spatialHostKind(project, pid);
       if (!kind) fail(`no element, object or camera ${pid}`);
       if (kind === 'element') {

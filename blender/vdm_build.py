@@ -974,6 +974,9 @@ def build_compositor(scene, meta, cache_dir, fog=None, overlay=None, backdrop=No
 
 # ---------------------------------------------------------------- builder
 
+FEED_OVERSCAN_PX = 8.0  # project pixels a camfeed plane reaches past each frame edge
+
+
 def feed_frame_path(el, frame):
     """Source frame file a camfeed element shows at `frame`, or None when hidden."""
     feed = el.get('feed') or {}
@@ -1127,8 +1130,14 @@ class SceneBuilder:
         # Camera feed (engine/camfeed-render.js): a full-frame plane whose image
         # is swapped every frame for f_<frame - delay>.png of the source pass.
         img = bpy.data.images.new(f'{el["id"]}_feed', 4, 4, alpha=True)
-        mesh = plane_mesh(f'{el["id"]}_mesh', self.W, self.H)
+        # Overscan: the plane reaches a few pixels past the frame with the edge
+        # texels extended, so the pixel filter at the border never mixes in the
+        # background (a full-frame feed would otherwise get a dark rim).
+        m = FEED_OVERSCAN_PX
+        mesh = plane_mesh(f'{el["id"]}_mesh', self.W + 2 * m, self.H + 2 * m,
+                          (-m / self.W, -m / self.H, 1 + m / self.W, 1 + m / self.H))
         mat, nodes = textured_material(f'{el["id"]}_mat', img, st0['opacity'])
+        nodes['tex'].extension = 'EXTEND'
         obj = self.add_object(mesh, mat, el['id'])
         obj.location.z = self.layer_px * z
         nodes['tex']['vdm_feed'] = 1

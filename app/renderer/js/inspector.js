@@ -528,9 +528,7 @@ export class Inspector {
         else if ((project.scene?.objects || []).some((x) => x.id === parentId)) this.opts.onSelect?.({ objectId: parentId });
         else if ((project.cameras || []).some((x) => x.id === parentId)) this.opts.onSelect?.({ camera: true });
       };
-      const unparent = () => this.opts.onOp(el.parent.mode === 'world'
-        ? { op: 'spatialUnparent', id: el.id }
-        : { op: 'elementUnparent', id: el.id, t: tNow() });
+      const unparent = () => this.opts.onOp({ op: 'spatialUnparent', id: el.id });
       this.root.appendChild(h('div', { class: 'hint pad insp-parent' },
         h('span', { class: 'insp-parent-name' }, `空间父级：${parentName}`),
         h('button', { type: 'button', class: 'mini', onclick: jump }, '转到父级'),
@@ -668,13 +666,6 @@ export class Inspector {
     });
     const bindRows = [
       this._field({ label: '跟随节拍', value: el.punch || 0, step: 0.05, min: 0, max: 2, onChange: (v) => set('punch', { punch: v }) }),
-      el.parent?.id ? null : this._field({
-        label: '贴屏', type: 'checkbox', value: false,
-        // screen-locked = parented to the active camera, bound at the playhead (no jump either way)
-        onChange: (v) => this.opts.onOp(v
-          ? { op: 'elementParent', id: el.id, parent: project.activeCameraId, t: tNow() }
-          : { op: 'elementUnparent', id: el.id, t: tNow() }),
-      }),
     ];
     if (node) {
       // Unified SpatialNode editor: pivot / position / orientation / xyz scale.

@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { normalizeProject, assertValidProject } from '../core/schema.js';
 import { ensureSpace } from '../core/space.js';
 import { migrateLegacyParents } from '../core/parent-strength.js';
+import { migrateScreenLocks } from '../core/screen-lock-migrate.js';
 import { ensureAudioElements } from '../core/audio.js';
 
 export const PROJECT_FILE = 'project.vdm.json';
@@ -71,6 +72,9 @@ export async function loadProject(dir) {
   // One placement parent kind: old 3D parents become spatial parents with the
   // same bind / switches / strength (docs/DESIGN-CAMFEED-PARENTS.md §3).
   migrateLegacyParents(project);
+  // The screen lock (贴屏) is retired: locked elements move into a HUD rig that
+  // films the shots through camera feeds (core/screen-lock-migrate.js).
+  migrateScreenLocks(project);
   // Old projects kept their song only in meta.audio; show it as a real element.
   ensureAudioElements(project);
   assertValidProject(project);

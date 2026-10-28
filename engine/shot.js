@@ -3,7 +3,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { bakeCameraTrack, cameraLayers, cameraTransform } from '../core/camera.js';
-import { elementCarrier } from '../core/hierarchy.js';
 import {
   cameraParamResolver, evalCameraWorldWithLinks, linksEvalOptions, objectWorldPoseWithLinks,
 } from '../core/link-eval.js';
@@ -115,36 +114,6 @@ export function bakeObjects(project, { fps = 24, from = 0, to = null } = {}) {
   return out;
 }
 
-/**
- * Camera-parented 2D elements: per-frame rigid carry (x' = rot·x + loc) that
- * Blender applies on top of the screen rig, from the same elementCarrier() the
- * viewport uses.
- */
-export function bakeElementCarriers(project, { fps = 24, from = 0, to = null } = {}) {
-  const els = (project.elements || []).filter((e) => e.parent?.id);
-  if (!els.length) return [];
-  const f0 = Math.round(from * fps) + 1;
-  const f1 = Math.round((to ?? project.meta.duration) * fps) + 1;
-  const param = cameraParamResolver(project);
-  return els.map((el) => {
-    const frames = [];
-    for (let f = f0; f <= f1; f++) {
-      const m = elementCarrier(project, el, (f - 1) / fps, { param });
-      if (!m) continue;
-      const L = m.L;
-      const loc = [0, 1, 2].map((i) => m.c[i] - (L[i][0] * m.p0[0] + L[i][1] * m.p0[1] + L[i][2] * m.p0[2]));
-      const k = m.scale || 1; // uniform pull-in toward the camera (see elementCarrier)
-      frames.push({
-        f,
-        loc: loc.map((v) => Math.round(v * 1e5) / 1e5),
-        rot: L.map((row) => row.map((v) => Math.round((v / k) * 1e6) / 1e6)),
-        scale: Math.round(k * 1e7) / 1e7,
-      });
-    }
-    return { id: el.id, frames };
-  });
-}
-
 export const is3D = (project) => cameraLayers(project).length > 0;
 
 function forCamera(project, camera) {
@@ -250,7 +219,6 @@ export function buildShot(project, { from = 0, to = null, fps = null } = {}) {
     camera,
     cameraLayers: layers,
     objects: bakeObjects(project, { fps: frameRate, from, to: end }),
-    elementCarriers: bakeElementCarriers(project, { fps: frameRate, from, to: end }),
     fx: project.meta.fx,
     cameraCfg: {
       near: Number(cam.near) || 0.5,
