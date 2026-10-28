@@ -7,7 +7,7 @@
 // its attributes are folded inside the camera row.
 import { timecode, sampleTrack } from '/core/time.js';
 import { objectPose } from '/core/scene.js';
-import { childrenOf } from '/core/hierarchy.js';
+import { childrenOf, wouldCycle } from '/core/hierarchy.js';
 import { pathPos, cameraTransform, cameraParamValue, cameraRange } from '/core/camera.js';
 import {
   emptySelection, normalizeSelection, selectOne, pickSelection, legacyFields,
@@ -1976,7 +1976,8 @@ export class Timeline {
     if (e.type !== 'audio' && rank2D != null) {
       kind.dataset.tip = `2D 图层：当前第 ${rank2D + 1} / ${this._rank2D.size} 个（越靠上越高；同面才看得出；拖过相机/3D/声音只改显示）`;
     }
-    g.append(eye, caret, dot, name, kind);
+    const parentBtn = e.type === 'audio' ? null : this._parentButton('el', e);
+    g.append(eye, parentBtn || '', caret, dot, name, kind);
 
     const track = el('div', 'tl-track');
     const b = el('div', `blk el t-${e.type}`);
@@ -2101,14 +2102,7 @@ export class Timeline {
     name.textContent = o.name || o.id;
     name.dataset.tip = '双击重命名';
     name.addEventListener('dblclick', () => this._inlineName(name, o));
-    if (o.parent?.id) {
-      const p = (this.project?.scene?.objects || []).find((x) => x.id === o.parent.id);
-      const link = el('span', 'tl-objparent', '↳');
-      link.dataset.tip = `父级：${p?.name || o.parent.id}`;
-      g.append(eye, caret, dot, link, name);
-    } else {
-      g.append(eye, caret, dot, name);
-    }
+    g.append(eye, this._parentButton('ob', o), caret, dot, name);
     const kind = el('span', 'tl-objkind badge badge-object', o.type === 'empty' ? '空' : '3D');
     kind.dataset.tip = '3D 物体按深度遮挡；上下拖动只改列表显示，不影响画面';
     const kids = childrenOf(this.project, o.id).length;
@@ -2849,6 +2843,148 @@ export class Timeline {
       }
     }
     this._paintPool();
+  }
+
+  /** Human name of a parent id across elements, objects and cameras. */
+  _parentName(parent) {
+    const id = parent?.id == null ? '' : String(parent.id);
+    if (!id) return '';
+    if (id === '@live') return '当前镜头 (@live)';
+    const p = this.project;
+    const host = (p?.elements || []).find((x) => x.id === id)
+      || (p?.scene?.objects || []).find((x) => x.id === id)
+      || (p?.cameras || []).find((x) => x.id === id);
+    return host?.name || id;
+  }
+
+  /**
+   * Parent button in a header row. 2D children use the world-space spatialParent
+   * op (any element/object/camera parent); 3D children keep the existing
+   * objectParent (3D object parents only). Press and drag to a target row;
+   * a plain click removes the current parent.
+   */
+  _parentButton(kind, host) {
+    const btn = h('button', {
+      type: 'button', class: `tl-objparentbtn${host.parent?.id ? ' on' : ''}`,
+      'aria-label': '空间父级', 'data-tip': host.parent?.id
+        ? `空间父级：${this._parentName(host.parent)}\n拖动到别的元素换父级；单击解除`
+        : '空间父级\n按住拖到目标元素行',
+    }, '↳');
+    btn.addEventListener('pointerdown', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      this._startParentDrag(ev, kind, host, btn);
+    });
+    return btn;
+  }
+
+  _runParentOp(op) {
+    try {
+      const pending = this.onOp?.(op);
+      if (pending?.catch) pending.catch((err) => this.onToast?.(String(err?.message || err)));
+    } catch (err) {
+      this.onToast?.(String(err?.message || err));
+    }
+  }
+
+  _removeParent(kind, host) {
+    if (!host?.parent?.id) return;
+    if (kind === 'el') {
+      this._runParentOp(host.parent.mode === 'world'
+        ? { op: 'spatialUnparent', id: host.id }
+        : { op: 'elementUnparent', id: host.id, t: round3(this.time) });
+    } else {
+      this._runParentOp({ op: 'objectUnparent', id: host.id, t: round3(this.time) });
+    }
+  }
+
+  _startParentDrag(ev, kind, host, btn) {
+    const start = { x: ev.clientX, y: ev.clientY };
+    let moved = false;
+    let line = null;
+    let targetRow = null;
+    const childId = host.id;
+    const clean = () => {
+      line?.remove();
+      line = null;
+      targetRow?.classList.remove('parent-target');
+      targetRow = null;
+      btn.classList.remove('drop');
+      document.body.classList.remove('tl-parent-dragging');
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', cancel);
+      window.removeEventListener('keydown', onKey, true);
+    };
+    const rowAt = (x, y) => document.elementFromPoint(x, y)?.closest?.(
+      '.tl-elhead[data-el], .tl-objhead[data-obj], .tl-camhead[data-cam]',
+    ) || null;
+    const targetOf = (row) => {
+      if (!row) return null;
+      if (row.dataset.el) return { kind: 'el', id: row.dataset.el, name: this._element(row.dataset.el)?.name };
+      if (row.dataset.obj) return { kind: 'ob', id: row.dataset.obj, name: this._obj(row.dataset.obj)?.name };
+      if (row.dataset.cam) return { kind: 'cam', id: row.dataset.cam, name: this._camById(row.dataset.cam)?.name };
+      return null;
+    };
+    const wire = (x, y) => {
+      if (!line) {
+        line = h('div', { class: 'tl-parent-wire' });
+        document.body.appendChild(line);
+      }
+      const r = btn.getBoundingClientRect();
+      const x0 = r.left + r.width / 2, y0 = r.top + r.height / 2;
+      const dx = x - x0, dy = y - y0;
+      line.style.left = `${x0}px`;
+      line.style.top = `${y0}px`;
+      line.style.width = `${Math.hypot(dx, dy)}px`;
+      line.style.transform = `rotate(${Math.atan2(dy, dx)}rad)`;
+    };
+    const move = (e) => {
+      if (!moved && Math.hypot(e.clientX - start.x, e.clientY - start.y) > 3) {
+        moved = true;
+        document.body.classList.add('tl-parent-dragging');
+        btn.classList.add('drop');
+      }
+      if (!moved) return;
+      wire(e.clientX, e.clientY);
+      const row = rowAt(e.clientX, e.clientY);
+      if (row !== targetRow) {
+        targetRow?.classList.remove('parent-target');
+        targetRow = row;
+        targetRow?.classList.add('parent-target');
+      }
+    };
+    const up = (e) => {
+      const didMove = moved;
+      const row = targetRow;
+      clean();
+      if (!didMove) {
+        this._removeParent(kind, host);
+        return;
+      }
+      const target = targetOf(row);
+      if (!target) return this.onToast?.('没有落在元素行上');
+      if (target.kind === 'el' && target.id === childId) return this.onToast?.('不能把自己设成父级');
+      if (kind === 'ob') {
+        if (target.kind !== 'ob') return this.onToast?.('3D 子级目前只能挂 3D 对象父级');
+        const objects = this.project?.scene?.objects || [];
+        if (wouldCycle(objects, childId, target.id)) return this.onToast?.('父子级会成环');
+        this._runParentOp({ op: 'objectParent', id: childId, parent: target.id, t: round3(this.time) });
+        return;
+      }
+      this._runParentOp({ op: 'spatialParent', id: childId, parent: target.id, t: round3(this.time) });
+    };
+    const cancel = () => clean();
+    const onKey = (e) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopPropagation();
+      clean();
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', cancel);
+    window.addEventListener('keydown', onKey, true);
   }
 
   _pickPool(kind, ref, ev) {

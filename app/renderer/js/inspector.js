@@ -408,6 +408,28 @@ export class Inspector {
       ],
     });
 
+    if (el.parent?.id) {
+      const parentId = String(el.parent.id);
+      const parentHost = parentId === '@live' ? null
+        : (project.elements || []).find((x) => x.id === parentId)
+          || (project.scene?.objects || []).find((x) => x.id === parentId)
+          || (project.cameras || []).find((x) => x.id === parentId);
+      const parentName = parentId === '@live' ? '当前镜头 (@live，随剪辑切换)' : (parentHost?.name || parentId);
+      const jump = () => {
+        if (parentId === '@live') this.opts.onSelect?.({ camera: true });
+        else if ((project.elements || []).some((x) => x.id === parentId)) this.opts.onSelect?.({ elementId: parentId });
+        else if ((project.scene?.objects || []).some((x) => x.id === parentId)) this.opts.onSelect?.({ objectId: parentId });
+        else if ((project.cameras || []).some((x) => x.id === parentId)) this.opts.onSelect?.({ camera: true });
+      };
+      const unparent = () => this.opts.onOp(el.parent.mode === 'world'
+        ? { op: 'spatialUnparent', id: el.id }
+        : { op: 'elementUnparent', id: el.id, t: tNow() });
+      this.root.appendChild(h('div', { class: 'hint pad insp-parent' },
+        h('span', { class: 'insp-parent-name' }, `空间父级：${parentName}`),
+        h('button', { type: 'button', class: 'mini', onclick: jump }, '转到父级'),
+        h('button', { type: 'button', class: 'mini', onclick: unparent }, '解除')));
+    }
+
     // Keyable fields show the keyed value at the playhead (before motion presets
     // and fades). Once a property has keys, typing a value keys it at the
     // playhead; otherwise it edits the base value.
@@ -477,14 +499,13 @@ export class Inspector {
       this._field({ label: '旋转', unit: '°', value: round(kv('transform.rotation', el.transform.rotation), 2), step: 0.5, kf: true, path: 'transform.rotation', onChange: edit('transform.rotation', (v) => ({ transform: { rotation: v } })) }),
       this._field({ label: '不透明度', value: round(kv('transform.opacity', el.transform.opacity), 3), step: 0.01, min: 0, max: 1, percent: true, kf: true, path: 'transform.opacity', onChange: edit('transform.opacity', (v) => ({ transform: { opacity: v } })) }),
       this._field({ label: '跟随节拍', value: el.punch || 0, step: 0.05, min: 0, max: 2, onChange: (v) => set('punch', { punch: v }) }),
-      this._field({
-        label: '贴屏', type: 'checkbox', value: !!el.parent,
+      el.parent?.id ? null : this._field({
+        label: '贴屏', type: 'checkbox', value: false,
         // screen-locked = parented to the active camera, bound at the playhead (no jump either way)
         onChange: (v) => this.opts.onOp(v
           ? { op: 'elementParent', id: el.id, parent: project.activeCameraId, t: tNow() }
           : { op: 'elementUnparent', id: el.id, t: tNow() }),
       }),
-      el.parent ? h('div', { class: 'hint' }, `跟随相机 ${(project.cameras || []).find((c) => c.id === el.parent.id)?.name || el.parent.id}：相机怎么动，它在画面上就停在哪里。取消时元素留在当前位置。`) : null,
     ));
 
     this.root.appendChild(this._sec('时间', {}, ...timeRows));

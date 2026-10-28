@@ -224,6 +224,22 @@ body.tl-scrubbing, body.tl-scrubbing * { cursor: ew-resize !important; user-sele
 .tl-objname input { font-size: var(--fs-sm); padding: 1px 4px; }
 .tl-objkind { margin-left: auto; flex: 0 0 auto; }
 .tl-objparent { color: var(--edit); font-size: var(--fs-xs); flex: 0 0 auto; }
+.tl-objparentbtn {
+  display: grid; place-items: center; width: 18px; height: 22px; flex: 0 0 18px; padding: 0;
+  border: 0; border-radius: var(--r-sm); background: transparent; color: var(--text-3);
+  font-size: var(--fs-xs); cursor: pointer;
+}
+.tl-objparentbtn:hover { color: var(--text-1); background: var(--surface-3); }
+.tl-objparentbtn.on { color: var(--edit); }
+.tl-objparentbtn.on:hover { background: var(--edit-bg); }
+.tl-parent-wire {
+  position: fixed; z-index: 80; height: 1px; background: var(--edit);
+  transform-origin: 0 50%; pointer-events: none; opacity: .9;
+}
+.tl-objhead.parent-target, .tl-camhead.parent-target, .tl-elhead.parent-target {
+  outline: 1px solid var(--edit-border); background: var(--edit-bg);
+}
+body.tl-parent-dragging, body.tl-parent-dragging * { cursor: crosshair !important; }
 .tl-objkids {
   font-size: var(--fs-xs); line-height: 16px; color: var(--text-3); border: 1px solid var(--border);
   border-radius: var(--r-sm); padding: 0 4px; flex: 0 0 auto;
