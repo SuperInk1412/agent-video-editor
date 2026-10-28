@@ -277,16 +277,32 @@ function applyProject(p, source) {
 // ---------------------------------------------------------------- time
 function setTime(t, { seekAudio = true } = {}) {
   const dur = S.project?.meta.duration || 12;
-  S.time = Math.max(0, Math.min(dur, t));
+  const next = Math.max(0, Math.min(dur, t));
+  // A follow only owns the camera's shot. Seeking outside its range ends the
+  // follow but keeps the eye on the near boundary frame (not on a stale pose).
+  detachFollowForSeek(next);
+  S.time = next;
   timeline?.setTime(S.time);
   updateTimecode();
   if (seekAudio && S.playing) preview.setAudioTime(S.time);
   if (!S.playing) inspector.render(S.project, S.selection, S.time);
+  if (S.followCam) syncViewControls();
 }
 
 function play() {
   if (!S.project) return;
-  if (S.time >= S.project.meta.duration - 0.02) S.time = 0;
+  const follow = S.followCam ? cameraById(S.followCam) : null;
+  if (follow) {
+    const range = cameraRange(S.project, follow);
+    if (S.time < range.start - 1e-6 || S.time >= range.end - 1e-6) {
+      if (range.end - range.start <= 1e-6) {
+        toast('这个镜头没有可播放的时间段', 'warn');
+        return;
+      }
+      // At the auto-pause point Space is the natural "watch it again".
+      setTime(range.start);
+    }
+  } else if (S.time >= S.project.meta.duration - 0.02) S.time = 0;
   S.playing = true;
   S.playWall = performance.now();
   S.playFrom = S.time;
@@ -1285,6 +1301,32 @@ function stopFollow() {
   return true;
 }
 
+/**
+ * Seeking outside the followed camera's clip ends the follow. The eye stays on
+ * the nearest boundary frame (start or end) so the picture does not silently
+ * show a camera path outside the shot. Exactly `end` is still inside: that is
+ * where the play-within-the-shot auto-pauses.
+ */
+function detachFollowForSeek(t) {
+  if (!S.followCam) return false;
+  const cam = cameraById(S.followCam);
+  if (!cam) { S.followCam = null; syncViewControls(); return false; }
+  const range = cameraRange(S.project, cam);
+  if (t >= range.start - 1e-6 && t <= range.end + 1e-6) return false;
+  const at = t < range.start ? range.start : range.end;
+  const c = evalCameraWorldWithLinks(S.project, at, cam);
+  S.editCam = {
+    pos: c.pos.slice(), look: c.look.slice(),
+    roll: Number(c.roll) || 0, fov: Number(c.fov) || 50,
+  };
+  if (preview) preview.editCam = S.editCam;
+  S.followCam = null;
+  if (S.playing) pause();
+  syncViewControls();
+  toast(`已离开镜头「${cam.name || cam.id}」，跟随结束`, 'info');
+  return true;
+}
+
 /** Enter edit-select mode and lock the viewport to camera `id` over time. */
 function followCamera(id, { selectHost = false } = {}) {
   const cam = cameraById(id);
@@ -2155,8 +2197,14 @@ function syncViewControls() {
     const cam = S.followCam ? cameraById(S.followCam) : null;
     followHint.hidden = !cam;
     if (cam) {
-      followHint.textContent = `跟随 ${cam.name || cam.id} ×`;
-      followHint.dataset.tip = '正在跟随这台相机；点击脱离，保持当前视角（切移动模式也会脱离）';
+      const range = cameraRange(S.project, cam);
+      const atEnd = S.time >= range.end - 1e-6;
+      followHint.textContent = atEnd
+        ? `跟随 ${cam.name || cam.id} · 末尾 ×`
+        : `跟随 ${cam.name || cam.id} ×`;
+      followHint.dataset.tip = atEnd
+        ? '已到镜头末尾；按空格从镜头起点重播；点击脱离，保持当前视角'
+        : '正在跟随这台相机；点击脱离，保持当前视角（切移动模式也会脱离）';
     }
   }
   syncGridButton();
