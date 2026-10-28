@@ -89,6 +89,9 @@ export class Inspector {
     this._kfSync = [];
     this._elId = null;
     this.root.classList.add('insp');
+    // The back chip belongs to the sticky header so a scrolled panel cannot hide
+    // it; it is only present after a "转到父级" jump.
+    this._back = !!this.opts.canGoBack?.();
     const objectId = primary?.type === 'ob' ? primary.id : (primary ? null : sel?.objectId);
     const elementId = primary?.type === 'el' ? primary.id : (primary ? null : sel?.elementId);
     const camera = primary ? primary.type === 'cam' : !!sel?.camera;
@@ -162,6 +165,10 @@ export class Inspector {
       });
     }
     const head = h('div', { class: 'insp-head' },
+      this._back ? h('button', {
+        type: 'button', class: 'mini insp-back', 'data-tip': '返回上一个属性面板（Alt+←）',
+        onclick: () => this.opts.onBack?.(),
+      }, '← 返回') : null,
       h('span', { class: `badge${type ? ` badge-${type}` : ''} insp-kind` }, badge),
       nameBtn,
       id ? h('span', { class: 'insp-id', title: id }, id) : null,

@@ -54,6 +54,11 @@ const S = {
 };
 
 let preview, timeline, inspector, agentPanel, pipelinePanel, logPanel, gizmo, projects, curvePanel;
+// Property-link "转到父级" navigation stack (PLAN-ui-round3 §4.3). Jumping never
+// writes the project and never touches Ctrl+Z; Alt+← / the inspector chip walks
+// back through the panels the user came from.
+const linkNavStack = [];
+const LINK_NAV_MAX = 20;
 let layout, timecodeUI, statusBar, logDrawer; // shell (shell.js)
 let assetsPanel, outliner; // left column (assets.js / outliner.js)
 
@@ -200,6 +205,8 @@ function syncWorld(p) {
 function applyProject(p, source) {
   if (source !== 'boot' && S.project && p.rev <= S.project.rev) return;
   const prevDuration = S.project?.meta?.duration;
+  // A fresh project (boot) invalidates every panel the back stack could restore.
+  if (!S.project || source === 'boot') linkNavStack.length = 0;
   S.project = p;
   // JSON responses cannot preserve the server-side `camera` alias identity;
   // re-point it at the active stack entry so edits and reads share one object.
@@ -331,13 +338,74 @@ function select(sel = {}) {
 }
 
 /**
+ * Snapshot the current panel/selection/timeline layout for the link-jump back
+ * stack. Only view state is captured: no project data, no time, no ops.
+ */
+function snapshotLinkNav() {
+  const sel = S.selection || {};
+  return {
+    selection: {
+      segmentId: sel.segmentId ?? null,
+      elementId: sel.elementId ?? null,
+      objectId: sel.objectId ?? null,
+      camera: !!sel.camera,
+      pool: sel.pool ? {
+        kind: sel.pool.kind,
+        ids: [...(sel.pool.ids || [])],
+        primary: sel.pool.primary ?? null,
+      } : emptySelection(),
+    },
+    timeline: timeline ? {
+      sections: { ...(timeline.sections || {}) },
+      expanded: [...(timeline.expanded || [])],
+      expandedEls: [...(timeline.expandedEls || [])],
+      openCams: [...(timeline.openCams || [])],
+      scrollTop: timeline.scroll?.scrollTop || 0,
+      scrollLeft: timeline.scroll?.scrollLeft || 0,
+    } : null,
+  };
+}
+
+/** Restore a snapshot taken by snapshotLinkNav (no project write, no undo step). */
+function restoreLinkNav(snap) {
+  if (!snap) return false;
+  select(snap.selection || {});
+  const tl = snap.timeline;
+  if (timeline && tl) {
+    timeline.sections = { ...(tl.sections || {}) };
+    timeline.expanded = new Set(tl.expanded || []);
+    timeline.expandedEls = new Set(tl.expandedEls || []);
+    timeline.openCams = new Set(tl.openCams || []);
+    timeline.render(true);
+    if (timeline.scroll) {
+      timeline.scroll.scrollTop = Number(tl.scrollTop) || 0;
+      timeline.scroll.scrollLeft = Number(tl.scrollLeft) || 0;
+    }
+  }
+  return true;
+}
+
+const canGoBackLink = () => linkNavStack.length > 0;
+
+/** Alt+← / inspector "← 返回": pop the last "转到父级" panel. */
+function goBackLink() {
+  const snap = linkNavStack.pop();
+  if (!snap) return false;
+  const active = document.activeElement;
+  if (active && /INPUT|TEXTAREA|SELECT/.test(active.tagName || '')) active.blur();
+  inspector?._flush();
+  timeline?.flushPending?.();
+  restoreLinkNav(snap);
+  toast('已返回上一个属性面板');
+  return true;
+}
+
+/**
  * Property-link "转到父级" (PLAN-ui-round3 §4.3): select the parent host, open
  * its property page and reveal the source row. Selecting a camera here only
  * shows its inspector/rows; it never activates the camera. This path writes
- * nothing to the project, so Ctrl+Z stays the global undo.
- *
- * TODO(ui-round3 §4.3): local nav stack + Alt+← / "← 返回" chip. Deliberately
- * not implemented yet; jumping must never consume Ctrl+Z.
+ * nothing to the project, so Ctrl+Z stays the global undo; the local back stack
+ * (Alt+← / inspector chip) restores the panel the user came from.
  */
 function jumpToLinkParent({ host, id, path } = {}) {
   if (!S.project || (host !== 'el' && host !== 'ob' && host !== 'cam') || id == null) return false;
@@ -348,6 +416,12 @@ function jumpToLinkParent({ host, id, path } = {}) {
   inspector?._flush();
   timeline?.flushPending?.();
   const ref = host === 'el' ? elementRef(id) : host === 'ob' ? objectRef(id) : cameraRef(id);
+  // A jump that changes the panel is reversible. Same-host property reveals do
+  // not push, so repeated clicks cannot grow a no-op stack.
+  if (String(S.selection?.pool?.primary || '') !== String(ref)) {
+    linkNavStack.push(snapshotLinkNav());
+    if (linkNavStack.length > LINK_NAV_MAX) linkNavStack.shift();
+  }
   const sel = { pool: selectOne('element', ref) };
   if (host === 'el') sel.elementId = id;
   else if (host === 'ob') sel.objectId = id;
@@ -2182,6 +2256,8 @@ async function boot() {
     onOp: (o) => op(o),
     getTime: () => S.time,
     onLinkJump: (jump) => jumpToLinkParent(jump),
+    canGoBack: () => canGoBackLink(),
+    onBack: () => goBackLink(),
     onToast: (msg, level = 'info') => toast(msg, level),
     // ◆ records what the property is at the playhead (its keyed value, or the base)
     getTimeValue: (path) => {
@@ -3164,7 +3240,7 @@ async function boot() {
   registerCommand({
     id: 'play.prevFrame', title: '上一帧', sheetTitle: '上一帧（Shift：后退 1s）', group: '播放', keys: 'ArrowLeft',
     icon: 'step-back', keywords: 'previous frame step back',
-    match: (e) => e.key === 'ArrowLeft',
+    match: (e) => e.key === 'ArrowLeft' && !e.altKey,
     run: (e) => { e?.preventDefault(); if (e?.shiftKey) stepTime(-1); else stepFrames(-1, { pauseFirst: true }); },
   });
   registerCommand({
@@ -3335,6 +3411,12 @@ async function boot() {
     id: 'tl.keyedOnly', title: '只看带键属性', group: '时间轴', keys: 'U', icon: 'filter', keywords: 'keyed filter properties',
     match: (e) => e.key.toLowerCase() === 'u' && !e.ctrlKey && !e.metaKey && !e.altKey,
     run: (e) => { if (timeline?.applyKeyedFilter()) { e?.preventDefault(); return; } return false; },
+  });
+  registerCommand({
+    id: 'nav.backLink', title: '返回上一个属性面板', sheetTitle: '返回上一个属性面板（属性父级跳转后）', group: '面板', keys: 'Alt+←',
+    icon: 'step-back', keywords: 'back return parent link panel',
+    match: (e) => e.altKey && !e.ctrlKey && !e.metaKey && e.key === 'ArrowLeft',
+    run: (e) => { if (!goBackLink()) return false; e?.preventDefault(); },
   });
   registerCommand({
     id: 'tl.curves', title: '曲线面板', group: '时间轴', keys: 'F2', icon: 'curve', keywords: 'curve graph editor', global: true,

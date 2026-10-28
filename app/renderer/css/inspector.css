@@ -38,6 +38,7 @@ button.insp-name:hover { background: var(--surface-2); border-color: var(--borde
 .insp-multi { flex: 0 0 auto; margin-left: auto; color: var(--accent); font-size: var(--fs-xs); white-space: nowrap; }
 .insp-multi + .insp-actions { margin-left: 4px; }
 .insp-actions.wide { margin: 10px 0; }
+.insp-back { flex: 0 0 auto; white-space: nowrap; }
 .insp-head + .hint.pad { padding: 8px 0 6px; }
 .insp-parent { display: flex; align-items: center; gap: 6px; padding: 6px 0 4px; }
 .insp-parent-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
