@@ -11,7 +11,8 @@ import {
 } from '../core/spatial.js';
 import { createProject, normalizeProject, validateProject } from '../core/schema.js';
 import { objectPose, poseMatrix, basisFromDir } from '../core/scene.js';
-import { frameOf as poseFrameOf } from '../core/hierarchy.js';
+import { worldPose, frameOf as poseFrameOf } from '../core/hierarchy.js';
+import { applyOp } from '../core/ops.js';
 import { screenCenterY } from '../core/space.js';
 
 const near = (a, b, eps = 1e-9, msg = '') => {
@@ -359,4 +360,32 @@ test('spatial: normalisation preserves element nodes and never fabricates them',
   assert.ok(paths.includes('elements[0].node.pivot'), 'bad pivot is reported');
   assert.ok(paths.includes('elements[0].node.dir'), 'zero direction is reported');
   assert.ok(!paths.some((path) => path.startsWith('elements[1].node')), 'legacy element is unaffected');
+});
+
+test('spatial: parent math matches the shipped 3D object hierarchy', () => {
+  const p = normalizeProject(createProject({ title: 'hier', duration: 10 }));
+  const add = (object) => applyOp(p, { op: 'objectAdd', object }).changed[0];
+  const parent = add({ id: 'ob_rig', type: 'empty', pivot: [0, 0, 0] });
+  applyOp(p, { op: 'objectKey', id: parent, path: 'pivot', t: 0, v: [0, 0, 0], ease: 'linear' });
+  applyOp(p, { op: 'objectKey', id: parent, path: 'pivot', t: 2, v: [10, 0, 0] });
+  applyOp(p, { op: 'objectKey', id: parent, path: 'dir', t: 0, v: [0, 0, -1], ease: 'linear' });
+  applyOp(p, { op: 'objectKey', id: parent, path: 'dir', t: 2, v: [1, 0, 0] });
+  const child = add({ id: 'ob_box', type: 'solid', pivot: [0, 0, -5] });
+  applyOp(p, { op: 'objectParent', id: child, parent, t: 0 });
+  const parentObj = p.scene.objects.find((o) => o.id === parent);
+  const childObj = p.scene.objects.find((o) => o.id === child);
+  // The stored 3D bind uses `pos`; the unified reader accepts it as `pivot`.
+  const bind = childObj.parent.bind;
+  assert.equal(bind.pivot, undefined);
+  for (const t of [0, 0.7, 2]) {
+    const expected = worldPose(p, childObj, t);
+    const got = frameOf(applyParentToNode(
+      objectNode(childObj, t),
+      poseFrameOf(worldPose(p, parentObj, t)),
+      bind,
+    ));
+    near(got.pos, expected.worldPos, 1e-6, `worldPos @${t}`);
+    near(got.basis, [expected.basis.right, expected.basis.up, expected.basis.forward], 1e-6, `basis @${t}`);
+    near(got.scale, expected.scale, 1e-6, `scale @${t}`);
+  }
 });
