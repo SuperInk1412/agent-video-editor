@@ -23,7 +23,7 @@ import { sampleTrack } from '/core/time.js';
 import { clearCompiledTracks } from '/core/tracks.js';
 import { elementNodeAt } from './node-at.js';
 import {
-  emptySelection, normalizeSelection, selectOne, legacyFields, cameraRef, objectRef, elementRef, splitRef,
+  emptySelection, normalizeSelection, selectOne, pickSelection, legacyFields, cameraRef, objectRef, elementRef, splitRef,
   keyframeExists, keyframeDeleteOps,
 } from '/core/selection.js';
 
@@ -2560,11 +2560,23 @@ async function boot() {
   const snap3 = (v, e) => (e?.ctrlKey ? v.map((n) => Math.round(n * 2) / 2) : v);
   const camCenter = (cam, t) => cameraTransform(cam, t).center;
   const camWorldKey = (cam, key) => v3add(camCenter(cam, key.t), key.pos);
-  const selectAt = (sx, sy) => {
+  const selectAt = (sx, sy, ev) => {
+    const additive = !!(ev?.ctrlKey || ev?.metaKey || ev?.shiftKey);
     const id = preview.hitTest(sx, sy, S.time);
-    if (id) return select({ elementId: id });
-    const obj = preview.scene3d?.pickObject(S.project, S.time, sx, sy);
-    if (obj) return select({ objectId: obj.id });
+    const obj = id ? null : preview.scene3d?.pickObject(S.project, S.time, sx, sy);
+    if (id || obj) {
+      const kind = id ? 'el' : 'ob';
+      const host = id || obj.id;
+      if (additive) {
+        // One element pool for 2D / 3D / cameras; picking a selected ref again
+        // removes it (pickSelection toggles inside the same pool).
+        const ref = kind === 'el' ? elementRef(host) : objectRef(host);
+        select({ pool: pickSelection(S.selection.pool, 'element', ref, true) });
+      } else if (kind === 'el') select({ elementId: host });
+      else select({ objectId: host });
+      return;
+    }
+    if (additive) return; // Ctrl-click on empty space keeps the current pool
     const seg = S.project.segments.find((s) => S.time >= s.start && S.time < s.start + s.duration);
     if (seg) return select({ elementId: null, segmentId: seg.id });
     if (S.project.camera) return select({ camera: true });
@@ -2730,8 +2742,12 @@ async function boot() {
     if (!S.editMode) {
       if (e.button === 0) {
         const elId = preview.hitTest(sx, sy, S.time);
-        if (elId) { begin2DElementDrag(elId, sx, sy, cx, cy, e); return; }
-        selectAt(sx, sy);
+        if (elId) {
+          if (e.ctrlKey || e.metaKey || e.shiftKey) selectAt(sx, sy, e);
+          else begin2DElementDrag(elId, sx, sy, cx, cy, e);
+          return;
+        }
+        selectAt(sx, sy, e);
       }
       return;
     }
@@ -3111,7 +3127,7 @@ async function boot() {
       gizmo.sel = -1;
       gizmo.liveSel = false;
       gizmo.draw();
-      selectAt(sx, sy);
+      selectAt(sx, sy, e);
     }
   };
   canvas.addEventListener('pointerup', endDrag);
