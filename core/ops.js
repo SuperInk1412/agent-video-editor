@@ -1,5 +1,6 @@
 // Edit operations: the ONE way anything (UI, CLI, AI) mutates a project.
 // Ops are plain JSON so they can be logged, replayed, diffed and undone.
+import { normalizeFeed } from './camfeed.js';
 import { DEFAULT_TRANSFORM, DEFAULT_STYLE, DEFAULT_FX, ELEMENT_TYPES, newId, normalizeSpatialNode } from './schema.js';
 import { SCENE_VERSION, normalizeObject } from './scene.js';
 import { normalizeCamera, retimeCamSpans, retimePathSpan, cameraRange } from './camera.js';
@@ -567,6 +568,8 @@ export function applyOp(p, op) {
       // Property links travel with the element on create (never auto-created).
       const links = el.links === undefined ? [] : normalizeLinks(el.links, { strict: true });
       if (links.length) full.links = links;
+      // Camera feed: which camera it shows and whether it lags one frame.
+      if (full.type === 'camfeed') full.feed = normalizeFeed(el.feed);
       if (full.type === 'video' || full.type === 'audio') {
         full.srcIn = Math.max(0, Number(el.srcIn) || 0);
       }

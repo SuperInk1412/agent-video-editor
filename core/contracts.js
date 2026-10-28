@@ -63,7 +63,10 @@ const definitions = {
   elementParent: [{ id: string, parent: nullableId, t: time }, ['id', 'parent']],
   elementUnparent: [{ id: string, t: time }, ['id']],
   spatialParent: [{ id: string, parent: string, t: time,
-    inherit: { type: 'object', properties: { pos: { type: 'boolean' }, rot: { type: 'boolean' }, scale: { type: 'boolean' } }, additionalProperties: false } }, ['id', 'parent']],
+    inherit: { type: 'object', properties: { pos: { type: 'boolean' }, rot: { type: 'boolean' }, scale: { type: 'boolean' } }, additionalProperties: false },
+    strength: { type: 'object', properties: { rot: { type: 'number' }, scale: { type: 'number' } }, additionalProperties: false } }, ['id', 'parent']],
+  spatialParentKey: [{ id: string, channel: parentChannel, t: time, v: number, value: number, ease: string }, ['id', 'channel', 't']],
+  spatialParentUnkey: [{ id: string, channel: parentChannel, t: time }, ['id', 'channel', 't']],
   spatialUnparent: [{ id: string }, ['id']],
   propLink: [{
     host: linkHostKind, id: string, to: property, from: linkFrom,

@@ -514,20 +514,10 @@ export const SCREEN_LOCK_DEPTH = 1; // m in front of the camera (render only)
  * the legacy screen-lock pull-in as well. Only the legacy camera lock (no
  * `mode`, written by applyElementParentOp) and `@live` are carried here.
  */
-export function elementCarrier(project, el, t, { rigid = false, param = null } = {}) {
-  const par = el?.parent;
-  if (!par?.id) return null;
-  if (par.mode === 'world') return null;
-  const now = cameraFrame(project, par.id, t, param ? { param } : null);
-  if (!now) return null;
-  const bind = normalizeBind(par.bind);
-  const Rd = M3.mul(M3.cols(...now.basis), M3.T(M3.cols(...bind.basis)));
-  if (rigid) return { c: now.pos, p0: bind.pos, L: Rd };
-  // x' = cam + k·Rd·(x − bind.pos): the bind pose had the camera at bind.pos,
-  // so the element's depth there is its distance along the bind view axis.
-  const depth = Math.max(1e-3, Number(par.bind?.depth) || 20);
-  const k = SCREEN_LOCK_DEPTH / depth;
-  return { c: now.pos, p0: bind.pos, L: Rd.map((row) => row.map((v) => v * k)), scale: k };
+export function elementCarrier() {
+  // Retired with the screen lock: no element is carried by a camera any more.
+  // Kept as a null stub for callers that still import it.
+  return null;
 }
 
 /** Column-major 4x4 of a carry map (x' = L·x + (c − L·p0)); identity for null. */
@@ -545,51 +535,13 @@ export function carrierMatrix(m) {
 
 export const ELEMENT_PARENT_OP_KINDS = ['elementParent', 'elementUnparent'];
 
-const shiftKeys = (el, path, d) => {
-  for (const k of el.keyframes || []) if (k.path === path && Number.isFinite(Number(k.value))) k.value = Number(k.value) + d;
-};
-
 /**
- * elementParent   {id, parent: <camera id>|null, t?}  bind to a camera at t (nothing moves)
- * elementUnparent {id, t?}                            keep the element's centre where it is at t
- *                                                     (position only: x / y / z and their keys shift)
+ * elementParent / elementUnparent: the screen lock (贴屏) is retired
+ * (docs/DESIGN-CAMFEED-PARENTS.md §2). Projects are converted to a HUD rig when
+ * they are opened (core/screen-lock-migrate.js); new locks are refused.
  */
+export const SCREEN_LOCK_RETIRED = '贴屏已取消：在相机上右键「创建投屏元素」，把字幕放进投屏机位（HUD），或用空间父级挂到相机上';
+
 export function applyElementParentOp(p, op, api) {
-  const { fail, findElement } = api;
-  const el = findElement(op.id);
-  const t = roundT(op.t);
-  if (op.op === 'elementParent' && op.parent) {
-    const camId = String(op.parent);
-    if (camId === LIVE_CAMERA ? !hasAnyCamera(p) : !findCamera(p, camId)) fail(`no camera ${camId}`);
-    if (el.parent) applyElementParentOp(p, { op: 'elementUnparent', id: el.id, t }, api);
-    const f = cameraFrame(p, camId, t);
-    // depth of the element's plane along the bind view axis (for the render-time pull-in)
-    const st = evalElement(el, t, p.meta);
-    const cy = (Number(p.meta?.height) || 1080) / 200;
-    const w = [(st.x || 0) / 100, cy - (st.y || 0) / 100, st.z || 0];
-    const depth = Math.max(1e-3, V.dot(V.sub(w, f.pos), f.basis[2]));
-    el.parent = {
-      id: camId, kind: 'camera',
-      bind: { pos: f.pos.map(r6), basis: f.basis.map((v) => v.map(r6)), depth: r6(depth) },
-    };
-    return { changed: [el.id] };
-  }
-  if (!el.parent) return { changed: [] };
-  const m = elementCarrier(p, el, t, { rigid: true });
-  if (m) {
-    // the element's centre in the world, with and without the camera carry
-    const st = evalElement(el, t, p.meta);
-    const cy = (Number(p.meta?.height) || 1080) / 200;
-    const local = [(st.x || 0) / 100, cy - (st.y || 0) / 100, st.z || 0];
-    const d = V.sub(mapPoint(m, local), local);
-    const tr = el.transform || (el.transform = {});
-    tr.x = (Number(tr.x) || 0) + d[0] * 100;
-    tr.y = (Number(tr.y) || 0) - d[1] * 100;
-    tr.z = (Number(tr.z) || 0) + d[2];
-    shiftKeys(el, 'transform.x', d[0] * 100);
-    shiftKeys(el, 'transform.y', -d[1] * 100);
-    shiftKeys(el, 'transform.z', d[2]);
-  }
-  delete el.parent;
-  return { changed: [el.id] };
+  api.fail(`${op.op}: ${SCREEN_LOCK_RETIRED}`);
 }

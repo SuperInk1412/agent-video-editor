@@ -644,38 +644,43 @@ def _embed_elements(scene, opts, shot=None):
     scene.collection.objects.link(rig)
     with bpy.context.temp_override(scene=scene):
         SceneBuilder(project, opts).build(scene=scene, embed=rig)
-    _carry_elements(scene, rig, (shot or {}).get('elementCarriers') or [])
     return rig
 
 
-def _carry_elements(scene, rig, carriers):
-    """Camera-parented elements: carry empty (baked camera motion since binding)
-    -> a copy of the screen rig -> the element's objects (text, plane, shadow)."""
-    from mathutils import Matrix
-    for entry in carriers:
-        eid = str(entry.get('id'))
-        frames = entry.get('frames') or []
-        if not frames:
-            continue
-        carry = bpy.data.objects.new('VDM_Carry_' + eid, None)
-        carry.rotation_mode = 'QUATERNION'
-        scene.collection.objects.link(carry)
-        for fr in frames:
-            carry.location = Vector(fr['loc'])
-            carry.rotation_quaternion = Matrix(fr['rot']).to_quaternion()
-            k = float(fr.get('scale', 1.0))
-            carry.scale = (k, k, k)
-            carry.keyframe_insert('location', frame=int(fr['f']))
-            carry.keyframe_insert('rotation_quaternion', frame=int(fr['f']))
-            carry.keyframe_insert('scale', frame=int(fr['f']))
-        screen = bpy.data.objects.new('VDM_Screen_' + eid, None)
-        screen.location = rig.location
-        screen.scale = rig.scale
-        screen.parent = carry
-        scene.collection.objects.link(screen)
-        for ob in list(rig.children):
-            if ob.name == eid or ob.name.startswith(eid + '_shadow'):
-                ob.parent = screen
+def _plane_layer(scene, rig):
+    """Split the 2D element planes into their own view layer; returns its name.
+
+    The planes use blended (transparent) materials, which EEVEE leaves out of
+    the Mist pass, so the compositor fog would paint them in full fog colour.
+    The main layer renders the 3D world without the planes (and fogs it); the
+    'VDM_Planes' layer renders only the planes with the world as holdout, so
+    3D objects still cover them, and the compositor lays it over the fogged
+    world. Matches the viewport, where 2D layers are never fogged."""
+    plane_objs = set()
+    roots = [rig]
+
+    def walk(ob):
+        plane_objs.add(ob)
+        for ch in ob.children:
+            walk(ch)
+    for r in roots:
+        walk(r)
+    cp = bpy.data.collections.new('VDM_Planes')
+    cw = bpy.data.collections.new('VDM_World')
+    scene.collection.children.link(cp)
+    scene.collection.children.link(cw)
+    for ob in list(scene.collection.objects):
+        target = cp if ob in plane_objs else cw
+        target.objects.link(ob)
+        scene.collection.objects.unlink(ob)
+    main = scene.view_layers[0]
+    main.layer_collection.children['VDM_Planes'].exclude = True
+    layer = scene.view_layers.new('VDM_Planes')
+    layer.layer_collection.children['VDM_World'].holdout = True
+    for attr in ('use_sky', 'use_pass_mist'):
+        if hasattr(layer, attr):
+            setattr(layer, attr, False)
+    return layer.name
 
 
 def _build_overlay(opts):
@@ -827,9 +832,12 @@ def build_shot_scene(shot, opts):
     meta = {'fx': shot.get('fx') or {}}
     # 2D elements: planes in the world on the screen plane (single camera); the
     # multi-camera path still lays them over the picture (see _build_overlay)
+    rig = None
     if not opts.get('_no_overlay'):
-        _embed_elements(scene, opts, shot)
+        rig = _embed_elements(scene, opts, shot)
+    planes = _plane_layer(scene, rig) if rig is not None and city.get('fog') else None
     build_compositor(scene, meta, os.path.join(opts['root'], '.vdm', 'cache', 'comp'),
                      fog=city.get('fog'),
-                     backdrop=city.get('sky') if city.get('empty') else None)
+                     backdrop=city.get('sky') if city.get('empty') else None,
+                     planes=planes)
     return scene

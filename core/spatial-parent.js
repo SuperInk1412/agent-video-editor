@@ -46,7 +46,7 @@ import {
   MAX_DEPTH, SCREEN_PARENT, applyParentToFrame, applyParentToNode, bindFrameFor,
   bindFrameFrom, cameraWorldFrame, elementNode, findSpatialHost, frameOf,
   frameToNode, mapParentPoint, normalizeInherit, normalizeSpatialNode,
-  parentDelta, rollOf, spatialAncestors, wouldSpatialCycle,
+  parentDelta, parentStrengthAt, rollOf, spatialAncestors, wouldSpatialCycle,
 } from './spatial.js';
 
 /** Ops owned by this module (registered in core/ops.js and core/contracts.js). */
@@ -190,7 +190,7 @@ export function hostFrameAt(project, id, t = 0, opts = {}) {
   }
   const resolved = hostFrameAt(project, parent.id, t, { ...where, depth: depth + 1 });
   if (!resolved) return { kind, host, frame: base, bind: bindFrameFrom(base) };
-  const frame = applyParentToFrame(base, resolved.frame, parent.bind, parent.inherit);
+  const frame = applyParentToFrame(base, resolved.frame, parent.bind, parent.inherit, parentStrengthAt(parent, t));
   return { kind, host, frame, bind: bindFrameFrom(frame) };
 }
 
@@ -218,10 +218,10 @@ export function objectWorldPose(project, obj, t, cache = null, opts = null) {
   if (!parent) return base;
   const resolved = hostFrameAt(src, parent.id, t, opts);
   if (!resolved) return base;
-  const delta = parentDelta(resolved.frame, parent.bind, parent.inherit);
+  const delta = parentDelta(resolved.frame, parent.bind, parent.inherit, parentStrengthAt(parent, t));
   if (!delta) return base;
   const local = poseFrameOf(base);
-  const frame = applyParentToFrame(local, resolved.frame, parent.bind, parent.inherit);
+  const frame = applyParentToFrame(local, resolved.frame, parent.bind, parent.inherit, parentStrengthAt(parent, t));
   const basis = { right: frame.basis[0], up: frame.basis[1], forward: frame.basis[2] };
   const pivot = mapParentPoint(delta, base.pivot);
   const rel = sub(frame.pos, pivot);
@@ -264,7 +264,7 @@ export function evalCameraWorld(project, t = 0, cam = null, opts = null) {
   if (!resolved) return base;
   const frame = applyParentToFrame(
     cameraWorldFrame(host, at, opts?.param ? { param: opts.param } : null),
-    resolved.frame, parent.bind, parent.inherit,
+    resolved.frame, parent.bind, parent.inherit, parentStrengthAt(parent, at),
   );
   const forward = frame.basis[2].slice();
   const pos = frame.pos.slice();
@@ -289,7 +289,7 @@ export function objectLocalPoint(project, obj, t, worldPoint, opts = null) {
   const parent = worldFrameParent(obj);
   const resolved = parent ? hostFrameAt(project, parent.id, t, opts) : null;
   if (!resolved) return toLocalPoint(project, obj, t, worldPoint, opts?.poseAt);
-  const delta = parentDelta(resolved.frame, parent.bind, parent.inherit);
+  const delta = parentDelta(resolved.frame, parent.bind, parent.inherit, parentStrengthAt(parent, t));
   const local = delta ? inverseMapPoint(delta, worldPoint) : worldPoint;
   return toLocalPoint(project, obj, t, local, opts?.poseAt);
 }
@@ -299,7 +299,7 @@ export function objectLocalVector(project, obj, t, worldVector, opts = null) {
   const parent = worldFrameParent(obj);
   const resolved = parent ? hostFrameAt(project, parent.id, t, opts) : null;
   if (!resolved) return toLocalVector(project, obj, t, worldVector, opts?.poseAt);
-  const delta = parentDelta(resolved.frame, parent.bind, parent.inherit);
+  const delta = parentDelta(resolved.frame, parent.bind, parent.inherit, parentStrengthAt(parent, t));
   const local = delta ? inverseMapVector(delta, worldVector) : worldVector;
   return toLocalVector(project, obj, t, local, opts?.poseAt);
 }
@@ -339,10 +339,20 @@ function elementWorldNodeAt(project, el, t, localNodeAt, depth, seen, opts = nul
     ...(opts || {}), depth: depth + 1, seen: visited, localNodeAt,
   });
   if (!resolved) return local; // missing parent host: keep the local placement
-  return applyParentToNode(local, resolved.frame, parent.bind, parent.inherit);
+  return applyParentToNode(local, resolved.frame, parent.bind, parent.inherit, parentStrengthAt(parent, t));
 }
 
 // ---------------------------------------------------------------- ops
+
+/** `{rot, scale}` clamped to 0..1, or null when both are full strength (the default). */
+function normalizeStrength(src) {
+  const out = {};
+  for (const ch of ['rot', 'scale']) {
+    const v = Number(src?.[ch]);
+    if (Number.isFinite(v)) out[ch] = Math.round(Math.max(0, Math.min(1, v)) * 1e4) / 1e4;
+  }
+  return Object.keys(out).length && (out.rot ?? 1) + (out.scale ?? 1) < 2 ? out : null;
+}
 
 const roundBind = (bind) => ({
   pivot: bind.pivot.map(r6),
@@ -396,7 +406,7 @@ export function applySpatialParentOp(project, op, api = {}) {
       const pid = op.parent == null ? '' : String(op.parent);
       if (!pid) fail('spatialParent needs a parent id');
       if (pid === String(child.host.id)) fail(`element ${child.host.id} cannot be its own spatial parent`);
-      if (pid === SCREEN_PARENT) fail('spatialParent does not take @live (use elementParent for the screen lock)');
+      if (pid === SCREEN_PARENT) fail('spatialParent does not take @live (the screen lock is retired; use a camera feed / HUD rig)');
       const kind = spatialHostKind(project, pid);
       if (!kind) fail(`no element, object or camera ${pid}`);
       if (kind === 'element') {
@@ -415,9 +425,17 @@ export function applySpatialParentOp(project, op, api = {}) {
         ...(prev?.inherit || {}),
         ...(isRecord(op.inherit) ? op.inherit : {}),
       });
-      setChildSpatialParent(child.kind, child.host, {
-        id: pid, mode: 'world', inherit, bind: roundBind(resolved.bind),
+      // Strength (base + keys) stays with a re-bind to the same parent; a new
+      // parent starts from the op's strength or full strength.
+      const same = prev && String(prev.id) === pid;
+      const strength = normalizeStrength({
+        ...(same && isRecord(prev.strength) ? prev.strength : {}),
+        ...(isRecord(op.strength) ? op.strength : {}),
       });
+      const record = { id: pid, mode: 'world', inherit, bind: roundBind(resolved.bind) };
+      if (strength) record.strength = strength;
+      if (same && isRecord(prev.strengthKeys)) record.strengthKeys = prev.strengthKeys;
+      setChildSpatialParent(child.kind, child.host, record);
       return { changed: [child.host.id] };
     }
     case 'spatialUnparent': {

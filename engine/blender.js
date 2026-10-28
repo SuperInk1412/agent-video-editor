@@ -13,6 +13,9 @@ import { elementLinkOverlayTable } from '../core/link-eval.js';
 import { encodeSequence, extractSequence, fileExists, hashOf, hashFile } from './media.js';
 import { is3D, writeShot } from './shot.js';
 import { prepareObjectSequences } from './media-objects.js';
+import { jobFrames, prepareFeeds } from './camfeed-render.js';
+import { bakeElementPlacements } from './element-bake.js';
+import { programProject } from '../core/camfeed.js';
 import { buildAudioMix } from './audio-mix.js';
 import { which } from './which.js';
 import { runProcess } from './process.js';
@@ -118,12 +121,20 @@ export async function runJob(dir, job, { onProgress, onLog, signal } = {}) {
   const jobFile = path.join(p.cache, 'jobs', `${jobId}.json`);
   const projFile = path.join(p.cache, 'jobs', `${jobId}-project.json`);
 
-  const seqProject = await prepareSequences(dir, job.project, { onLog, signal });
+  // Camera feeds render their source cameras first; feed-only cameras
+  // (output:false) never reach the picture (engine/camfeed-render.js).
+  const fed = programProject(await prepareFeeds(dir, job, runJob, { onLog, signal }));
+  const seqProject = await prepareSequences(dir, fed, { onLog, signal });
+  // Node / spatially parented 2D elements: per-frame world matrices (3D route).
+  if (is3D(fed)) {
+    const fps = Number(seqProject.meta.fps) || 24;
+    bakeElementPlacements(seqProject, jobFrames(job, fps, Number(seqProject.meta.duration) || 0), fps);
+  }
   await fs.writeFile(projFile, JSON.stringify(seqProject, null, 2));
   const payload = { ...job, project: projFile, root: p.root };
   delete payload.projectData;
   // 3D shot: bake city + per-frame camera once, let Blender consume the same package
-  if (is3D(job.project)) {
+  if (is3D(fed)) {
     // The prepared copy carries 3D video sequence paths and frame counts.
     const { file } = await writeShot(dir, seqProject, { fps: job.project.meta.fps, signal });
     payload.shot = file;

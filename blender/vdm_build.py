@@ -12,6 +12,7 @@ so an animation render stays fast.
 """
 import bisect
 import bpy
+from mathutils import Matrix
 import json
 import math
 import struct
@@ -414,6 +415,19 @@ def element_link_overlay(el, t):
     return value if isinstance(value, dict) else None
 
 
+def baked_world(el, t, meta):
+    """Baked plane matrix (engine/element-bake.js `_world`) at t, or None."""
+    bake = el.get('_world')
+    if not bake:
+        return None
+    frames = bake.get('frames') or []
+    if not frames:
+        return None
+    fps = float(meta.get('fps') or 24)
+    i = int(round(t * fps)) + 1 - int(bake.get('f0', 1))
+    return frames[max(0, min(len(frames) - 1, i))]
+
+
 def eval_element(el, t, meta):
     tr = el.get('transform') or {}
     kf = el.get('keyframes') or []
@@ -743,12 +757,15 @@ def _val(ng, v):
     return n.outputs[0]
 
 
-def build_compositor(scene, meta, cache_dir, fog=None, overlay=None, backdrop=None):
+def build_compositor(scene, meta, cache_dir, fog=None, overlay=None, backdrop=None, planes=None):
     """Post chain for `scene`. `overlay` is an optional transparent scene (the
     2D layer of a 3D shot) alpha-overed after the fog and before the post fx.
     `backdrop` (linear RGB) is for a transparent film (the empty world): fog only
     touches rendered pixels, then the picture goes over this flat colour, the
-    same as the viewport's clear colour."""
+    same as the viewport's clear colour. `planes` names the view layer that
+    holds the 2D element planes (the 3D world as holdout): it goes over the
+    fogged world, so the planes are never fogged — as in the viewport, where
+    only 3D objects get fog."""
     fx = meta.get('fx') or {}
     w, h = scene.render.resolution_x, scene.render.resolution_y
     os.makedirs(cache_dir, exist_ok=True)
@@ -795,6 +812,18 @@ def build_compositor(scene, meta, cache_dir, fog=None, overlay=None, backdrop=No
         ng.links.new(rgb.outputs[0], mixf.inputs[7])
         ng.links.new(mul.outputs[0], mixf.inputs[0])
         chain = mixf.outputs[2]
+
+    if planes is not None:
+        prl = ng.nodes.new('CompositorNodeRLayers')
+        try:
+            prl.scene = scene
+            prl.layer = planes
+        except Exception:
+            pass
+        pover = ng.nodes.new('CompositorNodeAlphaOver')
+        ng.links.new(chain, pover.inputs['Background'])
+        ng.links.new(prl.outputs['Image'], pover.inputs['Foreground'])
+        chain = pover.outputs[0]
 
     if backdrop is not None:
         bgc = ng.nodes.new('CompositorNodeRGB')
@@ -945,6 +974,35 @@ def build_compositor(scene, meta, cache_dir, fog=None, overlay=None, backdrop=No
 
 # ---------------------------------------------------------------- builder
 
+FEED_OVERSCAN_PX = 8.0  # project pixels a camfeed plane reaches past each frame edge
+
+
+def feed_frame_path(el, frame):
+    """Source frame file a camfeed element shows at `frame`, or None when hidden."""
+    feed = el.get('feed') or {}
+    folder = el.get('_feedDir') or ''
+    if not folder:
+        return None
+    for a, b in el.get('_feedHidden') or []:
+        if a <= frame <= b:
+            return None
+    n = int(frame) - (1 if int(feed.get('delay') or 0) == 1 else 0)
+    path = os.path.join(folder, 'f_%04d.png' % n)
+    return path if os.path.exists(path) else None
+
+
+def show_feed_frame(el, obj, tex, frame):
+    path = feed_frame_path(el, frame)
+    if path is None:
+        obj.hide_render = True
+        return
+    img = tex.image
+    if img.source != 'FILE' or bpy.path.abspath(img.filepath) != path:
+        img.source = 'FILE'
+        img.filepath = path
+    img.reload()
+
+
 class SceneBuilder:
     def __init__(self, project, opts):
         self.p = project
@@ -1068,6 +1126,23 @@ class SceneBuilder:
         obj.location.z = self.layer_px * z
         return obj, nodes, nodes['tex']
 
+    def build_feed(self, el, style, st0, z):
+        # Camera feed (engine/camfeed-render.js): a full-frame plane whose image
+        # is swapped every frame for f_<frame - delay>.png of the source pass.
+        img = bpy.data.images.new(f'{el["id"]}_feed', 4, 4, alpha=True)
+        # Overscan: the plane reaches a few pixels past the frame with the edge
+        # texels extended, so the pixel filter at the border never mixes in the
+        # background (a full-frame feed would otherwise get a dark rim).
+        m = FEED_OVERSCAN_PX
+        mesh = plane_mesh(f'{el["id"]}_mesh', self.W + 2 * m, self.H + 2 * m,
+                          (-m / self.W, -m / self.H, 1 + m / self.W, 1 + m / self.H))
+        mat, nodes = textured_material(f'{el["id"]}_mat', img, st0['opacity'])
+        nodes['tex'].extension = 'EXTEND'
+        obj = self.add_object(mesh, mat, el['id'])
+        obj.location.z = self.layer_px * z
+        nodes['tex']['vdm_feed'] = 1
+        return obj, nodes, nodes['tex']
+
     def build_shape(self, el, style, st0, z):
         w = float(style.get('w') or self.W)
         h = float(style.get('h') or self.H)
@@ -1146,6 +1221,8 @@ class SceneBuilder:
 
             if el['type'] == 'text':
                 obj, nodes = self.build_text(el, style, st0, z)
+            elif el['type'] == 'camfeed':
+                obj, nodes, tex = self.build_feed(el, style, st0, z)
             elif el['type'] in ('solid', 'shape'):
                 obj, nodes = self.build_shape(el, style, st0, z)
             else:
@@ -1236,6 +1313,21 @@ class SceneBuilder:
                     except Exception:
                         pass
 
+            if el['type'] == 'camfeed' and tex is not None:
+                show_feed_frame(el, obj, tex, frame)
+
+            # Node placement / spatial parent: the world matrix baked in JS
+            # (engine/element-bake.js) replaces the screen-rig placement.
+            wm = baked_world(el, t, meta)
+            if wm:
+                M = Matrix([[wm[c * 4 + r] for c in range(4)] for r in range(4)])
+                # layer order on one plane: a hair along the normal, as the rig does
+                M = M @ Matrix.Translation((0.0, 0.0, self.layer_px * z))
+                # relative to the screen rig without waiting for a depsgraph
+                # update (matrix_world of a just-built parent is still stale)
+                P = obj.parent.matrix_basis if obj.parent else Matrix.Identity(4)
+                obj.matrix_basis = P.inverted() @ M
+
             if tex is not None and tex.image and tex.image.source == 'SEQUENCE':
                 # Blender reads file number clamp(frame - frame_start + 1, 0, n) + offset;
                 # pin frame_start to the current frame so that is exactly the element's
@@ -1262,6 +1354,10 @@ class SceneBuilder:
                         shadow_obj.data.offset_y = -kv * shadow_obj.data.size
                 except Exception:
                     pass
+
+            if wm and shadow_obj:
+                # the shadow rides the baked plane, offset in its own pixels
+                shadow_obj.matrix_basis = obj.matrix_basis @ Matrix.Translation((5.0, -5.0, -0.0004))
 
         return update
 

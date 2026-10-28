@@ -26,7 +26,7 @@ import { elementWorldParent } from '/core/spatial-parent.js';
 import { frameOf } from '/core/spatial.js';
 import { basisFromDir } from '/core/scene.js';
 import { Scene3D } from './preview3d.js';
-import { elementCarrier, carrierMatrix } from '/core/hierarchy.js';
+import { feedPlan, hiddenFeeds, normalizeFeed, programProject } from '/core/camfeed.js';
 import { clearCompiledTracks, compileProject } from '/core/tracks.js';
 import {
   mul4, nodePlaneMatrix, orderLayers, planeOfFrame, transformPlane,
@@ -328,6 +328,12 @@ export class Preview {
     this.sceneFBO = null;
     this.layerFBO = null;
     this.bloomFBO = [null, null];
+    // Camera feeds (core/camfeed.js): per source camera a {cur, prev} pair of
+    // targets; `prev` holds the previous frame for delay-1 feeds.
+    this.feedTargets = new Map();
+    this._feedPlan = null;
+    this._feedT = null;
+    this._viewer = null; // camera id whose picture is being drawn (null = editor view)
     this.time = 0;
     this.layers = [];
     this.soloCameras = new Set();
@@ -562,7 +568,46 @@ export class Preview {
   _rebuildTargets() {
     const gl = this.gl;
     const w = this.canvas.width, h = this.canvas.height;
-    const mk = (tw, th) => {
+    const mk = (tw, th) => this._mkTarget(tw, th);
+    for (const f of [this.sceneFBO, this.layerFBO, ...(this.bloomFBO || [])]) this._freeTarget(f);
+    this._clearFeedTargets();
+    this.sceneFBO = mk(w, h);
+    this.layerFBO = mk(w, h);
+    const hw = Math.max(2, Math.round(w / 2)), hh = Math.max(2, Math.round(h / 2));
+    this.bloomFBO = [mk(hw, hh), mk(hw, hh)];
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    // text textures depend on pixel scale
+    for (const entry of this.textCache.values()) gl.deleteTexture(entry.tex);
+    this.textCache.clear();
+  }
+
+  _freeTarget(f) {
+    if (!f) return;
+    const gl = this.gl;
+    gl.deleteFramebuffer(f.fb); gl.deleteTexture(f.tex);
+    if (f.depth) gl.deleteRenderbuffer(f.depth);
+  }
+
+  _clearFeedTargets() {
+    for (const pair of this.feedTargets.values()) { this._freeTarget(pair.cur); this._freeTarget(pair.prev); }
+    this.feedTargets.clear();
+    this._feedT = null;
+  }
+
+  /** The {cur, prev} targets of a source camera, created at canvas size on demand. */
+  _feedTarget(camId) {
+    let pair = this.feedTargets.get(camId);
+    const w = this.canvas.width, h = this.canvas.height;
+    if (!pair) {
+      pair = { cur: this._mkTarget(w, h), prev: this._mkTarget(w, h), drawn: false, ready: false };
+      this.feedTargets.set(camId, pair);
+    }
+    return pair;
+  }
+
+  _mkTarget(tw, th) {
+    const gl = this.gl;
+    {
       const tex = gl.createTexture();
       gl.bindTexture(gl.TEXTURE_2D, tex);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, tw, th, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
@@ -578,20 +623,7 @@ export class Preview {
       gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, tw, th);
       gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth);
       return { fb, tex, depth, w: tw, h: th };
-    };
-    for (const f of [this.sceneFBO, this.layerFBO, ...(this.bloomFBO || [])]) {
-      if (!f) continue;
-      gl.deleteFramebuffer(f.fb); gl.deleteTexture(f.tex);
-      if (f.depth) gl.deleteRenderbuffer(f.depth);
     }
-    this.sceneFBO = mk(w, h);
-    this.layerFBO = mk(w, h);
-    const hw = Math.max(2, Math.round(w / 2)), hh = Math.max(2, Math.round(h / 2));
-    this.bloomFBO = [mk(hw, hh), mk(hw, hh)];
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    // text textures depend on pixel scale
-    for (const entry of this.textCache.values()) gl.deleteTexture(entry.tex);
-    this.textCache.clear();
   }
 
   _textTexture(el, st, style, zoom = 1) {
@@ -660,7 +692,8 @@ export class Preview {
   /** Cameras that contribute to the viewport, in timeline order (top -> bottom). */
   /** Cameras on screen at t (camera clips: only those whose start/duration covers t). */
   _cameraLayers(t = this.time) {
-    return cameraLayers(this.project, this.soloCameras, t);
+    // Feed-only cameras (output:false) never reach the picture (core/camfeed.js).
+    return cameraLayers(programProject(this.project), this.soloCameras, t);
   }
 
   /** Full-frame picture transform: scale around pivot, then offset. */
@@ -703,7 +736,9 @@ export class Preview {
       const state = evalCameraWorldWithLinks(p, t, cam);
       gl.bindFramebuffer(gl.FRAMEBUFFER, layer.fb);
       gl.viewport(0, 0, layer.w, layer.h);
+      this._viewer = cam.id;
       this.scene3d.draw(p, t, layer.w, layer.h, state);
+      this._viewer = null;
       if (cam.id === p.activeCameraId) {
         active = {
           cam: this.scene3d.lastCam,
@@ -739,6 +774,90 @@ export class Preview {
     }
   }
 
+  /** Camera states of the feed sources whose feed is on screen at t. */
+  _liveFeedCameras(p, t) {
+    const ids = new Set((p.elements || [])
+      .filter((el) => el.type === 'camfeed' && el.visible !== false
+        && t >= el.start - 1e-6 && t < el.start + el.duration - 1e-6)
+      .map((el) => normalizeFeed(el.feed).camera));
+    return (p.cameras || []).filter((c) => ids.has(c.id)).map((c) => evalCameraWorldWithLinks(p, t, c));
+  }
+
+  /** Layers the camera being drawn may film: its hidden live feeds removed. */
+  _visibleLayers(layers) {
+    if (!this._viewer || !this._feedPlan) return layers;
+    const skip = hiddenFeeds(this._feedPlan, this._viewer);
+    return skip.size ? layers.filter((L) => !(L.feed && skip.has(L.el.id))) : layers;
+  }
+
+  /** Texture a feed layer shows now: the source's current or previous frame. */
+  _feedTexture(feed) {
+    const pair = this.feedTargets.get(feed.camera);
+    if (!pair) return null;
+    if (feed.delay === 1) return pair.ready ? pair.prev.tex : null;
+    return pair.drawn ? pair.cur.tex : null;
+  }
+
+  /**
+   * Render every feed source camera into its own target before the picture,
+   * dependencies first (core/camfeed.js::feedPlan). A new time first swaps
+   * cur/prev so delay-1 feeds read the previous frame; re-rendering the same
+   * time keeps the previous frame. The targets hold the raw camera picture:
+   * the post chain runs once, on the final composite.
+   */
+  _renderFeeds(p, t, layers) {
+    const plan = feedPlan(p);
+    this._feedPlan = plan;
+    // Only sources with a feed on screen now are drawn (a cut sequence turned
+    // into feeds has one live source at a time); the others free their targets.
+    const live = new Set((p.elements || [])
+      .filter((el) => el.type === 'camfeed' && el.visible !== false
+        && t >= el.start - 1e-6 && t < el.start + el.duration - 1e-6)
+      .map((el) => normalizeFeed(el.feed).camera));
+    const sources = plan.sources.filter((id) => live.has(id));
+    if (!sources.length) {
+      if (this.feedTargets.size) this._clearFeedTargets();
+      return;
+    }
+    const gl = this.gl;
+    for (const id of [...this.feedTargets.keys()]) {
+      if (sources.includes(id)) continue;
+      const pair = this.feedTargets.get(id);
+      this._freeTarget(pair.cur); this._freeTarget(pair.prev);
+      this.feedTargets.delete(id);
+    }
+    if (this._feedT !== t) {
+      // `prev` becomes the last drawn frame; `cur` is redrawn below.
+      for (const pair of this.feedTargets.values()) {
+        [pair.cur, pair.prev] = [pair.prev, pair.cur];
+        pair.ready = pair.drawn;
+        pair.drawn = false;
+      }
+    }
+    this._feedT = t;
+    const keep = { cam: this.scene3d.lastCam, vp: this.scene3d.lastVP, w: this.scene3d.lastW, h: this.scene3d.lastH };
+    const W = this.canvas.width, H = this.canvas.height;
+    this.scene3d.onElements = layers.length
+      ? (vp, camPos) => this._drawLayers(this._visibleLayers(layers), W, H, { vp, camPos, meta: p.meta })
+      : null;
+    for (const id of sources) {
+      const cam = (p.cameras || []).find((c) => c.id === id);
+      if (!cam) continue;
+      const pair = this._feedTarget(id);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, pair.cur.fb);
+      gl.viewport(0, 0, pair.cur.w, pair.cur.h);
+      gl.clearColor(0, 0, 0, 1);
+      gl.clearDepth(1);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+      this._viewer = id;
+      this.scene3d.draw(p, t, pair.cur.w, pair.cur.h, evalCameraWorldWithLinks(p, t, cam));
+      this._viewer = null;
+      pair.drawn = true;
+    }
+    this.scene3d.onElements = null;
+    Object.assign(this.scene3d, { lastCam: keep.cam, lastVP: keep.vp, lastW: keep.w, lastH: keep.h });
+  }
+
   /**
    * Compute the draw list for time t (also used for hit testing).
    *
@@ -759,6 +878,10 @@ export class Preview {
     const out = [];
     // the camera this frame is seen through (text is rasterised for its close-ups)
     const cam = this.scene3d.city ? (this.editMode && this.editCam ? this.editCam : evalCameraWorldWithLinks(p, t)) : null;
+    // Feed sources on screen now also film the text: rasterise for the closest view.
+    const feedCams = cam ? this._liveFeedCameras(p, t) : [];
+    const zoomFor = (el, st, nodeFrame) => feedCams.reduce(
+      (z, c) => Math.max(z, this._textZoom(el, st, c, nodeFrame)), this._textZoom(el, st, cam, nodeFrame));
     for (const el of p.elements) {
       if (el.visible === false) continue;
       if (t < el.start - 1e-6 || t >= el.start + el.duration - 1e-6) continue;
@@ -781,7 +904,7 @@ export class Preview {
         out.push(L);
       };
       if (el.type === 'text') {
-        const tt = this._textTexture(el, st, el.style, this._textZoom(el, st, cam, nodeFrame));
+        const tt = this._textTexture(el, st, el.style, zoomFor(el, st, nodeFrame));
         const w = tt.w / tt.zoom, h = tt.h / tt.zoom;
         const M = M3.mul(
           M3.mul(M3.mul(M3.T(cx + st.x * S, cy + st.y * S), M3.R(rot)), M3.S(st.scale, st.scale)),
@@ -801,6 +924,17 @@ export class Preview {
           M3.mul(M3.T(-w / 2, -h / 2), M3.S(w, h)),
         );
         push({ el, st, kind: 'tex', tex: a.tex, uv, M, w, h, blend: el.style.blend, asset: a });
+      } else if (el.type === 'camfeed') {
+        // The texture is the source camera's target, bound per draw
+        // (_feedTexture): the source is only rendered later in the frame.
+        const feed = normalizeFeed(el.feed);
+        const w = W, h = H;
+        const M = M3.mul(
+          M3.mul(M3.mul(M3.T(cx + st.x * S, cy + st.y * S), M3.R(rot)), M3.S(st.scale, st.scale)),
+          M3.mul(M3.T(-w / 2, -h / 2), M3.S(w, h)),
+        );
+        // Targets are bottom-up: flip v.
+        push({ el, st, kind: 'tex', tex: null, feed, uv: [0, 1, 1, 0], M, w, h, blend: el.style.blend });
       } else if (el.type === 'solid' || el.type === 'shape') {
         const bw = (Number(el.style.w) || p.meta.width) * S;
         const bh = (Number(el.style.h) || p.meta.height) * S;
@@ -814,11 +948,6 @@ export class Preview {
       }
     }
     out.sort((a, b) => a.el.z - b.el.z);
-    // Elements with the legacy camera screen lock ride along with it. A world
-    // spatial parent (mode:'world') is a matrix parent already folded into the
-    // node frame: elementCarrier returns null for it (core/hierarchy.js).
-    const carrierParam = cameraParamResolver(p);
-    for (const L of out) if (L.el.parent) L.carry = carrierMatrix(elementCarrier(p, L.el, t, { param: carrierParam }));
     // World plane of every layer for the shared draw / pick ordering (§2.5).
     // Node layers use the SpatialNode frame; legacy layers keep the exact point
     // + [0,0,1] normal the old _planeDist used, so the old picture keeps its
@@ -828,7 +957,6 @@ export class Preview {
       L.plane = L.node
         ? planeOfFrame(L.node.frame)
         : { p: [(L.st.x || 0) / 100, cyW - (L.st.y || 0) / 100, L.st.z || 0], n: [0, 0, 1] };
-      if (L.carry) L.plane = transformPlane(L.plane, L.carry);
     }
     // Node placement (world matrix) for node layers; legacy layers never get one.
     for (const L of out) if (L.node) this._nodePlane(L, t, S, p.meta);
@@ -864,8 +992,7 @@ export class Preview {
     const plane = nodePlaneMatrix(frame, width, height, { offset, roll: d.rotation, scale: d.scale });
     L.node.w = plane.w;
     L.node.h = plane.h;
-    // Camera-parented (screen-locked) node layers fold the carry into the model.
-    L.node.model = L.carry ? mul4(L.carry, plane.model) : plane.model;
+    L.node.model = plane.model;
   }
 
   render(t) {
@@ -922,8 +1049,9 @@ export class Preview {
       // 2D elements are flat planes in the world: Scene3D calls back after its
       // own objects with the camera's view-projection, so they are drawn in the
       // editor view, every camera layer and every fisheye face alike.
+      this._renderFeeds(p, t, layers);
       this.scene3d.onElements = layers.length
-        ? (vp, camPos) => this._drawLayers(layers, W, H, { vp, camPos, meta: p.meta })
+        ? (vp, camPos) => this._drawLayers(this._visibleLayers(layers), W, H, { vp, camPos, meta: p.meta })
         : null;
       if (this.editMode) {
         // Editing keeps the free editor camera; the camera stack is a shot
@@ -984,6 +1112,8 @@ export class Preview {
     gl.bindVertexArray(this.vao);
     {
       for (const layer of list) {
+        // A feed whose source was not rendered (flat path, missing camera) is skipped.
+        if (layer.feed && !this._feedTexture(layer.feed)) continue;
         const b = BLEND[layer.blend] || BLEND.normal;
         b(gl);
         const nodeMode = !!world && !!layer.node?.model;
@@ -1003,7 +1133,7 @@ export class Preview {
           gl.uniform1f(pr.u.u_opacity, layer.st.opacity);
           gl.uniform1f(pr.u.u_glow, layer.st.glow || layer.el.fx?.glow || 0);
           gl.activeTexture(gl.TEXTURE0);
-          gl.bindTexture(gl.TEXTURE_2D, layer.tex);
+          gl.bindTexture(gl.TEXTURE_2D, layer.feed ? this._feedTexture(layer.feed) : layer.tex);
           gl.uniform1i(pr.u.u_tex, 0);
           gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
         } else {
@@ -1157,10 +1287,6 @@ export class Preview {
       const qx = (x - W / 2) / S;
       const qy = (y - H / 2) / S;
       let w = [qx / 100, cyW - qy / 100, z];
-      if (L.carry) {
-        const m = L.carry;
-        w = [0, 1, 2].map((i) => m[i] * w[0] + m[4 + i] * w[1] + m[8 + i] * w[2] + m[12 + i]);
-      }
       const p = s3.projectPoint(w);
       if (!p) return null;
       out.push([p.x * W / Math.max(1, s3.lastW), p.y * H / Math.max(1, s3.lastH)]);

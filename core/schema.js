@@ -5,11 +5,12 @@ import { OBJECT_TYPES } from './scene.js';
 import { assertSafeData, isRecord, pathParts } from './json.js';
 import { PROJECT_SCHEMA } from './version.js';
 import { linkIssues, normalizeLinks, projectLinkIssues } from './links.js';
+import { feedIssues } from './camfeed.js';
 // A "project" is the single source of truth on disk: <project>/project.vdm.json
 
 export const SCHEMA = PROJECT_SCHEMA;
 
-export const ELEMENT_TYPES = ['image', 'video', 'text', 'solid', 'shape', 'audio'];
+export const ELEMENT_TYPES = ['image', 'video', 'text', 'solid', 'shape', 'audio', 'camfeed'];
 export const SEGMENT_STATUS = ['draft', 'previewed', 'approved'];
 
 export const DEFAULT_TRANSFORM = { x: 0, y: 0, scale: 1, rotation: 0, opacity: 1 };
@@ -372,6 +373,7 @@ export function validateProject(p) {
       for (const name of Object.keys(DEFAULT_TRANSFORM)) if (e.transform[name] !== undefined) number(e.transform[name], `${at}.transform.${name}`);
     }
     if (e.node !== undefined) issues.push(...spatialNodeIssues(e.node, `${at}.node`));
+    issues.push(...feedIssues(e, at));
     if (e.links !== undefined) issues.push(...linkIssues(e.links, `${at}.links`));
     if (e.style?.size !== undefined) number(e.style.size, `${at}.style.size`, { min: 0 });
     if (e.segment && !segIds.has(e.segment)) push(`elements[${i}].segment`, `unknown segment ${e.segment}`);
@@ -389,6 +391,7 @@ export function validateProject(p) {
     if (!record(c, at)) return;
     id(c.id, `${at}.id`, camIds);
     if (c.fov !== undefined) number(c.fov, `${at}.fov`, { min: 1, max: 360 });
+    if (c.output !== undefined && typeof c.output !== 'boolean') push(`${at}.output`, 'must be boolean');
     if (c.start !== undefined) number(c.start, `${at}.start`, { min: 0 });
     if (c.duration !== undefined) number(c.duration, `${at}.duration`, { min: 0, exclusive: true });
     for (const name of ['center', 'scale']) if (c[name] !== undefined) vector(c[name], `${at}.${name}`, 3);
