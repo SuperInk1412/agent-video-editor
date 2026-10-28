@@ -166,6 +166,8 @@ const CAMERA_TRACK_DIMS = {
   fov: 1, lookAhead: 1, bankGain: 1, maxRoll: 1, roll: 1,
   'shake.amp': 1, 'shake.freq': 1, 'shake.speedGain': 1,
   'dof.enabled': 1, 'dof.fstop': 1,
+  // three-axis rotation offset (core/rotation.js)
+  'rotation.x': 1, 'rotation.y': 1, 'rotation.z': 1,
 };
 
 const CAMERA_TRACK_RANGES = {
@@ -458,6 +460,7 @@ const SCALAR_TRACKS = new Set([
   'scale.x', 'scale.y', 'scale.z',
   'pivot.x', 'pivot.y', 'pivot.z',
   'position.x', 'position.y', 'position.z',
+  'rotation.x', 'rotation.y', 'rotation.z', // three-axis rotation (core/rotation.js)
 ]);
 
 function trackValue(path, v) {

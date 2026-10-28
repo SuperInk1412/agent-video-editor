@@ -6,6 +6,7 @@ import { assertSafeData, isRecord, pathParts } from './json.js';
 import { PROJECT_SCHEMA } from './version.js';
 import { linkIssues, normalizeLinks, projectLinkIssues } from './links.js';
 import { feedIssues } from './camfeed.js';
+import { dirRollFromRotation, normalizeRotation } from './rotation.js';
 // A "project" is the single source of truth on disk: <project>/project.vdm.json
 
 export const SCHEMA = PROJECT_SCHEMA;
@@ -83,13 +84,20 @@ function unitDir(v, fallback) {
 export function normalizeSpatialNode(node, base = null) {
   const src = isRecord(node) ? node : {};
   const fb = isRecord(base) ? base : DEFAULT_SPATIAL_NODE;
-  return {
+  const out = {
     pivot: nodeVec(src.pivot, nodeVec(fb.pivot, DEFAULT_SPATIAL_NODE.pivot)),
     position: nodeVec(src.position, nodeVec(fb.position, DEFAULT_SPATIAL_NODE.position)),
     dir: unitDir(src.dir, nodeVec(fb.dir, DEFAULT_SPATIAL_NODE.dir)),
     roll: isNum(src.roll) ? Number(src.roll) : (isNum(fb.roll) ? Number(fb.roll) : 0),
     scale: nodeVec(src.scale, nodeVec(fb.scale, DEFAULT_SPATIAL_NODE.scale)),
   };
+  // Three-axis rotation (core/rotation.js) is the orientation when present;
+  // dir / roll are kept as its derived view for the node math.
+  if (Array.isArray(src.rotation)) {
+    out.rotation = normalizeRotation(src.rotation);
+    Object.assign(out, dirRollFromRotation(out.rotation));
+  }
+  return out;
 }
 
 /** Validation problems for an optional element `node` (no repair, no mutation). */
@@ -104,6 +112,9 @@ export function spatialNodeIssues(node, at = 'node') {
     } else if (name === 'dir' && Math.hypot(v[0], v[1], v[2]) < 1e-12) {
       issues.push({ path: `${at}.dir`, msg: 'must be a nonzero direction' });
     }
+  }
+  if (node.rotation !== undefined && (!Array.isArray(node.rotation) || node.rotation.length !== 3 || !node.rotation.every(Number.isFinite))) {
+    issues.push({ path: `${at}.rotation`, msg: 'must be [x, y, z] degrees' });
   }
   if (node.roll !== undefined && !Number.isFinite(node.roll)) {
     issues.push({ path: `${at}.roll`, msg: 'must be a finite number' });

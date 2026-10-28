@@ -7,6 +7,7 @@
 //   B  a legacy 2D box whose pivot.x is linked to another element
 //   C  a 3D box whose pivot.x is linked to the same element
 //   D  the camera FOV linked to an element's roll
+//   E  three-axis rotation: a tilted 2D node card, a keyed 3D box, a camera pan offset
 // The preview frame and a Blender still are classified on a 16×9 grid of
 // colour classes; the check fails when more than a few edge cells differ.
 //
@@ -29,7 +30,7 @@ const T = 0.5;
 const GRID = [16, 9];
 const ALLOWED = 4; // edge cells may land on either side of an anti-aliased border
 
-const only = (process.argv.find((a) => a.startsWith('--only=')) || '--only=A,B,C,D').slice(7).split(',');
+const only = (process.argv.find((a) => a.startsWith('--only=')) || '--only=A,B,C,D,E').slice(7).split(',');
 
 const run = (cmd, args, opts = {}) => new Promise((resolve, reject) => {
   const p = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, ...opts });
@@ -82,6 +83,17 @@ async function build() {
   }
   if (only.includes('D')) {
     ops.push({ op: 'propLink', host: 'cam', id: cam, to: 'fov', from: { host: 'el', id: 'el_src', path: 'roll' }, combine: 'add', t: 0 });
+  }
+  if (only.includes('E')) {
+    ops.push(
+      { op: 'addElement', element: { id: 'el_tilt', type: 'image', src: 'media/marker.png', start: 0, duration: 2, z: 4,
+        node: { pivot: [-3.5, 8, -2], position: [0, 0, 0], rotation: [25, 40, 10], scale: [0.22, 0.22, 1] }, style: { fit: 'stretch' } } },
+      { op: 'objectAdd', object: { id: 'ob_turn', type: 'solid', pivot: [5, 2.2, -1], geom: { w: 2.4, h: 0.6, d: 0.6 },
+        rotation: [0, 0, 0], style: { color: '#ffe020', emissive: 1 } } },
+      { op: 'objectKey', id: 'ob_turn', path: 'rotation.z', t: 0, v: 0 },
+      { op: 'objectKey', id: 'ob_turn', path: 'rotation.z', t: 1, v: 90 },
+      { op: 'cameraPatch', id: cam, patch: { rotation: [0, 3, 0] } },
+    );
   }
   // Move / turn the source after every bind: linked children must follow.
   ops.push({ op: 'updateElement', id: 'el_src', patch: { transform: { x: -350, rotation: only.includes('D') ? 12 : 0 } } });
@@ -138,6 +150,7 @@ async function main() {
   const b = await blenderGrid();
   const rows = [];
   let diff = 0;
+  const misses = [];
   const counts = {};
   for (let j = 0; j < GRID[1]; j++) {
     let line = '';
@@ -146,18 +159,19 @@ async function main() {
       const ca = classify(a[k]);
       const cb = classify(b[k]);
       counts[ca] = (counts[ca] || 0) + 1;
-      if (ca !== cb) { diff++; line += '#'; } else line += SYMBOL[ca];
+      if (ca !== cb) { diff++; line += '#'; misses.push(`(${i},${j}) preview ${a[k]} blender ${b[k]}`); } else line += SYMBOL[ca];
     }
     rows.push(line);
   }
   console.log(`[parity] cases ${only.join(',')}  preview classes ${JSON.stringify(counts)}`);
   for (const r of rows) console.log(`[parity] ${r}`);
-  if (diff > ALLOWED) {
+  if (diff > 0) {
     for (let j = 0; j < GRID[1]; j++) {
       const at = (g, i) => SYMBOL[classify(g[j * GRID[0] + i])];
       console.log(`[parity] preview ${Array.from({ length: GRID[0] }, (_, i) => at(a, i)).join('')}  blender ${Array.from({ length: GRID[0] }, (_, i) => at(b, i)).join('')}`);
     }
   }
+  for (const m of misses) console.log(`[parity] differs ${m}`);
   console.log(`[parity] ${diff} of ${a.length} cells differ (allowed ${ALLOWED})`);
   if (diff > ALLOWED) {
     console.log('[parity] FAIL');

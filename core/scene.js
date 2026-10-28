@@ -13,6 +13,7 @@ import { clamp, ease, speedWarp } from './time.js';
 import { compiledTrack, segmentIndex } from './tracks.js';
 import { SCENE_MODEL_VERSION } from './version.js';
 import { sampleCurve, normalizeCurve } from './curves.js';
+import { basisFromRotation, dirRollFromRotation, normalizeRotation, sampleRotation, ROTATION_PATHS } from './rotation.js';
 
 export const SCENE_VERSION = SCENE_MODEL_VERSION;
 export const PX_PER_M = 100; // v2 (pixels) -> v3 (metres) migration scale
@@ -226,16 +227,25 @@ export function objectPose(obj, t) {
   const pivot = sampleAxes(tr, 'pivot', t, o.pivot || [0, 0, 0]);
   const position = sampleAxes(tr, 'position', t, o.position || [0, 0, 0]);
   const scale = sampleAxes(tr, 'scale', t, o.scale || [1, 1, 1]);
-  const dir = sampleDir(tr.dir, t, o.rot?.dir);
-  const roll = sampleChannel(tr.roll, t, o.rot?.roll ?? 0);
   const opacity = clamp(sampleChannel(tr.opacity, t, o.opacity ?? 1), 0, 1);
-  const basis = basisFromDir(dir, roll);
+  // Three-axis rotation (core/rotation.js) wins over the older dir/roll fields.
+  const rotated = Array.isArray(o.rotation) || ROTATION_PATHS.some((p) => Array.isArray(tr[p]) && tr[p].length);
+  let dir, roll, basis, rotation;
+  if (rotated) {
+    rotation = sampleRotation(o.rotation, (path, fb) => sampleChannel(tr[path], t, fb));
+    basis = basisFromRotation(rotation);
+    ({ dir, roll } = dirRollFromRotation(rotation));
+  } else {
+    dir = sampleDir(tr.dir, t, o.rot?.dir);
+    roll = sampleChannel(tr.roll, t, o.rot?.roll ?? 0);
+    basis = basisFromDir(dir, roll);
+  }
   const worldPos = V.add(pivot, [
     basis.right[0] * position[0] + basis.up[0] * position[1] + basis.forward[0] * position[2],
     basis.right[1] * position[0] + basis.up[1] * position[1] + basis.forward[1] * position[2],
     basis.right[2] * position[0] + basis.up[2] * position[1] + basis.forward[2] * position[2],
   ]);
-  return { pivot, position, scale, dir, roll, basis, worldPos, opacity };
+  return { pivot, position, scale, dir, roll, basis, worldPos, opacity, ...(rotation ? { rotation } : {}) };
 }
 
 /** Column-major 4x4 for WebGL/Blender (geometry centre at worldPos). */
@@ -300,6 +310,7 @@ export function normalizeObject(o = {}) {
     position: vec3(o.position),
     scale: vec3(o.scale, [1, 1, 1]),
     rot: { dir: V.norm(vec3(rot.dir, [0, 0, -1])), roll: num(rot.roll, 0) },
+    ...(Array.isArray(o.rotation) ? { rotation: normalizeRotation(o.rotation) } : {}),
     opacity: clamp(num(o.opacity, 1), 0, 1),
     tracks: normalizeTracks(o.tracks),
   };

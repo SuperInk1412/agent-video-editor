@@ -36,6 +36,7 @@
 // elementCarrier`), and `isScreenParent` keeps it out of this path.
 import { normalizeCamera, evalCamera } from './camera.js';
 import { basisFromDir, objectPose, sampleChannel } from './scene.js';
+import { applyCameraRotation, sampleRotation } from './rotation.js';
 import { normalizeSpatialNode } from './schema.js';
 import { screenToWorld } from './space.js';
 import { clamp, sampleTrack } from './time.js';
@@ -228,7 +229,13 @@ const cameraProject = (cam) => ({
 function cameraState(cam, t, opts = null) {
   if (!cam) return null;
   const at = Number.isFinite(Number(t)) ? Number(t) : 0;
-  return evalCamera(cameraProject(normalizeCamera(cam)), at, opts);
+  return applyCameraRotation(evalCamera(cameraProject(normalizeCamera(cam)), at, opts), cameraRotationAt(cam, at));
+}
+
+/** A camera's three-axis rotation offset at t (base `cam.rotation` + 'rotation.x/y/z' tracks). */
+export function cameraRotationAt(cam, t) {
+  const tr = cam?.tracks || {};
+  return sampleRotation(cam?.rotation, (path, fb) => sampleChannel(tr[path], t, fb));
 }
 
 /**

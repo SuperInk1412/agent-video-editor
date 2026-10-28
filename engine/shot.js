@@ -19,7 +19,10 @@ const r3 = (v) => Math.round(Number(v) * 1000) / 1000;
 const OBJ_TYPES = new Set(['solid', 'shape', 'text', 'image', 'video', 'container']);
 
 /** A camera with a unified spatial parent needs the world wrapper; others keep the shipped bake. */
-const hasFrameParent = (cam) => !!cam?.frameParent?.id;
+// ...or a three-axis rotation offset (core/rotation.js), which only that path applies.
+const hasFrameParent = (cam) => !!cam?.frameParent?.id
+  || Array.isArray(cam?.rotation)
+  || ['rotation.x', 'rotation.y', 'rotation.z'].some((p) => Array.isArray(cam?.tracks?.[p]) && cam.tracks[p].length);
 
 /**
  * Same shape / rounding as core/camera.js::bakeCameraTrack, but reads

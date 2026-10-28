@@ -41,12 +41,13 @@
 import { isRecord } from './json.js';
 import { sampleTrack } from './time.js';
 import { evalCamera, cameraAtTime, normalizeCamera } from './camera.js';
+import { applyCameraRotation, dirRollFromRotation, ROTATION_PATHS, sampleRotation } from './rotation.js';
 import { frameOf as poseFrameOf, inverseMapPoint, inverseMapVector, toLocalPoint, toLocalVector, worldPose } from './hierarchy.js';
 import {
   MAX_DEPTH, SCREEN_PARENT, applyParentToFrame, applyParentToNode, bindFrameFor,
   bindFrameFrom, cameraWorldFrame, elementNode, findSpatialHost, frameOf,
   frameToNode, mapParentPoint, normalizeInherit, normalizeSpatialNode,
-  parentDelta, parentStrengthAt, rollOf, spatialAncestors, wouldSpatialCycle,
+  cameraRotationAt, parentDelta, parentStrengthAt, rollOf, spatialAncestors, wouldSpatialCycle,
 } from './spatial.js';
 
 /** Ops owned by this module (registered in core/ops.js and core/contracts.js). */
@@ -129,15 +130,21 @@ export function elementLocalNode(project, el, t) {
   const at = t == null ? null : Number(t);
   if (at == null || !Number.isFinite(at)) return base;
   const sample = (path, fallback) => sampleTrack(el.keyframes, path, at, fallback);
+  // Three-axis rotation: base node.rotation + 'rotation.x/y/z' keys.
+  const keyed = (path) => Array.isArray(el.keyframes) && el.keyframes.some((k) => k?.path === path);
+  const rotated = Array.isArray(el.node.rotation) || ROTATION_PATHS.some(keyed);
+  const rotation = rotated ? sampleRotation(base.rotation || el.node.rotation, (path, fb) => sample(path, fb), at) : null;
+  const orient = rotation ? dirRollFromRotation(rotation) : { dir: base.dir.slice(), roll: sample('roll', base.roll) };
   return {
+    ...(rotation ? { rotation } : {}),
     pivot: [
       sample('pivot.x', base.pivot[0]),
       sample('pivot.y', base.pivot[1]),
       sample('pivot.z', base.pivot[2]),
     ],
     position: base.position.slice(),
-    dir: base.dir.slice(),
-    roll: sample('roll', base.roll),
+    dir: orient.dir,
+    roll: orient.roll,
     scale: [
       sample('scale.x', base.scale[0]),
       sample('scale.y', base.scale[1]),
@@ -255,9 +262,10 @@ export function evalCameraWorld(project, t = 0, cam = null, opts = null) {
   const host = cam
     ? normalizeCamera(cam)
     : (cameraAtTime(project, at) || normalizeCamera(project?.camera || null));
-  const base = cam
+  // The camera's three-axis rotation is an offset in its own frame (core/rotation.js).
+  const base = applyCameraRotation(cam
     ? evalCamera({ camera: host, cameras: [host], activeCameraId: host.id }, at, opts)
-    : evalCamera(project, at, opts);
+    : evalCamera(project, at, opts), cameraRotationAt(host, at));
   const parent = worldFrameParent(host);
   if (!parent) return base;
   const resolved = hostFrameAt(project, parent.id, at, opts);

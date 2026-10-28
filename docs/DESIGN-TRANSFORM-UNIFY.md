@@ -111,3 +111,10 @@
   - miku-swiss 副本：预览和旧贴屏逐像素相同（48×27 网格最大差 0）；Blender 场景一致；字幕相比旧的 Blender 贴屏渲染偏移最多约 4 px（960 宽）。
   - 受控测试：同一段文字不挂父级和挂父级时，Blender 输出完全相同，和预览的差都在 0.16% 以内。说明偏差来自旧贴屏在 Blender 里的实现，新做法和预览一致。
 - 2026-10-28 · 第 1 步（A 部分：删旧界面）· A · `252f81e` · 删掉 `cam.output` 的界面：相机行开关、相机右键菜单项、属性面板复选框；相机行改为只读的「被投屏 ×N」提示角标（统计仍可见的投屏元素，含延迟一帧；隐藏相机照样统计）。`npm test` 423/423 PASS，截图确认角标显示。
+- 2026-10-28 · 第 2 步 2a（B）· `core/rotation.js`：三个角 ↔ 姿态互转，规则是"从正面看顺时针"，先 Z、再 X、最后 Y；Z 和旧的 2D 旋转、节点自转同号。所有求值路径都认 `rotation.x/y/z`，旧的朝向/自转字段继续生效，界面不受影响：
+  - 3D 物体：`obj.rotation` + `tracks['rotation.*']`，`objectPose` 从三个角求出朝向，`dir`/`roll` 作为派生值；
+  - 2D 节点：`node.rotation` + 关键帧 `rotation.*`，在 `elementLocalNode` 里统一采样；
+  - 相机：`cam.rotation` + `tracks['rotation.*']`，作为在相机自身坐标里的偏移，在 `evalCameraWorld` / `cameraState` 里加上；带偏移的相机在成片里走世界烘焙。
+  - `objectKey` / `cameraParamKey` 的白名单加了三个轴。
+  - 验收：单测 9 条（往返换算、Z 与旧旋转同号、逐轴插值、节点、相机偏移方向）；`check-render-parity` 加了 E 场景（倾斜的 2D 卡片、关键帧旋转的 3D 物体、相机偏移），其中旋转相关的格子全部一致；相机偏移 [0,3,0] / [6,0,0] / [0,0,10] 下，预览和 Blender 的包围盒差 ≤ 0.2%。
+  - **待 A（2b）**：时间轴旋转三行、属性面板、旋转球、视口手柄改成读写 `rotation.x/y/z`。**待 B（2c）**：打开项目时的迁移（旧 2D 转节点、`dir`/`roll`/`transform.rotation` → 三个角、链接改到 `rotation.z`），然后删掉旧字段。
