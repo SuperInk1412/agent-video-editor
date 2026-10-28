@@ -62,6 +62,9 @@ const definitions = {
   objectParentUnkey: [{ id: string, channel: parentChannel, t: time }, ['id', 'channel', 't']],
   elementParent: [{ id: string, parent: nullableId, t: time }, ['id', 'parent']],
   elementUnparent: [{ id: string, t: time }, ['id']],
+  spatialParent: [{ id: string, parent: string, t: time,
+    inherit: { type: 'object', properties: { pos: { type: 'boolean' }, rot: { type: 'boolean' }, scale: { type: 'boolean' } }, additionalProperties: false } }, ['id', 'parent']],
+  spatialUnparent: [{ id: string }, ['id']],
   propLink: [{
     host: linkHostKind, id: string, to: property, from: linkFrom,
     combine: { enum: ['add', 'mul'] }, t: time, enabled: { type: 'boolean' }, bindParentValue: number,
