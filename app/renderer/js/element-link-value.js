@@ -20,10 +20,13 @@ import { elementRowLinkPaths } from './link-menu.js';
 const PX_PER_M = 100;
 
 const centerY = (meta) => (Number(meta?.height) || 1080) / 2 / PX_PER_M;
+const NODE_ROW_RE = /^(pivot|position|scale)\.[xyz]$|^roll$|^opacity$/;
+const isNodeRowPath = (path) => NODE_ROW_RE.test(String(path ?? ''));
 
 /** Link target path behind a 2D row (`transform.x` -> `pivot.x`). */
 export function elementRowTarget(el, rowPath) {
   if (!isRecord(el)) return null;
+  if (isRecord(el.node) && isNodeRowPath(rowPath)) return String(rowPath);
   return elementRowLinkPaths(el, rowPath)[0] || null;
 }
 
@@ -34,14 +37,17 @@ export function elementRowTarget(el, rowPath) {
  */
 export function elementRowKeyPath(el, rowPath) {
   const path = String(rowPath ?? '');
-  if (!isRecord(el?.node) || path === 'transform.opacity' || path === 'audio.volume') return path;
+  if (path === 'transform.opacity' || path === 'audio.volume') return path;
+  if (isRecord(el?.node) && isNodeRowPath(path)) return path === 'opacity' ? 'transform.opacity' : path;
+  if (!isRecord(el?.node)) return path;
   return elementRowTarget(el, path) || path;
 }
 
 /** A node-unit target value (metres / ratio / deg) -> the row's display unit. */
-export function targetToRow(el, meta, target, value) {
+export function targetToRow(el, meta, target, value, rowPath = '') {
   const v = Number(value);
   if (!Number.isFinite(v)) return null;
+  if (isNodeRowPath(rowPath) && String(rowPath) === String(target)) return v;
   switch (String(target ?? '')) {
     case 'pivot.x': return v * PX_PER_M;
     case 'pivot.y': return (centerY(meta) - v) * PX_PER_M;
@@ -51,9 +57,10 @@ export function targetToRow(el, meta, target, value) {
 }
 
 /** The row's display unit -> a node-unit target value (inverse of targetToRow). */
-export function rowToTarget(el, meta, target, value) {
+export function rowToTarget(el, meta, target, value, rowPath = '') {
   const v = Number(value);
   if (!Number.isFinite(v)) return null;
+  if (isNodeRowPath(rowPath) && String(rowPath) === String(target)) return v;
   switch (String(target ?? '')) {
     case 'pivot.x': return v / PX_PER_M;
     case 'pivot.y': return centerY(meta) - v / PX_PER_M;
@@ -71,7 +78,7 @@ export function localElementRowValueAt(project, el, rowPath, t) {
   if (!target || !project) return null;
   const local = resolveLocalValue(project, { host: 'el', id: el.id }, target, t);
   if (local == null) return null;
-  return targetToRow(el, project.meta, target, local);
+  return targetToRow(el, project.meta, target, local, rowPath);
 }
 
 /**
@@ -83,19 +90,20 @@ export function nodeRowPatch(el, rowPath, rowValue, meta = {}) {
   const target = elementRowTarget(el, rowPath);
   const row = Number(rowValue);
   if (!target || !Number.isFinite(row)) return null;
-  const v = rowToTarget(el, meta, target, row);
+  const v = rowToTarget(el, meta, target, row, rowPath);
   if (v == null) return null;
   const node = { ...el.node };
   if (target === 'roll') {
     node.roll = v;
     return { node };
   }
-  if (target.startsWith('pivot.')) {
+  if (target.startsWith('pivot.') || target.startsWith('position.')) {
+    const group = target.slice(0, target.indexOf('.'));
     const i = 'xyz'.indexOf(target.slice(-1));
     if (i < 0) return null;
-    const arr = Array.isArray(node.pivot) ? node.pivot.slice() : [0, 0, 0];
+    const arr = Array.isArray(node[group]) ? node[group].slice() : [0, 0, 0];
     arr[i] = v;
-    node.pivot = arr;
+    node[group] = arr;
     return { node };
   }
   if (target.startsWith('scale.')) {
@@ -128,7 +136,7 @@ export function effectiveElementRowValue(project, el, rowPath, t, localValue) {
   if (!target || !project) return fallback;
   const effective = resolveEffectiveValue(project, { host: 'el', id: el.id }, target, t);
   if (effective == null) return fallback;
-  const row = targetToRow(el, project.meta, target, effective);
+  const row = targetToRow(el, project.meta, target, effective, rowPath);
   return row == null ? fallback : row;
 }
 
@@ -142,10 +150,10 @@ export function localElementRowValue(project, el, rowPath, t, effectiveRowValue)
   const fallback = Number.isFinite(row) ? row : effectiveRowValue;
   const target = elementRowTarget(el, rowPath);
   if (!target || !project) return fallback;
-  const targetValue = rowToTarget(el, project.meta, target, row);
+  const targetValue = rowToTarget(el, project.meta, target, row, rowPath);
   if (targetValue == null) return fallback;
   const local = writeBackLocalValue(project, { host: 'el', id: el.id }, target, t, targetValue);
   if (local == null) return fallback;
-  const localRow = targetToRow(el, project.meta, target, local);
+  const localRow = targetToRow(el, project.meta, target, local, rowPath);
   return localRow == null ? fallback : localRow;
 }

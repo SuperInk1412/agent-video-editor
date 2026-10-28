@@ -11,10 +11,11 @@ import { SpeedCurve, SPEED_PRESETS } from './speedcurve.js';
 import { attachNumberField, readNumber, writeNumber } from './numfield.js';
 import { widthFor, isWidth } from './field-width.js';
 import { frameWriteTime } from './timeline-math.js';
+import { elementNodeAt } from './node-at.js';
 import { splitRef } from '/core/selection.js';
 import { h, icon, prefs } from './ui.js';
 import {
-  elementRowLinkPaths, linkJumpTarget, linkOf, linkSourceLabel, linkSummary, openLinkMenu,
+  linkJumpTarget, linkOf, linkSourceLabel, linkSummary, openLinkMenu,
 } from './link-menu.js';
 import {
   effectiveElementRowValue, elementRowKeyPath, elementRowTarget, localElementRowValue,
@@ -558,7 +559,7 @@ export class Inspector {
       const rowValue = local == null ? v : local;
       if (keyed(rowPath)) {
         const target = elementRowTarget(el, rowPath);
-        const value = target ? rowToTarget(el, project.meta, target, rowValue) : rowValue;
+        const value = target ? rowToTarget(el, project.meta, target, rowValue, rowPath) : rowValue;
         this._commit(`${el.id}:${rowPath}`, {
           op: 'keySet', id: el.id, path: elementRowKeyPath(el, rowPath), t: keyT(),
           value: value == null ? rowValue : value,
@@ -576,7 +577,7 @@ export class Inspector {
     };
     // Property links target core/links.js paths: a legacy 2D element links
     // pivot.* / roll / scale.* / opacity, never transform.* (PLAN §3.3).
-    const linkPath = (rowPath) => elementRowLinkPaths(el, rowPath)[0] || null;
+    const linkPath = (rowPath) => elementRowTarget(el, rowPath);
     const link = (rowPath) => {
       const path = linkPath(rowPath);
       return path ? { kind: 'el', id: el.id, path } : null;
@@ -626,18 +627,46 @@ export class Inspector {
       return;
     }
 
-    this.root.appendChild(this._sec('变换', {},
-      this._vec({
-        label: '位置', keyPaths: [kp('transform.x'), kp('transform.y')],
-        items: [
-          { axis: 'x', value: round(kv('transform.x', el.transform.x)), unit: 'px', aria: 'X', link: link('transform.x'), onChange: edit('transform.x', (v) => ({ transform: { x: v } })) },
-          { axis: 'y', value: round(kv('transform.y', el.transform.y)), unit: 'px', aria: 'Y', link: link('transform.y'), onChange: edit('transform.y', (v) => ({ transform: { y: v } })) },
-        ],
-      }),
-      this._field({ label: '纵深 z', unit: 'm', value: round(kv('transform.z', el.transform.z ?? 0), 3), step: 0.05, kf: true, path: kp('transform.z'), link: link('transform.z'), onChange: edit('transform.z', (v) => ({ transform: { z: v } })) }),
-      this._field({ label: '缩放', value: round(kv('transform.scale', el.transform.scale), 3), step: 0.01, kf: true, path: kp('transform.scale'), link: link('transform.scale'), onChange: edit('transform.scale', (v) => ({ transform: { scale: v } })) }),
-      this._field({ label: '旋转', unit: '°', value: round(kv('transform.rotation', el.transform.rotation), 2), step: 0.5, kf: true, path: kp('transform.rotation'), link: link('transform.rotation'), onChange: edit('transform.rotation', (v) => ({ transform: { rotation: v } })) }),
-      this._field({ label: '不透明度', value: round(kv('transform.opacity', el.transform.opacity), 3), step: 0.01, min: 0, max: 1, percent: true, kf: true, path: kp('transform.opacity'), link: link('transform.opacity'), onChange: edit('transform.opacity', (v) => ({ transform: { opacity: v } })) }),
+    const node = el.node ? elementNodeAt(el, project.meta, time) : null;
+    const nodeVec = (group, label, step, unit) => {
+      const arr = Array.isArray(node?.[group]) ? node[group] : [0, 0, 0];
+      return this._vec({
+        label,
+        keyPaths: ['x', 'y', 'z'].map((ax) => `${group}.${ax}`),
+        items: ['x', 'y', 'z'].map((ax, i) => ({
+          axis: ax, value: round(kv(`${group}.${ax}`, arr[i]), 3), step, unit,
+          aria: `${label} ${ax.toUpperCase()}`,
+          link: link(`${group}.${ax}`),
+          onChange: edit(`${group}.${ax}`, null),
+        })),
+      });
+    };
+    const dirVec = () => {
+      const dir = Array.isArray(el.node?.dir) ? el.node.dir : [0, 0, 1];
+      const setDir = (i) => (v) => {
+        const next = (Array.isArray(el.node?.dir) ? el.node.dir : [0, 0, 1]).slice();
+        next[i] = Number(v) || 0;
+        const len = Math.hypot(next[0], next[1], next[2]);
+        if (!(len > 1e-9)) return;
+        this._commit(`${el.id}:dir`, {
+          op: 'updateElement', id: el.id,
+          patch: { node: { ...el.node, dir: next.map((n) => n / len) } },
+        });
+      };
+      return this._vec({
+        label: '朝向',
+        items: ['x', 'y', 'z'].map((ax, i) => ({
+          axis: ax, value: round(dir[i], 3), step: 0.01, aria: `朝向 ${ax.toUpperCase()}`,
+          onChange: setDir(i),
+        })),
+      });
+    };
+    const opacityField = this._field({
+      label: '不透明度', value: round(kv('transform.opacity', el.transform.opacity), 3),
+      step: 0.01, min: 0, max: 1, percent: true, kf: true, path: kp('transform.opacity'),
+      link: link('transform.opacity'), onChange: edit('transform.opacity', (v) => ({ transform: { opacity: v } })),
+    });
+    const bindRows = [
       this._field({ label: '跟随节拍', value: el.punch || 0, step: 0.05, min: 0, max: 2, onChange: (v) => set('punch', { punch: v }) }),
       el.parent?.id ? null : this._field({
         label: '贴屏', type: 'checkbox', value: false,
@@ -646,7 +675,37 @@ export class Inspector {
           ? { op: 'elementParent', id: el.id, parent: project.activeCameraId, t: tNow() }
           : { op: 'elementUnparent', id: el.id, t: tNow() }),
       }),
-    ));
+    ];
+    if (node) {
+      // Unified SpatialNode editor: pivot / position / orientation / xyz scale.
+      this.root.appendChild(this._sec('变换', {},
+        nodeVec('pivot', '中心点', 0.05, 'm'),
+        nodeVec('position', '位置', 0.05, 'm'),
+        dirVec(),
+        this._field({
+          label: '绕轴自转', unit: '°', value: round(node.roll, 2), step: 0.5,
+          kf: true, path: 'roll', link: link('roll'), onChange: edit('roll', null),
+        }),
+        nodeVec('scale', '缩放', 0.01, ''),
+        opacityField,
+        ...bindRows,
+      ));
+    } else {
+      this.root.appendChild(this._sec('变换', {},
+        this._vec({
+          label: '位置', keyPaths: [kp('transform.x'), kp('transform.y')],
+          items: [
+            { axis: 'x', value: round(kv('transform.x', el.transform.x)), unit: 'px', aria: 'X', link: link('transform.x'), onChange: edit('transform.x', (v) => ({ transform: { x: v } })) },
+            { axis: 'y', value: round(kv('transform.y', el.transform.y)), unit: 'px', aria: 'Y', link: link('transform.y'), onChange: edit('transform.y', (v) => ({ transform: { y: v } })) },
+          ],
+        }),
+        this._field({ label: '纵深 z', unit: 'm', value: round(kv('transform.z', el.transform.z ?? 0), 3), step: 0.05, kf: true, path: kp('transform.z'), link: link('transform.z'), onChange: edit('transform.z', (v) => ({ transform: { z: v } })) }),
+        this._field({ label: '缩放', value: round(kv('transform.scale', el.transform.scale), 3), step: 0.01, kf: true, path: kp('transform.scale'), link: link('transform.scale'), onChange: edit('transform.scale', (v) => ({ transform: { scale: v } })) }),
+        this._field({ label: '旋转', unit: '°', value: round(kv('transform.rotation', el.transform.rotation), 2), step: 0.5, kf: true, path: kp('transform.rotation'), link: link('transform.rotation'), onChange: edit('transform.rotation', (v) => ({ transform: { rotation: v } })) }),
+        opacityField,
+        ...bindRows,
+      ));
+    }
 
     this.root.appendChild(this._sec('时间', {}, ...timeRows));
 

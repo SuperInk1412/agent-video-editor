@@ -108,6 +108,8 @@ test('element-link-value: node rows use pivot paths, keys and node patches', () 
   n.node.scale = [2, 2, 1];
   n.node.roll = 30;
   assert.equal(elementRowTarget(n, 'transform.x'), 'pivot.x');
+  assert.equal(elementRowTarget(n, 'pivot.x'), 'pivot.x');
+  assert.equal(elementRowTarget(n, 'position.y'), 'position.y');
   assert.equal(elementRowKeyPath(n, 'transform.x'), 'pivot.x');
   assert.equal(elementRowKeyPath(n, 'transform.scale'), 'scale.x');
   assert.equal(elementRowKeyPath(n, 'transform.rotation'), 'roll');
@@ -116,6 +118,10 @@ test('element-link-value: node rows use pivot paths, keys and node patches', () 
   assert.equal(Math.round(localElementRowValueAt(p, n, 'transform.y', 0)), 150);
   assert.equal(localElementRowValueAt(p, n, 'transform.scale', 0), 2);
   assert.equal(localElementRowValueAt(p, n, 'transform.rotation', 0), 30);
+  assert.equal(localElementRowValueAt(p, n, 'pivot.x', 0), 1.25, 'direct node rows are metres');
+  assert.equal(localElementRowValue(p, n, 'pivot.y', 0, 0), 0, 'unlinked node rows pass through');
+  assert.deepEqual(nodeRowPatch(n, 'pivot.x', 2.5, p.meta).node.pivot, [2.5, 3.9, 0.5]);
+  assert.deepEqual(nodeRowPatch(n, 'position.x', 1, p.meta).node.position, [1, 0, 0]);
   assert.deepEqual(nodeRowPatch(n, 'transform.x', 250, p.meta).node.pivot, [2.5, 3.9, 0.5]);
   assert.deepEqual(nodeRowPatch(n, 'transform.y', 0, p.meta).node.pivot, [1.25, 5.4, 0.5]);
   assert.deepEqual(nodeRowPatch(n, 'transform.scale', 0.5, p.meta).node.scale, [0.5, 0.5, 1]);
