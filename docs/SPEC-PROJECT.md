@@ -144,8 +144,10 @@ Blender 侧这些效果由合成器节点组 `VDM_Composite` 完成。节点组�
   `el.parent = { id, mode: "world", inherit: { pos, rot, scale }, bind: { pivot, basis, scale } }`。
   `bind` 是绑定时父级世界 frame，之后 `parentDelta = frame(t) · frame(bind)⁻¹` 带着子级走——
   父级旋转会绕父级 pivot 公转，绑定时刻不跳。`spatialParent {id, parent, t, inherit?}` /
-  `spatialUnparent {id}` 只增删 `parent`，从不改子级本地值或关键帧。`@live` / 旧相机贴屏仍是渲染期
-  屏锁，不是世界父级，也不能当世界父级的目标。预览已接父级链；Blender / engine 尚未消费。
+  `spatialUnparent {id}` 只增删 `parent`，从不改子级本地值或关键帧。3D 物体和相机也可以当子级，
+  记录在 `obj.frameParent` / `cam.frameParent`（同样形状，不碰旧 3D `obj.parent` 层级）；
+  核心 `hostFrameAt` / `objectWorldPose` / `evalCameraWorld` 已支持，preview3d/engine 接线进行中。
+  `@live` / 旧相机贴屏仍是渲染期屏锁，不是世界父级，也不能当世界父级的目标。
 - **属性父级（`el.links` / `ob.links` / `cam.links`）**：一条链接是
   `{ id, to, from: { host: "el"|"ob"|"cam", id, path }, combine: "add"|"mul", bindParentValue, enabled }`。
   `add`：`eff = local + parent(t) − bindParentValue`；`mul`：`eff = local × parent(t) / bindParentValue`。
