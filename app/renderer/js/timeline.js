@@ -786,6 +786,17 @@ export class Timeline {
   }
 
   /**
+   * Live preview of a clip drag: the dragged edge lands on the frame grid while
+   * the pointer moves, not only after release. `_snap` is the magnetic layer
+   * (0 / tail / beats); this is the frame layer. The opposite edge stays where
+   * the caller had it, so a trim of a legacy off-grid clip keeps that edge.
+   */
+  _clipPreview(mode, start, duration, { maxDuration = null } = {}) {
+    const q = this._clipEdit(mode, start, duration, { maxDuration });
+    return q && q.duration >= 0.08 ? q : { start, duration };
+  }
+
+  /**
    * Where the playhead line is drawn: the start of the frame under `t`, except
    * at/after the end where the exact duration keeps it on the last pixel.
    * `this.time` stays exact (playback ticks, keyframe jumps); only the line,
@@ -1561,6 +1572,9 @@ export class Timeline {
         nd = Math.max(0.08, end - s);
         ns = s;
       }
+      const q = this._clipPreview(mode, ns, nd);
+      ns = q.start;
+      nd = q.duration;
       block.style.left = `${ns * this.pps}px`;
       setClipWidth(block, Math.max(8, nd * this.pps));
       block._ns = ns;
@@ -3831,6 +3845,8 @@ export class Timeline {
           nd = Math.max(0.08, end - s);
           ns = s;
         }
+        const q = this._clipPreview(mode, ns, nd);
+        ns = q.start; nd = q.duration;
         objBlk.style.left = `${ns * this.pps}px`;
         setClipWidth(objBlk, nd * this.pps);
         objBlk._ns = ns; objBlk._nd = nd;
@@ -3935,6 +3951,10 @@ export class Timeline {
           }
           ns = s;
         }
+        const q = this._clipPreview(mode, ns, nd, {
+          maxDuration: mode === 'r' && sourceLimit ? Math.max(0.08, sourceLimit - srcIn) : null,
+        });
+        ns = q.start; nd = q.duration;
         blk.style.left = `${ns * this.pps}px`;
         setClipWidth(blk, nd * this.pps);
         blk._ns = ns; blk._nd = nd; blk._sourceHit = hitSource;
