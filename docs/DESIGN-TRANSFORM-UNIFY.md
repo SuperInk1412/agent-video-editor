@@ -120,6 +120,10 @@
   - `objectKey` / `cameraParamKey` 的白名单加了三个轴。
   - 验收：单测 9 条（往返换算、Z 与旧旋转同号、逐轴插值、节点、相机偏移方向）；`check-render-parity` 加了 E 场景（倾斜的 2D 卡片、关键帧旋转的 3D 物体、相机偏移），其中旋转相关的格子全部一致；相机偏移 [0,3,0] / [6,0,0] / [0,0,10] 下，预览和 Blender 的包围盒差 ≤ 0.2%。
   - **待 A（2b）**：时间轴旋转三行、属性面板、旋转球、视口手柄改成读写 `rotation.x/y/z`。**待 B（2c）**：打开项目时的迁移（旧 2D 转节点、`dir`/`roll`/`transform.rotation` → 三个角、链接改到 `rotation.z`），然后删掉旧字段。
+- 2026-10-28 · 第 2 步 2c（B）· 分支 `agent/rotation-migrate`（已接到 `643ac06`，未合入）· 打开时迁移到三轴旋转：
+  - 旧 2D → 空间节点；节点 `dir/roll`、物体 `rot` 与 `dir/roll` 轨道、相机 `roll` → `rotation` / `rotation.*`；链接 `roll` → `rotation.z`。相机旧手动 roll 与 2b 后的旋转偏移同时存在时，静态 roll 精确并进 X/Y/Z（X/Y 有关键帧时保留 roll）。
+  - 验收：`npm test` 442/442；miku-swiss 副本 137 个元素 4247 个采样位置差 ≤ 9e-16、相机零差；Blender t=4/21 迁移前后逐像素相同；预览只有状态栏文字不同；A 的属性面板对旧 2D / 节点 / 物体 / 相机显示的三格与计算值一致。
+  - **开关仍关**：新建路径还在写旧格式（`createProject` 的相机、`addElement` 的 2D、`objectAdd` 的 `rot`、`normalizeCamera` 默认 `roll: 0`），开关一开每次打开都会重新迁移、重复提示和备份，撤销历史测试失败 12 条。先让新建路径直接写 `rotation`，再开。
 - 2026-10-28 · 第 2 步 2b（A）· `79309d8` · 三轴旋转界面：
   - 时间轴：2D 节点 / 3D 物体 / 相机各三行 `旋转 X°/Y°/Z°`，每行独立输入、菱形和属性链接；第一次给只有 `dir/roll` 的宿主写键时先补全 `rotation` 基础值，避免跳帧。
   - 属性面板：2D 节点 / 3D 物体 / 相机都是 X/Y/Z 三格（`↳` 链接 `rotation.x/y/z`）；2D 节点球和 3D 物体球拖动后写回三个角（`rotationFromDirRoll` 保留当前自转）。

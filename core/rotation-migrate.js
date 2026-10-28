@@ -16,15 +16,19 @@
 // Static orientations and roll-only animation are exact: with the dir fixed,
 // roll is a turn about the facing axis, which is exactly z.
 //
-// Off until the editor UI reads rotation.x/y/z (step 2b): ROTATION_MIGRATION.
+// Runs on open (engine/storage.js) behind ROTATION_MIGRATION.
 //
 // Pure ESM, no `node:*`.
 import { isRecord } from './json.js';
 import { objectPose } from './scene.js';
 import { planSpatialMigration } from './migrate-spatial.js';
-import { rotationFromDirRoll, rotationFromBasis } from './rotation.js';
+import { normalizeRotation, rotationFromDirRoll, rotationFromBasis, rotationMatrix } from './rotation.js';
 
-/** Turned on once the UI edits rotation.x/y/z (step 2b). */
+/**
+ * Off until the creation paths write rotation too (createProject's camera,
+ * addElement 2D, objectAdd, normalizeCamera's default roll): otherwise every
+ * open re-migrates freshly authored data. The UI side (2b) is done.
+ */
 export const ROTATION_MIGRATION = false;
 
 const r6 = (v) => Math.round(Number(v) * 1e6) / 1e6;
@@ -109,15 +113,34 @@ function migrateObject(obj, report) {
   report.objects++;
 }
 
+const mul3 = (A, B) => A.map((row) => [0, 1, 2].map((j) => row[0] * B[0][j] + row[1] * B[1][j] + row[2] * B[2][j]));
+const rz3 = (deg) => { const r = deg * Math.PI / 180, c = Math.cos(r), s = Math.sin(r); return [[c, -s, 0], [s, c, 0], [0, 0, 1]]; };
+
+// The manual roll turns the camera frame before the rotation offset
+// (core/rotation.js::applyCameraRotation): Rz(roll) · R(x, y, 0) · Rz(z).
+// Cameras from before step 2b have no offset, so it is just z = roll. A camera
+// edited since can carry both: a static roll folds exactly into new x / y and a
+// z shift unless x / y are keyed; a keyed roll folds only when the camera is
+// not tilted. Anything else keeps its roll, which still applies at runtime.
 function migrateCamera(cam, report) {
-  if (Array.isArray(cam.rotation)) return;
-  const roll = Number(cam.roll) || 0;
-  cam.rotation = [0, 0, r6(roll)];
   const tr = cam.tracks || (cam.tracks = {});
-  if (Array.isArray(tr.roll) && tr.roll.length) {
-    tr['rotation.z'] = tr.roll.map((k) => ({ ...k }));
+  const keyed = (p) => Array.isArray(tr[p]) && tr[p].length > 0;
+  if (Array.isArray(cam.rotation) && cam.roll === undefined && !keyed('roll')) return;
+  const rot = normalizeRotation(cam.rotation);
+  const roll = Number(cam.roll) || 0;
+  const xyKeyed = keyed('rotation.x') || keyed('rotation.y');
+  if (keyed('roll')) {
+    if (rot[0] || rot[1] || xyKeyed || keyed('rotation.z')) return;
+    tr['rotation.z'] = tr.roll.map((k) => ({ ...k, v: r6(Number(k.v) + rot[2]) }));
     delete tr.roll;
+  } else if (roll) {
+    if (xyKeyed) return;
+    const K = mul3(rz3(roll), rotationMatrix([rot[0], rot[1], 0]));
+    const [x, y, zz] = rotationFromBasis({ forward: [K[0][2], K[1][2], K[2][2]], up: [K[0][1], K[1][1], K[2][1]] });
+    rot[0] = x; rot[1] = y; rot[2] -= zz;
+    if (keyed('rotation.z')) tr['rotation.z'] = tr['rotation.z'].map((k) => ({ ...k, v: r6(Number(k.v) - zz) }));
   }
+  cam.rotation = rot.map(r6);
   delete cam.roll;
   report.cameras++;
 }

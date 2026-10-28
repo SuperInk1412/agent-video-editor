@@ -58,7 +58,7 @@ const snapshot = (p) => ({
 });
 const poseFrame = (s) => ({ pos: s.worldPos, basis: [s.basis.right, s.basis.up, s.basis.forward], scale: s.scale });
 
-test('the migration is off until the UI edits rotation.x/y/z', () => {
+test('the migration is off until new data is created in the rotation format', () => {
   assert.equal(ROTATION_MIGRATION, false);
 });
 
@@ -97,6 +97,36 @@ test('old fields are gone and links point at rotation.z', () => {
   const link = q.scene.objects.find((o) => o.id === 'ob_dir').links[0];
   assert.equal(link.to, 'rotation.z');
   assert.equal(link.from.path, 'rotation.z');
+});
+
+test('a camera edited after 2b keeps its picture when the old roll folds in', () => {
+  const cams = (setup) => {
+    const p = normalizeProject(createProject({ title: 'rc', duration: 4 }));
+    ensureSpace(p);
+    setup(p, p.cameras[0].id);
+    const before = TIMES.map((t) => evalCameraWorld(p, t));
+    const { project: q } = migrateRotations(p);
+    TIMES.forEach((t, i) => {
+      const after = evalCameraWorld(q, t);
+      near(after.look, before[i].look, 1e-5, `look @${t}`);
+      near(after.roll, before[i].roll, 1e-5, `roll @${t}`);
+    });
+    return q.cameras[0];
+  };
+  // tilted + static roll + keyed z: folds exactly
+  const a = cams((p, id) => {
+    applyOp(p, { op: 'cameraPatch', id, patch: { rotation: [5, 10, 3], roll: 12 } });
+    applyOp(p, { op: 'cameraParamKey', id, path: 'rotation.z', t: 0, v: 3 });
+    applyOp(p, { op: 'cameraParamKey', id, path: 'rotation.z', t: 3, v: 40 });
+  });
+  assert.equal(a.roll, undefined);
+  // tilted + keyed roll: cannot fold per axis, keeps the roll
+  const b = cams((p, id) => {
+    applyOp(p, { op: 'cameraPatch', id, patch: { rotation: [5, 10, 3] } });
+    applyOp(p, { op: 'cameraParamKey', id, path: 'roll', t: 0, v: 0 });
+    applyOp(p, { op: 'cameraParamKey', id, path: 'roll', t: 3, v: 30 });
+  });
+  assert.ok(b.tracks.roll.length);
 });
 
 test('a second run changes nothing', () => {
