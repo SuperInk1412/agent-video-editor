@@ -43,6 +43,22 @@ button.insp-name:hover { background: var(--surface-2); border-color: var(--borde
 .insp-parent { display: flex; align-items: center; gap: 6px; padding: 6px 0 4px; }
 .insp-parent-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .insp-parent .mini { flex: 0 0 auto; }
+/* Parent controls under the summary: drag ↳ + the three inherit switches. */
+.insp-parent-tools { display: flex; align-items: center; gap: 10px; padding: 2px 0 8px; }
+.insp-parentbtn {
+  display: grid; place-items: center; width: 22px; height: 22px; flex: 0 0 22px; padding: 0;
+  border: 1px solid var(--border); border-radius: var(--r-sm); background: transparent;
+  color: var(--text-3); font-size: var(--fs-sm); cursor: pointer;
+}
+.insp-parentbtn:hover { color: var(--text-1); background: var(--surface-3); }
+.insp-parentbtn.on { color: var(--edit); background: var(--edit-bg); border-color: var(--edit-border); }
+.insp-parentbtn.drop { color: var(--edit); border-color: var(--edit); }
+.insp-inherit {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: var(--fs-xs); color: var(--text-2); white-space: nowrap; cursor: pointer; user-select: none;
+}
+.insp-inherit-box { width: 13px; height: 13px; margin: 0; accent-color: var(--edit); }
+.insp-inherit.off { opacity: .45; cursor: default; }
 
 /* ---------------- collapsible sections ---------------- */
 .insp .sec { margin: 0 -10px; border-bottom: 1px solid var(--border-subtle); }

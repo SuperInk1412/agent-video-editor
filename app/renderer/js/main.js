@@ -2260,6 +2260,8 @@ async function boot() {
   inspector = new Inspector($('#panelInsp'), {
     onOp: (o) => op(o),
     getTime: () => S.time,
+    // The inspector's ↳ reuses the timeline drag wire and target highlighting.
+    onStartParentDrag: (ev, kind, host, btn) => timeline._startParentDrag(ev, kind, host, btn),
     onLinkJump: (jump) => jumpToLinkParent(jump),
     canGoBack: () => canGoBackLink(),
     onBack: () => goBackLink(),

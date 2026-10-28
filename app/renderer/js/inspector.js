@@ -534,6 +534,7 @@ export class Inspector {
         h('button', { type: 'button', class: 'mini', onclick: jump }, '转到父级'),
         h('button', { type: 'button', class: 'mini', onclick: unparent }, '解除')));
     }
+    this.root.appendChild(this._parentTools(project, el, 'el'));
 
     // Keyable fields show the keyed value at the playhead (before motion presets
     // and fades). Once a property has keys, typing a value keys it at the
@@ -921,6 +922,54 @@ export class Inspector {
       h('button', { type: 'button', class: 'mini', onclick: unparent }, '解除'));
   }
 
+  /**
+   * Parent controls under the spatial-parent summary (PLAN-ui-round3 §4.2):
+   * the same drag `↳` as the timeline row plus the three inherit switches.
+   * Dragging reuses timeline._startParentDrag, so target rows highlight and a
+   * plain click removes the parent; every toggle is one spatialParent op.
+   */
+  _parentTools(project, host, kind) {
+    const par = kind === 'el'
+      ? (host?.parent?.mode === 'world' ? host.parent : null)
+      : (host?.frameParent?.id ? host.frameParent : null);
+    const btn = h('button', {
+      type: 'button',
+      class: `insp-parentbtn${par?.id ? ' on' : ''}`,
+      'aria-label': '空间父级',
+      'data-tip': par?.id
+        ? '空间父级：按住拖到时间轴元素行换父级；单击解除'
+        : '空间父级：按住拖到时间轴元素行建立父级',
+    }, '↳');
+    btn.addEventListener('pointerdown', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      this.opts.onStartParentDrag?.(ev, kind, host, btn);
+    });
+    const inherit = par?.inherit || {};
+    const boxes = [['pos', '跟随位置'], ['rot', '跟随旋转'], ['scale', '跟随缩放']].map(([ch, label]) => h(
+      'label',
+      { class: `insp-inherit${par ? '' : ' off'}`, 'data-tip': par ? '这个轴跟随父级运动' : '先绑定空间父级' },
+      h('input', {
+        type: 'checkbox',
+        class: 'insp-inherit-box',
+        checked: par ? inherit[ch] !== false : false,
+        disabled: !par,
+        onchange: (ev) => {
+          if (!par?.id) return;
+          this.opts.onOp({
+            op: 'spatialParent',
+            id: host.id,
+            parent: par.id,
+            t: this._keyTime(),
+            inherit: { [ch]: ev.target.checked },
+          });
+        },
+      }),
+      h('span', {}, label),
+    ));
+    return h('div', { class: 'insp-parent-tools' }, btn, ...boxes);
+  }
+
   // ---------------------------------------------------------------- 3D object
   _renderObject(project, obj, time, multi = 0) {
     const id = obj.id;
@@ -1139,6 +1188,7 @@ export class Inspector {
     if (linksSummary) this.root.appendChild(linksSummary);
     const spatialParent = this._spatialParentSummary(project, cam);
     if (spatialParent) this.root.appendChild(spatialParent);
+    this.root.appendChild(this._parentTools(project, cam, 'cam'));
     this.root.appendChild(h('div', { class: 'hint pad' },
       '相机属性折叠在时间轴相机行里：点行首 ▾ 展开；位置是飞行路径关键帧，中心点 / 画面 / 透明度 / 缩放也能逐帧打点。'));
     this.root.appendChild(this._worldSection(project, true));
