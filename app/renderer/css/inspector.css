@@ -62,18 +62,30 @@ button.insp-name:hover { background: var(--surface-2); border-color: var(--borde
 .insp .sec-body > .row-btns { margin: 4px 0; }
 
 /* ---------------- property rows: label | control | ◆ ---------------- */
+/* 8-track grid: 72px label · six 1fr control tracks · 20px ◆. Width classes
+   give the control 2 / 3 / 6 tracks (1/3, 1/2, full) so short numbers stop
+   stretching; the ◆ column stays pinned at track 8. */
 .insp .prop {
   display: grid; align-items: center;
-  grid-template-columns: 72px minmax(0, 1fr) 20px; gap: 6px;
+  grid-template-columns: 72px repeat(6, minmax(0, 1fr)) 20px; column-gap: 4px;
   min-height: var(--h-md); margin: 0 0 4px;
 }
 .insp .prop > label { line-height: var(--h-md); }
-.insp .prop > select,
-.insp .prop > input[type="text"],
-.insp .prop > textarea { width: 100%; min-width: 0; }
-.insp .prop > select { padding: 0 4px; }
+.insp .prop > .ctl { grid-column: 2 / span 6; min-width: 0; }
+.insp .prop.w-third > .ctl { grid-column: 2 / span 2; min-width: 64px; }
+.insp .prop.w-half > .ctl { grid-column: 2 / span 3; min-width: 88px; }
+.insp .prop.w-full > .ctl { grid-column: 2 / span 6; }
+.insp .prop > .kf-btn,
+.insp .prop > .kf-slot { grid-column: 8; }
+.insp .ctl > input,
+.insp .ctl > select,
+.insp .ctl > textarea,
+.insp .ctl > .nbox,
+.insp .ctl > .color-ctl,
+.insp .ctl > .vec { width: 100%; min-width: 0; }
+.insp .ctl > select { padding: 0 4px; }
 .insp .prop.tall { align-items: start; }
-.insp .prop.tall > textarea { min-height: 48px; padding: 4px 7px; font-size: var(--fs-sm); }
+.insp .prop.tall > .ctl > textarea { min-height: 48px; padding: 4px 7px; font-size: var(--fs-sm); }
 .insp .prop .chk { display: flex; align-items: center; height: var(--h-md); }
 .insp .prop .chk input { margin: 0; width: 14px; height: 14px; }
 .insp .kf-slot { width: 20px; }

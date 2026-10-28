@@ -9,6 +9,7 @@ import { normalizeWorld } from '/core/world.js';
 import { RotBall } from './rotball.js';
 import { SpeedCurve, SPEED_PRESETS } from './speedcurve.js';
 import { attachNumberField, readNumber, writeNumber } from './numfield.js';
+import { widthFor, isWidth } from './field-width.js';
 import { h, icon, prefs } from './ui.js';
 
 const MOTIONS = ['none', 'in', 'out', 'left', 'right', 'up', 'down', 'drift', 'shake'];
@@ -187,9 +188,14 @@ export class Inspector {
   }
 
   // ---------------------------------------------------------------- property rows
+  // Label and ◆ stay direct children of the grid; the control sits in a .ctl
+  // wrapper so the width classes (w-third / w-half / w-full) can size it
+  // without touching the keyframe column.
   _row(label, control, kfNode, cls = '') {
     return h('div', { class: `prop fld${cls ? ` ${cls}` : ''}` },
-      h('label', { title: label }, label), control, kfNode || h('span', { class: 'kf-slot' }));
+      h('label', { title: label }, label),
+      h('span', { class: 'ctl' }, control),
+      kfNode || h('span', { class: 'kf-slot' }));
   }
 
   /** ◆ with three states; getState() -> 'none' | 'anim' | 'on' (re-read on every playhead sync). */
@@ -264,14 +270,18 @@ export class Inspector {
     return box;
   }
 
-  _field({ label, value, type = 'number', step = 0.01, min, max, path, kf, keyer, options, onChange, placeholder, percent = false, unit }) {
+  _field({ label, value, type = 'number', step = 0.01, min, max, path, kf, keyer, options, onChange, placeholder, percent = false, unit, w }) {
     const kfNode = keyer ? this._kfButton(keyer.state, keyer.set, keyer.unset)
       : kf ? this._elKfButton([path]) : null;
+    // Width is decided from type/value/step/bounds once per build; an explicit
+    // `w` (e.g. a path field that should not shrink while it is empty) wins.
+    const width = isWidth(w) ? w : widthFor({ type, value, step, min, max, unit, percent, placeholder, key: label });
+    const cls = `w-${width}${type === 'textarea' ? ' tall' : ''}`;
     if (type === 'number') {
       const box = this._num({ value, step, min, max, percent, unit, placeholder, aria: label, onChange });
-      return this._row(label, box, kfNode);
+      return this._row(label, box, kfNode, cls);
     }
-    if (type === 'color') return this._row(label, this._color(label, value, onChange), kfNode);
+    if (type === 'color') return this._row(label, this._color(label, value, onChange), kfNode, cls);
     let input;
     if (type === 'select') {
       input = h('select', { 'aria-label': label }, ...options.map((o) => {
@@ -296,7 +306,7 @@ export class Inspector {
     else input.addEventListener('input', emit);
     input.addEventListener('blur', () => this._flush());
     const control = type === 'checkbox' ? h('span', { class: 'chk' }, input) : input;
-    return this._row(label, control, kfNode, type === 'textarea' ? 'tall' : '');
+    return this._row(label, control, kfNode, cls);
   }
 
   /** 24×24 swatch + hex text, both editing the same value */
@@ -333,12 +343,12 @@ export class Inspector {
     const kfNode = keyer ? this._kfButton(keyer.state, keyer.set, keyer.unset)
       : keyPaths ? this._elKfButton(keyPaths) : null;
     const boxes = items.map((it) => this._num(it));
-    return this._row(label, h('div', { class: `vec vec-${items.length}` }, ...boxes), kfNode);
+    return this._row(label, h('div', { class: `vec vec-${items.length}` }, ...boxes), kfNode, 'w-full');
   }
 
   /** read-only value row */
   _ro(label, text) {
-    return this._row(label, h('div', { class: 'ro', title: text }, text));
+    return this._row(label, h('div', { class: 'ro', title: text }, text), undefined, 'w-full');
   }
 
   /** the selected element's key on `path` within half a frame of the playhead */
@@ -415,7 +425,7 @@ export class Inspector {
     if (el.type === 'audio') {
       this.root.appendChild(this._sec('时间', {}, ...timeRows));
       this.root.appendChild(this._sec('声音', {},
-        this._field({ label: '素材', type: 'text', value: el.src || '', onChange: (v) => set('src', { src: v }) }),
+        this._field({ label: '素材', type: 'text', value: el.src || '', w: 'full', onChange: (v) => set('src', { src: v }) }),
         this._field({
           label: '音量', value: round(kv('audio.volume', el.volume ?? 1), 3),
           step: 0.01, min: 0, max: 1, percent: true, kf: true, path: 'audio.volume',
@@ -474,7 +484,7 @@ export class Inspector {
           label: '适配', type: 'select', value: el.style.fit, options: [{ value: 'cover', label: '填满裁剪' }, { value: 'stretch', label: '拉伸' }],
           onChange: (v) => set('style.fit', { style: { fit: v } }),
         }),
-        this._field({ label: '素材', type: 'text', value: el.src || '', onChange: (v) => set('src', { src: v }) }),
+        this._field({ label: '素材', type: 'text', value: el.src || '', w: 'full', onChange: (v) => set('src', { src: v }) }),
         this._field({ label: '源入点', unit: 's', value: el.srcIn || 0, step: 0.05, onChange: (v) => set('srcIn', { srcIn: v }) }),
       ));
     } else {
@@ -532,7 +542,7 @@ export class Inspector {
         this._field({ label: '字号', unit: 'm', value: t.size, step: 0.05, min: 0.01, onChange: (v) => patch('size', { style: { size: v } }) }),
         this._field({ label: '颜色', type: 'color', value: t.color, onChange: (v) => patch('color', { style: { color: v } }) }),
         this._field({
-          label: '字体', type: 'text', value: t.font, placeholder: 'media/fonts/xxx.ttf 或字体名',
+          label: '字体', type: 'text', value: t.font, placeholder: 'media/fonts/xxx.ttf 或字体名', w: 'full',
           onChange: (v) => patch('font', { style: { font: v } }),
         }),
         this._field({
@@ -549,7 +559,7 @@ export class Inspector {
       const m = mediaSpec(obj);
       kids.push(
         this._field({
-          label: obj.type === 'video' ? '视频' : '图片', type: 'text', value: m.src, placeholder: 'media/xxx',
+          label: obj.type === 'video' ? '视频' : '图片', type: 'text', value: m.src, placeholder: 'media/xxx', w: 'full',
           onChange: (v) => patch('src', { src: v }),
         }),
         this._field({
@@ -812,7 +822,8 @@ export class Inspector {
       this._row('seed',
         h('div', { class: 'ctl-with-btn' },
           this._num({ value: w.seed, step: 1, aria: 'seed', onChange: (v) => setW({ seed: v }) }),
-          h('button', { type: 'button', class: 'mini', onclick: () => setW({ seed: Math.floor(Math.random() * 9999) }) }, '换一座城'))),
+          h('button', { type: 'button', class: 'mini', onclick: () => setW({ seed: Math.floor(Math.random() * 9999) }) }, '换一座城')),
+        undefined, 'w-full'),
       this._field({ label: '航线避让', type: 'select', value: String(!!w.corridor.enabled), options: [{ value: 'true', label: '开' }, { value: 'false', label: '关' }], onChange: (v) => setW({ corridor: { ...w.corridor, enabled: v === 'true' } }) }),
       this._field({ label: '避让半径', unit: 'm', value: w.corridor.radius, step: 1, min: 0, max: 120, onChange: (v) => setW({ corridor: { ...w.corridor, radius: v } }) }),
       h('div', { class: 'hint' }, '航线穿过或擦到的楼会被清掉，换 seed 也不会把塔吊在无人机航线上。'),
@@ -916,7 +927,8 @@ export class Inspector {
       this._row('节拍',
         h('div', { class: 'ctl-with-btn' },
           h('div', { class: 'ro' }, `${project.meta.tempo || 0} bpm · ${project.meta.beats.length} 个`),
-          h('button', { type: 'button', class: 'mini', 'data-tip': '重新分析节拍', onclick: () => this.opts.analyzeBeats() }, '重新分析'))),
+          h('button', { type: 'button', class: 'mini', 'data-tip': '重新分析节拍', onclick: () => this.opts.analyzeBeats() }, '重新分析')),
+        undefined, 'w-full'),
     ));
 
     if (project.camera) this.root.appendChild(this._worldSection(project, true));
