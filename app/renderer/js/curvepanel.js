@@ -83,6 +83,7 @@ export class CurvePanel {
     this._liveRaf = 0;
     this.curve = null;
     this.drag = null;
+    this._playheadT = NaN;
     this._build();
   }
 
@@ -598,11 +599,28 @@ export class CurvePanel {
 
   _drawPlayhead(ctx, g) {
     const tl = this.getTimeline();
-    const px = g.xOf(tl?.time ?? 0);
-    if (px <= g.plotLeft || px >= g.plotRight) return;
+    // The timeline draws its line on the left edge of the display frame, so
+    // mirror playheadStart(): the raw time would sit up to one frame to the
+    // right, and at t=0 the inequality below would hide the line entirely.
+    const px = g.xOf(tl?.playheadStart?.() ?? tl?.time ?? 0);
+    if (px < g.plotLeft || px > g.plotRight) return;
     ctx.strokeStyle = C('--playhead');
     ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(px, g.top); ctx.lineTo(px, g.bottom); ctx.stroke();
+  }
+
+  /**
+   * The timeline playhead moved. Playback ticks Timeline.setTime on every
+   * animation frame, but the line only moves once per project frame, so stay
+   * quiet while the display frame is the same and redraw when it changes.
+   */
+  syncTime() {
+    if (!this.isOpen() || !this.openState) return;
+    const tl = this.getTimeline();
+    const t = tl?.playheadStart?.() ?? tl?.time ?? 0;
+    if (t === this._playheadT) return;
+    this._playheadT = t;
+    this.draw();
   }
 
   /** Camera flight: draw every real span, then selection + keyframe markers. */
