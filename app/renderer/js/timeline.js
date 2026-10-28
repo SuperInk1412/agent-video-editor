@@ -25,6 +25,7 @@ import {
   cameraRowLinkPaths, elementRowLinkPaths, linkOf, linkPropLabel, linkSourceLabel,
   objectRowLinkPaths, openLinkMenu,
 } from './link-menu.js';
+import { effectiveElementRowValue, localElementRowValue } from './element-link-value.js';
 import { normalizeFps, frameIndex, frameStart, frameBand, planRulerTicks, frameWriteTime, frameClipEdit } from './timeline-math.js';
 
 const el = (tag, cls, html) => {
@@ -2582,6 +2583,11 @@ export class Timeline {
     return sampleTrack(e?.keyframes, path, t, Number(base));
   }
 
+  /** Display value of a 2D row: local plus its property-link contribution. */
+  _elEffective(e, path, t) {
+    return effectiveElementRowValue(this.project, e, path, t, this._elValue(e, path, t));
+  }
+
   _propKeys(o, path) {
     const tracks = o.tracks || {};
     const out = new Set();
@@ -2672,7 +2678,7 @@ export class Timeline {
     for (const pr of this._elPropRows) {
       const e = this._element(pr.elId);
       if (!e) continue;
-      set(pr.input, this._elValue(e, pr.path, t));
+      set(pr.input, this._elEffective(e, pr.path, t));
       const keys = this._elTrack(e, pr.path);
       const at = keys.some((k) => Math.abs(Number(k.t) - t) < 1e-3);
       const has = keys.length > 0;
@@ -2819,6 +2825,10 @@ export class Timeline {
     if (path === 'transform.opacity' || path === 'audio.volume') v = Math.max(0, Math.min(1, v));
     if (path === 'transform.scale') v = Math.max(0, v);
     const t = this._editTimes.get(`${elId}:${path}`) ?? this._frameTime();
+    // The input shows the effective value; store the local value its property
+    // link needs at this time (no-op for unlinked rows).
+    const local = localElementRowValue(this.project, e, path, t, v);
+    if (local != null && Number.isFinite(local)) v = local;
     const keyed = pr.keyedAtFocus ?? this._elTrack(e, path).length > 0;
     if (keyed) {
       this.onOp?.({ op: 'keySet', id: elId, path, t, value: v });

@@ -16,6 +16,7 @@ import { h, icon, prefs } from './ui.js';
 import {
   elementRowLinkPaths, linkJumpTarget, linkOf, linkSourceLabel, linkSummary, openLinkMenu,
 } from './link-menu.js';
+import { effectiveElementRowValue, localElementRowValue } from './element-link-value.js';
 
 const MOTIONS = ['none', 'in', 'out', 'left', 'right', 'up', 'down', 'drift', 'shake'];
 const FONTS = ['SimHei', 'Microsoft YaHei', 'Arial', 'Impact', 'Bahnschrift', 'Consolas'];
@@ -533,13 +534,19 @@ export class Inspector {
     // and fades). Once a property has keys, typing a value keys it at the
     // playhead; otherwise it edits the base value.
     const keyed = (path) => (el.keyframes || []).some((k) => k.path === path);
-    const kv = (path, base) => sampleTrack(el.keyframes, path, time, base);
+    const kv = (path, base) => effectiveElementRowValue(
+      project, el, path, time, sampleTrack(el.keyframes, path, time, base),
+    );
     // binding re-reads the pose at the playhead; keys land on the frame edge
     const tNow = () => Math.round(this.opts.getTime() * 1000) / 1000;
     const keyT = () => this._keyTime();
     const edit = (path, patch) => (v) => {
-      if (keyed(path)) this._commit(`${el.id}:${path}`, { op: 'keySet', id: el.id, path, t: keyT(), value: v });
-      else set(path, patch(v));
+      // A linked row displays the effective value; the project still stores the
+      // local value (writeBackLocalValue inverts the link at the playhead).
+      const local = localElementRowValue(project, el, path, time, v);
+      const value = local == null ? v : local;
+      if (keyed(path)) this._commit(`${el.id}:${path}`, { op: 'keySet', id: el.id, path, t: keyT(), value });
+      else set(path, patch(value));
     };
     // Property links target core/links.js paths: a legacy 2D element links
     // pivot.* / roll / scale.* / opacity, never transform.* (PLAN §3.3).
