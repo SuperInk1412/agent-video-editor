@@ -63,22 +63,24 @@ button.insp-name:hover { background: var(--surface-2); border-color: var(--borde
 .insp .sec-body > .hint { margin: 2px 0 6px; }
 .insp .sec-body > .row-btns { margin: 4px 0; }
 
-/* ---------------- property rows: label | control | ◆ ---------------- */
-/* 8-track grid: 72px label · six 1fr control tracks · 20px ◆. Width classes
-   give the control 2 / 3 / 6 tracks (1/3, 1/2, full) so short numbers stop
-   stretching; the ◆ column stays pinned at track 8. */
+/* ---------------- property rows: label | control | ↳ | ◆ ---------------- */
+/* 10-track grid: 72px label · six 1fr control tracks · 18px property-link
+   button · 20px ◆. Width classes give the control 2 / 3 / 6 tracks (1/3, 1/2,
+   full) so short numbers stop stretching; the link / ◆ columns stay pinned. */
 .insp .prop {
   display: grid; align-items: center;
-  grid-template-columns: 72px repeat(6, minmax(0, 1fr)) 20px; column-gap: 4px;
+  grid-template-columns: 72px repeat(6, minmax(0, 1fr)) 18px 20px; column-gap: 4px;
   min-height: var(--h-md); margin: 0 0 4px;
 }
-.insp .prop > label { line-height: var(--h-md); }
+.insp .prop > label { display: flex; align-items: center; gap: 3px; line-height: var(--h-md); min-width: 0; }
 .insp .prop > .ctl { grid-column: 2 / span 6; min-width: 0; }
 .insp .prop.w-third > .ctl { grid-column: 2 / span 2; min-width: 64px; }
 .insp .prop.w-half > .ctl { grid-column: 2 / span 3; min-width: 96px; }
 .insp .prop.w-full > .ctl { grid-column: 2 / span 6; }
+.insp .prop > .link-btn,
+.insp .prop > .link-slot { grid-column: 9; }
 .insp .prop > .kf-btn,
-.insp .prop > .kf-slot { grid-column: 8; }
+.insp .prop > .kf-slot { grid-column: 10; }
 .insp .ctl > input,
 .insp .ctl > select,
 .insp .ctl > textarea,
@@ -117,6 +119,50 @@ button.insp-name:hover { background: var(--surface-2); border-color: var(--borde
 .insp .vec { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; min-width: 0; }
 .insp .vec.vec-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .insp .vec.vec-1 { grid-template-columns: minmax(0, 1fr); }
+
+/* ---------------- property links (PLAN-ui-round3 §4.2) ---------------- */
+/* `↳` next to an input; lit = the property has a property parent. */
+.insp .link-btn {
+  display: grid; place-items: center; width: 18px; height: 18px; padding: 0;
+  font-size: var(--fs-sm); line-height: 1;
+  color: var(--text-disabled); background: transparent;
+  border: 1px solid transparent; border-radius: var(--r-sm); cursor: pointer;
+}
+.insp .link-btn:hover { color: var(--accent); background: var(--accent-bg); border-color: var(--accent-border); }
+.insp .link-btn.on { color: var(--accent); background: var(--accent-bg); border-color: var(--accent-border); }
+.insp .link-slot { width: 18px; }
+/* small "父" mark on rows whose property has a parent */
+.insp .parent-mark {
+  flex: 0 0 auto; padding: 0 3px; font-size: 10px; line-height: 13px;
+  color: var(--accent); background: var(--accent-bg);
+  border: 1px solid var(--accent-border); border-radius: var(--r-sm);
+}
+/* X/Y vec row: the link button sits right of each individual input */
+.insp .vec-cell { display: flex; align-items: center; gap: 2px; min-width: 0; }
+.insp .vec-cell > .nbox { flex: 1 1 auto; min-width: 0; }
+.insp .vec-cell > .link-btn { flex: 0 0 16px; width: 16px; height: 16px; font-size: var(--fs-xs); }
+/* first line under the header: linked parents (count + host chips) */
+.insp-links {
+  display: flex; align-items: center; gap: 6px; min-width: 0;
+  padding: 4px 0 6px; margin-bottom: 2px;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--fs-xs); color: var(--text-2);
+}
+.insp .insp-links-k { flex: 0 0 auto; color: var(--text-3); }
+.insp .insp-links-count {
+  flex: 0 0 auto; min-width: 16px; padding: 0 5px; text-align: center; line-height: 15px;
+  color: var(--accent); background: var(--accent-bg);
+  border: 1px solid var(--accent-border); border-radius: var(--r-pill);
+}
+.insp .insp-link-chips { display: flex; gap: 4px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.insp .insp-link-chips::-webkit-scrollbar { height: 0; }
+.insp .link-chip {
+  flex: 0 0 auto; max-width: 160px; height: 18px; padding: 0 6px; overflow: hidden;
+  font-size: var(--fs-xs); text-overflow: ellipsis; white-space: nowrap; cursor: pointer;
+  color: var(--accent); background: var(--accent-bg);
+  border: 1px solid var(--accent-border); border-radius: var(--r-sm);
+}
+.insp .link-chip:hover { border-color: var(--accent); }
 
 /* colour: 24×24 swatch + hex */
 .insp .color-ctl { display: flex; align-items: center; gap: 6px; min-width: 0; }
