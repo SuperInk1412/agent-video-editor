@@ -139,12 +139,17 @@ Blender 侧这些效果由合成器节点组 `VDM_Composite` 完成。节点组�
   `node scripts/migrate-spatial.mjs --in <fixture> --out <新目录或 json> --mode preserve|world|hybrid [--dry-run]`；
   输入输出都先 `validateProject`，拒绝写 `projects/`，旧字段保留在 `legacy`。目前**预览**已支持 `node`，
   Blender / engine 仍走 legacy 2D 求值，迁移元素的成片差异要等下一批。
-- **空间父级（`parent.mode: "world"`）**：2D 子级可挂到 2D / 3D / 相机：
-  `el.parent = { id, mode: "world", inherit: { pos, rot, scale }, bind: { pivot, basis, scale } }`。
+- **空间父级（`mode: "world"`）**：2D 元素、3D 物体、相机都可以当子级，父级也可以是其中任意一类。
+  记录形状相同，宿主字段不同：
+  `el.parent = ob.frameParent = cam.frameParent = { id, mode: "world", inherit: { pos, rot, scale }, bind: { pivot, basis, scale } }`。
+  3D 物体原有的 `obj.parent` 是另一张旧层级图（空物体、strength），不混用；空间父级单独写在
+  `obj.frameParent`，并在旧层级求值出的世界 pose 之上再乘一层父级增量。
   `bind` 是绑定时父级世界 frame，之后 `parentDelta = frame(t) · frame(bind)⁻¹` 带着子级走——
   父级旋转会绕父级 pivot 公转，绑定时刻不跳。`spatialParent {id, parent, t, inherit?}` /
-  `spatialUnparent {id}` 只增删 `parent`，从不改子级本地值或关键帧。`@live` / 旧相机贴屏仍是渲染期
-  屏锁，不是世界父级，也不能当世界父级的目标。预览已接父级链；Blender / engine 尚未消费。
+  `spatialUnparent {id}` 只增删子级的父级记录，从不改子级本地值或关键帧；解除 3D 物体时也不动
+  `obj.parent`。链可以混合 el/ob/cam，环与 32 层深度检查按混合图算。`@live` / 旧相机贴屏仍是渲染期
+  屏锁，不是世界父级，也不能当世界父级的目标。预览与 engine 都读同一组 wrapper：
+  `objectWorldPose`（3D 物体）、`evalCameraWorld`（相机）、`elementWorldNode`（2D 元素）。
 - **属性父级（`el.links` / `ob.links` / `cam.links`）**：一条链接是
   `{ id, to, from: { host: "el"|"ob"|"cam", id, path }, combine: "add"|"mul", bindParentValue, enabled }`。
   `add`：`eff = local + parent(t) − bindParentValue`；`mul`：`eff = local × parent(t) / bindParentValue`。
