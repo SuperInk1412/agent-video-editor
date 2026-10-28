@@ -9,6 +9,7 @@ import { normalizeProject, assertValidProject } from '../core/schema.js';
 import { ensureSpace } from '../core/space.js';
 import { migrateLegacyParents } from '../core/parent-strength.js';
 import { migrateScreenLocks } from '../core/screen-lock-migrate.js';
+import { ROTATION_MIGRATION, migrateRotations } from '../core/rotation-migrate.js';
 import { snapClipFrames } from '../core/clip-frames.js';
 import { ensureAudioElements } from '../core/audio.js';
 
@@ -65,7 +66,7 @@ export async function loadProject(dir) {
     if (e.code === 'ENOENT') throw new Error(`no ${PROJECT_FILE} in ${path.resolve(dir)}`);
     throw e;
   }
-  const project = JSON.parse(raw);
+  let project = JSON.parse(raw);
   normalizeProject(project);
   // Every project is 3D: a former 2D project gets the empty world and the
   // default camera when it is opened (docs/DESIGN-UNIFIED-SPACE.md §7).
@@ -73,9 +74,13 @@ export async function loadProject(dir) {
   // One placement parent kind: old 3D parents become spatial parents with the
   // same bind / switches / strength (docs/DESIGN-CAMFEED-PARENTS.md §3).
   const legacy = migrateLegacyParents(project);
-  // The screen lock (贴屏) is retired: locked elements move into a HUD rig that
-  // films the shots through camera feeds (core/screen-lock-migrate.js).
+  // The screen lock (贴屏) is retired: locked elements are split at the shot
+  // cuts and parented to the shot cameras (core/screen-lock-migrate.js).
   const screen = migrateScreenLocks(project);
+  // Three-axis rotation (docs/DESIGN-TRANSFORM-UNIFY.md §2): switched on once
+  // the editor UI edits rotation.x/y/z.
+  let rotation = null;
+  if (ROTATION_MIGRATION) ({ project, report: rotation } = migrateRotations(project));
   // Old projects kept their song only in meta.audio; show it as a real element.
   ensureAudioElements(project);
   // Every clip window lands on the frame grid (both heads and tails). This is
@@ -85,7 +90,14 @@ export async function loadProject(dir) {
   const notes = [];
   const legacyCount = (Number(legacy?.migrated) || 0) + (Number(legacy?.flattened) || 0);
   if (legacyCount) notes.push(`${legacyCount} 个旧 3D 父级已并成空间父级`);
-  if (screen) notes.push(`${screen.elements} 个贴屏元素已迁到 HUD 机位（${screen.feeds} 个投屏）`);
+  if (screen?.restoredHud) notes.push(`HUD 机位已还原（${screen.restoredHud} 个元素）`);
+  if (screen?.elements) notes.push(`${screen.elements} 个贴屏元素已按镜头挂到镜头相机（${screen.pieces} 段）`);
+  if (screen?.fovShots?.length) notes.push(`镜头 ${screen.fovShots.join('、')} 的 FOV 在动，挂在上面的字幕大小会跟着变`);
+  if (rotation) {
+    const n = rotation.elementsToNode + rotation.nodes + rotation.objects + rotation.cameras;
+    if (n) notes.push(`${n} 处旋转已转成 X/Y/Z 三轴（${rotation.elementsToNode} 个 2D 元素转成空间节点）`);
+    if (rotation.approximated.length) notes.push(`${rotation.approximated.join('、')} 的朝向关键帧之间改为逐轴插值，转动路径略有差别`);
+  }
   if (clipFrames) notes.push(`${clipFrames} 个片段的头/尾已对齐到帧`);
   if (notes.length) {
     project.meta.ui = {

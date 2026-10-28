@@ -105,7 +105,9 @@ export function spatialNodeIssues(node, at = 'node') {
   const issues = [];
   if (node === undefined) return issues;
   if (!isRecord(node)) return [{ path: at, msg: 'must be an object' }];
-  for (const name of ['pivot', 'position', 'dir', 'scale']) {
+  // `dir` is the older orientation field: a node with `rotation` may omit it.
+  const required = Array.isArray(node.rotation) ? ['pivot', 'position', 'scale'] : ['pivot', 'position', 'dir', 'scale'];
+  for (const name of required) {
     const v = node[name];
     if (!Array.isArray(v) || v.length !== 3 || !v.every(Number.isFinite)) {
       issues.push({ path: `${at}.${name}`, msg: 'must be a finite 3-vector' });

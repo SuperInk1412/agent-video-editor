@@ -309,8 +309,10 @@ export function normalizeObject(o = {}) {
     pivot: vec3(o.pivot),
     position: vec3(o.position),
     scale: vec3(o.scale, [1, 1, 1]),
-    rot: { dir: V.norm(vec3(rot.dir, [0, 0, -1])), roll: num(rot.roll, 0) },
-    ...(Array.isArray(o.rotation) ? { rotation: normalizeRotation(o.rotation) } : {}),
+    // three-axis rotation replaces the older dir/roll (core/rotation.js)
+    ...(Array.isArray(o.rotation)
+      ? { rotation: normalizeRotation(o.rotation), rot: undefined }
+      : { rot: { dir: V.norm(vec3(rot.dir, [0, 0, -1])), roll: num(rot.roll, 0) } }),
     opacity: clamp(num(o.opacity, 1), 0, 1),
     tracks: normalizeTracks(o.tracks),
   };
