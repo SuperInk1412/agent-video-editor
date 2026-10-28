@@ -48,6 +48,69 @@ export const DEFAULT_FX = {
 
 export const DEFAULT_MOTION = { type: 'none', amount: 0, dir: 'in' };
 
+// Unified spatial node (PLAN-ui-round3 §2, core/spatial.js): the single
+// transform source once a 2D element is upgraded. Old elements keep using
+// `transform`; normalisation never creates `node` by itself.
+export const DEFAULT_SPATIAL_NODE = Object.freeze({
+  pivot: Object.freeze([0, 0, 0]),
+  position: Object.freeze([0, 0, 0]),
+  dir: Object.freeze([0, 0, -1]),
+  roll: 0,
+  scale: Object.freeze([1, 1, 1]),
+});
+
+const isNum = (n) => Number.isFinite(Number(n));
+const nodeVec = (v, fallback) => (Array.isArray(v) && v.length >= 2 && v.slice(0, 3).every(isNum)
+  ? [Number(v[0]), Number(v[1]), Number(v[2] ?? fallback[2])]
+  : fallback.slice());
+
+function unitDir(v, fallback) {
+  const d = nodeVec(v, fallback);
+  const len = Math.hypot(d[0], d[1], d[2]);
+  if (len > 1e-12) return [d[0] / len, d[1] / len, d[2] / len];
+  const fb = nodeVec(fallback, DEFAULT_SPATIAL_NODE.dir);
+  const fl = Math.hypot(fb[0], fb[1], fb[2]) || 1;
+  return [fb[0] / fl, fb[1] / fl, fb[2] / fl];
+}
+
+/**
+ * Smallest tolerant normaliser for a SpatialNode. Missing/invalid fields fall
+ * back to `base` (another node) or the defaults; arrays are copied, never
+ * shared. This is also what `core/spatial.js` uses for readers.
+ */
+export function normalizeSpatialNode(node, base = null) {
+  const src = isRecord(node) ? node : {};
+  const fb = isRecord(base) ? base : DEFAULT_SPATIAL_NODE;
+  return {
+    pivot: nodeVec(src.pivot, nodeVec(fb.pivot, DEFAULT_SPATIAL_NODE.pivot)),
+    position: nodeVec(src.position, nodeVec(fb.position, DEFAULT_SPATIAL_NODE.position)),
+    dir: unitDir(src.dir, nodeVec(fb.dir, DEFAULT_SPATIAL_NODE.dir)),
+    roll: isNum(src.roll) ? Number(src.roll) : (isNum(fb.roll) ? Number(fb.roll) : 0),
+    scale: nodeVec(src.scale, nodeVec(fb.scale, DEFAULT_SPATIAL_NODE.scale)),
+  };
+}
+
+/** Validation problems for an optional element `node` (no repair, no mutation). */
+export function spatialNodeIssues(node, at = 'node') {
+  const issues = [];
+  if (node === undefined) return issues;
+  if (!isRecord(node)) return [{ path: at, msg: 'must be an object' }];
+  for (const name of ['pivot', 'position', 'dir', 'scale']) {
+    const v = node[name];
+    if (!Array.isArray(v) || v.length !== 3 || !v.every(Number.isFinite)) {
+      issues.push({ path: `${at}.${name}`, msg: 'must be a finite 3-vector' });
+    } else if (name === 'dir' && Math.hypot(v[0], v[1], v[2]) < 1e-12) {
+      issues.push({ path: `${at}.dir`, msg: 'must be a nonzero direction' });
+    }
+  }
+  if (node.roll !== undefined && !Number.isFinite(node.roll)) {
+    issues.push({ path: `${at}.roll`, msg: 'must be a finite number' });
+  }
+  return issues;
+}
+
+export const isValidSpatialNode = (node) => spatialNodeIssues(node).length === 0;
+
 const clone = (o) => JSON.parse(JSON.stringify(o));
 
 export function newId(prefix, taken) {
@@ -177,6 +240,9 @@ export function normalizeProject(p) {
     e.duration ??= 1;
     e.z ??= 0;
     e.transform = { ...DEFAULT_TRANSFORM, ...(e.transform || {}) };
+    // Unified space: an existing `node` is the authoritative 2D transform and
+    // is preserved verbatim (readers normalise it, `validateProject` checks it).
+    // Never fabricate one here: loading an old project must stay write-free.
     e.style = { ...DEFAULT_STYLE, ...(e.style || {}) };
     e.fx = { glow: 0, ...(e.fx || {}) };
     e.motion = { ...DEFAULT_MOTION, ...(e.motion || {}) };
@@ -289,6 +355,7 @@ export function validateProject(p) {
     if (e.transform !== undefined && record(e.transform, `${at}.transform`)) {
       for (const name of Object.keys(DEFAULT_TRANSFORM)) if (e.transform[name] !== undefined) number(e.transform[name], `${at}.transform.${name}`);
     }
+    if (e.node !== undefined) issues.push(...spatialNodeIssues(e.node, `${at}.node`));
     if (e.style?.size !== undefined) number(e.style.size, `${at}.style.size`, { min: 0 });
     if (e.segment && !segIds.has(e.segment)) push(`elements[${i}].segment`, `unknown segment ${e.segment}`);
     array(e.keyframes, `${at}.keyframes`, true).forEach((k, j) => {
