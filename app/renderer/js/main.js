@@ -1,5 +1,6 @@
 // VedioMaker renderer main: state, playback, selection, wiring.
 import { Preview } from './preview.js';
+import { objectSize, objectVisibleAt, sceneObjects } from './preview3d.js';
 import { PathGizmo } from './pathgizmo.js';
 import { Timeline } from './timeline.js';
 import { CurvePanel, curvePathLabel } from './curvepanel.js';
@@ -834,29 +835,263 @@ function toggleCurvePanel() {
   else openCurvePanel();
 }
 
+const additiveEvent = (e) => !!(e?.ctrlKey || e?.metaKey || e?.shiftKey);
+
+/** Normalized client rect from two points. */
+function clientRect(a, b) {
+  return {
+    left: Math.min(a.x, b.x), right: Math.max(a.x, b.x),
+    top: Math.min(a.y, b.y), bottom: Math.max(a.y, b.y),
+  };
+}
+
+const pointInRect = (p, r) => p[0] >= r.left && p[0] <= r.right && p[1] >= r.top && p[1] <= r.bottom;
+
+/** Proper segment intersection (rect edges vs a projected quad edge). */
+function segmentsCross(a, b, c, d) {
+  const cross = (p, q, r) => (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
+  const d1 = cross(c, d, a), d2 = cross(c, d, b), d3 = cross(a, b, c), d4 = cross(a, b, d);
+  if (((d1 > 0) !== (d2 > 0)) && ((d3 > 0) !== (d4 > 0))) return true;
+  const on = (p, q, r) => Math.abs(cross(p, q, r)) < 1e-9
+    && r[0] >= Math.min(p[0], q[0]) && r[0] <= Math.max(p[0], q[0])
+    && r[1] >= Math.min(p[1], q[1]) && r[1] <= Math.max(p[1], q[1]);
+  return on(c, d, a) || on(c, d, b) || on(a, b, c) || on(a, b, d);
+}
+
+function pointInPoly(p, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const a = poly[i], b = poly[j];
+    if (((a[1] > p[1]) !== (b[1] > p[1]))
+      && p[0] < ((b[0] - a[0]) * (p[1] - a[1])) / (b[1] - a[1] + 1e-12) + a[0]) inside = !inside;
+  }
+  return inside;
+}
+
+/** Marquee hit: any vertex inside, any rect corner inside the quad, or an edge crossing. */
+function polyRectHit(points, rect) {
+  if (!Array.isArray(points) || points.length < 3) return false;
+  if (points.some((p) => pointInRect(p, rect))) return true;
+  const corners = [[rect.left, rect.top], [rect.right, rect.top], [rect.right, rect.bottom], [rect.left, rect.bottom]];
+  if (corners.some((p) => pointInPoly(p, points))) return true;
+  for (let i = 0; i < points.length; i += 1) {
+    const a = points[i], b = points[(i + 1) % points.length];
+    for (let k = 0; k < 4; k += 1) if (segmentsCross(a, b, corners[k], corners[(k + 1) % 4])) return true;
+  }
+  return false;
+}
+
+/** Canvas-space bounding box of a 3D object's current world box. */
+function objectScreenRect(obj) {
+  const s3 = preview?.scene3d;
+  if (!s3?.lastVP || !s3.lastW || !s3.lastH) return null;
+  const pose = objectWorldPoseWithLinks(S.project, obj, S.time);
+  const size = objectSize(obj, pose);
+  const basis = pose.basis;
+  const half = size.map((v) => v / 2);
+  const pts = [];
+  for (const sx of [-1, 1]) for (const sy of [-1, 1]) for (const sz of [-1, 1]) {
+    const w = [
+      pose.worldPos[0] + basis.right[0] * half[0] * sx + basis.up[0] * half[1] * sy + basis.forward[0] * half[2] * sz,
+      pose.worldPos[1] + basis.right[1] * half[0] * sx + basis.up[1] * half[1] * sy + basis.forward[1] * half[2] * sz,
+      pose.worldPos[2] + basis.right[2] * half[0] * sx + basis.up[2] * half[1] * sy + basis.forward[2] * half[2] * sz,
+    ];
+    const p = s3.projectPoint(w);
+    if (!p) continue;
+    pts.push([p.x * preview.canvas.width / s3.lastW, p.y * preview.canvas.height / s3.lastH]);
+  }
+  if (pts.length < 2) return null;
+  const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
+  return { left: Math.min(...xs), right: Math.max(...xs), top: Math.min(...ys), bottom: Math.max(...ys) };
+}
+
+/** Every 2D element / 3D object intersecting the canvas-space rect. */
+function viewportHitRefs(rect) {
+  const refs = [];
+  for (const poly of preview.layerPolygons(true)) {
+    if (polyRectHit(poly.points, rect)) refs.push(elementRef(poly.id));
+  }
+  if (preview.scene3d?.lastVP) {
+    for (const obj of sceneObjects(S.project)) {
+      if (!objectVisibleAt(obj, S.time)) continue;
+      const r = objectScreenRect(obj);
+      if (r && r.right >= rect.left && r.left <= rect.right && r.bottom >= rect.top && r.top <= rect.bottom) {
+        refs.push(objectRef(obj.id));
+      }
+    }
+  }
+  return [...new Set(refs)];
+}
+
+/** Element refs currently in the selection (legacy single fields when no pool). */
+function selectedHostRefs() {
+  const pool = S.selection.pool;
+  if (pool?.kind === 'element') return [...pool.ids];
+  const out = [];
+  if (S.selection.elementId) out.push(elementRef(S.selection.elementId));
+  if (S.selection.objectId) out.push(objectRef(S.selection.objectId));
+  return out;
+}
+
+/**
+ * Rubber-band selection over the stage. Only starts from empty canvas: a press
+ * on an element/handle keeps its move gesture. Plain drag replaces the pool,
+ * Ctrl/Cmd/Shift adds the box contents; a press without movement keeps the old
+ * empty-click behaviour (segment / camera fallback or no change).
+ */
+function beginViewportMarquee(ev, additive = additiveEvent(ev)) {
+  const stage = $('#stage');
+  const stageBox = $('#stageBox');
+  const canvas = preview.canvas;
+  if (!stage || !stageBox || !canvas) return;
+  const start = { x: ev.clientX, y: ev.clientY };
+  let last = { ...start };
+  let moved = false;
+  const box = document.createElement('div');
+  box.className = 'stage-marquee';
+  stageBox.appendChild(box);
+  const place = () => {
+    const r = stageBox.getBoundingClientRect();
+    const band = clientRect(start, last);
+    box.style.left = `${band.left - r.left}px`;
+    box.style.top = `${band.top - r.top}px`;
+    box.style.width = `${Math.max(0, band.right - band.left)}px`;
+    box.style.height = `${Math.max(0, band.bottom - band.top)}px`;
+  };
+  const canvasRect = () => {
+    const r = canvas.getBoundingClientRect();
+    const kx = canvas.width / Math.max(1, r.width);
+    const ky = canvas.height / Math.max(1, r.height);
+    const band = clientRect(start, last);
+    return {
+      left: (band.left - r.left) * kx, right: (band.right - r.left) * kx,
+      top: (band.top - r.top) * ky, bottom: (band.bottom - r.top) * ky,
+    };
+  };
+  const cleanup = () => {
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', up);
+    window.removeEventListener('pointercancel', cancel);
+    window.removeEventListener('keydown', onKey, true);
+    box.remove();
+  };
+  const move = (e) => {
+    last = { x: e.clientX, y: e.clientY };
+    if (!moved && Math.hypot(last.x - start.x, last.y - start.y) > 3) moved = true;
+    if (moved) place();
+  };
+  const up = (e) => {
+    if (e) last = { x: e.clientX, y: e.clientY };
+    const dragged = moved;
+    cleanup();
+    if (!dragged) {
+      selectAt((start.x - canvas.getBoundingClientRect().left) * canvas.width / Math.max(1, canvas.getBoundingClientRect().width),
+        (start.y - canvas.getBoundingClientRect().top) * canvas.height / Math.max(1, canvas.getBoundingClientRect().height), ev);
+      return;
+    }
+    const hits = viewportHitRefs(canvasRect());
+    const prev = additive && S.selection.pool?.kind === 'element' ? S.selection.pool.ids : [];
+    if (!additive) {
+      select({ pool: hits.length ? normalizeSelection({ kind: 'element', ids: hits, primary: hits[0] }) : emptySelection() });
+      return;
+    }
+    if (!hits.length) return;
+    const ids = [...new Set([...prev, ...hits])];
+    const existing = new Set(prev);
+    const primary = hits.find((ref) => !existing.has(ref)) || S.selection.pool?.primary || ids[0];
+    select({ pool: normalizeSelection({ kind: 'element', ids, primary }) });
+  };
+  const cancel = () => cleanup();
+  const onKey = (e) => {
+    if (e.key !== 'Escape') return;
+    e.preventDefault();
+    e.stopPropagation();
+    cleanup();
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', up);
+  window.addEventListener('pointercancel', cancel);
+  window.addEventListener('keydown', onKey, true);
+}
+
 function updateOverlay() {
   const box = $('#selBox');
   const poly = $('#selPoly');
   const label = $('#selLabel');
   if (!box || !poly || !label || !preview || !S.project) return;
-  const item = preview.layerPolygons(true).find((x) => x.id === S.selection.elementId);
-  if (!item) {
-    box.style.display = 'none';
-    label.style.display = 'none';
-    return;
+  const SVG = 'http://www.w3.org/2000/svg';
+  let extra = document.getElementById('selExtra');
+  if (!extra) {
+    extra = document.createElementNS(SVG, 'g');
+    extra.id = 'selExtra';
+    box.appendChild(extra);
   }
+  extra.replaceChildren();
   const W = preview.canvas.width, H = preview.canvas.height;
-  const pts = item.points;
   box.setAttribute('viewBox', `0 0 ${W} ${H}`);
-  box.style.display = 'block';
-  poly.setAttribute('points', pts.map((p) => `${p[0]},${p[1]}`).join(' '));
-  const scale = $('#stage').clientWidth / Math.max(1, W);
-  const top = pts.reduce((a, b) => (b[1] < a[1] ? b : a), pts[0]);
-  const el = S.project.elements.find((e) => e.id === item.id);
-  label.textContent = el?.name || item.id;
-  label.style.display = 'block';
-  label.style.left = `${Math.max(2, top[0] * scale)}px`;
-  label.style.top = `${Math.max(14, top[1] * scale)}px`;
+
+  const refs = selectedHostRefs();
+  const polys = new Map(preview.layerPolygons(true).map((p) => [p.id, p.points]));
+  const objects = new Map(sceneObjects(S.project).map((o) => [o.id, o]));
+  const primaryEl = S.selection.elementId;
+  const primaryObj = S.selection.objectId;
+  let drawn = 0;
+
+  const showPointPoly = (points) => {
+    if (!points?.length) return;
+    poly.setAttribute('points', points.map((p) => `${p[0]},${p[1]}`).join(' '));
+    poly.setAttribute('visibility', 'visible');
+    const scale = $('#stage').clientWidth / Math.max(1, W);
+    const top = points.reduce((a, b) => (b[1] < a[1] ? b : a), points[0]);
+    const el = S.project.elements.find((e) => e.id === primaryEl);
+    label.textContent = el?.name || primaryEl;
+    label.style.display = 'block';
+    label.style.left = `${Math.max(2, top[0] * scale)}px`;
+    label.style.top = `${Math.max(14, top[1] * scale)}px`;
+    drawn += 1;
+  };
+  const inCanvas = (points) => {
+    if (!points?.length) return false;
+    const xs = points.map((p) => p[0]), ys = points.map((p) => p[1]);
+    return Math.max(...xs) > 0 && Math.min(...xs) < W && Math.max(...ys) > 0 && Math.min(...ys) < H;
+  };
+  if (primaryEl && polys.has(primaryEl) && inCanvas(polys.get(primaryEl))) showPointPoly(polys.get(primaryEl));
+  else {
+    poly.setAttribute('points', '');
+    poly.setAttribute('visibility', 'hidden');
+    label.style.display = 'none';
+  }
+
+  // Every other selected 2D element / 3D object gets the same outline; the
+  // primary one is already #selPoly (or gets a slightly stronger rect below).
+  for (const ref of refs) {
+    const s = splitRef(ref);
+    if (!s) continue;
+    if (s.type === 'el') {
+      if (s.id === primaryEl) continue;
+      const points = polys.get(s.id);
+      if (!points || !inCanvas(points)) continue;
+      const p = document.createElementNS(SVG, 'polygon');
+      p.setAttribute('points', points.map((q) => `${q[0]},${q[1]}`).join(' '));
+      p.setAttribute('class', 'sel-extra');
+      extra.appendChild(p);
+      drawn += 1;
+    } else if (s.type === 'ob') {
+      const obj = objects.get(s.id);
+      const r = obj ? objectScreenRect(obj) : null;
+      if (!r || r.right <= 0 || r.left >= W || r.bottom <= 0 || r.top >= H) continue;
+      const rect = document.createElementNS(SVG, 'rect');
+      rect.setAttribute('x', String(r.left));
+      rect.setAttribute('y', String(r.top));
+      rect.setAttribute('width', String(Math.max(1, r.right - r.left)));
+      rect.setAttribute('height', String(Math.max(1, r.bottom - r.top)));
+      rect.setAttribute('class', s.id === primaryObj ? 'sel-extra primary' : 'sel-extra');
+      extra.appendChild(rect);
+      drawn += 1;
+    }
+  }
+  box.style.display = drawn ? 'block' : 'none';
+  if (!drawn) label.style.display = 'none';
 }
 
 const SEL_TYPE = {
@@ -2786,7 +3021,7 @@ async function boot() {
           else begin2DElementDrag(elId, sx, sy, cx, cy, e);
           return;
         }
-        selectAt(sx, sy, e);
+        beginViewportMarquee(e);
       }
       return;
     }
@@ -2909,8 +3144,7 @@ async function boot() {
     }
     gizmo.objHover = null;
     gizmo.draw();
-    drag = { kind: 'click', x: cx, y: cy };
-    try { canvas.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
+    beginViewportMarquee(e);
     e.preventDefault();
   });
 

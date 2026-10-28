@@ -205,7 +205,7 @@ body.tl-scrubbing, body.tl-scrubbing * { cursor: ew-resize !important; user-sele
 .tl-objhead .tl-track, .tl-elhead .tl-track { background: var(--surface-1); }
 .tl-objhead .tl-gutter, .tl-elhead .tl-gutter { gap: 5px; color: var(--text-1); }
 .tl-objhead.sel, .tl-objhead.sel .tl-gutter, .tl-objhead.sel .tl-track,
-.tl-elhead.sel, .tl-elhead.sel .tl-gutter, .tl-elhead.sel .tl-track { background: var(--sel-row); }
+.tl-elhead.sel, .tl-elhead.sel .tl-gutter, .tl-elhead.sel .tl-track { background: var(--accent-bg); }
 .tl-objhead.kin, .tl-objhead.kin .tl-gutter, .tl-objhead.kin .tl-track {
   background: linear-gradient(var(--edit-bg), var(--edit-bg)) var(--surface-1); /* flat tint, kept opaque */
 }
@@ -265,9 +265,9 @@ body.tl-parent-dragging, body.tl-parent-dragging * { cursor: crosshair !importan
 
 /* ---------------- property rows ---------------- */
 .tl-prop { height: 28px; }
-.tl-prop.sel { background: var(--sel-row); }
-.tl-prop.sel .tl-gutter { background: var(--sel-row); color: var(--text-1); }
-.tl-prop.sel .tl-track { background: var(--sel-row); }
+.tl-prop.sel { background: var(--accent-bg); }
+.tl-prop.sel .tl-gutter { background: var(--accent-bg); color: var(--text-1); }
+.tl-prop.sel .tl-track { background: var(--accent-bg); }
 .tl-prop .tl-gutter {
   display: grid; grid-template-columns: 54px repeat(3, minmax(0, 1fr)) 24px;
   gap: 4px; padding: 0 9px; align-items: center;
@@ -405,21 +405,31 @@ body.tl-parent-dragging, body.tl-parent-dragging * { cursor: crosshair !importan
 .tl-camposrow.sel { background: var(--sel-row); }
 .tl-camposrow.sel .tl-gutter { background: var(--sel-row); color: var(--text-1); }
 .tl-camposrow.sel .tl-track { background: var(--sel-row); }
-/* Homogeneous selection pool: extra refs beyond the primary. The header rows'
-   gutter/track have opaque backgrounds of their own, so tint the children too;
-   the primary keeps its stronger .sel colour, the other refs get the accent
-   tint plus a left bar so a mixed pool is visible in the left list. */
-.tl-camhead.poolsel:not(.sel), .tl-camhead.poolsel:not(.sel) .tl-gutter, .tl-camhead.poolsel:not(.sel) .tl-track,
-.tl-objhead.poolsel:not(.sel), .tl-objhead.poolsel:not(.sel) .tl-gutter, .tl-objhead.poolsel:not(.sel) .tl-track,
-.tl-elhead.poolsel:not(.sel), .tl-elhead.poolsel:not(.sel) .tl-gutter, .tl-elhead.poolsel:not(.sel) .tl-track,
-.tl-prop.poolsel:not(.sel), .tl-prop.poolsel:not(.sel) .tl-gutter, .tl-prop.poolsel:not(.sel) .tl-track,
-.tl-camprop.poolsel:not(.sel), .tl-camprop.poolsel:not(.sel) .tl-gutter, .tl-camprop.poolsel:not(.sel) .tl-track,
-.tl-elprop.poolsel:not(.sel), .tl-elprop.poolsel:not(.sel) .tl-gutter, .tl-elprop.poolsel:not(.sel) .tl-track,
-.blk.poolsel:not(.sel) { background: var(--accent-bg); box-shadow: inset 0 0 0 1px var(--accent-border); }
-.tl-camhead.poolsel:not(.sel) > .tl-gutter,
-.tl-objhead.poolsel:not(.sel) > .tl-gutter,
-.tl-elhead.poolsel:not(.sel) > .tl-gutter { box-shadow: inset 3px 0 0 var(--accent); }
+/* Homogeneous selection pool: every selected row/clip is tinted; the primary
+   (the newly added one) gets a stronger edge/left bar instead of a different
+   fill, so old and new selections read at nearly the same brightness. */
+.tl-camhead.poolsel, .tl-camhead.poolsel .tl-gutter, .tl-camhead.poolsel .tl-track,
+.tl-objhead.poolsel, .tl-objhead.poolsel .tl-gutter, .tl-objhead.poolsel .tl-track,
+.tl-elhead.poolsel, .tl-elhead.poolsel .tl-gutter, .tl-elhead.poolsel .tl-track,
+.tl-prop.poolsel, .tl-prop.poolsel .tl-gutter, .tl-prop.poolsel .tl-track,
+.tl-camprop.poolsel, .tl-camprop.poolsel .tl-gutter, .tl-camprop.poolsel .tl-track,
+.tl-elprop.poolsel, .tl-elprop.poolsel .tl-gutter, .tl-elprop.poolsel .tl-track,
+.blk.poolsel { background: var(--accent-bg); box-shadow: inset 0 0 0 1px var(--accent-border); }
+.tl-camhead.poolsel > .tl-gutter,
+.tl-objhead.poolsel > .tl-gutter,
+.tl-elhead.poolsel > .tl-gutter { box-shadow: inset 2px 0 0 var(--accent-border); }
+.tl-camhead.poolsel.poolprimary,
+.tl-objhead.poolsel.poolprimary,
+.tl-elhead.poolsel.poolprimary,
+.tl-prop.poolsel.poolprimary,
+.tl-camprop.poolsel.poolprimary,
+.tl-elprop.poolsel.poolprimary { box-shadow: inset 0 0 0 1px var(--accent); }
+.tl-camhead.poolsel.poolprimary > .tl-gutter,
+.tl-objhead.poolsel.poolprimary > .tl-gutter,
+.tl-elhead.poolsel.poolprimary > .tl-gutter { box-shadow: inset 3px 0 0 var(--accent); }
+.blk.poolsel.poolprimary { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), 0 0 10px var(--accent-bg); }
 .tl-key.poolsel { background: var(--edit); border-color: var(--surface-0); }
+.tl-key.poolsel.poolprimary { box-shadow: 0 0 0 1px var(--edit-border); }
 /* A diamond being dragged horizontally: same size, grab cursor, above peers. */
 .tl-key.dragging { cursor: ew-resize; background: var(--keyframe); z-index: 6; }
 

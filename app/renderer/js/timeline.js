@@ -3061,11 +3061,16 @@ export class Timeline {
 
   // ------------------------------------------------------------ selection / input
   _paintPool() {
-    this.inner.querySelectorAll('.poolsel').forEach((n) => n.classList.remove('poolsel'));
+    this.inner.querySelectorAll('.poolsel').forEach((n) => n.classList.remove('poolsel', 'poolprimary'));
     const pool = this.pool;
     if (!pool.kind || !pool.ids.length) return;
     const ids = new Set(pool.ids);
-    const mark = (node, ref) => { if (ids.has(ref)) node.classList.add('poolsel'); };
+    const primary = pool.primary;
+    const mark = (node, ref) => {
+      if (!ids.has(ref)) return;
+      node.classList.add('poolsel');
+      if (ref === primary) node.classList.add('poolprimary');
+    };
     if (pool.kind === 'element') {
       this.inner.querySelectorAll('.tl-camhead[data-cam], .blk.cam[data-cam]').forEach((n) => mark(n, cameraRef(n.dataset.cam)));
       this.inner.querySelectorAll('.tl-objhead[data-obj], .blk.ob[data-obj]').forEach((n) => mark(n, objectRef(n.dataset.obj)));
@@ -3317,6 +3322,27 @@ export class Timeline {
   }
 
   /**
+   * Element-list marquee: press an unselected row (or Ctrl-press any row) and
+   * drag across headers to select every row intersecting the band. Reordering
+   * stays on an already-selected row, per the agreed gesture split.
+   */
+  _startElementMarquee(ev, header) {
+    const hit = this._headerRows().find((x) => x.row === header);
+    if (!hit) return;
+    const { ref, kind, id } = hit;
+    const additive = !!(ev.ctrlKey || ev.metaKey || ev.shiftKey);
+    this._pickPool('element', ref, ev);
+    this.propSel = null;
+    this._selectPoolHost();
+    this._paintSelection();
+    this._startMarquee(ev, {
+      scope: 'elements',
+      additive,
+      tap: () => { if (!additive && kind === 'cam') this._activateCamera(id); },
+    });
+  }
+
+  /**
    * Drag a box over the lanes to select keyframe diamonds. The band ends at the
    * pointerup coordinates (never a stale last move), is clipped to the visible
    * lane area so diamonds hidden under the sticky name column cannot be caught,
@@ -3324,8 +3350,13 @@ export class Timeline {
    * diamond centre. A press without movement clears the selection; callers that
    * need a click action arm it through `_deferGesture` and only hand over once
    * the pointer really moved.
+   *
+   * `additive` (Ctrl/Cmd/Shift) toggles the diamonds in the band instead of
+   * replacing the pool: unselected keys are added, selected keys are removed.
+   * `scope: 'elements'` draws the same band over header rows; `tap` is the
+   * no-movement action (camera activation when a plain camera row was pressed).
    */
-  _startMarquee(ev, { slop = 3, at = null } = {}) {
+  _startMarquee(ev, { slop = 3, at = null, additive = false, scope = 'keyframes', tap = null } = {}) {
     const start = { x: ev.clientX, y: ev.clientY };
     let last = at ? { x: at.x, y: at.y } : { ...start };
     let moved = !!at;
@@ -3356,7 +3387,7 @@ export class Timeline {
     const bandRect = () => {
       const scrollRect = this.scroll.getBoundingClientRect();
       const band = padded(start, last);
-      band.left = Math.max(band.left, scrollRect.left + this._gutter());
+      band.left = Math.max(band.left, scrollRect.left + (scope === 'elements' ? 0 : this._gutter()));
       band.right = Math.min(Math.max(band.left, band.right), scrollRect.right);
       band.top = Math.max(band.top, scrollRect.top);
       band.bottom = Math.min(Math.max(band.top, band.bottom), scrollRect.bottom);
@@ -3389,6 +3420,19 @@ export class Timeline {
       const tol = 2;
       const refs = [];
       const seen = new Set();
+      if (scope === 'elements') {
+        for (const hit of this._headerRows()) {
+          const node = hit.row;
+          if (!node.getClientRects().length) continue; // hidden by the filter
+          const r = node.getBoundingClientRect();
+          const inside = r.right + tol >= band.left && r.left - tol <= band.right
+            && r.bottom + tol >= band.top && r.top - tol <= band.bottom;
+          if (!inside || seen.has(hit.ref)) continue;
+          seen.add(hit.ref);
+          refs.push(hit.ref);
+        }
+        return refs;
+      }
       this.inner.querySelectorAll('.tl-key').forEach((node) => {
         if (!node.getClientRects().length) return; // hidden by the filter
         const ref = keyframeRefOf(node);
@@ -3405,10 +3449,41 @@ export class Timeline {
 
     /** Take the keyframe pool and keep the primary key's host row selected. */
     const apply = () => {
-      const ids = hitRefs();
-      const primary = ids.length ? splitRef(ids[0]) : null;
-      this.pool = ids.length
-        ? normalizeSelection({ kind: 'keyframe', ids, primary: ids[0] })
+      const hits = hitRefs();
+      if (scope === 'elements') {
+        const prev = additive && this.pool?.kind === 'element' ? this.pool.ids : [];
+        let pool;
+        if (!additive) {
+          pool = hits.length
+            ? normalizeSelection({ kind: 'element', ids: hits, primary: hits[hits.length - 1] })
+            : emptySelection();
+        } else {
+          const before = new Set(prev);
+          const ids = [...new Set([...prev, ...hits])];
+          const primary = hits.find((ref) => !before.has(ref)) || this.pool?.primary || ids[0] || null;
+          pool = normalizeSelection({ kind: 'element', ids, primary });
+        }
+        this.pool = pool;
+        this.segmentId = null;
+        this.propSel = null;
+        this._selectPoolHost();
+        this._paintSelection();
+        return;
+      }
+      const ids = hits;
+      const prev = additive && this.pool?.kind === 'keyframe' ? this.pool.ids : [];
+      const set = new Set(prev);
+      for (const id of ids) {
+        if (additive && set.has(id)) set.delete(id);
+        else set.add(id);
+      }
+      const list = [...set];
+      const primaryId = additive
+        ? (this.pool?.primary && set.has(this.pool.primary) ? this.pool.primary : (list[list.length - 1] || null))
+        : (ids[0] || null);
+      const primary = primaryId ? splitRef(primaryId) : null;
+      this.pool = list.length
+        ? normalizeSelection({ kind: 'keyframe', ids: list, primary: primaryId })
         : emptySelection();
       this.segmentId = null;
       this.propSel = null;
@@ -3420,7 +3495,7 @@ export class Timeline {
         this._paintSelection();
         return;
       }
-      const oneProp = ids.every((id) => {
+      const oneProp = list.every((id) => {
         const s = splitRef(id);
         return s && s.host === primary.host && s.path === primary.path;
       });
@@ -3466,11 +3541,13 @@ export class Timeline {
       if (e) last = { x: e.clientX, y: e.clientY };
       const dragged = moved;
       cleanup();
-      if (!dragged) clear();
-      else {
-        this._swallowNextClick();
-        apply();
+      if (!dragged) {
+        if (tap) tap();
+        else if (!additive) clear();
+        return;
       }
+      this._swallowNextClick();
+      apply();
     };
 
     const cancel = () => {
@@ -3524,7 +3601,10 @@ export class Timeline {
       handed = true;
       cleanup();
       if (onDrag?.(e)) return;
-      this._startMarquee(ev, { at: { x: e.clientX, y: e.clientY } });
+      this._startMarquee(ev, {
+        at: { x: e.clientX, y: e.clientY },
+        additive: !!(ev.ctrlKey || ev.metaKey || ev.shiftKey),
+      });
     };
     const up = (e) => {
       if (!samePointer(e)) return;
@@ -3820,7 +3900,13 @@ export class Timeline {
     // (select / second click expands / camera activates).
     const head = target.closest?.('.tl-gutter')?.closest?.('.tl-camhead[data-cam], .tl-elhead[data-el], .tl-objhead[data-obj]');
     if (head) {
-      this._startRowDrag(ev, head);
+      const hit = this._headerRows().find((x) => x.row === head);
+      const additive = !!(ev.ctrlKey || ev.metaKey || ev.shiftKey);
+      const inPool = !!hit && this.pool?.kind === 'element' && this.pool.ids.includes(hit.ref);
+      // Reorder only from an already-selected row; an unselected press-drag is
+      // an element marquee (a plain tap still selects the row).
+      if (!inPool || additive) this._startElementMarquee(ev, head);
+      else this._startRowDrag(ev, head);
       return;
     }
     const objBlk = target.closest?.('.blk.ob');
@@ -4005,7 +4091,7 @@ export class Timeline {
 
     // Clicking empty space below the ruler never seeks; drag to box-select
     // keyframe diamonds, or click to clear the current pool.
-    if (target.closest('.tl-track')) this._startMarquee(ev);
+    if (target.closest('.tl-track')) this._startMarquee(ev, { additive: !!(ev.ctrlKey || ev.metaKey || ev.shiftKey) });
   }
 }
 
