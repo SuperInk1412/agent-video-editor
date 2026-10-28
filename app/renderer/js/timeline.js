@@ -20,6 +20,11 @@ import {
 } from '/core/timeline-order.js';
 import { attachNumberField, readNumber, writeNumber } from './numfield.js';
 import { h, icon, token, prefs } from './ui.js';
+import { findLinkTarget } from '/core/links.js';
+import {
+  cameraRowLinkPaths, elementRowLinkPaths, linkOf, linkPropLabel, linkSourceLabel,
+  objectRowLinkPaths, openLinkMenu,
+} from './link-menu.js';
 import { normalizeFps, frameIndex, frameStart, frameBand, planRulerTicks, frameWriteTime, frameClipEdit } from './timeline-math.js';
 
 const el = (tag, cls, html) => {
@@ -52,10 +57,30 @@ const sliderToZoom = (v) => Math.exp(Math.log(ZOOM_MIN) + (Number(v) / ZOOM_STEP
 // Clips narrower than this hide their right-side meta ("7 关键点", "2.00s").
 const CLIP_META_MIN = 90;
 
+// Link target path -> the row `data-path` this timeline draws for it. Used by
+// revealProperty() after a "转到父级" jump. `transform.*` is the legacy 2D row
+// path; link data itself is always pivot.* / roll / scale.* (core/links.js).
+const EL_LINK_ROW_PATH = Object.freeze({
+  'pivot.x': 'transform.x', 'pivot.y': 'transform.y', 'pivot.z': 'transform.z',
+  'position.x': null, 'position.y': null,
+  'scale.x': 'transform.scale', 'scale.y': 'transform.scale', scale: 'transform.scale',
+  roll: 'transform.rotation', opacity: 'transform.opacity',
+  'audio.volume': 'audio.volume',
+});
+const OB_LINK_ROW_PATH = (path) => {
+  if (path === 'opacity' || path === 'roll') return path;
+  return /^(pivot|position|scale)\./.test(path) ? path.slice(0, path.indexOf('.')) : null;
+};
+const CAM_LINK_ROW_PATH = (path) => {
+  if (path.startsWith('pivot.')) return 'center';
+  if (path.startsWith('scale.')) return 'scale';
+  return path;
+};
+
 export class Timeline {
   constructor(root, {
     onSeek, onSelect, onOp, onPause, onElementMenu, onCameraMenu, onClipMenu, onSplit, onTextEdit,
-    onToggleCurves, isCurvesOpen, sourceDuration, onSourceLimit, onToast,
+    onToggleCurves, isCurvesOpen, sourceDuration, onSourceLimit, onToast, onLinkJump,
   } = {}) {
     this.root = root;
     this.onSeek = onSeek;
@@ -72,6 +97,7 @@ export class Timeline {
     this.sourceDuration = sourceDuration;
     this.onSourceLimit = onSourceLimit;
     this.onToast = onToast;
+    this.onLinkJump = onLinkJump;
     this.project = null;
     this.time = 0;
     this.pool = emptySelection();
@@ -100,6 +126,7 @@ export class Timeline {
     this._editTimes = new Map();
     this._propRows = [];
     this._elPropRows = [];
+    this._linkButtons = [];
     this._objHeads = new Map();
     this._elHeads = new Map();
     this.expandedEls = new Set();
@@ -446,6 +473,50 @@ export class Timeline {
     const viewR = this.scroll.scrollLeft + this.scroll.clientWidth;
     if (x < viewL + 8 || x > viewR - 40) this.scroll.scrollLeft = Math.max(0, x - this._gutter() - 40);
     return true;
+  }
+
+  /**
+   * Scroll to an expanded property row (property-link "转到父级"). `path` is the
+   * link source path (`pivot.x`, `roll`, `fov`, …); it is mapped onto the row
+   * path this timeline draws. Falls back to the host header when the row is not
+   * rendered (collapsed group, keyed-only pass, or a 3D roll with no row here).
+   * Returns false only when neither the row nor the header can be shown.
+   */
+  revealProperty(ref, path) {
+    let kind = null;
+    let id = null;
+    if (ref && typeof ref === 'object') {
+      kind = ref.kind;
+      id = ref.id;
+    } else {
+      const r = splitRef(ref);
+      if (r) {
+        kind = r.type === 'cam' ? 'camera' : r.type === 'ob' ? 'object' : 'element';
+        id = r.id;
+      }
+    }
+    if (!kind || id == null || !this.project) return false;
+    const source = String(path ?? '');
+    const rowPath = kind === 'camera' ? CAM_LINK_ROW_PATH(source)
+      : kind === 'object' ? OB_LINK_ROW_PATH(source)
+        : EL_LINK_ROW_PATH[source] ?? null;
+    if (rowPath) {
+      const q = CSS.escape(String(id));
+      const sel = kind === 'camera' ? `.tl-camprop[data-cam="${q}"][data-path="${CSS.escape(rowPath)}"]`
+        : kind === 'object' ? `.tl-prop[data-obj="${q}"][data-path="${CSS.escape(rowPath)}"]`
+          : `.tl-elprop[data-el="${q}"][data-path="${CSS.escape(rowPath)}"]`;
+      const row = this.inner.querySelector(sel);
+      if (row && row.getClientRects().length) {
+        const sr = this.scroll.getBoundingClientRect();
+        const r = row.getBoundingClientRect();
+        const top = sr.top + (this.rulerRow?.offsetHeight || 26);
+        const bottom = sr.top + this.scroll.clientHeight;
+        if (r.top < top) this.scroll.scrollTop -= (top - r.top) + 4;
+        else if (r.bottom > bottom) this.scroll.scrollTop += (r.bottom - bottom) + 4;
+        return true;
+      }
+    }
+    return this.reveal({ kind, id });
   }
 
   // ------------------------------------------------------------ row insertion
@@ -887,6 +958,7 @@ export class Timeline {
     this._camPropRows = [];
     this._propRows = [];
     this._elPropRows = [];
+    this._linkButtons = [];
     this._objHeads = new Map();
     this._elHeads = new Map();
     // Open camera pages survive activation changes (the active camera may well be
@@ -1643,11 +1715,14 @@ export class Timeline {
   }
 
   _camPosRow(cam) {
-    const row = el('div', 'tl-row tl-camprop tl-camposrow');
+    // Camera path position is animation, not a linkable scalar (PLAN §3.3):
+    // the placeholder keeps this row aligned with the linkable rows above it.
+    const row = el('div', 'tl-row tl-camprop tl-camposrow tl-linkrow');
     row.dataset.cam = cam.id;
     row.dataset.path = 'path';
     const g = el('div', 'tl-gutter');
     g.dataset.cam = cam.id;
+    g.appendChild(this._linkButton('cam', cam, cameraRowLinkPaths('position')));
     g.appendChild(el('span', 'tl-plabel', '位置'));
     const inputs = [];
     for (const ax of AX) {
@@ -1722,11 +1797,12 @@ export class Timeline {
   }
 
   _camVecRow(cam, path, label, dims, values, { step = 0.1, min, max, letter } = {}) {
-    const row = el('div', 'tl-row tl-camprop tl-camxform');
+    const row = el('div', 'tl-row tl-camprop tl-camxform tl-linkrow');
     row.dataset.cam = cam.id;
     row.dataset.path = path;
     const g = el('div', 'tl-gutter');
     g.dataset.cam = cam.id;
+    g.appendChild(this._linkButton('cam', cam, cameraRowLinkPaths(path)));
     g.appendChild(el('span', 'tl-plabel', label));
     const inputs = [];
     for (let i = 0; i < dims; i++) {
@@ -1854,11 +1930,12 @@ export class Timeline {
   }
 
   _camParamNumRow(cam, path, label, value, { step = 0.1, min, max, badge = '', keyable = true } = {}) {
-    const row = el('div', 'tl-row tl-camprop tl-camparamrow');
+    const row = el('div', 'tl-row tl-camprop tl-camparamrow tl-linkrow');
     row.dataset.cam = cam.id;
     row.dataset.path = path;
     const g = el('div', 'tl-gutter');
     g.dataset.cam = cam.id;
+    g.appendChild(this._linkButton('cam', cam, cameraRowLinkPaths(path)));
     g.appendChild(el('span', 'tl-plabel', label));
     const { box, inp } = this._numBox('d', '');
     box.classList.add('tl-camnum');
@@ -1898,11 +1975,12 @@ export class Timeline {
   }
 
   _camParamSelectRow(cam, path, label, value, options, { badge = '', keyable = true } = {}) {
-    const row = el('div', 'tl-row tl-camprop tl-camparamrow');
+    const row = el('div', 'tl-row tl-camprop tl-camparamrow tl-linkrow');
     row.dataset.cam = cam.id;
     row.dataset.path = path;
     const g = el('div', 'tl-gutter');
     g.dataset.cam = cam.id;
+    g.appendChild(this._linkButton('cam', cam, []));
     g.appendChild(el('span', 'tl-plabel', label));
     const sel = document.createElement('select');
     sel.className = 'tl-camselect';
@@ -2040,11 +2118,12 @@ export class Timeline {
   }
 
   _elementNumRow(e, path, label, { step = 0.1, axis = 'd', letter = '', unit = '', min, max, title } = {}) {
-    const row = el('div', 'tl-row tl-prop tl-elprop');
+    const row = el('div', 'tl-row tl-prop tl-elprop tl-linkrow');
     row.dataset.el = e.id;
     row.dataset.path = path;
     const g = el('div', 'tl-gutter');
     g.dataset.el = e.id;
+    g.appendChild(this._linkButton('el', e, elementRowLinkPaths(e, path)));
     const lab = el('span', 'tl-plabel', label);
     lab.dataset.tip = title || `${label}${unit ? ` (${unit})` : ''}`;
     g.appendChild(lab);
@@ -2293,6 +2372,74 @@ export class Timeline {
     return { box, inp };
   }
 
+  // ------------------------------------------------------------ property links
+  /**
+   * `↳` button for a property row (PLAN-ui-round3 §4.2). A row that cannot be
+   * linked keeps a 20px placeholder so the name column does not jump between
+   * rows. Lit = the host carries a link for one of `paths`.
+   */
+  _linkButton(kind, host, paths) {
+    const usable = (paths || []).filter((path) => findLinkTarget(kind, host, path));
+    if (!usable.length) return el('span', 'tl-linkflag');
+    const btn = el('button', 'tl-linkbtn');
+    btn.type = 'button';
+    btn.textContent = '↳';
+    btn.setAttribute('aria-label', '属性父级');
+    const rec = { node: btn, kind, hostId: String(host?.id ?? ''), paths: usable };
+    this._linkButtons.push(rec);
+    const open = (anchor, x, y) => {
+      this.onPause?.();
+      openLinkMenu({
+        project: this.project,
+        hostKind: kind,
+        id: rec.hostId,
+        to: usable,
+        labels: usable.map((path) => linkPropLabel(path)),
+        anchor, x, y,
+        t: this._frameTime(),
+        onOp: (op) => this.onOp?.(op),
+        onJump: (jump) => this.onLinkJump?.(jump),
+        toast: this.onToast,
+      });
+    };
+    btn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      open(btn);
+    });
+    btn.addEventListener('contextmenu', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      open(null, ev.clientX, ev.clientY);
+    });
+    this._paintLink(rec);
+    return btn;
+  }
+
+  _paintLink(rec) {
+    if (!rec?.node) return;
+    const host = this._linkHost(rec.kind, rec.hostId);
+    const links = host ? rec.paths.map((path) => linkOf(host, path)).filter(Boolean) : [];
+    rec.node.classList.toggle('on', links.length > 0);
+    rec.node.dataset.tip = links.length
+      ? `属性父级：${links.map((link) => linkSourceLabel(this.project, link)).join('；')}`
+      : '属性父级：点击选择父级属性（右键也可）';
+  }
+
+  /** Repaint every link button from the live project (called by _syncProps). */
+  _paintLinks() {
+    for (const rec of this._linkButtons) this._paintLink(rec);
+  }
+
+  _linkHost(kind, id) {
+    const p = this.project;
+    if (!p) return null;
+    const key = String(id ?? '');
+    const list = kind === 'el' ? (p.elements || [])
+      : kind === 'ob' ? (p.scene?.objects || [])
+        : [...(p.cameras || []), ...(p.camera ? [p.camera] : [])];
+    return list.find((host) => String(host?.id ?? '') === key) || null;
+  }
+
   _geomRow(o) {
     const row = el('div', 'tl-row tl-prop');
     row.dataset.obj = o.id;
@@ -2351,11 +2498,12 @@ export class Timeline {
   }
 
   _vecRow(o, path, label) {
-    const row = el('div', 'tl-row tl-prop');
+    const row = el('div', 'tl-row tl-prop tl-linkrow');
     row.dataset.obj = o.id;
     row.dataset.path = path;
     const g = el('div', 'tl-gutter');
     g.dataset.obj = o.id;
+    g.appendChild(this._linkButton('ob', o, objectRowLinkPaths(path)));
     const lab = el('span', 'tl-plabel');
     if (o.parent?.id) {
       const local = el('span', 'tl-plocal', '本');
@@ -2387,11 +2535,12 @@ export class Timeline {
   }
 
   _opacityRow(o) {
-    const row = el('div', 'tl-row tl-prop');
+    const row = el('div', 'tl-row tl-prop tl-linkrow');
     row.dataset.obj = o.id;
     row.dataset.path = 'opacity';
     const g = el('div', 'tl-gutter');
     g.dataset.obj = o.id;
+    g.appendChild(this._linkButton('ob', o, objectRowLinkPaths('opacity')));
     g.appendChild(el('span', 'tl-plabel', '不透明度'));
     const { box, inp } = this._numBox('d', '');
     box.classList.add('tl-scalar');
@@ -2603,6 +2752,7 @@ export class Timeline {
       setClipLoopMark(h.block, isLooping(e));
       h.block.dataset.tip = elementClipTip(e, label);
     }
+    this._paintLinks();
   }
 
   _hasTrack(o, path) {
@@ -2716,6 +2866,11 @@ export class Timeline {
     clearTimeout(p.timer);
     this._pending.delete(key);
     p.fn();
+  }
+
+  /** Send every debounced property edit now (property-link jump must not lose typing). */
+  flushPending() {
+    for (const key of [...this._pending.keys()]) this._flush(key);
   }
 
   _toggleExpand(id) {

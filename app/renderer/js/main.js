@@ -330,6 +330,49 @@ function select(sel = {}) {
   updateSelectionInfo();
 }
 
+/**
+ * Property-link "转到父级" (PLAN-ui-round3 §4.3): select the parent host, open
+ * its property page and reveal the source row. Selecting a camera here only
+ * shows its inspector/rows; it never activates the camera. This path writes
+ * nothing to the project, so Ctrl+Z stays the global undo.
+ *
+ * TODO(ui-round3 §4.3): local nav stack + Alt+← / "← 返回" chip. Deliberately
+ * not implemented yet; jumping must never consume Ctrl+Z.
+ */
+function jumpToLinkParent({ host, id, path } = {}) {
+  if (!S.project || (host !== 'el' && host !== 'ob' && host !== 'cam') || id == null) return false;
+  // Flush pending typing before the selection changes: an inspector debounce or
+  // a timeline property debounce must land on the old host, not the new one.
+  const active = document.activeElement;
+  if (active && /INPUT|TEXTAREA|SELECT/.test(active.tagName || '')) active.blur();
+  inspector?._flush();
+  timeline?.flushPending?.();
+  const ref = host === 'el' ? elementRef(id) : host === 'ob' ? objectRef(id) : cameraRef(id);
+  const sel = { pool: selectOne('element', ref) };
+  if (host === 'el') sel.elementId = id;
+  else if (host === 'ob') sel.objectId = id;
+  else sel.camera = true;
+  select(sel);
+  // Open the host's page (element / object group, camera property rows) and the
+  // group that owns the source property, so revealProperty can find its row.
+  if (host === 'el') timeline.expandedEls.add(String(id));
+  else if (host === 'ob') timeline.expanded.add(String(id));
+  else timeline.openCams.add(String(id));
+  const source = String(path ?? '');
+  if (host === 'cam') {
+    if (source.startsWith('shake.')) timeline.sections.camShake = 'full';
+    else if (source.startsWith('dof.')) timeline.sections.camDof = 'full';
+    else if (source.startsWith('pivot.') || source.startsWith('scale.') || source === 'opacity') timeline.sections.camPos = 'full';
+    else timeline.sections.camMain = 'full';
+  } else if (host === 'el' || host === 'ob') {
+    timeline.sections.transform = 'full';
+  }
+  timeline.render(true);
+  const kind = host === 'el' ? 'element' : host === 'ob' ? 'object' : 'camera';
+  timeline.revealProperty({ kind, id: String(id) }, String(path ?? ''));
+  return true;
+}
+
 // ---------------------------------------------------------------- inline text editor
 // Double-click a text element (2D overlay or 3D text object) in the viewport or
 // on the timeline. The editor is a transparent textarea placed on the projected
@@ -2110,6 +2153,7 @@ async function boot() {
       ? '左边界不能早于素材开头'
       : '已到素材结尾；右键该素材勾选「开启循环」后可继续拉长', 'info'),
     onToast: (msg, level = 'info') => toast(msg, level),
+    onLinkJump: (jump) => jumpToLinkParent(jump),
     onSplit: () => splitAtPlayhead(),
     onTextEdit: (kind, id, ev) => openTextEditor(kind, id, ev),
     onToggleCurves: () => toggleCurvePanel(),
@@ -2137,6 +2181,8 @@ async function boot() {
   inspector = new Inspector($('#panelInsp'), {
     onOp: (o) => op(o),
     getTime: () => S.time,
+    onLinkJump: (jump) => jumpToLinkParent(jump),
+    onToast: (msg, level = 'info') => toast(msg, level),
     // ◆ records what the property is at the playhead (its keyed value, or the base)
     getTimeValue: (path) => {
       const el = S.project.elements.find((e) => e.id === S.selection.elementId);
