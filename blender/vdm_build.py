@@ -743,12 +743,15 @@ def _val(ng, v):
     return n.outputs[0]
 
 
-def build_compositor(scene, meta, cache_dir, fog=None, overlay=None, backdrop=None):
+def build_compositor(scene, meta, cache_dir, fog=None, overlay=None, backdrop=None, planes=None):
     """Post chain for `scene`. `overlay` is an optional transparent scene (the
     2D layer of a 3D shot) alpha-overed after the fog and before the post fx.
     `backdrop` (linear RGB) is for a transparent film (the empty world): fog only
     touches rendered pixels, then the picture goes over this flat colour, the
-    same as the viewport's clear colour."""
+    same as the viewport's clear colour. `planes` names the view layer that
+    holds the 2D element planes (the 3D world as holdout): it goes over the
+    fogged world, so the planes are never fogged — as in the viewport, where
+    only 3D objects get fog."""
     fx = meta.get('fx') or {}
     w, h = scene.render.resolution_x, scene.render.resolution_y
     os.makedirs(cache_dir, exist_ok=True)
@@ -795,6 +798,18 @@ def build_compositor(scene, meta, cache_dir, fog=None, overlay=None, backdrop=No
         ng.links.new(rgb.outputs[0], mixf.inputs[7])
         ng.links.new(mul.outputs[0], mixf.inputs[0])
         chain = mixf.outputs[2]
+
+    if planes is not None:
+        prl = ng.nodes.new('CompositorNodeRLayers')
+        try:
+            prl.scene = scene
+            prl.layer = planes
+        except Exception:
+            pass
+        pover = ng.nodes.new('CompositorNodeAlphaOver')
+        ng.links.new(chain, pover.inputs['Background'])
+        ng.links.new(prl.outputs['Image'], pover.inputs['Foreground'])
+        chain = pover.outputs[0]
 
     if backdrop is not None:
         bgc = ng.nodes.new('CompositorNodeRGB')

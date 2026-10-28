@@ -678,6 +678,42 @@ def _carry_elements(scene, rig, carriers):
                 ob.parent = screen
 
 
+def _plane_layer(scene, rig):
+    """Split the 2D element planes into their own view layer; returns its name.
+
+    The planes use blended (transparent) materials, which EEVEE leaves out of
+    the Mist pass, so the compositor fog would paint them in full fog colour.
+    The main layer renders the 3D world without the planes (and fogs it); the
+    'VDM_Planes' layer renders only the planes with the world as holdout, so
+    3D objects still cover them, and the compositor lays it over the fogged
+    world. Matches the viewport, where 2D layers are never fogged."""
+    plane_objs = set()
+    roots = [rig] + [ob for ob in scene.objects if ob.name.startswith(('VDM_Carry_', 'VDM_Screen_'))]
+
+    def walk(ob):
+        plane_objs.add(ob)
+        for ch in ob.children:
+            walk(ch)
+    for r in roots:
+        walk(r)
+    cp = bpy.data.collections.new('VDM_Planes')
+    cw = bpy.data.collections.new('VDM_World')
+    scene.collection.children.link(cp)
+    scene.collection.children.link(cw)
+    for ob in list(scene.collection.objects):
+        target = cp if ob in plane_objs else cw
+        target.objects.link(ob)
+        scene.collection.objects.unlink(ob)
+    main = scene.view_layers[0]
+    main.layer_collection.children['VDM_Planes'].exclude = True
+    layer = scene.view_layers.new('VDM_Planes')
+    layer.layer_collection.children['VDM_World'].holdout = True
+    for attr in ('use_sky', 'use_pass_mist'):
+        if hasattr(layer, attr):
+            setattr(layer, attr, False)
+    return layer.name
+
+
 def _build_overlay(opts):
     """The project's 2D elements as a transparent scene ('VDM_2D'), or None.
 
@@ -827,9 +863,12 @@ def build_shot_scene(shot, opts):
     meta = {'fx': shot.get('fx') or {}}
     # 2D elements: planes in the world on the screen plane (single camera); the
     # multi-camera path still lays them over the picture (see _build_overlay)
+    rig = None
     if not opts.get('_no_overlay'):
-        _embed_elements(scene, opts, shot)
+        rig = _embed_elements(scene, opts, shot)
+    planes = _plane_layer(scene, rig) if rig is not None and city.get('fog') else None
     build_compositor(scene, meta, os.path.join(opts['root'], '.vdm', 'cache', 'comp'),
                      fog=city.get('fog'),
-                     backdrop=city.get('sky') if city.get('empty') else None)
+                     backdrop=city.get('sky') if city.get('empty') else None,
+                     planes=planes)
     return scene
