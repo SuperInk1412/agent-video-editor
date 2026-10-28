@@ -15,7 +15,8 @@ import { applyOp, OP_KINDS } from '../core/ops.js';
 import { ensureSpace, screenCenterY } from '../core/space.js';
 import { elementCarrier } from '../core/hierarchy.js';
 import { frameOf } from '../core/spatial.js';
-import { elementWorldParent, SPATIAL_PARENT_OP_KINDS } from '../core/spatial-parent.js';
+import { elementWorldParent, evalCameraWorld, objectWorldPose, SPATIAL_PARENT_OP_KINDS } from '../core/spatial-parent.js';
+import { evalCamera } from '../core/camera.js';
 import { elementNodeAt, elementWorldNode } from '../app/renderer/js/node-at.js';
 import { PUBLIC_OPS, EDIT_SCHEMA } from '../core/contracts.js';
 import { validateContract } from '../application/validate-contract.js';
@@ -195,7 +196,107 @@ test('spatial-parent: a 3D object parent rotates and translates the 2D child', (
   near(frameAt(p, el, 2).pos, [5, cy, 0], 1e-6, 'object rotation + travel carry the child');
 });
 
-// ---------------------------------------------------------------- camera parent
+// ---------------------------------------------------------------- object child
+
+test('spatial-parent: a 3D object child is carried by an element parent (frameParent)', () => {
+  const p = fresh();
+  const parent = addEl(p, nodeEl([0, cy, 0]));
+  keyRoll(p, parent.id, 0, 90);
+  const ob = applyOp(p, {
+    op: 'objectAdd',
+    object: { type: 'empty', start: 0, duration: 4, pivot: [2, cy, 0], rot: { dir: [0, 0, -1], roll: 0 }, scale: [1, 1, 1] },
+  }).changed[0];
+  const obj = p.scene.objects.find((o) => o.id === ob);
+  const before = objectWorldPose(p, obj, 0);
+
+  applyOp(p, { op: 'spatialParent', id: ob, parent: parent.id, t: 0 });
+  assert.equal(obj.frameParent.id, parent.id);
+  assert.equal(obj.frameParent.mode, 'world');
+  assert.equal('parent' in obj, false, 'the old 3D parent graph is untouched');
+  near(objectWorldPose(p, obj, 0).worldPos, before.worldPos, 1e-6, 'binding does not jump');
+  near(objectWorldPose(p, obj, 0).basis.forward, before.basis.forward, 1e-6);
+
+  // Parent rolls +90°: the object pivots around the parent centre, its own
+  // basis turns with it (no old 3D hierarchy involved).
+  const at2 = objectWorldPose(p, obj, 2);
+  near(at2.worldPos, [0, cy - 2, 0], 1e-6, 'object orbits the parent pivot');
+  near(at2.basis.right, [0, -1, 0], 1e-6, 'object basis turns with the parent');
+
+  applyOp(p, { op: 'spatialUnparent', id: ob });
+  assert.equal('frameParent' in obj, false);
+  near(objectWorldPose(p, obj, 2).worldPos, [2, cy, 0], 1e-6, 'back to the local 3D pose');
+});
+
+test('spatial-parent: an object child follows a camera parent and stays byte-equal without a parent', () => {
+  const p = fresh();
+  const cam = p.cameras[0];
+  const ob = applyOp(p, {
+    op: 'objectAdd',
+    object: { type: 'empty', start: 0, duration: 4, pivot: [2, cy, 10], rot: { dir: [0, 0, -1], roll: 0 }, scale: [1, 1, 1] },
+  }).changed[0];
+  const obj = p.scene.objects.find((o) => o.id === ob);
+  const free = objectWorldPose(p, obj, 0);
+  applyOp(p, { op: 'spatialParent', id: ob, parent: cam.id, t: 0 });
+  near(objectWorldPose(p, obj, 0).worldPos, free.worldPos, 1e-6, 'no jump');
+
+  // Pan the camera +3 m: the object travels with it at the same depth.
+  applyOp(p, {
+    op: 'cameraPath', id: cam.id, path: [
+      { t: 0, pos: [0, cy, 20], look: [0, cy, 0] },
+      { t: 2, pos: [3, cy, 20], look: [3, cy, 0] },
+    ],
+  });
+  near(objectWorldPose(p, obj, 2).worldPos, [5, cy, 10], 1e-6, 'camera pan carries the object');
+
+  // A project without frameParent still returns the shipped worldPose verbatim.
+  const plain = fresh();
+  const free2 = objectWorldPose(plain, { type: 'empty', pivot: [1, cy, 2], rot: { dir: [0, 0, -1], roll: 0 } }, 1);
+  near(free2.worldPos, [1, cy, 2], 1e-12);
+});
+
+// ---------------------------------------------------------------- camera child
+
+test('spatial-parent: a camera child follows its parent through evalCameraWorld', () => {
+  const p = fresh();
+  const cam = p.cameras[0];
+  const base = evalCameraWorld(p, 0, cam);
+  const ob = applyOp(p, {
+    op: 'objectAdd',
+    object: { type: 'empty', start: 0, duration: 4, pivot: [0, cy, 0], rot: { dir: [0, 0, -1], roll: 0 }, scale: [1, 1, 1] },
+  }).changed[0];
+  applyOp(p, { op: 'spatialParent', id: cam.id, parent: ob, t: 0 });
+  assert.equal(cam.frameParent.id, ob);
+  near(evalCameraWorld(p, 0, cam).pos, base.pos, 1e-6, 'binding does not jump');
+  near(evalCameraWorld(p, 0, cam).look, base.look, 1e-6);
+
+  applyOp(p, { op: 'objectKey', id: ob, path: 'pivot', t: 0, v: [0, cy, 0], ease: 'linear' });
+  applyOp(p, { op: 'objectKey', id: ob, path: 'pivot', t: 2, v: [3, cy, 0] });
+  const moved = evalCameraWorld(p, 2, cam);
+  near(moved.pos, [base.pos[0] + 3, base.pos[1], base.pos[2]], 1e-6, 'object motion carries the camera');
+  near(moved.fov, base.fov, 1e-9, 'lens stays local');
+  assert.equal(evalCameraWorld(p, 2).pos[0], moved.pos[0], 'the live-camera path picks the parented camera');
+
+  // Without a frameParent evalCameraWorld is evalCamera (byte-equal).
+  const plain = fresh();
+  assert.deepEqual(evalCameraWorld(plain, 1, plain.cameras[0]), evalCamera(plain, 1));
+
+  applyOp(p, { op: 'spatialUnparent', id: cam.id });
+  assert.equal('frameParent' in cam, false);
+  near(evalCameraWorld(p, 2, cam).pos, base.pos, 1e-6, 'unparent restores the local camera');
+});
+
+test('spatial-parent: the mixed graph rejects loops across elements, objects and cameras', () => {
+  const p = fresh();
+  const el = addEl(p, nodeEl([0, cy, 0]));
+  const ob = applyOp(p, { op: 'objectAdd', object: { type: 'empty', start: 0, duration: 4, pivot: [2, cy, 0] } }).changed[0];
+  const cam = p.cameras[0];
+  applyOp(p, { op: 'spatialParent', id: ob, parent: el.id, t: 0 });
+  applyOp(p, { op: 'spatialParent', id: cam.id, parent: ob, t: 0 });
+  assert.throws(() => applyOp(p, { op: 'spatialParent', id: el.id, parent: cam.id, t: 0 }), /loop/);
+  // A camera cannot be its own parent either.
+  assert.throws(() => applyOp(p, { op: 'spatialParent', id: cam.id, parent: cam.id }), /own spatial parent/);
+});
+
 
 test('spatial-parent: a camera parent pans and rolls the 2D child (not the screen lock)', () => {
   const p = fresh();
@@ -283,10 +384,20 @@ test('spatial-parent: rejects self, missing hosts, cycles, depth and non-element
   assert.throws(() => applyOp(p, { op: 'spatialParent', id: a.id, parent: '@live' }), /@live|elementParent/);
   assert.throws(() => applyOp(p, { op: 'spatialParent', id: a.id }), /needs a parent/);
 
-  // Objects and cameras cannot be children in this slice.
+  // 3D objects and cameras are spatial children too now (frameParent).
   const ob = applyOp(p, { op: 'objectAdd', object: { type: 'empty', start: 0, duration: 4 } }).changed[0];
-  assert.throws(() => applyOp(p, { op: 'spatialParent', id: ob, parent: a.id }), /only takes 2D element children/);
-  assert.throws(() => applyOp(p, { op: 'spatialParent', id: p.cameras[0].id, parent: a.id }), /only takes 2D element children/);
+  applyOp(p, { op: 'spatialParent', id: ob, parent: a.id, t: 0 });
+  assert.equal(p.scene.objects.find((o) => o.id === ob).frameParent.id, a.id);
+  assert.equal('parent' in p.scene.objects.find((o) => o.id === ob), false, 'old 3D parent untouched');
+  applyOp(p, { op: 'spatialUnparent', id: ob });
+  assert.equal('frameParent' in p.scene.objects.find((o) => o.id === ob), false);
+
+  const cam = p.cameras[0];
+  applyOp(p, { op: 'spatialParent', id: cam.id, parent: a.id, t: 0 });
+  assert.equal(cam.frameParent.id, a.id);
+  applyOp(p, { op: 'spatialUnparent', id: cam.id });
+  assert.equal('frameParent' in cam, false);
+
   const audio = addEl(p, { type: 'audio', src: 'a.m4a' });
   assert.throws(() => applyOp(p, { op: 'spatialParent', id: audio.id, parent: a.id }), /audio/);
 
