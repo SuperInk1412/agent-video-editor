@@ -73,9 +73,11 @@ export class Timeline {
     this.elementId = null;
     this.objectId = null;
     this.cameraSel = false;
-    this.camOpenId = null;
+    // Camera property pages that are open, like expandedEls: ephemeral UI state,
+    // independent of which camera is active. Several cameras may be open at once.
+    this.openCams = new Set();
     this.soloCameras = new Set();
-    this._camPos = null;
+    this._camPosRows = [];
     this._camPropRows = [];
     this._camDrag = null;
     this.zoom = 1;
@@ -714,14 +716,16 @@ export class Timeline {
     // only — their position never feeds the renderer.
     const cams = Array.isArray(p.cameras) && p.cameras.length ? p.cameras : (p.camera ? [p.camera] : []);
     this.rowsWrap.innerHTML = '';
-    this._camPos = null;
+    this._camPosRows = [];
     this._camPropRows = [];
     this._propRows = [];
     this._elPropRows = [];
     this._objHeads = new Map();
     this._elHeads = new Map();
-    if (this.camOpenId && p.activeCameraId && this.camOpenId !== p.activeCameraId) this.camOpenId = null;
-    if (this.camOpenId && !cams.some((c) => c.id === this.camOpenId)) this.camOpenId = null;
+    // Open camera pages survive activation changes (the active camera may well be
+    // folded); only ids whose camera is gone are pruned, like expandedEls above.
+    const camIds = new Set(cams.map((c) => c.id));
+    for (const id of [...this.openCams]) if (!camIds.has(id)) this.openCams.delete(id);
 
     const order = this._reconcileOrder(p, cams, objs);
     this.viewOrder = order;
@@ -870,36 +874,42 @@ export class Timeline {
     return this.project?.activeCameraId || this.project?.camera?.id || null;
   }
 
+  /** Camera the selection points at: the pool primary, else the active camera. */
+  _selectedCameraId() {
+    const host = splitRef(this.pool?.primary);
+    if (host?.type === 'cam' && this._camById(host.id)) return host.id;
+    return this._activeCameraId();
+  }
+
   _activateCamera(id) {
     if (!id) return;
-    if (this._activeCameraId() !== id) this.camOpenId = null;
     this.cameraSel = true;
     this.pool = selectOne('element', cameraRef(id));
     this.onSelect?.({ camera: true, pool: this.pool });
     this._paintSelection();
     if (this._activeCameraId() === id) return;
-    const r = this.onOp?.({ op: 'activateCamera', id });
-    if (r?.then) r.then(() => this.render(true)).catch(() => {});
+    // The reply applies the project (and renders) on its own; activation must
+    // never close or reorder the open camera property pages.
+    this.onOp?.({ op: 'activateCamera', id });
   }
 
   _toggleCam(id) {
     if (!id) return;
-    if (this.camOpenId === id) {
-      this.camOpenId = null;
+    if (this.openCams.has(id)) {
+      this.openCams.delete(id);
       this.render(true);
       return;
     }
-    this.camOpenId = id;
+    this.openCams.add(id);
     this.cameraSel = true;
     this.pool = selectOne('element', cameraRef(id));
     this.onSelect?.({ camera: true, pool: this.pool });
-    if (this._activeCameraId() !== id) {
-      const r = this.onOp?.({ op: 'activateCamera', id });
-      if (r?.then) r.then(() => this.render(true)).catch(() => {});
-      else this.render(true);
-    } else {
-      this.render(true);
-    }
+    // Expand now. Activation is a server transaction + preview render + project
+    // reply, so waiting for it made the row appear long after the click.
+    this.render(true);
+    // Activate in the background; its project reply re-renders. Opening a camera
+    // does not have to keep it active if another one is already live.
+    if (this._activeCameraId() !== id) this.onOp?.({ op: 'activateCamera', id });
   }
 
   setSoloCameras(ids) {
@@ -1234,7 +1244,7 @@ export class Timeline {
 
   _cameraGroup(cam, p, host = this.rowsWrap) {
     const activeId = p.activeCameraId || p.camera?.id || null;
-    const open = this.camOpenId === cam.id;
+    const open = this.openCams.has(cam.id);
     const row = el('div', 'tl-row tl-objhead tl-camhead tl-camrow');
     row.dataset.cam = cam.id;
     row.classList.toggle('sel', cam.id === activeId && this.cameraSel);
@@ -1483,66 +1493,67 @@ export class Timeline {
     }
   }
 
-  _camPosRow(cam = this.project?.camera) {
+  _camPosRow(cam) {
     const row = el('div', 'tl-row tl-camprop tl-camposrow');
-    row.dataset.cam = cam?.id || '';
+    row.dataset.cam = cam.id;
     row.dataset.path = 'path';
     const g = el('div', 'tl-gutter');
-    g.dataset.cam = cam?.id || '';
+    g.dataset.cam = cam.id;
     g.appendChild(el('span', 'tl-plabel', '位置'));
     const inputs = [];
     for (const ax of AX) {
       const { box, inp } = this._numBox(ax, ax.toUpperCase());
       inp.addEventListener('focus', () => this.onPause?.());
       inp.addEventListener('input', () => {
-        this._editTimes.set('camera:position', round3(this.time));
-        this._schedule('camera:position', () => this._commitCamPos());
+        this._editTimes.set(camPosEditKey(cam.id), round3(this.time));
+        this._schedule(camPosEditKey(cam.id), () => this._commitCamPos(cam.id));
       });
-      inp.addEventListener('blur', () => { this._flush('camera:position'); this._syncProps(); });
+      inp.addEventListener('blur', () => { this._flush(camPosEditKey(cam.id)); this._syncProps(); });
       inputs.push(inp);
       g.appendChild(box);
     }
     const kf = kfButton();
     kf.dataset.tip = '在当前时间打点 / 删点';
-    kf.addEventListener('click', (e) => { e.stopPropagation(); this._toggleCamKey(); });
+    kf.addEventListener('click', (e) => { e.stopPropagation(); this._toggleCamKey(cam.id); });
     g.appendChild(kf);
     const lane = el('div', 'tl-track');
     row.append(g, lane);
-    this._camPos = { inputs, kf, lane, sig: '', keys: [] };
-    this._refreshCamLane();
+    // One row state per camera: several cameras may be open, and each row must
+    // read/write its own camera (this.project.camera is only the active one).
+    const posRow = { camId: cam.id, inputs, kf, lane, sig: '', keys: [] };
+    this._camPosRows.push(posRow);
+    this._refreshCamLane(posRow, cam);
     return row;
   }
 
-  _commitCamPos() {
-    const cam = this.project?.camera;
-    const posRow = this._camPos;
+  _commitCamPos(camId) {
+    const cam = this._camById(camId);
+    const posRow = this._camPosRows.find((r) => r.camId === camId);
     if (!cam || !posRow) return;
     const v = posRow.inputs.map((i) => readNumber(i));
     if (v.some((n) => !Number.isFinite(n))) return;
-    const t = this._editTimes.get('camera:position') ?? round3(this.time);
-    const old = cam.path.find((k) => Math.abs(k.t - t) <= 1e-4);
-    this.onOp?.({ op: 'cameraKey', t, pos: v, look: old?.look ?? null, fov: old?.fov ?? null });
+    const t = this._editTimes.get(camPosEditKey(camId)) ?? round3(this.time);
+    const old = (cam.path || []).find((k) => Math.abs(k.t - t) <= 1e-4);
+    this.onOp?.({ op: 'cameraKey', id: camId, t, pos: v, look: old?.look ?? null, fov: old?.fov ?? null });
   }
 
-  _toggleCamKey() {
-    const cam = this.project?.camera;
+  _toggleCamKey(camId) {
+    const cam = this._camById(camId);
     if (!cam) return;
     this.onPause?.();
     const t = round3(this.time);
-    const key = cam.path.find((k) => Math.abs(k.t - t) < 1e-3);
+    const key = (cam.path || []).find((k) => Math.abs(k.t - t) < 1e-3);
     if (key) {
-      this.onOp?.({ op: 'cameraRemove', t: key.t });
+      this.onOp?.({ op: 'cameraRemove', id: camId, t: key.t });
       return;
     }
     const pos = pathPos(cam, this.time).map(round3);
-    this.onOp?.({ op: 'cameraKey', t, pos });
+    this.onOp?.({ op: 'cameraKey', id: camId, t, pos });
   }
 
-  _refreshCamLane() {
-    const posRow = this._camPos;
-    const cam = this.project?.camera;
+  _refreshCamLane(posRow, cam) {
     if (!posRow || !cam) return;
-    const keys = cam.path.map((k) => round3(k.t)).sort((a, b) => a - b);
+    const keys = (cam.path || []).map((k) => round3(k.t)).sort((a, b) => a - b);
     const sig = keys.join(',');
     if (sig !== posRow.sig) {
       posRow.sig = sig;
@@ -1816,7 +1827,7 @@ export class Timeline {
     if (e.type !== 'audio' && rank2D != null) {
       kind.dataset.tip = `2D 图层：当前第 ${rank2D + 1} / ${this._rank2D.size} 个（越靠上越高；同面才看得出；拖过相机/3D/声音只改显示）`;
     }
-    g.append(caret, eye, dot, name, kind);
+    g.append(eye, caret, dot, name, kind);
 
     const track = el('div', 'tl-track');
     const b = el('div', `blk el t-${e.type}`);
@@ -1943,9 +1954,9 @@ export class Timeline {
       const p = (this.project?.scene?.objects || []).find((x) => x.id === o.parent.id);
       const link = el('span', 'tl-objparent', '↳');
       link.dataset.tip = `父级：${p?.name || o.parent.id}`;
-      g.append(caret, eye, dot, link, name);
+      g.append(eye, caret, dot, link, name);
     } else {
-      g.append(caret, eye, dot, name);
+      g.append(eye, caret, dot, name);
     }
     const kind = el('span', 'tl-objkind badge badge-object', o.type === 'empty' ? '空' : '3D');
     kind.dataset.tip = '3D 物体按深度遮挡；上下拖动只改列表显示，不影响画面';
@@ -2083,7 +2094,9 @@ export class Timeline {
       const id = (primary?.type === 'cam' && cams.some((r) => r.id === primary.id)) ? primary.id : cams[0].id;
       const cam = this._camById(id);
       if (!cam) return false;
-      this.camOpenId = id;
+      // U opens every selected camera; sections are shared, so they follow the
+      // primary one. Other open camera pages stay open.
+      for (const r of cams) if (this._camById(r.id)) this.openCams.add(r.id);
       for (const g of ['transform', 'lens', 'shake', 'dofMb']) {
         const key = g === 'transform' ? 'camPos' : g === 'lens' ? 'camMain' : g === 'shake' ? 'camShake' : 'camDof';
         this.sections[key] = this._camGroupKeyed(cam, g) ? 'keyed' : 'collapsed';
@@ -2370,16 +2383,17 @@ export class Timeline {
       pr.kf.dataset.tip = at ? '删除这一帧' : has ? `在当前时间打帧（已有 ${keys.length} 帧）` : '在当前时间打帧';
       this._refreshElLane(pr, e);
     }
-    const cam = this.project?.camera;
-    if (this._camPos && cam) {
+    for (const posRow of this._camPosRows) {
+      const cam = this._camById(posRow.camId);
+      if (!cam) continue;
       const pos = pathPos(cam, t);
-      this._camPos.inputs.forEach((inp, i) => set(inp, pos[i]));
-      const at = cam.path.some((k) => Math.abs(k.t - t) < 1e-3);
-      const has = cam.path.length > 0;
-      this._camPos.kf.classList.toggle('on', at);
-      this._camPos.kf.classList.toggle('has', !at && has);
-      this._camPos.kf.dataset.tip = at ? '删除这一帧' : has ? `在当前时间打点（已有 ${cam.path.length} 帧）` : '在当前时间打点';
-      this._refreshCamLane();
+      posRow.inputs.forEach((inp, i) => set(inp, pos[i]));
+      const at = (cam.path || []).some((k) => Math.abs(k.t - t) < 1e-3);
+      const has = (cam.path || []).length > 0;
+      posRow.kf.classList.toggle('on', at);
+      posRow.kf.classList.toggle('has', !at && has);
+      posRow.kf.dataset.tip = at ? '删除这一帧' : has ? `在当前时间打点（已有 ${(cam.path || []).length} 帧）` : '在当前时间打点';
+      this._refreshCamLane(posRow, cam);
     }
     for (const pr of this._camPropRows) {
       const cam = this._camById(pr.camId);
@@ -2597,7 +2611,9 @@ export class Timeline {
   }
 
   _scrollObject(id) {
-    const camId = this.camOpenId || this._activeCameraId();
+    // 'camera' has no header id of its own: prefer the live camera, then any
+    // open camera page.
+    const camId = this._activeCameraId() || [...this.openCams][0] || null;
     const elId = String(id).startsWith('el:') ? String(id).slice(3) : null;
     const row = elId
       ? this.inner.querySelector(`.tl-elhead[data-el="${elId}"]`)
@@ -2667,12 +2683,15 @@ export class Timeline {
       }
     }
     if (this.cameraSel) {
-      const camId = this._activeCameraId();
+      // Mark the selected camera header and every 位置 row of that camera. The
+      // active camera is only a fallback: with several open pages the selection
+      // (pool primary) is what tells them apart.
+      const camId = this._selectedCameraId();
       if (camId) {
         this.inner.querySelector(`.blk.cam[data-cam="${camId}"]`)?.classList.add('sel');
         this.inner.querySelector(`.tl-camhead[data-cam="${camId}"]`)?.classList.add('sel');
+        this.inner.querySelector(`.tl-camposrow[data-cam="${camId}"]`)?.classList.add('sel');
       }
-      this.inner.querySelector('.tl-camposrow')?.classList.add('sel');
     }
     this._paintPool();
   }
@@ -3255,6 +3274,8 @@ export class Timeline {
 }
 
 const round3 = (v) => Math.round(v * 1000) / 1000;
+// Pending-edit key of one camera's 位置 row: one per camera, not one global.
+const camPosEditKey = (camId) => `camera:position:${camId}`;
 
 /**
  * Stable keyframe ref for a `.tl-key` diamond, or null when the node is not a
