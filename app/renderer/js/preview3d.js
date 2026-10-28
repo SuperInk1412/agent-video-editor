@@ -1,6 +1,6 @@
 // 3D viewport for camera shots: instanced boxes from the SAME city json Blender uses.
 // Draws into the preview's scene FBO so the existing post chain (bloom/grain/…) applies.
-import { evalCameraWorld, objectWorldPose } from '/core/spatial-parent.js';
+import { evalCameraWorldWithLinks, linksEvalOptions, objectWorldPoseWithLinks } from '/core/link-eval.js';
 import { poseMatrix } from '/core/scene.js';
 import { isText, mediaSpec, textSpec, fitPlane, mediaUrl, isFontFile, videoTime, MEDIA_TYPES } from '/core/objects-media.js';
 
@@ -515,6 +515,7 @@ export class Scene3D {
   _drawObjects(project, time, camPos, vp, city) {
     const gl = this.gl;
     const all = sceneObjects(project);
+    const evalOpts = linksEvalOptions(project);
     const objs = all.filter((o) => objectVisibleAt(o, time) && (DRAWABLE.has(o.type) || o.type === 'empty'));
     if (!objs.length) return;
     const opaque = [];
@@ -534,7 +535,7 @@ export class Scene3D {
       };
     };
     for (const obj of objs) {
-      const pose = objectWorldPose(project, obj, time, poses);
+      const pose = objectWorldPoseWithLinks(project, obj, time, poses, evalOpts);
       if (obj.type === 'empty') {
         for (const size of locatorBars(pose)) {
           opaque.push({ ...boxItem(pose, size), col: LOCATOR_COLOR, alpha: 1, dist: 0, emissive: 1 });
@@ -855,7 +856,7 @@ export class Scene3D {
     const gl = this.gl;
     const city = this.city;
     if (!city) return;
-    const cam = overrideCam || evalCameraWorld(project, time);
+    const cam = overrideCam || evalCameraWorldWithLinks(project, time);
     this.lastCam = cam;
     this.lastW = W;
     this.lastH = H;
@@ -948,10 +949,11 @@ export class Scene3D {
     let best = null;
     const all = sceneObjects(project);
     const poses = new Map();
+    const evalOpts = linksEvalOptions(project);
     for (const obj of all) {
       const empty = obj.type === 'empty';
       if (!(DRAWABLE.has(obj.type) || empty) || !objectVisibleAt(obj, time)) continue;
-      const pose = objectWorldPose(project, obj, time, poses);
+      const pose = objectWorldPoseWithLinks(project, obj, time, poses, evalOpts);
       if (!empty && pose.opacity <= 0.003) continue;
       const size = empty ? locatorBars(pose).map((b, i) => b[i])
         : MEDIA_TYPES.has(obj.type) ? [...(this._planeSizes.get(obj.id) || [1, 1]), 0.05]

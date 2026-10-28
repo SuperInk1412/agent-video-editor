@@ -504,8 +504,12 @@ export function cameraAtTime(project, t) {
  * layer compositor (normalized 0..1 for pivot/offset), `opacity` is the layer
  * alpha. Keeping this in one function means the viewport, bake and timeline
  * all show the same sampled values.
+ *
+ * `opts.param(cam, path, t)` resolves a property through its chain of property
+ * links (core/links.js::cameraParamResolver); without it every value is the
+ * local sample, exactly as before links existed.
  */
-export function cameraTransform(cam, t) {
+export function cameraTransform(cam, t, opts = null) {
   const c = cam || normalizeCamera(null);
   const tr = c.tracks || {};
   const center = sampleAxes(tr, 'center', t, c.center || DEFAULT_CAMERA.center);
@@ -516,6 +520,21 @@ export function cameraTransform(cam, t) {
   const offsetBase = c.pictureOffset || DEFAULT_CAMERA.pictureOffset;
   const picturePivot = sampleVec3(tr.picturePivot, t, [pivotBase[0], pivotBase[1], 0]).slice(0, 2);
   const pictureOffset = sampleVec3(tr.pictureOffset, t, [offsetBase[0], offsetBase[1], 0]).slice(0, 2);
+  const param = opts && typeof opts.param === 'function' ? opts.param : null;
+  if (param) {
+    // Camera link paths use the SpatialNode names (`pivot.*` / `scale.*`): the
+    // local camera calls them `center` / picture scale (see core/links.js).
+    ['x', 'y', 'z'].forEach((axis, i) => {
+      const pivot = Number(param(c, `pivot.${axis}`, t));
+      if (Number.isFinite(pivot)) center[i] = pivot;
+      const sx = Number(param(c, `scale.${axis}`, t));
+      if (Number.isFinite(sx)) scale[i] = sx;
+    });
+    const alpha = Number(param(c, 'opacity', t));
+    if (Number.isFinite(alpha)) return {
+      center, position, scale, opacity: clamp(alpha, 0, 1), picturePivot, pictureOffset,
+    };
+  }
   return { center, position, scale, opacity, picturePivot, pictureOffset };
 }
 
@@ -575,11 +594,16 @@ export function pathSpeed(cam, t, dt = 0.1) {
 
 /**
  * Full camera state at time t.
+ *
+ * `opts.param(cam, path, t)` is the property-link resolver every linkable
+ * channel goes through (core/links.js::cameraParamResolver). Omit it and the
+ * result is exactly the local evaluation that shipped before links.
  * @returns {{pos:number[], look:number[], up:number[], fov:number, roll:number, speed:number, focus:number}}
  */
-export function evalCamera(project, t) {
+export function evalCamera(project, t, opts = null) {
+  const param = opts && typeof opts.param === 'function' ? opts.param : cameraParamValue;
   const cam = cameraAtTime(project, t) || normalizeCamera(null);
-  const tr = cameraTransform(cam, t);
+  const tr = cameraTransform(cam, t, opts);
   const pos = v3.add(tr.center, tr.position);
   const posA = v3.add(tr.center, pathPos(cam, t - 0.16));
   const posB = v3.add(tr.center, pathPos(cam, t + 0.16));
@@ -601,7 +625,7 @@ export function evalCamera(project, t) {
 
   // explicit look keys win inside their window; outside, blend back to the
   // tangent so entering / leaving a look range does not snap the camera.
-  const lookAhead = Math.max(1, Number(cameraParamValue(cam, 'lookAhead', t)) || 1);
+  const lookAhead = Math.max(1, Number(param(cam, 'lookAhead', t)) || 1);
   const autoLook = v3.add(pos, v3.mul(tang, Math.max(1, lookAhead)));
   let look = autoLook;
   const manual = manualLookAt(cam, t);
@@ -625,8 +649,8 @@ export function evalCamera(project, t) {
   // ~2π when the heading crosses ±180°, which used to slam the roll to max.
   // Near the ends the ±dt probes leave the path; hold the last valid curvature
   // instead of letting a zero vector produce a fake max bank.
-  const bankGain = cameraParamValue(cam, 'bankGain', t);
-  const maxRoll = cameraParamValue(cam, 'maxRoll', t);
+  const bankGain = param(cam, 'bankGain', t);
+  const maxRoll = param(cam, 'maxRoll', t);
   let bank = 0;
   const firstT = Number(cam.path?.[0]?.t) || 0;
   const lastT = Number(cam.path?.[cam.path.length - 1]?.t) || 0;
@@ -643,15 +667,15 @@ export function evalCamera(project, t) {
     const yawRate = dy / 0.5;
     bank = clamp(-yawRate * bankGain * 57.2958, -maxRoll, maxRoll);
   }
-  let roll = bank + cameraParamValue(cam, 'roll', t);
+  let roll = bank + param(cam, 'roll', t);
 
   // shake: value noise, stronger at speed
   const sh = {
     ...cam.shake,
-    amp: cameraParamValue(cam, 'shake.amp', t),
-    freq: cameraParamValue(cam, 'shake.freq', t),
-    speedGain: cameraParamValue(cam, 'shake.speedGain', t),
-    seed: cameraParamValue(cam, 'shake.seed', t),
+    amp: param(cam, 'shake.amp', t),
+    freq: param(cam, 'shake.freq', t),
+    speedGain: param(cam, 'shake.speedGain', t),
+    seed: param(cam, 'shake.seed', t),
   };
   const amp = Number(sh.amp) || 0;
   if (amp > 0 && cam.path.length > 1) {
@@ -675,10 +699,10 @@ export function evalCamera(project, t) {
   }
 
   const up = [0, 1, 0];
-  const fov = cameraParamValue(cam, 'fov', t);
+  const fov = param(cam, 'fov', t);
   const dof = {
     enabled: cameraParamValue(cam, 'dof.enabled', t),
-    fstop: cameraParamValue(cam, 'dof.fstop', t),
+    fstop: param(cam, 'dof.fstop', t),
     focusOffset: Number(cam.dof?.focusOffset) || 0,
   };
   const focus = Math.max(1, v3.len(v3.sub(look, pos)) + dof.focusOffset);
@@ -690,13 +714,13 @@ export function evalCamera(project, t) {
 }
 
 /** Sample the whole shot into per-frame camera states (baked for Blender). */
-export function bakeCameraTrack(project, { fps = 24, from = 0, to = null } = {}) {
+export function bakeCameraTrack(project, { fps = 24, from = 0, to = null, param = null } = {}) {
   const dur = to ?? project.meta.duration;
   const f0 = Math.round(from * fps), f1 = Math.round(dur * fps);
   const out = [];
   for (let f = f0; f <= f1; f++) {
     const t = f / fps;
-    const c = evalCamera(project, t);
+    const c = evalCamera(project, t, param ? { param } : null);
     out.push({
       f: f + 1,
       t: Math.round(t * 1000) / 1000,

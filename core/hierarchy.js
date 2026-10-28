@@ -169,14 +169,17 @@ function normalizeBind(b) {
 /**
  * The affine map a parent applies to its child at time t, or null when the
  * child has no (valid) parent. `{ c, p0, L }`: x' = c + L·(x - p0).
+ *
+ * `poseAt(obj, t)` optionally overrides the local pose of every host in the
+ * chain (core/links.js::objectPoseWithLinks); the default is `objectPose`.
  */
-export function parentMap(src, obj, t, cache = null, depth = 0) {
+export function parentMap(src, obj, t, cache = null, depth = 0, poseAt = null) {
   const pid = parentIdOf(obj);
   if (!pid || depth >= MAX_DEPTH) return null;
   const list = objectList(src);
   const parent = list.find((o) => o.id === pid);
   if (!parent || wouldCycle(list, obj.id, pid)) return null;
-  const pf = frameOf(worldPose(list, parent, t, cache, depth + 1));
+  const pf = frameOf(worldPose(list, parent, t, cache, depth + 1, poseAt));
   const bind = normalizeBind(obj.parent.bind);
   const w = parentWeights(obj, t);
 
@@ -210,13 +213,13 @@ export function inverseMapVector(m, v) {
 }
 
 /** Local point of `obj` (at t) that lands at world point x. */
-export function toLocalPoint(src, obj, t, x) {
-  return inverseMapPoint(parentMap(src, obj, t), x);
+export function toLocalPoint(src, obj, t, x, poseAt = null) {
+  return inverseMapPoint(parentMap(src, obj, t, null, 0, poseAt), x);
 }
 
 /** Local direction of `obj` (at t) that lands at world direction v. */
-export function toLocalVector(src, obj, t, v) {
-  return inverseMapVector(parentMap(src, obj, t), v);
+export function toLocalVector(src, obj, t, v, poseAt = null) {
+  return inverseMapVector(parentMap(src, obj, t, null, 0, poseAt), v);
 }
 
 /** Orthonormal basis (basisFromDir convention) from transformed forward + up. */
@@ -256,13 +259,15 @@ export function applyMapToPose(m, pose) {
 /**
  * World pose of an object at time t (objectPose + the parent chain).
  * `src` is the project or its scene.objects array. Pass a Map as `cache`
- * when posing many objects for the same t.
+ * when posing many objects for the same t. `poseAt(obj, t)` overrides the
+ * local pose of every object in the chain (property links); without it this
+ * function is unchanged.
  */
-export function worldPose(src, obj, t, cache = null, depth = 0) {
-  const key = cache ? `${obj?.id}@${t}` : null;
+export function worldPose(src, obj, t, cache = null, depth = 0, poseAt = null) {
+  const key = cache ? `${obj?.id}@${t}${typeof poseAt === 'function' ? '@p' : ''}` : null;
   if (cache?.has(key)) return cache.get(key);
-  const local = objectPose(obj, t);
-  const m = parentMap(src, obj, t, cache, depth);
+  const local = typeof poseAt === 'function' ? poseAt(obj, t) : objectPose(obj, t);
+  const m = parentMap(src, obj, t, cache, depth, poseAt);
   const pose = m ? { ...applyMapToPose(m, local), parentId: parentIdOf(obj) } : local;
   if (cache) cache.set(key, pose);
   return pose;
@@ -472,15 +477,15 @@ export function findCamera(project, id) {
 const hasAnyCamera = (project) => (Array.isArray(project?.cameras) && project.cameras.length > 0) || !!project?.camera;
 
 /** World frame of camera `id` at t: { pos, basis: [right, up, forward] } or null. */
-export function cameraFrame(project, id, t) {
+export function cameraFrame(project, id, t, opts = null) {
   let c;
   if (id === LIVE_CAMERA) {
     if (!hasAnyCamera(project)) return null;
-    c = evalCamera(project, t);
+    c = evalCamera(project, t, opts);
   } else {
     const cam = findCamera(project, id);
     if (!cam) return null;
-    c = evalCamera({ ...project, camera: cam, cameras: [cam], activeCameraId: cam.id }, t);
+    c = evalCamera({ ...project, camera: cam, cameras: [cam], activeCameraId: cam.id }, t, opts);
   }
   let f = V.sub(c.look, c.pos);
   if (V.len(f) < 1e-9) f = [0, 0, -1];
@@ -509,11 +514,11 @@ export const SCREEN_LOCK_DEPTH = 1; // m in front of the camera (render only)
  * the legacy screen-lock pull-in as well. Only the legacy camera lock (no
  * `mode`, written by applyElementParentOp) and `@live` are carried here.
  */
-export function elementCarrier(project, el, t, { rigid = false } = {}) {
+export function elementCarrier(project, el, t, { rigid = false, param = null } = {}) {
   const par = el?.parent;
   if (!par?.id) return null;
   if (par.mode === 'world') return null;
-  const now = cameraFrame(project, par.id, t);
+  const now = cameraFrame(project, par.id, t, param ? { param } : null);
   if (!now) return null;
   const bind = normalizeBind(par.bind);
   const Rd = M3.mul(M3.cols(...now.basis), M3.T(M3.cols(...bind.basis)));

@@ -17,7 +17,10 @@ import { initCommands, register as registerCommand, dispatch as dispatchCommand,
 import { pathPos, cameraTransform, cameraRange } from '/core/camera.js';
 import { curveSegments } from '/core/curves.js';
 import { ancestors, childrenOf, elementCarrier, carrierMatrix } from '/core/hierarchy.js';
-import { evalCameraWorld, objectLocalPoint, objectLocalVector, objectWorldPose } from '/core/spatial-parent.js';
+import {
+  cameraParamResolver, evalCameraWorldWithLinks, objectLocalPointWithLinks,
+  objectLocalVectorWithLinks, objectWorldPoseWithLinks,
+} from '/core/link-eval.js';
 import { defaultCamera } from '/core/space.js';
 import { newId } from '/core/schema.js';
 import { sampleTrack } from '/core/time.js';
@@ -545,7 +548,7 @@ function inlineTextGeometry(kind, id, text) {
   const s3 = preview.scene3d;
   const obj = (S.project.scene?.objects || []).find((o) => o.id === id);
   if (!obj || obj.type !== 'text' || !s3?.projectPoint) return null;
-  const pose = objectWorldPose(S.project, obj, S.time);
+  const pose = objectWorldPoseWithLinks(S.project, obj, S.time);
   const size = s3._planeSizes?.get(obj.id);
   const asset = s3.media?.get(obj.id);
   if (!pose || !size || !asset?.w || !asset?.h) return null;
@@ -874,7 +877,7 @@ function updateSelectionInfo() {
   if (obj) {
     const chain = ancestors(p, obj.id).reverse().map((o) => o.name || o.id);
     const path = [...chain, obj.name || obj.id].join(' › ');
-    const pose = objectWorldPose(p, obj, S.time);
+    const pose = objectWorldPoseWithLinks(p, obj, S.time);
     const world = pose.worldPos.map((v) => (Math.round(Number(v) * 100) / 100).toFixed(2)).join(', ');
     const kids = childrenOf(p, obj.id).length;
     const note = obj.parent?.id ? '\n手柄和轨迹按世界位置显示；时间轴属性仍是本地值' : '';
@@ -951,7 +954,7 @@ function setEditMode(on) {
   S.editMode = !!on;
   preview.editMode = S.editMode;
   if (S.editMode) {
-    const c = evalCameraWorld(S.project, S.time);
+    const c = evalCameraWorldWithLinks(S.project, S.time);
     S.editCam = { pos: c.pos.slice(), look: c.look.slice(), roll: c.roll || 0, fov: c.fov };
     preview.editCam = S.editCam;
   } else {
@@ -1992,8 +1995,8 @@ async function boot() {
     if (!o) return;
     const kidsCount = childrenOf(S.project, id).length;
     const at = Math.round(S.time * 1000) / 1000;
-    const pose = objectWorldPose(S.project, o, S.time);
-    const cam = (S.editMode && S.editCam) ? S.editCam : evalCameraWorld(S.project, S.time);
+    const pose = objectWorldPoseWithLinks(S.project, o, S.time);
+    const cam = (S.editMode && S.editCam) ? S.editCam : evalCameraWorldWithLinks(S.project, S.time);
     showContextMenu(x, y, [
       { label: '选中元素', icon: 'pointer', run: () => select({ objectId: id }) },
       {
@@ -2002,7 +2005,7 @@ async function boot() {
         run: () => {
           const d = [cam.pos[0] - pose.worldPos[0], cam.pos[1] - pose.worldPos[1], cam.pos[2] - pose.worldPos[2]];
           const l = Math.hypot(d[0], d[1], d[2]) || 1;
-          const local = objectLocalVector(S.project, o, at, d.map((v) => v / l));
+          const local = objectLocalVectorWithLinks(S.project, o, at, d.map((v) => v / l));
           op({ op: 'objectKey', id, path: 'dir', t: at, v: local });
         },
       },
@@ -2012,7 +2015,7 @@ async function boot() {
         run: () => {
           const h = Number(o.geom?.h) || 2;
           const worldPivot = [pose.pivot[0], h / 2, pose.pivot[2]];
-          const local = objectLocalPoint(S.project, o, at, worldPivot);
+          const local = objectLocalPointWithLinks(S.project, o, at, worldPivot);
           op({ op: 'objectKey', id, path: 'pivot', t: at, v: local.map((v) => Math.round(v * 100) / 100) });
         },
       },
@@ -2395,7 +2398,7 @@ async function boot() {
       if (!media) return null;
     }
     if (!S.editMode) setEditMode(true);
-    const c = S.editCam || evalCameraWorld(S.project, S.time);
+    const c = S.editCam || evalCameraWorldWithLinks(S.project, S.time);
     const fwd = v3norm(v3sub(c.look, c.pos));
     const right = v3norm(v3cross(fwd, [0, 1, 0]));
     const up = v3cross(right, fwd);
@@ -2462,7 +2465,7 @@ async function boot() {
   const createCamera = async () => {
     if (!S.project) return null;
     let view = (S.editMode && S.editCam)
-      || (S.project.camera ? evalCameraWorld(S.project, S.time) : null)
+      || (S.project.camera ? evalCameraWorldWithLinks(S.project, S.time) : null)
       || preview.scene3d.lastCam;
     if (!view) {
       // Unified space guarantees a default camera on load/create, but keep a
@@ -2652,7 +2655,7 @@ async function boot() {
       label: '视口对齐到当前镜头',
       run: () => {
         if (!S.editCam) return;
-        const c = evalCameraWorld(S.project, S.time);
+        const c = evalCameraWorldWithLinks(S.project, S.time);
         S.editCam = { pos: c.pos.slice(), look: c.look.slice(), roll: c.roll || 0, fov: c.fov };
         preview.editCam = S.editCam;
         preview.render(S.time);
@@ -2709,7 +2712,7 @@ async function boot() {
     const elX = elValue(el, 'transform.x', S.time);
     const elY = elValue(el, 'transform.y', S.time);
     const cyW = (Number(S.project.meta.height) || 1080) / 200;
-    const carry = carrierMatrix(elementCarrier(S.project, el, S.time));
+    const carry = carrierMatrix(elementCarrier(S.project, el, S.time, { param: cameraParamResolver(S.project) }));
     const center = applyMat4(carry, [elX / 100, cyW - elY / 100, z]);
     const normal = v3norm([carry[8], carry[9], carry[10]]);
     const hit = preview.scene3d?.planeHit(sx, sy, center, normal);
@@ -2806,7 +2809,7 @@ async function boot() {
         select({ objectId: obj.id });
         const ac = preview.scene3d.lastCam;
         const normal = ac ? v3norm(v3sub(ac.look, ac.pos)) : [0, 0, -1];
-        const pose = objectWorldPose(S.project, obj, okey.t);
+        const pose = objectWorldPoseWithLinks(S.project, obj, okey.t);
         drag = {
           kind: 'objkey', id: obj.id, index: okey.index, keyT: okey.t,
           normal, hit: okey.world, world0: pose.pivot.slice(),
@@ -2857,7 +2860,7 @@ async function boot() {
       if (obj) {
         const ac = preview.scene3d.lastCam;
         const normal = ac ? v3norm(v3sub(ac.look, ac.pos)) : [0, 0, -1];
-        const pose = objectWorldPose(S.project, obj, S.time);
+        const pose = objectWorldPoseWithLinks(S.project, obj, S.time);
         drag = {
           kind: 'object', id: obj.id, normal, hit: pick.point,
           world0: pose.pivot.slice(), pivot: pose.pivot.slice(),
@@ -2996,7 +2999,7 @@ async function boot() {
         r2(drag.world0[1] + w[1] - drag.hit[1]),
         r2(drag.world0[2] + w[2] - drag.hit[2]),
       ], e);
-      drag.pivot = objectLocalPoint(S.project, obj, drag.keyT, target).map(r2);
+      drag.pivot = objectLocalPointWithLinks(S.project, obj, drag.keyT, target).map(r2);
       const key = obj.tracks?.pivot?.[drag.index];
       if (key) key.v = drag.pivot.slice();
       drag.moved = true;
@@ -3018,7 +3021,7 @@ async function boot() {
         r2(drag.p0[1] + drag.axis[1] * delta),
         r2(drag.p0[2] + drag.axis[2] * delta),
       ], e);
-      drag.pivot = objectLocalPoint(S.project, obj, S.time, target).map(r2);
+      drag.pivot = objectLocalPointWithLinks(S.project, obj, S.time, target).map(r2);
       setLiveKey(obj, 'pivot', drag.pivot);
       drag.moved = true;
       preview.render(S.time);
@@ -3038,7 +3041,7 @@ async function boot() {
         r2(drag.world0[1] + w[1] - drag.hit[1]),
         r2(drag.world0[2] + w[2] - drag.hit[2]),
       ], e);
-      drag.pivot = objectLocalPoint(S.project, obj, S.time, target).map(r2);
+      drag.pivot = objectLocalPointWithLinks(S.project, obj, S.time, target).map(r2);
       setLiveKey(obj, 'pivot', drag.pivot);
       drag.moved = true;
       preview.render(S.time);

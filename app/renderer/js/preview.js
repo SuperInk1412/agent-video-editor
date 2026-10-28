@@ -18,11 +18,11 @@
 // drawing identical; only the vertex placement differs.
 import { evalElement, motionDelta } from '/core/evaluate.js';
 import { elementOverlay } from '/core/links.js';
+import { cameraParamResolver, elementWorldNodeWithLinks, evalCameraWorldWithLinks, linksEvalOptions } from '/core/link-eval.js';
 import { clamp } from '/core/time.js';
 import { cameraTransform, cameraLayers } from '/core/camera.js';
 import { audioElements, audioVolume } from '/core/audio.js';
-import { elementWorldNode } from './node-at.js';
-import { elementWorldParent, evalCameraWorld } from '/core/spatial-parent.js';
+import { elementWorldParent } from '/core/spatial-parent.js';
 import { frameOf } from '/core/spatial.js';
 import { basisFromDir } from '/core/scene.js';
 import { Scene3D } from './preview3d.js';
@@ -694,12 +694,13 @@ export class Preview {
     gl.clearColor(0, 0, 0, 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
     let active = null;
+    const param = cameraParamResolver(p);
     for (const cam of cams.slice().reverse()) {
-      const tr = cameraTransform(cam, t);
+      const tr = cameraTransform(cam, t, { param });
       const sx = Number(tr.scale?.[0]);
       const sy = Number(tr.scale?.[1]);
       if (!(tr.opacity > 0.002) || Math.abs(sx) < 1e-4 || Math.abs(sy) < 1e-4) continue;
-      const state = evalCameraWorld(p, t, cam);
+      const state = evalCameraWorldWithLinks(p, t, cam);
       gl.bindFramebuffer(gl.FRAMEBUFFER, layer.fb);
       gl.viewport(0, 0, layer.w, layer.h);
       this.scene3d.draw(p, t, layer.w, layer.h, state);
@@ -749,6 +750,7 @@ export class Preview {
    */
   computeLayers(t) {
     const p = this.project;
+    const nodeOpts = linksEvalOptions(p);
     const gl = this.gl;
     const W = this.canvas.width, H = this.canvas.height;
     const S = W / (p.meta.width || 1920);
@@ -756,7 +758,7 @@ export class Preview {
     const cyW = (Number(p.meta?.height) || 1080) / 200;
     const out = [];
     // the camera this frame is seen through (text is rasterised for its close-ups)
-    const cam = this.scene3d.city ? (this.editMode && this.editCam ? this.editCam : evalCameraWorld(p, t)) : null;
+    const cam = this.scene3d.city ? (this.editMode && this.editCam ? this.editCam : evalCameraWorldWithLinks(p, t)) : null;
     for (const el of p.elements) {
       if (el.visible === false) continue;
       if (t < el.start - 1e-6 || t >= el.start + el.duration - 1e-6) continue;
@@ -773,7 +775,7 @@ export class Preview {
       // legacy layer whose node is derived from its transform; an unparented
       // legacy layer keeps the old screen path untouched.
       const worldParent = !!elementWorldParent(el);
-      const nodeFrame = (el.node || worldParent) ? frameOf(elementWorldNode(p, el, t)) : null;
+      const nodeFrame = (el.node || worldParent) ? frameOf(elementWorldNodeWithLinks(p, el, t, nodeOpts)) : null;
       const push = (L) => {
         if (nodeFrame) L.node = { frame: nodeFrame };
         out.push(L);
@@ -815,7 +817,8 @@ export class Preview {
     // Elements with the legacy camera screen lock ride along with it. A world
     // spatial parent (mode:'world') is a matrix parent already folded into the
     // node frame: elementCarrier returns null for it (core/hierarchy.js).
-    for (const L of out) if (L.el.parent) L.carry = carrierMatrix(elementCarrier(p, L.el, t));
+    const carrierParam = cameraParamResolver(p);
+    for (const L of out) if (L.el.parent) L.carry = carrierMatrix(elementCarrier(p, L.el, t, { param: carrierParam }));
     // World plane of every layer for the shared draw / pick ordering (§2.5).
     // Node layers use the SpatialNode frame; legacy layers keep the exact point
     // + [0,0,1] normal the old _planeDist used, so the old picture keeps its

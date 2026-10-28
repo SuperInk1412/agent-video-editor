@@ -139,7 +139,7 @@ Blender 侧这些效果由合成器节点组 `VDM_Composite` 完成。节点组�
   `node scripts/migrate-spatial.mjs --in <fixture> --out <新目录或 json> --mode preserve|world|hybrid [--dry-run]`；
   输入输出都先 `validateProject`，拒绝写 `projects/`，旧字段保留在 `legacy`。**预览**已支持完整的
   `node`；Blender 的 2D 构建器也支持平面节点（`dir` 为 ±Z、`position` 在平面内），迁移后的 miku
-  flat 元素可正常出片；倾斜 `node`、空间父级和属性链接在 Blender 仍走旧路径/未接。
+  flat 元素可正常出片；倾斜 `node` 仍是平面近似，Blender 的 2D 空间父级尚未接入（属性链接已接，见下）。
 - **空间父级（`mode: "world"`）**：2D 元素、3D 物体、相机都可以当子级，父级也可以是其中任意一类。
   记录形状相同，宿主字段不同：
   `el.parent = ob.frameParent = cam.frameParent = { id, mode: "world", inherit: { pos, rot, scale }, bind: { pivot, basis, scale } }`。
@@ -151,15 +151,24 @@ Blender 侧这些效果由合成器节点组 `VDM_Composite` 完成。节点组�
   `obj.parent`。链可以混合 el/ob/cam，环与 32 层深度检查按混合图算。`@live` / 旧相机贴屏仍是渲染期
   屏锁，不是世界父级，也不能当世界父级的目标。预览与 engine 都读同一组 wrapper：
   `objectWorldPose`（3D 物体）、`evalCameraWorld`（相机）、`elementWorldNode`（2D 元素）。
-  2D 元素作为子级时，Blender 2D 构建器仍未消费其空间父级/属性链接。
+  带属性链接时改用 `core/link-eval.js` 的对应版本（见下）。2D 元素作为子级时，Blender 2D
+  构建器仍未消费其空间父级。
 - **属性父级（`el.links` / `ob.links` / `cam.links`）**：一条链接是
   `{ id, to, from: { host: "el"|"ob"|"cam", id, path }, combine: "add"|"mul", bindParentValue, enabled }`。
   `add`：`eff = local + parent(t) − bindParentValue`；`mul`：`eff = local × parent(t) / bindParentValue`。
   只能连同单位（长度 / 角度 / 比例 / 数值）；父值沿父级自己的链接链读取，环和 >32 层链被拒绝；
   `@live` 与相机 `position.*` 不可作来源。解除只删 link，本地值留在原地。ops：
   `propLink {id, to, from, combine?, bindParentValue?, t}` / `propLinkPatch {id, to, patch}` /
-  `propUnlink {id, to}`。目前**预览的旧 2D 元素**已接（`elementOverlay`）；3D、相机和 Blender 求值
-  还没接入，数据会保留但不改变对应画面。
+  `propUnlink {id, to}`。
+- **属性链接的求值顺序**：本地值 / 关键帧 → 属性链接（`eff`）→ 空间父级 → 运动预设 / 淡出。
+  所有画面入口共用 `core/link-eval.js`，因此属性行显示的值、预览和成片一致：
+  旧 2D 用 `elementOverlay`（进 `evalElement`），带 `node` 的 2D 用
+  `elementNodeWithLinks` / `elementWorldNodeWithLinks`，3D 物体用 `objectWorldPoseWithLinks`，
+  相机用 `evalCameraWorldWithLinks`；`engine/shot.js` 烘焙的 `objects[].frames` 与
+  `camera[].pos/look/roll/fov` 也走同一条路径。Blender 不重算链接图：
+  `engine/blender.js` 把 2D 元素的每帧有效值写成 `el._linkOverlay = { fps, values }`，
+  `vdm_build.py::eval_element` 在应用运动 / 淡出之前覆盖本地字段；3D 物体与相机在
+  `shot.json` 里已经是解算后的世界值。
 - **编辑器剪贴板**：Ctrl+C / Ctrl+V 复制选中的 2D 元素和 3D 对象，保存在本机 localStorage，跨项目重启仍可用；
   粘贴时保持组内相对时间，落到当前播放头，2D 副本放到当前图层最上面。跨项目只带元素数据，`media/` 文件不会随剪贴板复制。
 - **时间轴列表顺序（编辑器状态）**：`meta.ui.timelineOrder` 是左侧统一列表自上而下的引用数组

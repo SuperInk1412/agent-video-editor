@@ -8,15 +8,12 @@
 //   transform.scale      ->  keyframes 'scale.x' + 'scale.y'
 //   transform.rotation   ->  keyframes 'roll'
 //
-// This module samples those paths on top of the base node, exactly like
-// `migrate-spatial.js::migratedNodeAt`, so the preview draws the same frame the
-// migrator validated. It lives on the preview side (not in core/spatial.js) so
-// the renderer branch does not have to change the shared spatial core. Relative
-// core imports keep the module importable from Node tests as well.
-import { elementNode, normalizeSpatialNode } from '../../../core/spatial.js';
-import { elementWorldNode as coreElementWorldNode } from '../../../core/spatial-parent.js';
-import { isRecord } from '../../../core/json.js';
-import { sampleTrack } from '../../../core/time.js';
+// This module used to carry its own sampler; the logic now lives in
+// core/spatial-parent.js::elementLocalNode (core ops bind at the playhead with
+// it). Keep this thin wrapper for the renderer call sites and the tests that
+// compare both paths. Property links are applied one layer above, in
+// core/link-eval.js::elementNodeWithLinks.
+import { elementLocalNode, elementWorldNode as coreElementWorldNode } from '../../../core/spatial-parent.js';
 
 /** Node keyframe paths of a migrated 2D element (PLAN §2.3, S4 convention). */
 export const NODE_KEY_PATHS = Object.freeze({
@@ -34,44 +31,18 @@ export const NODE_KEY_PATHS = Object.freeze({
  * Without `el.node` or without a finite `t` this is exactly `elementNode`.
  */
 export function elementNodeAt(el, meta = {}, t = null) {
-  const base = normalizeSpatialNode(elementNode(el, meta, t));
-  if (!isRecord(el?.node)) return base;
-  const at = t == null ? null : Number(t);
-  if (at == null || !Number.isFinite(at)) return base;
-  const sample = (path, fallback) => sampleTrack(el.keyframes, path, at, fallback);
-  return {
-    pivot: [
-      sample('pivot.x', base.pivot[0]),
-      sample('pivot.y', base.pivot[1]),
-      sample('pivot.z', base.pivot[2]),
-    ],
-    position: base.position.slice(),
-    dir: base.dir.slice(),
-    roll: sample('roll', base.roll),
-    scale: [
-      sample('scale.x', base.scale[0]),
-      sample('scale.y', base.scale[1]),
-      sample('scale.z', base.scale[2]),
-    ],
-  };
+  return elementLocalNode({ meta }, el, t);
 }
 
 /**
  * World SpatialNode of `el` at `t`: the sampled local node above carried by the
- * spatial-parent chain (PLAN-ui-round3 §3.1):
- *
- *   elementNodeAt(el, meta, t)  then, while `el.parent.mode === 'world'`,
- *   applyParentToNode(child, parentFrame(t), parent.bind, parent.inherit)
- *
- * Parent frames come from core/spatial-parent.js: an element parent resolves
- * recursively (cycle/depth guarded), an object parent through
- * core/hierarchy.js::worldPose, a camera parent through
- * core/spatial.js::cameraWorldFrame. `@live` and the legacy camera lock are not
- * world parents and keep the render-time screen carrier.
- *
- * Missing parents / cycles / over-deep chains fall back to the local node, so a
- * hand-edited project cannot crash the preview.
+ * spatial-parent chain (PLAN-ui-round3 §3.1). `opts` reaches every host in the
+ * chain (core/link-eval.js passes the link resolvers there).
  */
-export function elementWorldNode(project, el, t = null) {
-  return coreElementWorldNode(project, el, t, (host, at) => elementNodeAt(host, project?.meta || {}, at));
+export function elementWorldNode(project, el, t = null, opts = null) {
+  return coreElementWorldNode(
+    project, el, t,
+    (host, at) => elementNodeAt(host, project?.meta || {}, at),
+    opts,
+  );
 }

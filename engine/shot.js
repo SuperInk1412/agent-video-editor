@@ -4,7 +4,9 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { bakeCameraTrack, cameraLayers, cameraTransform } from '../core/camera.js';
 import { elementCarrier } from '../core/hierarchy.js';
-import { evalCameraWorld, objectWorldPose } from '../core/spatial-parent.js';
+import {
+  cameraParamResolver, evalCameraWorldWithLinks, linksEvalOptions, objectWorldPoseWithLinks,
+} from '../core/link-eval.js';
 import { isPlane, isText, mediaSpec, textSpec, videoFrame } from '../core/objects-media.js';
 import { generateCity, cityHash } from './city.js';
 import { paths } from './storage.js';
@@ -32,7 +34,7 @@ function bakeCameraTrackWorld(project, { fps = 24, from = 0, to = null, camera =
   const out = [];
   for (let f = f0; f <= f1; f++) {
     const t = f / fps;
-    const c = evalCameraWorld(project, t, camera);
+    const c = evalCameraWorldWithLinks(project, t, camera);
     out.push({
       f: f + 1,
       t: Math.round(t * 1000) / 1000,
@@ -51,7 +53,7 @@ function bakeCameraTrackWorld(project, { fps = 24, from = 0, to = null, camera =
 function bakeCameraOf(project, cam, opts) {
   return hasFrameParent(cam)
     ? bakeCameraTrackWorld(project, { ...opts, camera: cam })
-    : bakeCameraTrack(forCamera(project, cam), opts);
+    : bakeCameraTrack(forCamera(project, cam), { ...opts, param: cameraParamResolver(project) });
 }
 
 /**
@@ -68,6 +70,7 @@ export function bakeObjects(project, { fps = 24, from = 0, to = null } = {}) {
   const f1 = Math.round((to ?? project.meta.duration) * fps) + 1;
   const out = [];
   const poses = new Map();
+  const evalOpts = linksEvalOptions(project);
   for (const o of objs) {
     if (!OBJ_TYPES.has(o.type) || o.visible === false) continue;
     const start = Number(o.start) || 0;
@@ -85,7 +88,7 @@ export function bakeObjects(project, { fps = 24, from = 0, to = null } = {}) {
     for (let f = f0; f <= f1; f++) {
       const t = (f - 1) / fps;
       const live = t >= start - 1e-6 && t < end - 1e-6;
-      const pose = objectWorldPose(project, o, t, poses);
+      const pose = objectWorldPoseWithLinks(project, o, t, poses, evalOpts);
       const hidden = live ? 1 : 0.0001;
       frames.push({
         f,
@@ -122,10 +125,11 @@ export function bakeElementCarriers(project, { fps = 24, from = 0, to = null } =
   if (!els.length) return [];
   const f0 = Math.round(from * fps) + 1;
   const f1 = Math.round((to ?? project.meta.duration) * fps) + 1;
+  const param = cameraParamResolver(project);
   return els.map((el) => {
     const frames = [];
     for (let f = f0; f <= f1; f++) {
-      const m = elementCarrier(project, el, (f - 1) / fps);
+      const m = elementCarrier(project, el, (f - 1) / fps, { param });
       if (!m) continue;
       const L = m.L;
       const loc = [0, 1, 2].map((i) => m.c[i] - (L[i][0] * m.p0[0] + L[i][1] * m.p0[1] + L[i][2] * m.p0[2]));
@@ -158,8 +162,9 @@ export function worldSnapshot(project) {
 /** Bake one camera layer, including its per-frame picture transform. */
 function bakeCameraLayer(project, cam, { fps, from, to }) {
   const track = bakeCameraOf(project, cam, { fps, from, to });
+  const param = cameraParamResolver(project);
   const frames = track.map((e) => {
-    const tr = cameraTransform(cam, e.t);
+    const tr = cameraTransform(cam, e.t, { param });
     return {
       f: e.f,
       t: e.t,
@@ -228,7 +233,9 @@ export function buildShot(project, { from = 0, to = null, fps = null } = {}) {
     || cameraLayers(project).some(hasFrameParent);
   const camera = liveParented
     ? bakeCameraTrackWorld(project, { fps: frameRate, from, to: end })
-    : bakeCameraTrack(project, { fps: frameRate, from, to: end });
+    : bakeCameraTrack(project, {
+      fps: frameRate, from, to: end, param: cameraParamResolver(project),
+    });
   const city = worldSnapshot(project);
   const cam = project.camera || {};
   return {
@@ -258,7 +265,11 @@ export function buildShot(project, { from = 0, to = null, fps = null } = {}) {
 export async function writeShot(dir, project, opts = {}) {
   const p = paths(dir);
   const { signal, ...options } = opts;
-  const key = hashOf({ version: 2, meta: project.meta, cameras: project.cameras, camera: project.camera,
+  // Blender overlay/sequence paths are derived data; hash the authored elements
+  // only (the links themselves still invalidate the cache).
+  const elements = (project.elements || []).map(({ _linkOverlay, _sequenceDir, ...el }) => el);
+  const key = hashOf({ version: 2, meta: project.meta, elements,
+    cameras: project.cameras, camera: project.camera,
     cameraOrder: project.cameraOrder, scene: project.scene, world: project.world, options });
   const file = path.join(p.cache, `shot-${key}.json`);
   try { return { file, shot: JSON.parse(await fs.readFile(file, 'utf8')) }; }

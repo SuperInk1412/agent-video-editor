@@ -390,6 +390,30 @@ def motion_delta(el, t, meta):
     return d
 
 
+def element_link_overlay(el, t):
+    """Effective values of the linked 2D channels at t, sampled by JS.
+
+    The engine attaches `el['_linkOverlay'] = {fps, values}` (core/link-eval.js)
+    so Blender never re-implements the property-link graph: it just overrides its
+    locally sampled fields before the motion preset / fades, exactly like
+    core/evaluate.js::evalElement's overlay order.
+    """
+    table = el.get('_linkOverlay')
+    if not isinstance(table, dict):
+        return None
+    values = table.get('values')
+    if not isinstance(values, list) or not values:
+        return None
+    try:
+        fps = float(table.get('fps') or 24)
+        idx = int(round(float(t) * fps))
+    except (TypeError, ValueError):
+        return None
+    idx = max(0, min(len(values) - 1, idx))
+    value = values[idx]
+    return value if isinstance(value, dict) else None
+
+
 def eval_element(el, t, meta):
     tr = el.get('transform') or {}
     kf = el.get('keyframes') or []
@@ -448,6 +472,14 @@ def eval_element(el, t, meta):
             'size': float(g('style.size', (el.get('style') or {}).get('size', 96)) or 0),
             'color': g('style.color', (el.get('style') or {}).get('color', '#ffffff')),
         }
+    overlay = element_link_overlay(el, t)
+    if overlay:
+        for key in ('x', 'y', 'z', 'scale', 'rotation', 'opacity', 'size', 'glow'):
+            if key in overlay:
+                try:
+                    st[key] = float(overlay[key])
+                except (TypeError, ValueError):
+                    pass
     md = motion_delta(el, t, meta)
     st['x'] += md['x']
     st['y'] += md['y']

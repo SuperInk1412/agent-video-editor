@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { paths } from './storage.js';
 import { audioElements } from '../core/audio.js';
+import { elementLinkOverlayTable } from '../core/link-eval.js';
 import { encodeSequence, extractSequence, fileExists, hashOf, hashFile } from './media.js';
 import { is3D, writeShot } from './shot.js';
 import { prepareObjectSequences } from './media-objects.js';
@@ -96,6 +97,14 @@ export async function prepareSequences(dir, project, { onLog, signal } = {}) {
     el._sequenceDir = seqDir;
   }
   await prepareObjectSequences(dir, out, { onLog });
+  // 2D property links have no Python evaluator: sample the effective values JS
+  // would draw (per render frame) and let vdm_build.py override its local `st`.
+  // Only linked elements get a table, so existing jobs stay byte-identical.
+  const linkFps = Number(out.meta?.fps) || 24;
+  for (const el of out.elements || []) {
+    const table = elementLinkOverlayTable(out, el, { fps: linkFps });
+    if (table) el._linkOverlay = table;
+  }
   return out;
 }
 

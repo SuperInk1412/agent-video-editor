@@ -3,7 +3,7 @@
 // owns pointer events, this module only knows how to draw and hit-test.
 import { evalCamera, pathPos, cameraTransform } from '/core/camera.js';
 import { childrenOf, parentIdOf } from '/core/hierarchy.js';
-import { objectWorldPose } from '/core/spatial-parent.js';
+import { objectWorldPoseWithLinks } from '/core/link-eval.js';
 
 const CYAN = '#17d9ff';
 const YELLOW = '#ffd166';
@@ -42,7 +42,7 @@ export class PathGizmo {
    * handles sit on the object the viewport actually draws.
    */
   _worldPose(obj, time) {
-    return objectWorldPose(this.opts.project(), obj, time);
+    return objectWorldPoseWithLinks(this.opts.project(), obj, time);
   }
 
   get scale() {
