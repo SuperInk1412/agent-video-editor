@@ -14,9 +14,10 @@ import { showMenu, hideMenu, initTooltips, icon, prefs } from './ui.js';
 import { initLayout, markTab, Timecode, StatusBar, LogDrawer } from './shell.js';
 import { frameStep } from './timeline-math.js';
 import { initCommands, register as registerCommand, dispatch as dispatchCommand, openPalette, openShortcuts } from './commands.js';
-import { evalCamera, pathPos, cameraTransform, cameraRange } from '/core/camera.js';
+import { pathPos, cameraTransform, cameraRange } from '/core/camera.js';
 import { curveSegments } from '/core/curves.js';
-import { worldPose, toLocalPoint, toLocalVector, ancestors, childrenOf, elementCarrier, carrierMatrix } from '/core/hierarchy.js';
+import { toLocalPoint, toLocalVector, ancestors, childrenOf, elementCarrier, carrierMatrix } from '/core/hierarchy.js';
+import { evalCameraWorld, objectWorldPose } from '/core/spatial-parent.js';
 import { defaultCamera } from '/core/space.js';
 import { newId } from '/core/schema.js';
 import { sampleTrack } from '/core/time.js';
@@ -544,7 +545,7 @@ function inlineTextGeometry(kind, id, text) {
   const s3 = preview.scene3d;
   const obj = (S.project.scene?.objects || []).find((o) => o.id === id);
   if (!obj || obj.type !== 'text' || !s3?.projectPoint) return null;
-  const pose = worldPose(S.project, obj, S.time);
+  const pose = objectWorldPose(S.project, obj, S.time);
   const size = s3._planeSizes?.get(obj.id);
   const asset = s3.media?.get(obj.id);
   if (!pose || !size || !asset?.w || !asset?.h) return null;
@@ -873,7 +874,7 @@ function updateSelectionInfo() {
   if (obj) {
     const chain = ancestors(p, obj.id).reverse().map((o) => o.name || o.id);
     const path = [...chain, obj.name || obj.id].join(' › ');
-    const pose = worldPose(p, obj, S.time);
+    const pose = objectWorldPose(p, obj, S.time);
     const world = pose.worldPos.map((v) => (Math.round(Number(v) * 100) / 100).toFixed(2)).join(', ');
     const kids = childrenOf(p, obj.id).length;
     const note = obj.parent?.id ? '\n手柄和轨迹按世界位置显示；时间轴属性仍是本地值' : '';
@@ -950,7 +951,7 @@ function setEditMode(on) {
   S.editMode = !!on;
   preview.editMode = S.editMode;
   if (S.editMode) {
-    const c = evalCamera(S.project, S.time);
+    const c = evalCameraWorld(S.project, S.time);
     S.editCam = { pos: c.pos.slice(), look: c.look.slice(), roll: c.roll || 0, fov: c.fov };
     preview.editCam = S.editCam;
   } else {
@@ -1991,8 +1992,8 @@ async function boot() {
     if (!o) return;
     const kidsCount = childrenOf(S.project, id).length;
     const at = Math.round(S.time * 1000) / 1000;
-    const pose = worldPose(S.project, o, S.time);
-    const cam = (S.editMode && S.editCam) ? S.editCam : evalCamera(S.project, S.time);
+    const pose = objectWorldPose(S.project, o, S.time);
+    const cam = (S.editMode && S.editCam) ? S.editCam : evalCameraWorld(S.project, S.time);
     showContextMenu(x, y, [
       { label: '选中元素', icon: 'pointer', run: () => select({ objectId: id }) },
       {
@@ -2394,7 +2395,7 @@ async function boot() {
       if (!media) return null;
     }
     if (!S.editMode) setEditMode(true);
-    const c = S.editCam || evalCamera(S.project, S.time);
+    const c = S.editCam || evalCameraWorld(S.project, S.time);
     const fwd = v3norm(v3sub(c.look, c.pos));
     const right = v3norm(v3cross(fwd, [0, 1, 0]));
     const up = v3cross(right, fwd);
@@ -2461,7 +2462,7 @@ async function boot() {
   const createCamera = async () => {
     if (!S.project) return null;
     let view = (S.editMode && S.editCam)
-      || (S.project.camera ? evalCamera(S.project, S.time) : null)
+      || (S.project.camera ? evalCameraWorld(S.project, S.time) : null)
       || preview.scene3d.lastCam;
     if (!view) {
       // Unified space guarantees a default camera on load/create, but keep a
@@ -2651,7 +2652,7 @@ async function boot() {
       label: '视口对齐到当前镜头',
       run: () => {
         if (!S.editCam) return;
-        const c = evalCamera(S.project, S.time);
+        const c = evalCameraWorld(S.project, S.time);
         S.editCam = { pos: c.pos.slice(), look: c.look.slice(), roll: c.roll || 0, fov: c.fov };
         preview.editCam = S.editCam;
         preview.render(S.time);
@@ -2805,7 +2806,7 @@ async function boot() {
         select({ objectId: obj.id });
         const ac = preview.scene3d.lastCam;
         const normal = ac ? v3norm(v3sub(ac.look, ac.pos)) : [0, 0, -1];
-        const pose = worldPose(S.project, obj, okey.t);
+        const pose = objectWorldPose(S.project, obj, okey.t);
         drag = {
           kind: 'objkey', id: obj.id, index: okey.index, keyT: okey.t,
           normal, hit: okey.world, world0: pose.pivot.slice(),
@@ -2856,7 +2857,7 @@ async function boot() {
       if (obj) {
         const ac = preview.scene3d.lastCam;
         const normal = ac ? v3norm(v3sub(ac.look, ac.pos)) : [0, 0, -1];
-        const pose = worldPose(S.project, obj, S.time);
+        const pose = objectWorldPose(S.project, obj, S.time);
         drag = {
           kind: 'object', id: obj.id, normal, hit: pick.point,
           world0: pose.pivot.slice(), pivot: pose.pivot.slice(),

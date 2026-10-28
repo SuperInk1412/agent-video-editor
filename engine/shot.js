@@ -3,7 +3,8 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { bakeCameraTrack, cameraLayers, cameraTransform } from '../core/camera.js';
-import { worldPose, elementCarrier } from '../core/hierarchy.js';
+import { elementCarrier } from '../core/hierarchy.js';
+import { evalCameraWorld, objectWorldPose } from '../core/spatial-parent.js';
 import { isPlane, isText, mediaSpec, textSpec, videoFrame } from '../core/objects-media.js';
 import { generateCity, cityHash } from './city.js';
 import { paths } from './storage.js';
@@ -16,10 +17,49 @@ import { RENDER_PLAN_VERSION } from '../core/version.js';
 const r3 = (v) => Math.round(Number(v) * 1000) / 1000;
 const OBJ_TYPES = new Set(['solid', 'shape', 'text', 'image', 'video', 'container']);
 
+/** A camera with a unified spatial parent needs the world wrapper; others keep the shipped bake. */
+const hasFrameParent = (cam) => !!cam?.frameParent?.id;
+
+/**
+ * Same shape / rounding as core/camera.js::bakeCameraTrack, but reads
+ * evalCameraWorld so a camera with `frameParent` bakes the parented frame the
+ * viewport draws. Only used when such a camera exists, which keeps every
+ * existing project's shot.json byte-identical.
+ */
+function bakeCameraTrackWorld(project, { fps = 24, from = 0, to = null, camera = null } = {}) {
+  const dur = to ?? project.meta.duration;
+  const f0 = Math.round(from * fps), f1 = Math.round(dur * fps);
+  const out = [];
+  for (let f = f0; f <= f1; f++) {
+    const t = f / fps;
+    const c = evalCameraWorld(project, t, camera);
+    out.push({
+      f: f + 1,
+      t: Math.round(t * 1000) / 1000,
+      pos: c.pos.map((v) => Math.round(v * 1000) / 1000),
+      look: c.look.map((v) => Math.round(v * 1000) / 1000),
+      roll: Math.round(c.roll * 1000) / 1000,
+      fov: Math.round(c.fov * 1000) / 1000,
+      focus: Math.round((c.focus || 0) * 1000) / 1000,
+      dof: { enabled: !!c.dof?.enabled, fstop: Math.round((c.dof?.fstop ?? 2.8) * 1000) / 1000 },
+    });
+  }
+  return out;
+}
+
+/** Bake one specific camera: the world wrapper only when it has a frameParent. */
+function bakeCameraOf(project, cam, opts) {
+  return hasFrameParent(cam)
+    ? bakeCameraTrackWorld(project, { ...opts, camera: cam })
+    : bakeCameraTrack(forCamera(project, cam), opts);
+}
+
 /**
  * Elements -> per-frame transforms for Blender. Same worldPose() (objectPose +
- * parent chain) as the viewport, so position/rotation/scale/opacity cannot drift
- * between the two.
+ * parent chain) as the viewport, plus the unified `frameParent` matrix layer
+ * (core/spatial-parent.js::objectWorldPose), so a 3D object parented to a 2D
+ * element / camera renders where the preview draws it. Without a frameParent
+ * the wrapper is exactly worldPose, so existing shots do not change.
  */
 export function bakeObjects(project, { fps = 24, from = 0, to = null } = {}) {
   const objs = project.scene?.objects || [];
@@ -45,7 +85,7 @@ export function bakeObjects(project, { fps = 24, from = 0, to = null } = {}) {
     for (let f = f0; f <= f1; f++) {
       const t = (f - 1) / fps;
       const live = t >= start - 1e-6 && t < end - 1e-6;
-      const pose = worldPose(objs, o, t, poses);
+      const pose = objectWorldPose(project, o, t, poses);
       const hidden = live ? 1 : 0.0001;
       frames.push({
         f,
@@ -109,7 +149,7 @@ function forCamera(project, camera) {
 
 /** Full-shot flight corridors are independent polylines, shared by every view. */
 export function worldSnapshot(project) {
-  const paths = cameraLayers(project).map((cam) => bakeCameraTrack(forCamera(project, cam), {
+  const paths = cameraLayers(project).map((cam) => bakeCameraOf(project, cam, {
     fps: project.meta.fps,
   }).map((state) => state.pos));
   return cachedCity(project.world, null, { paths });
@@ -117,8 +157,7 @@ export function worldSnapshot(project) {
 
 /** Bake one camera layer, including its per-frame picture transform. */
 function bakeCameraLayer(project, cam, { fps, from, to }) {
-  const sub = forCamera(project, cam);
-  const track = bakeCameraTrack(sub, { fps, from, to });
+  const track = bakeCameraOf(project, cam, { fps, from, to });
   const frames = track.map((e) => {
     const tr = cameraTransform(cam, e.t);
     return {
@@ -182,8 +221,14 @@ export function buildShot(project, { from = 0, to = null, fps = null } = {}) {
   }));
   // Bake the active camera as the legacy single-camera field. Blender keeps
   // this path for one-camera projects and switches to cameraLayers when there
-  // is more than one visible layer.
-  const camera = bakeCameraTrack(project, { fps: frameRate, from, to: end });
+  // is more than one visible layer. A camera with a spatial `frameParent` (or a
+  // stack that can go live with one) bakes through evalCameraWorld; otherwise
+  // the shipped bakeCameraTrack is used untouched.
+  const liveParented = hasFrameParent(project.camera)
+    || cameraLayers(project).some(hasFrameParent);
+  const camera = liveParented
+    ? bakeCameraTrackWorld(project, { fps: frameRate, from, to: end })
+    : bakeCameraTrack(project, { fps: frameRate, from, to: end });
   const city = worldSnapshot(project);
   const cam = project.camera || {};
   return {
