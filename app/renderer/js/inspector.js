@@ -16,7 +16,10 @@ import { h, icon, prefs } from './ui.js';
 import {
   elementRowLinkPaths, linkJumpTarget, linkOf, linkSourceLabel, linkSummary, openLinkMenu,
 } from './link-menu.js';
-import { effectiveElementRowValue, localElementRowValue } from './element-link-value.js';
+import {
+  effectiveElementRowValue, elementRowKeyPath, elementRowTarget, localElementRowValue,
+  localElementRowValueAt, nodeRowPatch, rowToTarget,
+} from './element-link-value.js';
 
 const MOTIONS = ['none', 'in', 'out', 'left', 'right', 'up', 'down', 'drift', 'shake'];
 const FONTS = ['SimHei', 'Microsoft YaHei', 'Arial', 'Impact', 'Bahnschrift', 'Consolas'];
@@ -32,6 +35,9 @@ const PATH_LABELS = {
   'transform.x': 'X', 'transform.y': 'Y', 'transform.z': '纵深', 'transform.scale': '缩放',
   'transform.rotation': '旋转', 'transform.opacity': '不透明度', 'style.size': '字号', 'style.color': '颜色',
   'style.fill': '填充', 'fx.glow': '辉光', 'audio.volume': '音量', dir: '朝向', roll: '自转',
+  'pivot.x': '中心点 X', 'pivot.y': '中心点 Y', 'pivot.z': '中心点 Z',
+  'position.x': '位置 X', 'position.y': '位置 Y', 'position.z': '位置 Z',
+  'scale.x': '缩放 X', 'scale.y': '缩放 Y', 'scale.z': '缩放 Z',
 };
 const KF_TIP = '打关键帧\nShift+点击 删除当前帧关键帧';
 
@@ -533,20 +539,40 @@ export class Inspector {
     // Keyable fields show the keyed value at the playhead (before motion presets
     // and fades). Once a property has keys, typing a value keys it at the
     // playhead; otherwise it edits the base value.
-    const keyed = (path) => (el.keyframes || []).some((k) => k.path === path);
-    const kv = (path, base) => effectiveElementRowValue(
-      project, el, path, time, sampleTrack(el.keyframes, path, time, base),
-    );
+    const keyed = (rowPath) => (el.keyframes || []).some((k) => k.path === elementRowKeyPath(el, rowPath));
+    const kp = (rowPath) => elementRowKeyPath(el, rowPath);
+    const kv = (rowPath, base) => {
+      const local = localElementRowValueAt(project, el, rowPath, time);
+      const fallback = local != null
+        ? local
+        : sampleTrack(el.keyframes, elementRowKeyPath(el, rowPath), time, base);
+      return effectiveElementRowValue(project, el, rowPath, time, fallback);
+    };
     // binding re-reads the pose at the playhead; keys land on the frame edge
     const tNow = () => Math.round(this.opts.getTime() * 1000) / 1000;
     const keyT = () => this._keyTime();
-    const edit = (path, patch) => (v) => {
+    const edit = (rowPath, patch) => (v) => {
       // A linked row displays the effective value; the project still stores the
       // local value (writeBackLocalValue inverts the link at the playhead).
-      const local = localElementRowValue(project, el, path, time, v);
-      const value = local == null ? v : local;
-      if (keyed(path)) this._commit(`${el.id}:${path}`, { op: 'keySet', id: el.id, path, t: keyT(), value });
-      else set(path, patch(value));
+      const local = localElementRowValue(project, el, rowPath, time, v);
+      const rowValue = local == null ? v : local;
+      if (keyed(rowPath)) {
+        const target = elementRowTarget(el, rowPath);
+        const value = target ? rowToTarget(el, project.meta, target, rowValue) : rowValue;
+        this._commit(`${el.id}:${rowPath}`, {
+          op: 'keySet', id: el.id, path: elementRowKeyPath(el, rowPath), t: keyT(),
+          value: value == null ? rowValue : value,
+        });
+        return;
+      }
+      if (el.node) {
+        const nodePatch = nodeRowPatch(el, rowPath, rowValue, project.meta);
+        if (nodePatch) {
+          this._commit(`${el.id}:node`, { op: 'updateElement', id: el.id, patch: nodePatch });
+          return;
+        }
+      }
+      set(rowPath, patch(rowValue));
     };
     // Property links target core/links.js paths: a legacy 2D element links
     // pivot.* / roll / scale.* / opacity, never transform.* (PLAN §3.3).
@@ -602,16 +628,16 @@ export class Inspector {
 
     this.root.appendChild(this._sec('变换', {},
       this._vec({
-        label: '位置', keyPaths: ['transform.x', 'transform.y'],
+        label: '位置', keyPaths: [kp('transform.x'), kp('transform.y')],
         items: [
           { axis: 'x', value: round(kv('transform.x', el.transform.x)), unit: 'px', aria: 'X', link: link('transform.x'), onChange: edit('transform.x', (v) => ({ transform: { x: v } })) },
           { axis: 'y', value: round(kv('transform.y', el.transform.y)), unit: 'px', aria: 'Y', link: link('transform.y'), onChange: edit('transform.y', (v) => ({ transform: { y: v } })) },
         ],
       }),
-      this._field({ label: '纵深 z', unit: 'm', value: round(kv('transform.z', el.transform.z ?? 0), 3), step: 0.05, kf: true, path: 'transform.z', link: link('transform.z'), onChange: edit('transform.z', (v) => ({ transform: { z: v } })) }),
-      this._field({ label: '缩放', value: round(kv('transform.scale', el.transform.scale), 3), step: 0.01, kf: true, path: 'transform.scale', link: link('transform.scale'), onChange: edit('transform.scale', (v) => ({ transform: { scale: v } })) }),
-      this._field({ label: '旋转', unit: '°', value: round(kv('transform.rotation', el.transform.rotation), 2), step: 0.5, kf: true, path: 'transform.rotation', link: link('transform.rotation'), onChange: edit('transform.rotation', (v) => ({ transform: { rotation: v } })) }),
-      this._field({ label: '不透明度', value: round(kv('transform.opacity', el.transform.opacity), 3), step: 0.01, min: 0, max: 1, percent: true, kf: true, path: 'transform.opacity', link: link('transform.opacity'), onChange: edit('transform.opacity', (v) => ({ transform: { opacity: v } })) }),
+      this._field({ label: '纵深 z', unit: 'm', value: round(kv('transform.z', el.transform.z ?? 0), 3), step: 0.05, kf: true, path: kp('transform.z'), link: link('transform.z'), onChange: edit('transform.z', (v) => ({ transform: { z: v } })) }),
+      this._field({ label: '缩放', value: round(kv('transform.scale', el.transform.scale), 3), step: 0.01, kf: true, path: kp('transform.scale'), link: link('transform.scale'), onChange: edit('transform.scale', (v) => ({ transform: { scale: v } })) }),
+      this._field({ label: '旋转', unit: '°', value: round(kv('transform.rotation', el.transform.rotation), 2), step: 0.5, kf: true, path: kp('transform.rotation'), link: link('transform.rotation'), onChange: edit('transform.rotation', (v) => ({ transform: { rotation: v } })) }),
+      this._field({ label: '不透明度', value: round(kv('transform.opacity', el.transform.opacity), 3), step: 0.01, min: 0, max: 1, percent: true, kf: true, path: kp('transform.opacity'), link: link('transform.opacity'), onChange: edit('transform.opacity', (v) => ({ transform: { opacity: v } })) }),
       this._field({ label: '跟随节拍', value: el.punch || 0, step: 0.05, min: 0, max: 2, onChange: (v) => set('punch', { punch: v }) }),
       el.parent?.id ? null : this._field({
         label: '贴屏', type: 'checkbox', value: false,

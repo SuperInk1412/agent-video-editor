@@ -25,7 +25,10 @@ import {
   cameraRowLinkPaths, elementRowLinkPaths, linkOf, linkPropLabel, linkSourceLabel,
   objectRowLinkPaths, openLinkMenu,
 } from './link-menu.js';
-import { effectiveElementRowValue, localElementRowValue } from './element-link-value.js';
+import {
+  effectiveElementRowValue, elementRowKeyPath, elementRowTarget, localElementRowValue,
+  localElementRowValueAt, nodeRowPatch, rowToTarget,
+} from './element-link-value.js';
 import { normalizeFps, frameIndex, frameStart, frameBand, planRulerTicks, frameWriteTime, frameClipEdit } from './timeline-math.js';
 
 const el = (tag, cls, html) => {
@@ -2102,7 +2105,7 @@ export class Timeline {
     this._appendSection(host, '变换', 'transform', 'px / m');
     const mode = this._groupMode('transform');
     if (mode === 'collapsed') return;
-    const show = (path) => mode === 'full' || this._elTrack(e, path).length > 0;
+    const show = (path) => mode === 'full' || this._elTrack(e, this._elKeyPath(e, path)).length > 0;
     if (show('transform.x')) host.appendChild(this._elementNumRow(e, 'transform.x', 'X', { step: 0.1, axis: 'x', letter: 'X', unit: 'px' }));
     if (show('transform.y')) host.appendChild(this._elementNumRow(e, 'transform.y', 'Y', { step: 0.1, axis: 'y', letter: 'Y', unit: 'px' }));
     if (show('transform.z')) {
@@ -2138,10 +2141,13 @@ export class Timeline {
     // Decide once, when editing starts: an unkeyed property keeps editing its
     // base value for the whole gesture. Otherwise a stray key created while a
     // field is focused would silently turn the next keystroke into a keyframe.
-    const pr = { elId: e.id, path, input: inp, kf: null, lane: null, row, sig: '', keyedAtFocus: null };
+    const pr = {
+      elId: e.id, path, keyPath: this._elKeyPath(e, path), input: inp, kf: null, lane: null, row, sig: '',
+      keyedAtFocus: null,
+    };
     inp.addEventListener('focus', () => {
       this.onPause?.();
-      pr.keyedAtFocus = this._elTrack(e, path).length > 0;
+      pr.keyedAtFocus = this._elTrack(e, pr.keyPath).length > 0;
     });
     inp.addEventListener('input', () => {
       this._editTimes.set(`${e.id}:${path}`, this._frameTime());
@@ -2576,11 +2582,18 @@ export class Timeline {
 
   /** Base / keyed value of a 2D element property (no motion presets or fades). */
   _elValue(e, path, t) {
+    const viaNode = localElementRowValueAt(this.project, e, path, t);
+    if (viaNode != null) return viaNode;
     const prop = path.slice(path.lastIndexOf('.') + 1);
     let base = path.startsWith('transform.') ? e?.transform?.[prop] : undefined;
     if (path === 'audio.volume') base = e?.volume;
     if (base == null) base = (prop === 'scale' || prop === 'opacity' || path === 'audio.volume') ? 1 : 0;
     return sampleTrack(e?.keyframes, path, t, Number(base));
+  }
+
+  /** Actual keyframe path behind a 2D row (node elements key pivot.* / roll / scale.*). */
+  _elKeyPath(e, path) {
+    return elementRowKeyPath(e, path);
   }
 
   /** Display value of a 2D row: local plus its property-link contribution. */
@@ -2623,7 +2636,8 @@ export class Timeline {
   }
 
   _refreshElLane(pr, e) {
-    const keys = this._elTrack(e, pr.path).map((k) => Math.round(Number(k.t) * 1000) / 1000);
+    const keyPath = pr.keyPath || pr.path;
+    const keys = this._elTrack(e, keyPath).map((k) => Math.round(Number(k.t) * 1000) / 1000);
     const sig = keys.join(',');
     if (sig !== pr.sig) {
       pr.sig = sig;
@@ -2631,10 +2645,10 @@ export class Timeline {
       pr.keys = keys.map((t) => {
         const d = el('div', 'tl-key');
         d.dataset.el = e.id;
-        d.dataset.path = pr.path;
+        d.dataset.path = keyPath;
         d.dataset.t = String(t);
         d.style.left = `${t * this.pps}px`;
-        d.dataset.tip = `${pr.path} · ${t.toFixed(2)}s`;
+        d.dataset.tip = `${keyPath} · ${t.toFixed(2)}s`;
         pr.lane.appendChild(d);
         return { t, node: d };
       });
@@ -2679,7 +2693,7 @@ export class Timeline {
       const e = this._element(pr.elId);
       if (!e) continue;
       set(pr.input, this._elEffective(e, pr.path, t));
-      const keys = this._elTrack(e, pr.path);
+      const keys = this._elTrack(e, pr.keyPath || pr.path);
       const at = keys.some((k) => Math.abs(Number(k.t) - t) < 1e-3);
       const has = keys.length > 0;
       pr.kf.classList.toggle('on', at);
@@ -2829,14 +2843,24 @@ export class Timeline {
     // link needs at this time (no-op for unlinked rows).
     const local = localElementRowValue(this.project, e, path, t, v);
     if (local != null && Number.isFinite(local)) v = local;
-    const keyed = pr.keyedAtFocus ?? this._elTrack(e, path).length > 0;
+    const keyPath = this._elKeyPath(e, path);
+    const target = elementRowTarget(e, path);
+    const keyed = pr.keyedAtFocus ?? this._elTrack(e, keyPath).length > 0;
     if (keyed) {
-      this.onOp?.({ op: 'keySet', id: elId, path, t, value: v });
+      const value = target ? rowToTarget(e, this.project?.meta, target, v) : v;
+      this.onOp?.({ op: 'keySet', id: elId, path: keyPath, t, value: value == null ? v : value });
       return;
     }
     if (path === 'audio.volume') {
       this.onOp?.({ op: 'updateElement', id: elId, patch: { volume: v } });
       return;
+    }
+    if (e.node) {
+      const patch = nodeRowPatch(e, path, v, this.project?.meta);
+      if (patch) {
+        this.onOp?.({ op: 'updateElement', id: elId, patch });
+        return;
+      }
     }
     const key = path.slice(path.lastIndexOf('.') + 1);
     this.onOp?.({ op: 'updateElement', id: elId, patch: { transform: { [key]: v } } });
@@ -2847,12 +2871,16 @@ export class Timeline {
     if (!e) return;
     this.onPause?.();
     const t = this._frameTime();
-    const keys = this._elTrack(e, path);
+    const keyPath = this._elKeyPath(e, path);
+    const keys = this._elTrack(e, keyPath);
     if (keys.some((k) => Math.abs(Number(k.t) - t) < 1e-3)) {
-      this.onOp?.({ op: 'keyRemove', id: elId, path, t });
+      this.onOp?.({ op: 'keyRemove', id: elId, path: keyPath, t });
       return;
     }
-    this.onOp?.({ op: 'keySet', id: elId, path, t, value: this._elValue(e, path, t) });
+    const local = this._elValue(e, path, t);
+    const target = elementRowTarget(e, path);
+    const value = target ? rowToTarget(e, this.project?.meta, target, local) : local;
+    this.onOp?.({ op: 'keySet', id: elId, path: keyPath, t, value: value == null ? local : value });
   }
 
   _schedule(key, fn) {

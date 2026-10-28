@@ -17,6 +17,14 @@ const project = () => ({
     },
     { id: 'el_styleonly', keyframes: [{ t: 0, path: 'style.size', value: 40 }] },
     { id: 'el_plain', keyframes: [] },
+    {
+      id: 'el_node',
+      node: { pivot: [0, 0, 0] },
+      keyframes: [
+        { t: 0, path: 'pivot.x', value: 0 },
+        { t: 1, path: 'scale.x', value: 2 },
+      ],
+    },
     { id: 'el_audio', type: 'audio', keyframes: [{ t: 0, path: 'audio.volume', value: 1 }] },
   ],
   cameras: [
@@ -59,7 +67,11 @@ test('element host keys only count rows the timeline can draw', () => {
   assert.deepEqual(styleOnly.paths, new Set());
 
   assert.equal(elementHostKeys(p.elements[2]).keyed, false);
-  const audio = elementHostKeys(p.elements[3]);
+  const node = elementHostKeys(p.elements[3]);
+  assert.equal(node.keyed, true, 'node rows (pivot.* / scale.*) are timeline rows');
+  assert.deepEqual(node.paths, new Set(['pivot.x', 'scale.x']));
+  assert.deepEqual(node.groups, new Set(['transform']));
+  const audio = elementHostKeys(p.elements[4]);
   assert.equal(audio.keyed, true);
   assert.deepEqual(audio.groups, new Set(['audio']));
 });

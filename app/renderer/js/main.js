@@ -21,6 +21,7 @@ import { defaultCamera } from '/core/space.js';
 import { newId } from '/core/schema.js';
 import { sampleTrack } from '/core/time.js';
 import { clearCompiledTracks } from '/core/tracks.js';
+import { elementNodeAt } from './node-at.js';
 import {
   emptySelection, normalizeSelection, selectOne, legacyFields, cameraRef, objectRef, elementRef, splitRef,
   keyframeExists, keyframeDeleteOps,
@@ -2263,6 +2264,20 @@ async function boot() {
     getTimeValue: (path) => {
       const el = S.project.elements.find((e) => e.id === S.selection.elementId);
       if (!el) return 0;
+      // Node elements key pivot.* / position.* / scale.* / roll; read the same
+      // sampled node the preview draws so ◆ stores the value that is on screen.
+      if (el.node) {
+        const node = elementNodeAt(el, S.project.meta, S.time);
+        if (path === 'roll') return node.roll;
+        const dot = path.indexOf('.');
+        if (dot > 0) {
+          const group = path.slice(0, dot);
+          const i = 'xyz'.indexOf(path.slice(dot + 1));
+          if (i >= 0 && Array.isArray(node[group]) && Number.isFinite(Number(node[group][i]))) {
+            return Number(node[group][i]);
+          }
+        }
+      }
       const [a, b] = path.split('.');
       const base = a === 'transform' ? el.transform?.[b] : a === 'style' ? el.style?.[b] : a === 'fx' ? el.fx?.[b] : undefined;
       return sampleTrack(el.keyframes, path, S.time, base ?? 0);

@@ -116,10 +116,9 @@ export function linkSummary(project, host) {
 /** Linkable target paths of a 2D element row (`transform.x`, `audio.volume`, …). */
 export function elementRowLinkPaths(el, rowPath) {
   const path = String(rowPath ?? '');
-  const node = isRecord(el?.node);
   switch (path) {
-    case 'transform.x': return [node ? 'position.x' : 'pivot.x'];
-    case 'transform.y': return [node ? 'position.y' : 'pivot.y'];
+    case 'transform.x': return ['pivot.x'];
+    case 'transform.y': return ['pivot.y'];
     case 'transform.z': return ['pivot.z'];
     case 'transform.scale': return ['scale.x'];
     case 'transform.rotation': return ['roll'];

@@ -17,7 +17,11 @@ const AX = ['x', 'y', 'z'];
 const hasKeys = (list) => Array.isArray(list) && list.length > 0;
 
 const EL_TRANSFORM = [
+  // Legacy 2D rows.
   'transform.x', 'transform.y', 'transform.z', 'transform.scale', 'transform.rotation', 'transform.opacity',
+  // Migrated node rows (core/migrate-spatial.js rewrites x/y/z/scale/rotation).
+  'pivot.x', 'pivot.y', 'pivot.z', 'position.x', 'position.y', 'position.z',
+  'scale.x', 'scale.y', 'scale.z', 'roll',
 ];
 const EL_AUDIO = ['audio.volume'];
 const OB_TRANSFORM = ['pivot', 'position', 'scale', 'opacity'];

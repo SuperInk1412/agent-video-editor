@@ -5,9 +5,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  elementRowKeyPath,
   elementRowTarget,
   effectiveElementRowValue,
   localElementRowValue,
+  localElementRowValueAt,
+  nodeRowPatch,
   rowToTarget,
   targetToRow,
 } from '../app/renderer/js/element-link-value.js';
@@ -97,10 +100,25 @@ test('element-link-value: a disabled link falls back to the local value', () => 
   assert.equal(localElementRowValue(p, a, 'transform.y', 0, 0), 0);
 });
 
-test('element-link-value: migrated node rows are not silently converted', () => {
+test('element-link-value: node rows use pivot paths, keys and node patches', () => {
   const p = project();
   const n = p.elements[2];
-  assert.equal(elementRowTarget(n, 'transform.x'), null);
-  assert.equal(effectiveElementRowValue(p, n, 'transform.x', 0, 999), 999);
-  assert.equal(localElementRowValue(p, n, 'transform.x', 0, 42), 42);
+  n.transform.x = 999;
+  n.node.pivot = [1.25, 3.9, 0.5];
+  n.node.scale = [2, 2, 1];
+  n.node.roll = 30;
+  assert.equal(elementRowTarget(n, 'transform.x'), 'pivot.x');
+  assert.equal(elementRowKeyPath(n, 'transform.x'), 'pivot.x');
+  assert.equal(elementRowKeyPath(n, 'transform.scale'), 'scale.x');
+  assert.equal(elementRowKeyPath(n, 'transform.rotation'), 'roll');
+  assert.equal(elementRowKeyPath(n, 'transform.opacity'), 'transform.opacity');
+  assert.equal(localElementRowValueAt(p, n, 'transform.x', 0), 125);
+  assert.equal(Math.round(localElementRowValueAt(p, n, 'transform.y', 0)), 150);
+  assert.equal(localElementRowValueAt(p, n, 'transform.scale', 0), 2);
+  assert.equal(localElementRowValueAt(p, n, 'transform.rotation', 0), 30);
+  assert.deepEqual(nodeRowPatch(n, 'transform.x', 250, p.meta).node.pivot, [2.5, 3.9, 0.5]);
+  assert.deepEqual(nodeRowPatch(n, 'transform.y', 0, p.meta).node.pivot, [1.25, 5.4, 0.5]);
+  assert.deepEqual(nodeRowPatch(n, 'transform.scale', 0.5, p.meta).node.scale, [0.5, 0.5, 1]);
+  assert.equal(nodeRowPatch(n, 'transform.rotation', 45, p.meta).node.roll, 45);
+  assert.equal(nodeRowPatch(n, 'transform.opacity', 0.4, p.meta).transform.opacity, 0.4);
 });

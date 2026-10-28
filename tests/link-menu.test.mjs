@@ -71,10 +71,11 @@ test('link-menu: legacy 2D rows link pivot.* / roll / scale.*, never transform.*
       assert.ok(findLinkTarget('el', legacy, path), `${path} is in the legacy element catalog`);
     }
   }
-  // Migrated elements move x/y into the node-local position.
+  // Migrated elements keep screen placement on the node pivot (migrate-spatial
+  // rewrites transform.x/y keys to pivot.x/y); the row editor maps accordingly.
   const node = { id: 'el_2', node: { pivot: [0, 0, 0] } };
-  assert.deepEqual(elementRowLinkPaths(node, 'transform.x'), ['position.x']);
-  assert.deepEqual(elementRowLinkPaths(node, 'transform.y'), ['position.y']);
+  assert.deepEqual(elementRowLinkPaths(node, 'transform.x'), ['pivot.x']);
+  assert.deepEqual(elementRowLinkPaths(node, 'transform.y'), ['pivot.y']);
   assert.deepEqual(elementRowLinkPaths(node, 'transform.z'), ['pivot.z']);
   assert.deepEqual(elementRowLinkPaths(node, 'transform.scale'), ['scale.x']);
 });
