@@ -140,16 +140,18 @@ Blender 侧这些效果由合成器节点组 `VDM_Composite` 完成。节点组�
   输入输出都先 `validateProject`，拒绝写 `projects/`，旧字段保留在 `legacy`。**预览**已支持完整的
   `node`；Blender 的 2D 构建器也支持平面节点（`dir` 为 ±Z、`position` 在平面内），迁移后的 miku
   flat 元素可正常出片；倾斜 `node`、空间父级和属性链接在 Blender 仍走旧路径/未接。
-- **空间父级（`parent.mode: "world"`）**：2D 子级可挂到 2D / 3D / 相机：
-  `el.parent = { id, mode: "world", inherit: { pos, rot, scale }, bind: { pivot, basis, scale } }`。
+- **空间父级（`mode: "world"`）**：2D 元素、3D 物体、相机都可以当子级，父级也可以是其中任意一类。
+  记录形状相同，宿主字段不同：
+  `el.parent = ob.frameParent = cam.frameParent = { id, mode: "world", inherit: { pos, rot, scale }, bind: { pivot, basis, scale } }`。
+  3D 物体原有的 `obj.parent` 是另一张旧层级图（空物体、strength），不混用；空间父级单独写在
+  `obj.frameParent`，并在旧层级求值出的世界 pose 之上再乘一层父级增量。
   `bind` 是绑定时父级世界 frame，之后 `parentDelta = frame(t) · frame(bind)⁻¹` 带着子级走——
   父级旋转会绕父级 pivot 公转，绑定时刻不跳。`spatialParent {id, parent, t, inherit?}` /
-  `spatialUnparent {id}` 只增删 `parent`，从不改子级本地值或关键帧。3D 物体和相机也可以当子级，
-  记录在 `obj.frameParent` / `cam.frameParent`（同样形状，不碰旧 3D `obj.parent` 层级）；
-  核心 `hostFrameAt` / `objectWorldPose` / `evalCameraWorld`、preview3d 和 engine shot 烘焙都已接线，
-  3D/相机子级在预览与 Blender 成片一致。2D 元素作为子级时，Blender 2D 构建器仍未消费其
-  空间父级/属性链接。
-  `@live` / 旧相机贴屏仍是渲染期屏锁，不是世界父级，也不能当世界父级的目标。
+  `spatialUnparent {id}` 只增删子级的父级记录，从不改子级本地值或关键帧；解除 3D 物体时也不动
+  `obj.parent`。链可以混合 el/ob/cam，环与 32 层深度检查按混合图算。`@live` / 旧相机贴屏仍是渲染期
+  屏锁，不是世界父级，也不能当世界父级的目标。预览与 engine 都读同一组 wrapper：
+  `objectWorldPose`（3D 物体）、`evalCameraWorld`（相机）、`elementWorldNode`（2D 元素）。
+  2D 元素作为子级时，Blender 2D 构建器仍未消费其空间父级/属性链接。
 - **属性父级（`el.links` / `ob.links` / `cam.links`）**：一条链接是
   `{ id, to, from: { host: "el"|"ob"|"cam", id, path }, combine: "add"|"mul", bindParentValue, enabled }`。
   `add`：`eff = local + parent(t) − bindParentValue`；`mul`：`eff = local × parent(t) / bindParentValue`。
