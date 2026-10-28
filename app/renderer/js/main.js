@@ -16,9 +16,9 @@ import { frameStep } from './timeline-math.js';
 import { initCommands, register as registerCommand, dispatch as dispatchCommand, openPalette, openShortcuts } from './commands.js';
 import { pathPos, cameraTransform, cameraRange } from '/core/camera.js';
 import { curveSegments } from '/core/curves.js';
-import { ancestors, childrenOf, elementCarrier, carrierMatrix } from '/core/hierarchy.js';
+import { ancestors, childrenOf } from '/core/hierarchy.js';
 import {
-  cameraParamResolver, evalCameraWorldWithLinks, objectLocalPointWithLinks,
+  evalCameraWorldWithLinks, objectLocalPointWithLinks,
   objectLocalVectorWithLinks, objectWorldPoseWithLinks,
 } from '/core/link-eval.js';
 import { defaultCamera } from '/core/space.js';
@@ -2187,6 +2187,25 @@ async function boot() {
     if (!cam) return;
     const solo = S.soloCameras;
     const checked = solo.has(id);
+    // A camfeed element shows this camera's picture; it is a normal 2D element
+    // (move/scale/keyframes/spatial parent all work). Default clip = the camera
+    // clip range, or the whole project when the camera is unbounded.
+    const createCamfeed = async () => {
+      const range = cameraRange(S.project, cam);
+      const beforeIds = new Set(S.project.elements.map((e) => e.id));
+      const created = await op({
+        op: 'addElement',
+        element: {
+          type: 'camfeed',
+          feed: { camera: cam.id, delay: 0 },
+          start: range.start,
+          duration: Math.max(0.08, range.duration || S.project.meta.duration),
+        },
+      });
+      const element = created?.element
+        || S.project.elements.find((e) => !beforeIds.has(e.id) && e.type === 'camfeed');
+      if (element?.id) select({ elementId: element.id });
+    };
     showContextMenu(x, y, [
       {
         label: checked ? '✓ 单独查看该相机（们）' : '单独查看该相机（们）',
@@ -2199,6 +2218,12 @@ async function boot() {
         },
       },
       { label: '激活相机', icon: 'camera', run: () => { op({ op: 'activateCamera', id }); select({ camera: true }); } },
+      { label: '创建投屏元素', icon: 'film', run: () => { createCamfeed(); } },
+      {
+        label: cam.output === false ? '恢复直接出画' : '仅作投屏来源（不出画）',
+        icon: cam.output === false ? 'eye' : 'eye-off',
+        run: () => op({ op: 'cameraPatch', id, patch: { output: cam.output === false } }),
+      },
       (() => {
         const at = Math.round(S.time * 1000) / 1000;
         const range = cameraRange(S.project, cam);
@@ -2714,13 +2739,14 @@ async function boot() {
     const elX = elValue(el, 'transform.x', S.time);
     const elY = elValue(el, 'transform.y', S.time);
     const cyW = (Number(S.project.meta.height) || 1080) / 200;
-    const carry = carrierMatrix(elementCarrier(S.project, el, S.time, { param: cameraParamResolver(S.project) }));
-    const center = applyMat4(carry, [elX / 100, cyW - elY / 100, z]);
-    const normal = v3norm([carry[8], carry[9], carry[10]]);
+    // Screen lock is retired: every 2D element is a world plane. Drag on the
+    // page plane (x right, y up) at its depth.
+    const center = [elX / 100, cyW - elY / 100, z];
+    const normal = [0, 0, 1];
     const hit = preview.scene3d?.planeHit(sx, sy, center, normal);
     if (hit) {
       drag = {
-        kind: 'element', id: elId, z, hit, carry, center, normal,
+        kind: 'element', id: elId, z, hit, center, normal,
         elX, elY,
         x: elX,
         y: elY,
@@ -2931,10 +2957,9 @@ async function boot() {
       if (!w) return;
       const el = S.project.elements.find((x) => x.id === drag.id);
       if (!el) return;
-      // World delta -> the element's local page plane. For a free element the
-      // carry is identity; for a screen-locked HUD it is the camera's carry
-      // (including the pull-in scale), so x/y stay under the pointer.
-      const d = invertMat3(drag.carry, [w[0] - drag.hit[0], w[1] - drag.hit[1], w[2] - drag.hit[2]]);
+      // World delta on the page plane; x right / y up map straight to the
+      // element's transform values now that no camera carry is folded in.
+      const d = [w[0] - drag.hit[0], w[1] - drag.hit[1], w[2] - drag.hit[2]];
       const nx = drag.elX + d[0] * 100;
       const ny = drag.elY - d[1] * 100;
       const t = Math.round(S.time * 1000) / 1000;

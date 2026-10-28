@@ -1497,6 +1497,16 @@ export class Timeline {
       ? '相机'
       : `相机叠层：从上往下第 ${camRank + 1} / ${this._rankCam.size} 层；拖到另一台相机上下会改叠层（并激活），拖过其它类型只改显示`;
     g.append(eye, this._parentButton('cam', cam), caret, dot, name, kind);
+    if (cam.output === false) {
+      const out = el('button', 'tl-camoutput on', '仅投屏');
+      out.type = 'button';
+      out.dataset.tip = '仅作投屏来源，不直接出画；点击恢复出画';
+      out.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.onOp?.({ op: 'cameraPatch', id: cam.id, patch: { output: true } });
+      });
+      g.append(out);
+    }
 
     const track = el('div', 'tl-track');
     const block = el('div', 'blk cam');

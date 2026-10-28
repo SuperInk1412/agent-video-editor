@@ -26,7 +26,7 @@ const MOTIONS = ['none', 'in', 'out', 'left', 'right', 'up', 'down', 'drift', 's
 const FONTS = ['SimHei', 'Microsoft YaHei', 'Arial', 'Impact', 'Bahnschrift', 'Consolas'];
 const EASES = ['linear', 'easeIn', 'easeOut', 'easeInOut', 'smooth', 'outExpo', 'inOutCubic', 'outBack'];
 
-const EL_LABELS = { image: '图片', video: '视频', text: '文字', shape: '形状', solid: '色块', audio: '声音' };
+const EL_LABELS = { image: '图片', video: '视频', text: '文字', shape: '形状', solid: '色块', audio: '声音', camfeed: '投屏' };
 const OBJ_LABELS = {
   empty: '空元素', solid: '3D 物体', shape: '3D 形状', text: '3D 文字', image: '3D 图片', video: '3D 视频',
   camera: '相机', container: '容器', audio: '声音',
@@ -725,6 +725,28 @@ export class Inspector {
         this._field({ label: '素材', type: 'text', value: el.src || '', w: 'full', onChange: (v) => set('src', { src: v }) }),
         this._field({ label: '源入点', unit: 's', value: el.srcIn || 0, step: 0.05, onChange: (v) => set('srcIn', { srcIn: v }) }),
       ));
+    } else if (el.type === 'camfeed') {
+      const delay = el.feed?.delay === 1 ? 1 : 0;
+      const options = [{ value: '', label: '（未选择）' }].concat(
+        (project.cameras || []).map((c) => ({ value: c.id, label: c.name || c.id })),
+      );
+      this.root.appendChild(this._sec('投屏', {},
+        this._field({
+          label: '来源相机', type: 'select', value: el.feed?.camera || '', options,
+          onChange: (v) => this.opts.onOp({
+            op: 'updateElement', id: el.id, patch: { feed: { camera: v, delay } },
+          }),
+        }),
+        this._field({
+          label: '延迟一帧', type: 'checkbox', value: delay === 1,
+          onChange: (v) => this.opts.onOp({
+            op: 'updateElement', id: el.id, patch: { feed: { camera: el.feed?.camera || '', delay: v ? 1 : 0 } },
+          }),
+        }),
+        h('div', { class: 'hint' },
+          '默认显示来源相机的当前帧；来源相机拍不到自己的当前帧投屏。',
+          '延迟一帧用于无限隧道/反馈画面，首帧为黑。'),
+      ));
     } else {
       this.root.appendChild(this._sec('形状', {},
         this._field({
@@ -1191,6 +1213,12 @@ export class Inspector {
     this.root.appendChild(this._parentTools(project, cam, 'cam'));
     this.root.appendChild(h('div', { class: 'hint pad' },
       '相机属性折叠在时间轴相机行里：点行首 ▾ 展开；位置是飞行路径关键帧，中心点 / 画面 / 透明度 / 缩放也能逐帧打点。'));
+    this.root.appendChild(this._field({
+      label: '仅作投屏来源',
+      type: 'checkbox',
+      value: cam.output === false,
+      onChange: (v) => this.opts.onOp({ op: 'cameraPatch', id: cam.id, patch: { output: !v } }),
+    }));
     this.root.appendChild(this._worldSection(project, true));
   }
 
