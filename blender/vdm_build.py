@@ -960,6 +960,32 @@ def build_compositor(scene, meta, cache_dir, fog=None, overlay=None, backdrop=No
 
 # ---------------------------------------------------------------- builder
 
+def feed_frame_path(el, frame):
+    """Source frame file a camfeed element shows at `frame`, or None when hidden."""
+    feed = el.get('feed') or {}
+    folder = el.get('_feedDir') or ''
+    if not folder:
+        return None
+    for a, b in el.get('_feedHidden') or []:
+        if a <= frame <= b:
+            return None
+    n = int(frame) - (1 if int(feed.get('delay') or 0) == 1 else 0)
+    path = os.path.join(folder, 'f_%04d.png' % n)
+    return path if os.path.exists(path) else None
+
+
+def show_feed_frame(el, obj, tex, frame):
+    path = feed_frame_path(el, frame)
+    if path is None:
+        obj.hide_render = True
+        return
+    img = tex.image
+    if img.source != 'FILE' or bpy.path.abspath(img.filepath) != path:
+        img.source = 'FILE'
+        img.filepath = path
+    img.reload()
+
+
 class SceneBuilder:
     def __init__(self, project, opts):
         self.p = project
@@ -1083,6 +1109,17 @@ class SceneBuilder:
         obj.location.z = self.layer_px * z
         return obj, nodes, nodes['tex']
 
+    def build_feed(self, el, style, st0, z):
+        # Camera feed (engine/camfeed-render.js): a full-frame plane whose image
+        # is swapped every frame for f_<frame - delay>.png of the source pass.
+        img = bpy.data.images.new(f'{el["id"]}_feed', 4, 4, alpha=True)
+        mesh = plane_mesh(f'{el["id"]}_mesh', self.W, self.H)
+        mat, nodes = textured_material(f'{el["id"]}_mat', img, st0['opacity'])
+        obj = self.add_object(mesh, mat, el['id'])
+        obj.location.z = self.layer_px * z
+        nodes['tex']['vdm_feed'] = 1
+        return obj, nodes, nodes['tex']
+
     def build_shape(self, el, style, st0, z):
         w = float(style.get('w') or self.W)
         h = float(style.get('h') or self.H)
@@ -1161,6 +1198,8 @@ class SceneBuilder:
 
             if el['type'] == 'text':
                 obj, nodes = self.build_text(el, style, st0, z)
+            elif el['type'] == 'camfeed':
+                obj, nodes, tex = self.build_feed(el, style, st0, z)
             elif el['type'] in ('solid', 'shape'):
                 obj, nodes = self.build_shape(el, style, st0, z)
             else:
@@ -1250,6 +1289,9 @@ class SceneBuilder:
                         nodes['em'].inputs['Color'].default_value = hex_rgba(st['color'])
                     except Exception:
                         pass
+
+            if el['type'] == 'camfeed' and tex is not None:
+                show_feed_frame(el, obj, tex, frame)
 
             if tex is not None and tex.image and tex.image.source == 'SEQUENCE':
                 # Blender reads file number clamp(frame - frame_start + 1, 0, n) + offset;

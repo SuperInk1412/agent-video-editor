@@ -56,7 +56,8 @@ export async function buildProject(dir, { delay = 0 } = {}) {
   const [key] = out.path;
   applyOps(project, [
     { op: 'setFx', fx: { bloom: 0, ca: 0, grain: 0, vignette: 0, scanline: 0, grade: 0, contrast: 0, saturation: 1 } },
-    { op: 'addCamera', camera: { id: 'cam_src', name: 'source' } },
+    // A copy of the static default camera (no shake / motion blur / bank).
+    { op: 'addCamera', camera: { ...JSON.parse(JSON.stringify(out)), id: 'cam_src', name: 'source' } },
   ]);
   const src = project.cameras.find((c) => c.id === 'cam_src');
   applyOps(project, [
