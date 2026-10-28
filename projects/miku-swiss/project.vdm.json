@@ -1,6 +1,6 @@
 {
   "schema": "vdm.project/1",
-  "rev": 59,
+  "rev": 245,
   "meta": {
     "title": "初音ミクの消失 · Swiss",
     "fps": 30,
@@ -27,8 +27,173 @@
       "shake": 0
     },
     "style": "default",
-    "savedAt": "2026-10-27T08:45:14.862Z",
-    "audioMigrated": true
+    "savedAt": "2026-10-28T15:07:36.009Z",
+    "audioMigrated": true,
+    "ui": {
+      "timelineOrder": [
+        "el:el_20",
+        "cam:cam_hud",
+        "cam:cam_1",
+        "cam:cam_7",
+        "cam:cam_8",
+        "cam:cam_6",
+        "cam:cam_5",
+        "cam:cam_4",
+        "cam:cam_3",
+        "cam:cam_2",
+        "el:end_black",
+        "ob:ob_1",
+        "el:el_18",
+        "el:s7_tc",
+        "el:s7_count",
+        "el:s7_tr",
+        "el:s7_line",
+        "el:s6_tc",
+        "el:el_15",
+        "el:el_16",
+        "el:el_17",
+        "el:s6_count",
+        "el:s6_tr",
+        "el:s6_line",
+        "el:s5_tc",
+        "el:el_12",
+        "el:el_13",
+        "el:el_14",
+        "el:s5_count",
+        "el:s5_tr",
+        "el:s5_line",
+        "el:s4_tc",
+        "el:el_9",
+        "el:el_10",
+        "el:el_11",
+        "el:s4_count",
+        "el:s4_tr",
+        "el:s4_line",
+        "el:s3_tc",
+        "el:el_7",
+        "el:el_8",
+        "el:s3_count",
+        "el:s3_tr",
+        "el:s3_line",
+        "el:s2_tc",
+        "el:el_3",
+        "el:el_4",
+        "el:el_5",
+        "el:el_6",
+        "el:s2_count",
+        "el:s2_tr",
+        "el:s2_line",
+        "el:s1_tc",
+        "el:el_1",
+        "el:el_2",
+        "el:s1_count",
+        "el:s1_tr",
+        "el:s1_line",
+        "el:s7_dot",
+        "el:s6_dot",
+        "el:s5_dot",
+        "el:s4_dot",
+        "el:s3_dot",
+        "el:s2_dot",
+        "el:s1_dot",
+        "el:s7_w2",
+        "el:s7_w1",
+        "el:s6_w4",
+        "el:s6_w3",
+        "el:s6_w2",
+        "el:s6_w1",
+        "el:s5_w4",
+        "el:el_19",
+        "el:s5_w3",
+        "el:s5_w2",
+        "el:s5_w1",
+        "el:s4_w4",
+        "el:s4_w3",
+        "el:s4_w2",
+        "el:s4_w1",
+        "el:s3_w3",
+        "el:s3_w2",
+        "el:s3_w1",
+        "el:s2_w5",
+        "el:s2_w4",
+        "el:s2_w3",
+        "el:s2_w2",
+        "el:s2_w1",
+        "el:s1_w3",
+        "el:s1_w2",
+        "el:s1_w1",
+        "el:s7_bar2",
+        "el:s7_bar1",
+        "el:s6_bar4",
+        "el:s6_bar3",
+        "el:s6_bar2",
+        "el:s6_bar1",
+        "el:s5_bar4",
+        "el:s5_bar3",
+        "el:s5_bar2",
+        "el:s5_bar1",
+        "el:s4_bar4",
+        "el:s4_bar3",
+        "el:s4_bar2",
+        "el:s4_bar1",
+        "el:s3_bar3",
+        "el:s3_bar2",
+        "el:s3_bar1",
+        "el:s2_bar5",
+        "el:s2_bar4",
+        "el:s2_bar3",
+        "el:s2_bar2",
+        "el:s2_bar1",
+        "el:s1_bar3",
+        "el:s1_bar2",
+        "el:s1_bar1",
+        "el:s7_rule_v",
+        "el:s7_rule_b",
+        "el:s7_rule_a",
+        "el:s6_rule_v",
+        "el:s6_rule_b",
+        "el:s6_rule_a",
+        "el:s5_rule_v",
+        "el:s5_rule_b",
+        "el:s5_rule_a",
+        "el:s4_rule_v",
+        "el:s4_rule_b",
+        "el:s4_rule_a",
+        "el:s3_rule_v",
+        "el:s3_rule_b",
+        "el:s3_rule_a",
+        "el:s2_rule_v",
+        "el:s2_rule_b",
+        "el:s2_rule_a",
+        "el:s1_rule_v",
+        "el:s1_rule_b",
+        "el:s1_rule_a",
+        "el:s7_bg",
+        "el:s6_bg",
+        "el:s5_bg",
+        "el:s4_bg",
+        "el:s3_bg",
+        "el:s2_bg",
+        "el:s1_bg",
+        "el:el_21",
+        "el:el_feed_cam_1",
+        "el:el_feed_cam_7",
+        "el:el_feed_cam_8",
+        "el:el_feed_cam_6",
+        "el:el_feed_cam_5",
+        "el:el_feed_cam_4",
+        "el:el_feed_cam_3",
+        "el:el_feed_cam_2",
+        "ob:ob_hud"
+      ],
+      "migration": {
+        "at": "2026-10-28T13:18:01.099Z",
+        "notes": [
+          "48 个贴屏元素已迁到 HUD 机位（undefined 个投屏）"
+        ],
+        "backupPending": true
+      }
+    }
   },
   "segments": [],
   "elements": [
@@ -39,11 +204,11 @@
       "src": "",
       "segment": null,
       "start": 0,
-      "duration": 1.68,
-      "z": 0,
+      "duration": 1.667,
+      "z": 9,
       "transform": {
-        "x": 0,
-        "y": 0,
+        "x": 260.65,
+        "y": 39.9,
         "scale": 1,
         "rotation": 0,
         "opacity": 1,
@@ -86,9 +251,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 1.68,
-      "duration": 3.62,
-      "z": 1,
+      "start": 1.667,
+      "duration": 3.633,
+      "z": 10,
       "transform": {
         "x": 0,
         "y": 0,
@@ -135,8 +300,8 @@
       "src": "",
       "segment": null,
       "start": 5.3,
-      "duration": 2.04,
-      "z": 2,
+      "duration": 2.034,
+      "z": 11,
       "transform": {
         "x": 0,
         "y": 0,
@@ -182,9 +347,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 7.34,
-      "duration": 3.16,
-      "z": 3,
+      "start": 7.334,
+      "duration": 3.166,
+      "z": 12,
       "transform": {
         "x": 0,
         "y": 0,
@@ -231,8 +396,8 @@
       "src": "",
       "segment": null,
       "start": 10.5,
-      "duration": 2.94,
-      "z": 4,
+      "duration": 2.934,
+      "z": 13,
       "transform": {
         "x": 0,
         "y": 0,
@@ -278,9 +443,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 13.44,
-      "duration": 1.12,
-      "z": 5,
+      "start": 13.434,
+      "duration": 1.133,
+      "z": 14,
       "transform": {
         "x": 0,
         "y": 0,
@@ -326,9 +491,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 14.56,
-      "duration": 0.44,
-      "z": 6,
+      "start": 14.567,
+      "duration": 0.433,
+      "z": 15,
       "transform": {
         "x": 0,
         "y": 0,
@@ -375,8 +540,8 @@
       "src": "",
       "segment": null,
       "start": 0,
-      "duration": 1.68,
-      "z": 7,
+      "duration": 1.667,
+      "z": 16,
       "transform": {
         "x": 0,
         "y": -350,
@@ -423,8 +588,8 @@
       "src": "",
       "segment": null,
       "start": 0,
-      "duration": 1.68,
-      "z": 8,
+      "duration": 1.667,
+      "z": 17,
       "transform": {
         "x": 0,
         "y": 270,
@@ -471,8 +636,8 @@
       "src": "",
       "segment": null,
       "start": 0,
-      "duration": 1.68,
-      "z": 9,
+      "duration": 1.667,
+      "z": 18,
       "transform": {
         "x": 280,
         "y": 0,
@@ -518,9 +683,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 1.68,
-      "duration": 3.62,
-      "z": 10,
+      "start": 1.667,
+      "duration": 3.633,
+      "z": 19,
       "transform": {
         "x": 0,
         "y": -350,
@@ -566,9 +731,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 1.68,
-      "duration": 3.62,
-      "z": 11,
+      "start": 1.667,
+      "duration": 3.633,
+      "z": 20,
       "transform": {
         "x": 0,
         "y": 270,
@@ -614,9 +779,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 1.68,
-      "duration": 3.62,
-      "z": 12,
+      "start": 1.667,
+      "duration": 3.633,
+      "z": 21,
       "transform": {
         "x": 280,
         "y": 0,
@@ -663,8 +828,8 @@
       "src": "",
       "segment": null,
       "start": 5.3,
-      "duration": 2.04,
-      "z": 13,
+      "duration": 2.034,
+      "z": 22,
       "transform": {
         "x": 0,
         "y": -350,
@@ -711,8 +876,8 @@
       "src": "",
       "segment": null,
       "start": 5.3,
-      "duration": 2.04,
-      "z": 14,
+      "duration": 2.034,
+      "z": 23,
       "transform": {
         "x": 0,
         "y": 270,
@@ -759,8 +924,8 @@
       "src": "",
       "segment": null,
       "start": 5.3,
-      "duration": 2.04,
-      "z": 15,
+      "duration": 2.034,
+      "z": 24,
       "transform": {
         "x": 280,
         "y": 0,
@@ -806,9 +971,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 7.34,
-      "duration": 3.16,
-      "z": 16,
+      "start": 7.334,
+      "duration": 3.166,
+      "z": 25,
       "transform": {
         "x": 0,
         "y": -350,
@@ -854,9 +1019,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 7.34,
-      "duration": 3.16,
-      "z": 17,
+      "start": 7.334,
+      "duration": 3.166,
+      "z": 26,
       "transform": {
         "x": 0,
         "y": 270,
@@ -902,9 +1067,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 7.34,
-      "duration": 3.16,
-      "z": 18,
+      "start": 7.334,
+      "duration": 3.166,
+      "z": 27,
       "transform": {
         "x": 280,
         "y": 0,
@@ -951,8 +1116,8 @@
       "src": "",
       "segment": null,
       "start": 10.5,
-      "duration": 2.94,
-      "z": 19,
+      "duration": 2.934,
+      "z": 28,
       "transform": {
         "x": 0,
         "y": -350,
@@ -999,8 +1164,8 @@
       "src": "",
       "segment": null,
       "start": 10.5,
-      "duration": 2.94,
-      "z": 20,
+      "duration": 2.934,
+      "z": 29,
       "transform": {
         "x": 0,
         "y": 270,
@@ -1047,8 +1212,8 @@
       "src": "",
       "segment": null,
       "start": 10.5,
-      "duration": 2.94,
-      "z": 21,
+      "duration": 2.934,
+      "z": 30,
       "transform": {
         "x": 280,
         "y": 0,
@@ -1094,9 +1259,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 13.44,
-      "duration": 1.12,
-      "z": 22,
+      "start": 13.434,
+      "duration": 1.133,
+      "z": 31,
       "transform": {
         "x": 0,
         "y": -350,
@@ -1142,9 +1307,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 13.44,
-      "duration": 1.12,
-      "z": 23,
+      "start": 13.434,
+      "duration": 1.133,
+      "z": 32,
       "transform": {
         "x": 0,
         "y": 270,
@@ -1190,9 +1355,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 13.44,
-      "duration": 1.12,
-      "z": 24,
+      "start": 13.434,
+      "duration": 1.133,
+      "z": 33,
       "transform": {
         "x": 280,
         "y": 0,
@@ -1238,9 +1403,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 14.56,
-      "duration": 0.44,
-      "z": 25,
+      "start": 14.567,
+      "duration": 0.433,
+      "z": 34,
       "transform": {
         "x": 0,
         "y": -350,
@@ -1286,9 +1451,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 14.56,
-      "duration": 0.44,
-      "z": 26,
+      "start": 14.567,
+      "duration": 0.433,
+      "z": 35,
       "transform": {
         "x": 0,
         "y": 270,
@@ -1334,9 +1499,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 14.56,
-      "duration": 0.44,
-      "z": 27,
+      "start": 14.567,
+      "duration": 0.433,
+      "z": 36,
       "transform": {
         "x": 280,
         "y": 0,
@@ -1383,8 +1548,8 @@
       "src": "",
       "segment": null,
       "start": 0,
-      "duration": 1.68,
-      "z": 28,
+      "duration": 1.667,
+      "z": 37,
       "transform": {
         "x": -770,
         "y": 190,
@@ -1430,9 +1595,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 0.48,
+      "start": 0.467,
       "duration": 1.2,
-      "z": 29,
+      "z": 38,
       "transform": {
         "x": -630,
         "y": 190,
@@ -1478,9 +1643,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 1.25,
-      "duration": 0.43,
-      "z": 30,
+      "start": 1.267,
+      "duration": 0.4,
+      "z": 39,
       "transform": {
         "x": -490,
         "y": 190,
@@ -1526,9 +1691,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 1.68,
-      "duration": 3.62,
-      "z": 31,
+      "start": 1.667,
+      "duration": 3.633,
+      "z": 40,
       "transform": {
         "x": -770,
         "y": 190,
@@ -1574,9 +1739,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 2.48,
-      "duration": 2.82,
-      "z": 32,
+      "start": 2.467,
+      "duration": 2.833,
+      "z": 41,
       "transform": {
         "x": -630,
         "y": 190,
@@ -1624,7 +1789,7 @@
       "segment": null,
       "start": 3.5,
       "duration": 1.8,
-      "z": 33,
+      "z": 42,
       "transform": {
         "x": -490,
         "y": 190,
@@ -1670,9 +1835,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 4.04,
-      "duration": 1.26,
-      "z": 34,
+      "start": 4.034,
+      "duration": 1.266,
+      "z": 43,
       "transform": {
         "x": -350,
         "y": 190,
@@ -1718,9 +1883,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 4.82,
-      "duration": 0.48,
-      "z": 35,
+      "start": 4.834,
+      "duration": 0.466,
+      "z": 44,
       "transform": {
         "x": -210,
         "y": 190,
@@ -1767,8 +1932,8 @@
       "src": "",
       "segment": null,
       "start": 5.3,
-      "duration": 2.04,
-      "z": 36,
+      "duration": 2.034,
+      "z": 45,
       "transform": {
         "x": -770,
         "y": 190,
@@ -1814,9 +1979,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 6.26,
-      "duration": 1.08,
-      "z": 37,
+      "start": 6.267,
+      "duration": 1.067,
+      "z": 46,
       "transform": {
         "x": -630,
         "y": 190,
@@ -1863,8 +2028,8 @@
       "src": "",
       "segment": null,
       "start": 6.9,
-      "duration": 0.44,
-      "z": 38,
+      "duration": 0.434,
+      "z": 47,
       "transform": {
         "x": -490,
         "y": 190,
@@ -1910,9 +2075,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 7.34,
-      "duration": 3.16,
-      "z": 39,
+      "start": 7.334,
+      "duration": 3.166,
+      "z": 48,
       "transform": {
         "x": -770,
         "y": 190,
@@ -1958,9 +2123,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 7.96,
-      "duration": 2.54,
-      "z": 40,
+      "start": 7.967,
+      "duration": 2.533,
+      "z": 49,
       "transform": {
         "x": -630,
         "y": 190,
@@ -2006,9 +2171,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 8.54,
-      "duration": 1.96,
-      "z": 41,
+      "start": 8.534,
+      "duration": 1.966,
+      "z": 50,
       "transform": {
         "x": -490,
         "y": 190,
@@ -2054,9 +2219,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 9.24,
-      "duration": 1.26,
-      "z": 42,
+      "start": 9.234,
+      "duration": 1.266,
+      "z": 51,
       "transform": {
         "x": -350,
         "y": 190,
@@ -2103,8 +2268,8 @@
       "src": "",
       "segment": null,
       "start": 10.5,
-      "duration": 2.94,
-      "z": 43,
+      "duration": 2.934,
+      "z": 52,
       "transform": {
         "x": -770,
         "y": 190,
@@ -2150,9 +2315,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 10.98,
-      "duration": 2.46,
-      "z": 44,
+      "start": 10.967,
+      "duration": 2.467,
+      "z": 53,
       "transform": {
         "x": -630,
         "y": 190,
@@ -2198,9 +2363,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 12.16,
-      "duration": 1.28,
-      "z": 45,
+      "start": 12.167,
+      "duration": 1.267,
+      "z": 54,
       "transform": {
         "x": -490,
         "y": 190,
@@ -2247,8 +2412,8 @@
       "src": "",
       "segment": null,
       "start": 13.1,
-      "duration": 0.34,
-      "z": 46,
+      "duration": 0.334,
+      "z": 55,
       "transform": {
         "x": -350,
         "y": 190,
@@ -2294,9 +2459,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 13.44,
-      "duration": 1.12,
-      "z": 47,
+      "start": 13.434,
+      "duration": 1.133,
+      "z": 56,
       "transform": {
         "x": -770,
         "y": 190,
@@ -2342,9 +2507,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 13.86,
+      "start": 13.867,
       "duration": 0.7,
-      "z": 48,
+      "z": 57,
       "transform": {
         "x": -630,
         "y": 190,
@@ -2390,9 +2555,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 14.06,
+      "start": 14.067,
       "duration": 0.5,
-      "z": 49,
+      "z": 58,
       "transform": {
         "x": -490,
         "y": 190,
@@ -2438,9 +2603,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 14.38,
-      "duration": 0.18,
-      "z": 50,
+      "start": 14.367,
+      "duration": 0.2,
+      "z": 59,
       "transform": {
         "x": -350,
         "y": 190,
@@ -2486,9 +2651,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 14.56,
-      "duration": 0.44,
-      "z": 51,
+      "start": 14.567,
+      "duration": 0.433,
+      "z": 60,
       "transform": {
         "x": -770,
         "y": 190,
@@ -2534,9 +2699,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 14.88,
-      "duration": 0.12,
-      "z": 52,
+      "start": 14.867,
+      "duration": 0.133,
+      "z": 61,
       "transform": {
         "x": -630,
         "y": 190,
@@ -2583,8 +2748,8 @@
       "src": "",
       "segment": null,
       "start": 0,
-      "duration": 1.68,
-      "z": 53,
+      "duration": 1.667,
+      "z": 62,
       "transform": {
         "x": -610,
         "y": -230,
@@ -2623,7 +2788,19 @@
           "t": 0,
           "path": "transform.z",
           "value": 0.8,
-          "ease": "outExpo"
+          "ease": "outExpo",
+          "curve": {
+            "type": "bezier",
+            "p1": [
+              0.42,
+              0
+            ],
+            "p2": [
+              0.58,
+              1
+            ],
+            "preset": "easeInOut"
+          }
         },
         {
           "t": 0,
@@ -2647,7 +2824,19 @@
           "t": 0.48,
           "path": "style.color",
           "value": "#111111",
-          "ease": "easeOut"
+          "ease": "easeOut",
+          "curve": {
+            "type": "bezier",
+            "p1": [
+              0.42,
+              0
+            ],
+            "p2": [
+              0.58,
+              1
+            ],
+            "preset": "easeInOut"
+          }
         },
         {
           "t": 0.73,
@@ -2665,9 +2854,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 0.48,
+      "start": 0.5,
       "duration": 1.2,
-      "z": 54,
+      "z": 63,
       "transform": {
         "x": -108.6,
         "y": -230,
@@ -2703,37 +2892,37 @@
       },
       "keyframes": [
         {
-          "t": 0.48,
+          "t": 0.49,
           "path": "transform.z",
           "value": 0.8,
           "ease": "outExpo"
         },
         {
-          "t": 0.48,
+          "t": 0.49,
           "path": "transform.y",
           "value": -194,
           "ease": "outExpo"
         },
         {
-          "t": 0.64,
+          "t": 0.65,
           "path": "transform.y",
           "value": -230,
           "ease": "easeInOut"
         },
         {
-          "t": 0.68,
+          "t": 0.69,
           "path": "transform.z",
           "value": 0,
           "ease": "easeInOut"
         },
         {
-          "t": 1.25,
+          "t": 1.26,
           "path": "style.color",
           "value": "#111111",
           "ease": "easeOut"
         },
         {
-          "t": 1.5,
+          "t": 1.51,
           "path": "style.color",
           "value": "#9A968D",
           "ease": "easeInOut"
@@ -2748,9 +2937,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 1.25,
-      "duration": 0.43,
-      "z": 55,
+      "start": 1.267,
+      "duration": 0.4,
+      "z": 64,
       "transform": {
         "x": 277.8,
         "y": -230,
@@ -2819,9 +3008,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 1.68,
-      "duration": 3.62,
-      "z": 56,
+      "start": 1.667,
+      "duration": 3.633,
+      "z": 65,
       "transform": {
         "x": -650,
         "y": -120,
@@ -2902,9 +3091,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 2.48,
-      "duration": 2.82,
-      "z": 57,
+      "start": 2.467,
+      "duration": 2.833,
+      "z": 66,
       "transform": {
         "x": -140.8,
         "y": -120,
@@ -2987,7 +3176,7 @@
       "segment": null,
       "start": 3.5,
       "duration": 1.8,
-      "z": 58,
+      "z": 67,
       "transform": {
         "x": 463.4,
         "y": -120,
@@ -3068,9 +3257,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 4.04,
-      "duration": 1.26,
-      "z": 59,
+      "start": 4.034,
+      "duration": 1.266,
+      "z": 68,
       "transform": {
         "x": -650,
         "y": 98.5,
@@ -3151,9 +3340,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 4.82,
-      "duration": 0.48,
-      "z": 60,
+      "start": 4.834,
+      "duration": 0.466,
+      "z": 69,
       "transform": {
         "x": -140.8,
         "y": 98.5,
@@ -3223,8 +3412,8 @@
       "src": "",
       "segment": null,
       "start": 5.3,
-      "duration": 2.04,
-      "z": 61,
+      "duration": 2.034,
+      "z": 70,
       "transform": {
         "x": -580,
         "y": -230,
@@ -3305,9 +3494,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 6.26,
-      "duration": 1.08,
-      "z": 62,
+      "start": 6.267,
+      "duration": 1.067,
+      "z": 71,
       "transform": {
         "x": -13.2,
         "y": -230,
@@ -3389,8 +3578,8 @@
       "src": "",
       "segment": null,
       "start": 6.9,
-      "duration": 0.44,
-      "z": 63,
+      "duration": 0.434,
+      "z": 72,
       "transform": {
         "x": 423.6,
         "y": -230,
@@ -3459,9 +3648,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 7.34,
-      "duration": 3.16,
-      "z": 64,
+      "start": 7.334,
+      "duration": 3.166,
+      "z": 73,
       "transform": {
         "x": -440,
         "y": -120,
@@ -3542,9 +3731,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 7.96,
-      "duration": 2.54,
-      "z": 65,
+      "start": 7.967,
+      "duration": 2.533,
+      "z": 74,
       "transform": {
         "x": 196,
         "y": -120,
@@ -3625,9 +3814,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 8.54,
-      "duration": 1.96,
-      "z": 66,
+      "start": 8.534,
+      "duration": 1.966,
+      "z": 75,
       "transform": {
         "x": -540,
         "y": 110,
@@ -3708,9 +3897,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 9.24,
-      "duration": 1.26,
-      "z": 67,
+      "start": 9.234,
+      "duration": 1.266,
+      "z": 76,
       "transform": {
         "x": -4,
         "y": 110,
@@ -3780,8 +3969,8 @@
       "src": "",
       "segment": null,
       "start": 10.5,
-      "duration": 2.94,
-      "z": 68,
+      "duration": 2.934,
+      "z": 77,
       "transform": {
         "x": -630,
         "y": -230,
@@ -3862,9 +4051,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 10.98,
-      "duration": 2.46,
-      "z": 69,
+      "start": 10.967,
+      "duration": 2.467,
+      "z": 78,
       "transform": {
         "x": -67.2,
         "y": -230,
@@ -3945,9 +4134,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 12.16,
-      "duration": 0.877,
-      "z": 70,
+      "start": 12.167,
+      "duration": 0.867,
+      "z": 79,
       "transform": {
         "x": -525,
         "y": 11.5,
@@ -4023,9 +4212,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 13.037,
-      "duration": 0.403,
-      "z": 71,
+      "start": 13.034,
+      "duration": 0.4,
+      "z": 80,
       "transform": {
         "x": -525,
         "y": 11.5,
@@ -4096,8 +4285,8 @@
       "src": "",
       "segment": null,
       "start": 13.1,
-      "duration": 0.34,
-      "z": 72,
+      "duration": 0.334,
+      "z": 81,
       "transform": {
         "x": -67.2,
         "y": 11.5,
@@ -4166,9 +4355,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 13.44,
-      "duration": 1.12,
-      "z": 73,
+      "start": 13.434,
+      "duration": 1.133,
+      "z": 82,
       "transform": {
         "x": -555,
         "y": -120,
@@ -4249,9 +4438,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 13.86,
+      "start": 13.867,
       "duration": 0.7,
-      "z": 74,
+      "z": 83,
       "transform": {
         "x": 49.2,
         "y": -120,
@@ -4332,9 +4521,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 14.06,
+      "start": 14.067,
       "duration": 0.5,
-      "z": 75,
+      "z": 84,
       "transform": {
         "x": -555,
         "y": 98.5,
@@ -4415,9 +4604,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 14.38,
-      "duration": 0.18,
-      "z": 76,
+      "start": 14.367,
+      "duration": 0.2,
+      "z": 85,
       "transform": {
         "x": 49.2,
         "y": 98.5,
@@ -4486,9 +4675,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 14.56,
-      "duration": 0.44,
-      "z": 77,
+      "start": 14.567,
+      "duration": 0.433,
+      "z": 86,
       "transform": {
         "x": -540,
         "y": -230,
@@ -4569,9 +4758,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 14.88,
-      "duration": 0.12,
-      "z": 78,
+      "start": 14.867,
+      "duration": 0.133,
+      "z": 87,
       "transform": {
         "x": 264,
         "y": -230,
@@ -4641,8 +4830,8 @@
       "src": "",
       "segment": null,
       "start": 0,
-      "duration": 1.68,
-      "z": 79,
+      "duration": 1.667,
+      "z": 88,
       "transform": {
         "x": 795,
         "y": 375,
@@ -4743,9 +4932,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 1.68,
-      "duration": 3.62,
-      "z": 80,
+      "start": 1.667,
+      "duration": 3.633,
+      "z": 89,
       "transform": {
         "x": 795,
         "y": 375,
@@ -4883,8 +5072,8 @@
       "src": "",
       "segment": null,
       "start": 5.3,
-      "duration": 2.04,
-      "z": 81,
+      "duration": 2.034,
+      "z": 90,
       "transform": {
         "x": 795,
         "y": 375,
@@ -4985,9 +5174,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 7.34,
-      "duration": 3.16,
-      "z": 82,
+      "start": 7.334,
+      "duration": 3.166,
+      "z": 91,
       "transform": {
         "x": 795,
         "y": 375,
@@ -5107,8 +5296,8 @@
       "src": "",
       "segment": null,
       "start": 10.5,
-      "duration": 2.94,
-      "z": 83,
+      "duration": 2.934,
+      "z": 92,
       "transform": {
         "x": 795,
         "y": 375,
@@ -5227,9 +5416,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 13.44,
-      "duration": 1.12,
-      "z": 84,
+      "start": 13.434,
+      "duration": 1.133,
+      "z": 93,
       "transform": {
         "x": 795,
         "y": 375,
@@ -5342,9 +5531,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 14.56,
-      "duration": 0.44,
-      "z": 85,
+      "start": 14.567,
+      "duration": 0.433,
+      "z": 94,
       "transform": {
         "x": 795,
         "y": 375,
@@ -5428,8 +5617,8 @@
       "src": "",
       "segment": null,
       "start": 0,
-      "duration": 1.68,
-      "z": 86,
+      "duration": 1.667,
+      "z": 95,
       "transform": {
         "x": -680,
         "y": 296,
@@ -5467,10 +5656,15 @@
       "visible": true,
       "meta": {},
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_1",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -5492,7 +5686,11 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
       }
     },
@@ -5503,8 +5701,8 @@
       "src": "",
       "segment": null,
       "start": 0,
-      "duration": 1.68,
-      "z": 87,
+      "duration": 1.667,
+      "z": 96,
       "transform": {
         "x": -664,
         "y": 346,
@@ -5542,10 +5740,15 @@
       "visible": true,
       "meta": {},
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_1",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -5567,7 +5770,11 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
       }
     },
@@ -5578,8 +5785,8 @@
       "src": "",
       "segment": null,
       "start": 0,
-      "duration": 0.48,
-      "z": 88,
+      "duration": 0.467,
+      "z": 97,
       "transform": {
         "x": 750,
         "y": -400,
@@ -5616,11 +5823,17 @@
       "keyframes": [],
       "visible": true,
       "meta": {},
+      "fadeOut": 0,
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_1",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -5642,10 +5855,13 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
-      },
-      "fadeOut": 0
+      }
     },
     {
       "id": "el_2",
@@ -5653,9 +5869,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 0.48,
-      "duration": 0.77,
-      "z": 89,
+      "start": 0.467,
+      "duration": 0.8,
+      "z": 98,
       "transform": {
         "x": 750,
         "y": -400,
@@ -5692,11 +5908,18 @@
       "keyframes": [],
       "visible": true,
       "meta": {},
+      "fadeOut": 0,
+      "fadeIn": 0,
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_1",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -5718,11 +5941,13 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
-      },
-      "fadeOut": 0,
-      "fadeIn": 0
+      }
     },
     {
       "id": "el_1",
@@ -5730,9 +5955,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 1.25,
-      "duration": 0.43,
-      "z": 90,
+      "start": 1.267,
+      "duration": 0.4,
+      "z": 99,
       "transform": {
         "x": 750,
         "y": -400,
@@ -5769,11 +5994,17 @@
       "keyframes": [],
       "visible": true,
       "meta": {},
+      "fadeIn": 0,
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_1",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -5795,10 +6026,13 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
-      },
-      "fadeIn": 0
+      }
     },
     {
       "id": "s1_tc",
@@ -5807,8 +6041,8 @@
       "src": "",
       "segment": null,
       "start": 0,
-      "duration": 1.68,
-      "z": 91,
+      "duration": 1.667,
+      "z": 100,
       "transform": {
         "x": 400,
         "y": -400,
@@ -5846,10 +6080,15 @@
       "visible": true,
       "meta": {},
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_1",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -5871,7 +6110,11 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
       }
     },
@@ -5881,9 +6124,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 1.68,
-      "duration": 3.62,
-      "z": 92,
+      "start": 1.667,
+      "duration": 0.4,
+      "z": 101,
       "transform": {
         "x": -580,
         "y": 296,
@@ -5920,11 +6163,17 @@
       "keyframes": [],
       "visible": true,
       "meta": {},
+      "fadeOut": 0,
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_7",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -5946,7 +6195,96 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
+        }
+      }
+    },
+    {
+      "id": "el_22",
+      "name": "02 歌句（贴屏）",
+      "type": "text",
+      "src": "",
+      "segment": null,
+      "start": 2.067,
+      "duration": 3.233,
+      "z": 101,
+      "transform": {
+        "x": -580,
+        "y": 296,
+        "scale": 1,
+        "rotation": 0,
+        "opacity": 1,
+        "z": 0
+      },
+      "style": {
+        "fit": "cover",
+        "text": "見せながら消えてゆくヒカリ",
+        "font": "Microsoft YaHei",
+        "size": 40,
+        "weight": 400,
+        "color": "#F2F0EB",
+        "align": "left",
+        "lineHeight": 1.1,
+        "letterSpacing": 0,
+        "shadow": 0,
+        "shape": "rect",
+        "fill": "#ffffff",
+        "radius": 0,
+        "stroke": "",
+        "strokeWidth": 0
+      },
+      "fx": {
+        "glow": 0
+      },
+      "motion": {
+        "type": "none",
+        "amount": 0,
+        "dir": "in"
+      },
+      "keyframes": [],
+      "visible": true,
+      "meta": {},
+      "fadeIn": 0,
+      "parent": {
+        "id": "cam_8",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
+        "bind": {
+          "pivot": [
+            0,
+            5.4,
+            20
+          ],
+          "basis": [
+            [
+              1,
+              0,
+              0
+            ],
+            [
+              0,
+              1,
+              0
+            ],
+            [
+              0,
+              0,
+              -1
+            ]
+          ],
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
       }
     },
@@ -5956,9 +6294,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 1.68,
-      "duration": 3.62,
-      "z": 93,
+      "start": 1.667,
+      "duration": 0.4,
+      "z": 102,
       "transform": {
         "x": -616,
         "y": 346,
@@ -5995,11 +6333,17 @@
       "keyframes": [],
       "visible": true,
       "meta": {},
+      "fadeOut": 0,
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_7",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -6021,7 +6365,96 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
+        }
+      }
+    },
+    {
+      "id": "el_23",
+      "name": "02 译文（贴屏）",
+      "type": "text",
+      "src": "",
+      "segment": null,
+      "start": 2.067,
+      "duration": 3.233,
+      "z": 102,
+      "transform": {
+        "x": -616,
+        "y": 346,
+        "scale": 1,
+        "rotation": 0,
+        "opacity": 0.72,
+        "z": 0
+      },
+      "style": {
+        "fit": "cover",
+        "text": "瞬间显现却又随即消失的那道光",
+        "font": "Microsoft YaHei",
+        "size": 32,
+        "weight": 400,
+        "color": "#F2F0EB",
+        "align": "left",
+        "lineHeight": 1.1,
+        "letterSpacing": 0,
+        "shadow": 0,
+        "shape": "rect",
+        "fill": "#ffffff",
+        "radius": 0,
+        "stroke": "",
+        "strokeWidth": 0
+      },
+      "fx": {
+        "glow": 0
+      },
+      "motion": {
+        "type": "none",
+        "amount": 0,
+        "dir": "in"
+      },
+      "keyframes": [],
+      "visible": true,
+      "meta": {},
+      "fadeIn": 0,
+      "parent": {
+        "id": "cam_8",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
+        "bind": {
+          "pivot": [
+            0,
+            5.4,
+            20
+          ],
+          "basis": [
+            [
+              1,
+              0,
+              0
+            ],
+            [
+              0,
+              1,
+              0
+            ],
+            [
+              0,
+              0,
+              -1
+            ]
+          ],
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
       }
     },
@@ -6031,9 +6464,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 1.68,
-      "duration": 0.8,
-      "z": 94,
+      "start": 1.667,
+      "duration": 0.4,
+      "z": 103,
       "transform": {
         "x": 750,
         "y": -400,
@@ -6070,11 +6503,17 @@
       "keyframes": [],
       "visible": true,
       "meta": {},
+      "fadeOut": 0,
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_7",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -6096,10 +6535,99 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
+      }
+    },
+    {
+      "id": "el_24",
+      "name": "02 计数（贴屏）",
+      "type": "text",
+      "src": "",
+      "segment": null,
+      "start": 2.067,
+      "duration": 0.4,
+      "z": 103,
+      "transform": {
+        "x": 750,
+        "y": -400,
+        "scale": 1,
+        "rotation": 0,
+        "opacity": 1,
+        "z": 0
       },
-      "fadeOut": 0
+      "style": {
+        "fit": "cover",
+        "text": "04 / 25",
+        "font": "Arial",
+        "size": 36,
+        "weight": 400,
+        "color": "#F2F0EB",
+        "align": "right",
+        "lineHeight": 1.1,
+        "letterSpacing": 2,
+        "shadow": 0,
+        "shape": "rect",
+        "fill": "#ffffff",
+        "radius": 0,
+        "stroke": "",
+        "strokeWidth": 0
+      },
+      "fx": {
+        "glow": 0
+      },
+      "motion": {
+        "type": "none",
+        "amount": 0,
+        "dir": "in"
+      },
+      "keyframes": [],
+      "visible": true,
+      "meta": {},
+      "fadeOut": 0,
+      "fadeIn": 0,
+      "parent": {
+        "id": "cam_8",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
+        "bind": {
+          "pivot": [
+            0,
+            5.4,
+            20
+          ],
+          "basis": [
+            [
+              1,
+              0,
+              0
+            ],
+            [
+              0,
+              1,
+              0
+            ],
+            [
+              0,
+              0,
+              -1
+            ]
+          ],
+          "scale": [
+            20,
+            20,
+            20
+          ]
+        }
+      }
     },
     {
       "id": "el_6",
@@ -6107,9 +6635,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 2.48,
-      "duration": 1.02,
-      "z": 95,
+      "start": 2.467,
+      "duration": 1.033,
+      "z": 104,
       "transform": {
         "x": 750,
         "y": -400,
@@ -6146,11 +6674,18 @@
       "keyframes": [],
       "visible": true,
       "meta": {},
+      "fadeOut": 0,
+      "fadeIn": 0,
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_8",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -6172,11 +6707,13 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
-      },
-      "fadeOut": 0,
-      "fadeIn": 0
+      }
     },
     {
       "id": "el_5",
@@ -6185,8 +6722,8 @@
       "src": "",
       "segment": null,
       "start": 3.5,
-      "duration": 0.54,
-      "z": 96,
+      "duration": 0.534,
+      "z": 105,
       "transform": {
         "x": 750,
         "y": -400,
@@ -6223,11 +6760,18 @@
       "keyframes": [],
       "visible": true,
       "meta": {},
+      "fadeOut": 0,
+      "fadeIn": 0,
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_8",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -6249,11 +6793,13 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
-      },
-      "fadeOut": 0,
-      "fadeIn": 0
+      }
     },
     {
       "id": "el_4",
@@ -6261,9 +6807,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 4.04,
-      "duration": 0.78,
-      "z": 97,
+      "start": 4.034,
+      "duration": 0.8,
+      "z": 106,
       "transform": {
         "x": 750,
         "y": -400,
@@ -6300,11 +6846,18 @@
       "keyframes": [],
       "visible": true,
       "meta": {},
+      "fadeOut": 0,
+      "fadeIn": 0,
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_8",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -6326,11 +6879,13 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
-      },
-      "fadeOut": 0,
-      "fadeIn": 0
+      }
     },
     {
       "id": "el_3",
@@ -6338,9 +6893,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 4.82,
-      "duration": 0.48,
-      "z": 98,
+      "start": 4.834,
+      "duration": 0.466,
+      "z": 107,
       "transform": {
         "x": 750,
         "y": -400,
@@ -6377,11 +6932,17 @@
       "keyframes": [],
       "visible": true,
       "meta": {},
+      "fadeIn": 0,
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_8",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -6403,10 +6964,13 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
-      },
-      "fadeIn": 0
+      }
     },
     {
       "id": "s2_tc",
@@ -6414,9 +6978,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 1.68,
-      "duration": 3.62,
-      "z": 99,
+      "start": 1.667,
+      "duration": 0.4,
+      "z": 108,
       "transform": {
         "x": 400,
         "y": -400,
@@ -6453,11 +7017,17 @@
       "keyframes": [],
       "visible": true,
       "meta": {},
+      "fadeOut": 0,
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_7",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -6479,7 +7049,96 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
+        }
+      }
+    },
+    {
+      "id": "el_25",
+      "name": "02 时间码（贴屏）",
+      "type": "text",
+      "src": "",
+      "segment": null,
+      "start": 2.067,
+      "duration": 3.233,
+      "z": 108,
+      "transform": {
+        "x": 400,
+        "y": -400,
+        "scale": 1,
+        "rotation": 0,
+        "opacity": 1,
+        "z": 0
+      },
+      "style": {
+        "fit": "cover",
+        "text": "03:47.68",
+        "font": "Arial",
+        "size": 28,
+        "weight": 400,
+        "color": "#6E6E6E",
+        "align": "left",
+        "lineHeight": 1.1,
+        "letterSpacing": 2,
+        "shadow": 0,
+        "shape": "rect",
+        "fill": "#ffffff",
+        "radius": 0,
+        "stroke": "",
+        "strokeWidth": 0
+      },
+      "fx": {
+        "glow": 0
+      },
+      "motion": {
+        "type": "none",
+        "amount": 0,
+        "dir": "in"
+      },
+      "keyframes": [],
+      "visible": true,
+      "meta": {},
+      "fadeIn": 0,
+      "parent": {
+        "id": "cam_8",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
+        "bind": {
+          "pivot": [
+            0,
+            5.4,
+            20
+          ],
+          "basis": [
+            [
+              1,
+              0,
+              0
+            ],
+            [
+              0,
+              1,
+              0
+            ],
+            [
+              0,
+              0,
+              -1
+            ]
+          ],
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
       }
     },
@@ -6490,8 +7149,8 @@
       "src": "",
       "segment": null,
       "start": 5.3,
-      "duration": 2.04,
-      "z": 100,
+      "duration": 2.034,
+      "z": 109,
       "transform": {
         "x": -740,
         "y": 296,
@@ -6529,10 +7188,15 @@
       "visible": true,
       "meta": {},
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_6",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -6554,7 +7218,11 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
       }
     },
@@ -6565,8 +7233,8 @@
       "src": "",
       "segment": null,
       "start": 5.3,
-      "duration": 2.04,
-      "z": 101,
+      "duration": 2.034,
+      "z": 110,
       "transform": {
         "x": -728,
         "y": 346,
@@ -6604,10 +7272,15 @@
       "visible": true,
       "meta": {},
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_6",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -6629,7 +7302,11 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
       }
     },
@@ -6640,8 +7317,8 @@
       "src": "",
       "segment": null,
       "start": 5.3,
-      "duration": 0.96,
-      "z": 102,
+      "duration": 0.967,
+      "z": 111,
       "transform": {
         "x": 750,
         "y": -400,
@@ -6678,11 +7355,17 @@
       "keyframes": [],
       "visible": true,
       "meta": {},
+      "fadeOut": 0,
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_6",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -6704,10 +7387,13 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
-      },
-      "fadeOut": 0
+      }
     },
     {
       "id": "el_8",
@@ -6715,9 +7401,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 6.26,
-      "duration": 0.64,
-      "z": 103,
+      "start": 6.267,
+      "duration": 0.633,
+      "z": 112,
       "transform": {
         "x": 750,
         "y": -400,
@@ -6754,11 +7440,18 @@
       "keyframes": [],
       "visible": true,
       "meta": {},
+      "fadeOut": 0,
+      "fadeIn": 0,
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_6",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -6780,11 +7473,13 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
-      },
-      "fadeOut": 0,
-      "fadeIn": 0
+      }
     },
     {
       "id": "el_7",
@@ -6793,8 +7488,8 @@
       "src": "",
       "segment": null,
       "start": 6.9,
-      "duration": 0.44,
-      "z": 104,
+      "duration": 0.434,
+      "z": 113,
       "transform": {
         "x": 750,
         "y": -400,
@@ -6831,11 +7526,17 @@
       "keyframes": [],
       "visible": true,
       "meta": {},
+      "fadeIn": 0,
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_6",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -6857,10 +7558,13 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
-      },
-      "fadeIn": 0
+      }
     },
     {
       "id": "s3_tc",
@@ -6869,8 +7573,8 @@
       "src": "",
       "segment": null,
       "start": 5.3,
-      "duration": 2.04,
-      "z": 105,
+      "duration": 2.034,
+      "z": 114,
       "transform": {
         "x": 400,
         "y": -400,
@@ -6908,10 +7612,15 @@
       "visible": true,
       "meta": {},
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_6",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -6933,7 +7642,11 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
       }
     },
@@ -6943,9 +7656,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 7.34,
-      "duration": 3.16,
-      "z": 106,
+      "start": 7.334,
+      "duration": 3.166,
+      "z": 115,
       "transform": {
         "x": -620,
         "y": 296,
@@ -6983,10 +7696,15 @@
       "visible": true,
       "meta": {},
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_5",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -7008,7 +7726,11 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
       }
     },
@@ -7018,9 +7740,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 7.34,
-      "duration": 3.16,
-      "z": 107,
+      "start": 7.334,
+      "duration": 3.166,
+      "z": 116,
       "transform": {
         "x": -648,
         "y": 346,
@@ -7058,10 +7780,15 @@
       "visible": true,
       "meta": {},
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_5",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -7083,7 +7810,11 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
       }
     },
@@ -7093,9 +7824,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 7.34,
-      "duration": 0.62,
-      "z": 108,
+      "start": 7.334,
+      "duration": 0.633,
+      "z": 117,
       "transform": {
         "x": 750,
         "y": -400,
@@ -7132,11 +7863,17 @@
       "keyframes": [],
       "visible": true,
       "meta": {},
+      "fadeOut": 0,
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_5",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -7158,10 +7895,13 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
-      },
-      "fadeOut": 0
+      }
     },
     {
       "id": "el_11",
@@ -7169,9 +7909,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 7.96,
-      "duration": 0.58,
-      "z": 109,
+      "start": 7.967,
+      "duration": 0.567,
+      "z": 118,
       "transform": {
         "x": 750,
         "y": -400,
@@ -7208,11 +7948,18 @@
       "keyframes": [],
       "visible": true,
       "meta": {},
+      "fadeOut": 0,
+      "fadeIn": 0,
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_5",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -7234,11 +7981,13 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
-      },
-      "fadeOut": 0,
-      "fadeIn": 0
+      }
     },
     {
       "id": "el_10",
@@ -7246,9 +7995,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 8.54,
+      "start": 8.534,
       "duration": 0.7,
-      "z": 110,
+      "z": 119,
       "transform": {
         "x": 750,
         "y": -400,
@@ -7285,11 +8034,18 @@
       "keyframes": [],
       "visible": true,
       "meta": {},
+      "fadeOut": 0,
+      "fadeIn": 0,
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_5",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -7311,11 +8067,13 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
-      },
-      "fadeOut": 0,
-      "fadeIn": 0
+      }
     },
     {
       "id": "el_9",
@@ -7323,9 +8081,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 9.24,
-      "duration": 1.26,
-      "z": 111,
+      "start": 9.234,
+      "duration": 1.266,
+      "z": 120,
       "transform": {
         "x": 750,
         "y": -400,
@@ -7362,11 +8120,17 @@
       "keyframes": [],
       "visible": true,
       "meta": {},
+      "fadeIn": 0,
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_5",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -7388,10 +8152,13 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
-      },
-      "fadeIn": 0
+      }
     },
     {
       "id": "s4_tc",
@@ -7399,9 +8166,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 7.34,
-      "duration": 3.16,
-      "z": 112,
+      "start": 7.334,
+      "duration": 3.166,
+      "z": 121,
       "transform": {
         "x": 400,
         "y": -400,
@@ -7439,10 +8206,15 @@
       "visible": true,
       "meta": {},
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_5",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -7464,7 +8236,11 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
       }
     },
@@ -7475,8 +8251,8 @@
       "src": "",
       "segment": null,
       "start": 10.5,
-      "duration": 2.94,
-      "z": 113,
+      "duration": 2.934,
+      "z": 122,
       "transform": {
         "x": -620,
         "y": 296,
@@ -7514,10 +8290,15 @@
       "visible": true,
       "meta": {},
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_4",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -7539,7 +8320,11 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
       }
     },
@@ -7550,8 +8335,8 @@
       "src": "",
       "segment": null,
       "start": 10.5,
-      "duration": 2.94,
-      "z": 114,
+      "duration": 2.934,
+      "z": 123,
       "transform": {
         "x": -680,
         "y": 346,
@@ -7589,10 +8374,15 @@
       "visible": true,
       "meta": {},
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_4",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -7614,7 +8404,11 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
       }
     },
@@ -7625,8 +8419,8 @@
       "src": "",
       "segment": null,
       "start": 10.5,
-      "duration": 0.48,
-      "z": 115,
+      "duration": 0.467,
+      "z": 124,
       "transform": {
         "x": 750,
         "y": -400,
@@ -7663,11 +8457,17 @@
       "keyframes": [],
       "visible": true,
       "meta": {},
+      "fadeOut": 0,
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_4",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -7689,10 +8489,13 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
-      },
-      "fadeOut": 0
+      }
     },
     {
       "id": "el_14",
@@ -7700,9 +8503,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 10.98,
-      "duration": 1.18,
-      "z": 116,
+      "start": 10.967,
+      "duration": 1.2,
+      "z": 125,
       "transform": {
         "x": 750,
         "y": -400,
@@ -7739,11 +8542,18 @@
       "keyframes": [],
       "visible": true,
       "meta": {},
+      "fadeOut": 0,
+      "fadeIn": 0,
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_4",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -7765,11 +8575,13 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
-      },
-      "fadeOut": 0,
-      "fadeIn": 0
+      }
     },
     {
       "id": "el_13",
@@ -7777,9 +8589,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 12.16,
-      "duration": 0.94,
-      "z": 117,
+      "start": 12.167,
+      "duration": 0.933,
+      "z": 126,
       "transform": {
         "x": 750,
         "y": -400,
@@ -7816,11 +8628,18 @@
       "keyframes": [],
       "visible": true,
       "meta": {},
+      "fadeOut": 0,
+      "fadeIn": 0,
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_4",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -7842,11 +8661,13 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
-      },
-      "fadeOut": 0,
-      "fadeIn": 0
+      }
     },
     {
       "id": "el_12",
@@ -7855,8 +8676,8 @@
       "src": "",
       "segment": null,
       "start": 13.1,
-      "duration": 0.34,
-      "z": 118,
+      "duration": 0.334,
+      "z": 127,
       "transform": {
         "x": 750,
         "y": -400,
@@ -7893,11 +8714,17 @@
       "keyframes": [],
       "visible": true,
       "meta": {},
+      "fadeIn": 0,
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_4",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -7919,10 +8746,13 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
-      },
-      "fadeIn": 0
+      }
     },
     {
       "id": "s5_tc",
@@ -7931,8 +8761,8 @@
       "src": "",
       "segment": null,
       "start": 10.5,
-      "duration": 2.94,
-      "z": 119,
+      "duration": 2.934,
+      "z": 128,
       "transform": {
         "x": 400,
         "y": -400,
@@ -7970,10 +8800,15 @@
       "visible": true,
       "meta": {},
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_4",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -7995,7 +8830,11 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
       }
     },
@@ -8005,9 +8844,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 13.44,
-      "duration": 1.12,
-      "z": 120,
+      "start": 13.434,
+      "duration": 1.133,
+      "z": 129,
       "transform": {
         "x": -580,
         "y": 296,
@@ -8045,10 +8884,15 @@
       "visible": true,
       "meta": {},
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_3",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -8070,7 +8914,11 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
       }
     },
@@ -8080,9 +8928,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 13.44,
-      "duration": 1.12,
-      "z": 121,
+      "start": 13.434,
+      "duration": 1.133,
+      "z": 130,
       "transform": {
         "x": -632,
         "y": 346,
@@ -8120,10 +8968,15 @@
       "visible": true,
       "meta": {},
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_3",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -8145,7 +8998,11 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
       }
     },
@@ -8155,9 +9012,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 13.44,
-      "duration": 0.42,
-      "z": 122,
+      "start": 13.434,
+      "duration": 0.433,
+      "z": 131,
       "transform": {
         "x": 750,
         "y": -400,
@@ -8194,11 +9051,17 @@
       "keyframes": [],
       "visible": true,
       "meta": {},
+      "fadeOut": 0,
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_3",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -8220,10 +9083,13 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
-      },
-      "fadeOut": 0
+      }
     },
     {
       "id": "el_17",
@@ -8231,9 +9097,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 13.86,
+      "start": 13.867,
       "duration": 0.2,
-      "z": 123,
+      "z": 132,
       "transform": {
         "x": 750,
         "y": -400,
@@ -8270,11 +9136,18 @@
       "keyframes": [],
       "visible": true,
       "meta": {},
+      "fadeOut": 0,
+      "fadeIn": 0,
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_3",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -8296,11 +9169,13 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
-      },
-      "fadeOut": 0,
-      "fadeIn": 0
+      }
     },
     {
       "id": "el_16",
@@ -8308,9 +9183,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 14.06,
-      "duration": 0.32,
-      "z": 124,
+      "start": 14.067,
+      "duration": 0.3,
+      "z": 133,
       "transform": {
         "x": 750,
         "y": -400,
@@ -8347,11 +9222,18 @@
       "keyframes": [],
       "visible": true,
       "meta": {},
+      "fadeOut": 0,
+      "fadeIn": 0,
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_3",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -8373,11 +9255,13 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
-      },
-      "fadeOut": 0,
-      "fadeIn": 0
+      }
     },
     {
       "id": "el_15",
@@ -8385,9 +9269,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 14.38,
-      "duration": 0.18,
-      "z": 125,
+      "start": 14.367,
+      "duration": 0.2,
+      "z": 134,
       "transform": {
         "x": 750,
         "y": -400,
@@ -8424,11 +9308,17 @@
       "keyframes": [],
       "visible": true,
       "meta": {},
+      "fadeIn": 0,
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_3",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -8450,10 +9340,13 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
-      },
-      "fadeIn": 0
+      }
     },
     {
       "id": "s6_tc",
@@ -8461,9 +9354,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 13.44,
-      "duration": 1.12,
-      "z": 126,
+      "start": 13.434,
+      "duration": 1.133,
+      "z": 135,
       "transform": {
         "x": 400,
         "y": -400,
@@ -8501,10 +9394,15 @@
       "visible": true,
       "meta": {},
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_3",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -8526,7 +9424,11 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
       }
     },
@@ -8536,9 +9438,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 14.56,
-      "duration": 0.44,
-      "z": 127,
+      "start": 14.567,
+      "duration": 0.433,
+      "z": 136,
       "transform": {
         "x": -620,
         "y": 296,
@@ -8576,10 +9478,15 @@
       "visible": true,
       "meta": {},
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_2",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -8601,7 +9508,11 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
       }
     },
@@ -8611,9 +9522,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 14.56,
-      "duration": 0.44,
-      "z": 128,
+      "start": 14.567,
+      "duration": 0.433,
+      "z": 137,
       "transform": {
         "x": -648,
         "y": 346,
@@ -8651,10 +9562,15 @@
       "visible": true,
       "meta": {},
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_2",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -8676,7 +9592,11 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
       }
     },
@@ -8686,9 +9606,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 14.56,
-      "duration": 0.32,
-      "z": 129,
+      "start": 14.567,
+      "duration": 0.3,
+      "z": 138,
       "transform": {
         "x": 750,
         "y": -400,
@@ -8725,11 +9645,17 @@
       "keyframes": [],
       "visible": true,
       "meta": {},
+      "fadeOut": 0,
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_2",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -8751,86 +9677,13 @@
               -1
             ]
           ],
-          "depth": 20
-        }
-      },
-      "fadeOut": 0
-    },
-    {
-      "id": "el_18",
-      "name": "07 计数（贴屏）",
-      "type": "text",
-      "src": "",
-      "segment": null,
-      "start": 14.88,
-      "duration": 0.12,
-      "z": 130,
-      "transform": {
-        "x": 750,
-        "y": -400,
-        "scale": 1,
-        "rotation": 0,
-        "opacity": 1,
-        "z": 0
-      },
-      "style": {
-        "fit": "cover",
-        "text": "25 / 25",
-        "font": "Arial",
-        "size": 36,
-        "weight": 400,
-        "color": "#F2F0EB",
-        "align": "right",
-        "lineHeight": 1.1,
-        "letterSpacing": 2,
-        "shadow": 0,
-        "shape": "rect",
-        "fill": "#ffffff",
-        "radius": 0,
-        "stroke": "",
-        "strokeWidth": 0
-      },
-      "fx": {
-        "glow": 0
-      },
-      "motion": {
-        "type": "none",
-        "amount": 0,
-        "dir": "in"
-      },
-      "keyframes": [],
-      "visible": true,
-      "meta": {},
-      "parent": {
-        "id": "@live",
-        "kind": "camera",
-        "bind": {
-          "pos": [
-            0,
-            5.4,
+          "scale": [
+            20,
+            20,
             20
-          ],
-          "basis": [
-            [
-              1,
-              0,
-              0
-            ],
-            [
-              0,
-              1,
-              0
-            ],
-            [
-              0,
-              0,
-              -1
-            ]
-          ],
-          "depth": 20
+          ]
         }
-      },
-      "fadeIn": 0
+      }
     },
     {
       "id": "s7_tc",
@@ -8838,9 +9691,9 @@
       "type": "text",
       "src": "",
       "segment": null,
-      "start": 14.56,
-      "duration": 0.44,
-      "z": 131,
+      "start": 14.567,
+      "duration": 0.433,
+      "z": 139,
       "transform": {
         "x": 400,
         "y": -400,
@@ -8878,10 +9731,15 @@
       "visible": true,
       "meta": {},
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_2",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -8903,7 +9761,96 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
+        }
+      }
+    },
+    {
+      "id": "el_18",
+      "name": "07 计数（贴屏）",
+      "type": "text",
+      "src": "",
+      "segment": null,
+      "start": 14.867,
+      "duration": 0.133,
+      "z": 140,
+      "transform": {
+        "x": 750,
+        "y": -400,
+        "scale": 1,
+        "rotation": 0,
+        "opacity": 1,
+        "z": 0
+      },
+      "style": {
+        "fit": "cover",
+        "text": "25 / 25",
+        "font": "Arial",
+        "size": 36,
+        "weight": 400,
+        "color": "#F2F0EB",
+        "align": "right",
+        "lineHeight": 1.1,
+        "letterSpacing": 2,
+        "shadow": 0,
+        "shape": "rect",
+        "fill": "#ffffff",
+        "radius": 0,
+        "stroke": "",
+        "strokeWidth": 0
+      },
+      "fx": {
+        "glow": 0
+      },
+      "motion": {
+        "type": "none",
+        "amount": 0,
+        "dir": "in"
+      },
+      "keyframes": [],
+      "visible": true,
+      "meta": {},
+      "fadeIn": 0,
+      "parent": {
+        "id": "cam_2",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
+        "bind": {
+          "pivot": [
+            0,
+            5.4,
+            20
+          ],
+          "basis": [
+            [
+              1,
+              0,
+              0
+            ],
+            [
+              0,
+              1,
+              0
+            ],
+            [
+              0,
+              0,
+              -1
+            ]
+          ],
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
       }
     },
@@ -8913,9 +9860,9 @@
       "type": "solid",
       "src": "",
       "segment": null,
-      "start": 14.94,
-      "duration": 0.06,
-      "z": 132,
+      "start": 14.934,
+      "duration": 0.066,
+      "z": 141,
       "transform": {
         "x": 0,
         "y": 0,
@@ -8955,10 +9902,15 @@
       "visible": true,
       "meta": {},
       "parent": {
-        "id": "@live",
-        "kind": "camera",
+        "id": "cam_2",
+        "mode": "world",
+        "inherit": {
+          "pos": true,
+          "rot": true,
+          "scale": true
+        },
         "bind": {
-          "pos": [
+          "pivot": [
             0,
             5.4,
             20
@@ -8980,7 +9932,11 @@
               -1
             ]
           ],
-          "depth": 20
+          "scale": [
+            20,
+            20,
+            20
+          ]
         }
       }
     },
@@ -8992,7 +9948,7 @@
       "segment": null,
       "start": 0,
       "duration": 15,
-      "z": 133,
+      "z": 142,
       "srcIn": 0,
       "volume": 0.1,
       "transform": {
@@ -9044,8 +10000,8 @@
     }
   ],
   "camera": {
-    "id": "cam_8",
-    "name": "镜头 02 見せながら消えてゆくヒカリ · 2",
+    "id": "cam_1",
+    "name": "镜头 01 明るい未来幻想を",
     "fov": 51.282,
     "near": 0.5,
     "far": 5000,
@@ -9092,199 +10048,33 @@
     },
     "path": [
       {
+        "t": 0,
+        "pos": [
+          -0.07,
+          5.43,
+          20.07
+        ],
+        "look": [
+          0,
+          5.4,
+          0
+        ],
+        "fov": null,
+        "ease": "linear",
+        "out": null,
+        "in": null,
+        "speed": null
+      },
+      {
         "t": 1.68,
         "pos": [
-          -12.5,
-          9,
-          9
+          -2.269,
+          7.9,
+          12
         ],
         "look": [
-          -6.5,
-          6.6,
-          0
-        ],
-        "fov": null,
-        "ease": "linear",
-        "out": null,
-        "in": [
-          0,
-          0,
-          0
-        ],
-        "speed": null
-      },
-      {
-        "t": 2.36,
-        "pos": [
-          -11.5,
-          8.8,
-          8.6
-        ],
-        "look": [
-          -6.5,
-          6.6,
-          0
-        ],
-        "fov": null,
-        "ease": "linear",
-        "out": null,
-        "in": null,
-        "speed": null
-      },
-      {
-        "t": 2.44,
-        "pos": [
-          -2.908,
-          8.2,
-          9
-        ],
-        "look": [
-          -1.408,
-          6.6,
-          0
-        ],
-        "fov": null,
-        "ease": "linear",
-        "out": null,
-        "in": null,
-        "speed": null
-      },
-      {
-        "t": 3.38,
-        "pos": [
-          -2.508,
-          8.1,
-          8.7
-        ],
-        "look": [
-          -1.408,
-          6.6,
-          0
-        ],
-        "fov": null,
-        "ease": "linear",
-        "out": null,
-        "in": null,
-        "speed": null
-      },
-      {
-        "t": 3.46,
-        "pos": [
-          4.134,
-          8.2,
-          9
-        ],
-        "look": [
-          4.634,
-          6.6,
-          0
-        ],
-        "fov": null,
-        "ease": "linear",
-        "out": null,
-        "in": null,
-        "speed": null
-      },
-      {
-        "t": 3.92,
-        "pos": [
-          4.534,
-          8.1,
-          8.7
-        ],
-        "look": [
-          4.634,
-          6.6,
-          0
-        ],
-        "fov": null,
-        "ease": "linear",
-        "out": null,
-        "in": null,
-        "speed": null
-      },
-      {
-        "t": 4,
-        "pos": [
-          -6,
-          6.015,
-          9
-        ],
-        "look": [
-          -6.5,
-          4.415,
-          0
-        ],
-        "fov": null,
-        "ease": "linear",
-        "out": null,
-        "in": null,
-        "speed": null
-      },
-      {
-        "t": 4.7,
-        "pos": [
-          -5.6,
-          5.915,
-          8.7
-        ],
-        "look": [
-          -6.5,
-          4.415,
-          0
-        ],
-        "fov": null,
-        "ease": "linear",
-        "out": null,
-        "in": null,
-        "speed": null
-      },
-      {
-        "t": 4.78,
-        "pos": [
-          0.092,
-          6.015,
-          9
-        ],
-        "look": [
-          -1.408,
-          4.415,
-          0
-        ],
-        "fov": null,
-        "ease": "linear",
-        "out": null,
-        "in": null,
-        "speed": null
-      },
-      {
-        "t": 5.17,
-        "pos": [
-          -1.008,
-          4.815,
-          8.882
-        ],
-        "look": [
-          -1.408,
-          4.415,
-          0
-        ],
-        "fov": null,
-        "ease": "linear",
-        "out": null,
-        "in": null,
-        "speed": null
-      },
-      {
-        "t": 5.3,
-        "pos": [
-          -1.208,
-          4.615,
-          8.482
-        ],
-        "look": [
-          -1.408,
-          4.415,
+          -1.469,
+          7.7,
           0
         ],
         "fov": null,
@@ -9298,8 +10088,8 @@
         "speed": null
       }
     ],
-    "start": 2.077,
-    "duration": 3.223
+    "start": 0,
+    "duration": 1.667
   },
   "cameras": [
     {
@@ -9353,9 +10143,9 @@
         {
           "t": 0,
           "pos": [
-            0,
-            5.4,
-            20
+            -0.07,
+            5.43,
+            20.07
           ],
           "look": [
             0,
@@ -9365,11 +10155,7 @@
           "fov": null,
           "ease": "linear",
           "out": null,
-          "in": [
-            0,
-            0,
-            0
-          ],
+          "in": null,
           "speed": null
         },
         {
@@ -9396,7 +10182,7 @@
         }
       ],
       "start": 0,
-      "duration": 1.68
+      "duration": 1.667
     },
     {
       "id": "cam_7",
@@ -9505,8 +10291,8 @@
           "speed": null
         }
       ],
-      "start": 1.68,
-      "duration": 0.397
+      "start": 1.667,
+      "duration": 0.4
     },
     {
       "id": "cam_8",
@@ -9763,8 +10549,8 @@
           "speed": null
         }
       ],
-      "start": 2.077,
-      "duration": 3.223
+      "start": 2.067,
+      "duration": 3.233
     },
     {
       "id": "cam_6",
@@ -9950,7 +10736,7 @@
         }
       ],
       "start": 5.3,
-      "duration": 2.04
+      "duration": 2.034
     },
     {
       "id": "cam_5",
@@ -10045,8 +10831,8 @@
           "speed": null
         }
       ],
-      "start": 7.34,
-      "duration": 3.16
+      "start": 7.334,
+      "duration": 3.166
     },
     {
       "id": "cam_4",
@@ -10142,7 +10928,7 @@
         }
       ],
       "start": 10.5,
-      "duration": 2.94
+      "duration": 2.934
     },
     {
       "id": "cam_3",
@@ -10345,8 +11131,8 @@
           "speed": null
         }
       ],
-      "start": 13.44,
-      "duration": 1.12
+      "start": 13.434,
+      "duration": 1.133
     },
     {
       "id": "cam_2",
@@ -10477,8 +11263,8 @@
           "speed": null
         }
       ],
-      "start": 14.56,
-      "duration": 0.44
+      "start": 14.567,
+      "duration": 0.433
     }
   ],
   "cameraOrder": [
@@ -10491,7 +11277,7 @@
     "cam_3",
     "cam_2"
   ],
-  "activeCameraId": "cam_8",
+  "activeCameraId": "cam_1",
   "world": {
     "source": "none",
     "seed": 2077,
@@ -10552,5 +11338,11 @@
       "#f9c80e",
       "#b967ff"
     ]
+  },
+  "scene": {
+    "version": 3,
+    "units": "m",
+    "objects": [],
+    "annotations": []
   }
 }
