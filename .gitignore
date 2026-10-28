@@ -21,6 +21,7 @@ assets/media/
 /projects/demo/
 /projects/nightcity/
 /projects/空项目测试/
+/projects/未命名项目/
 /projects/miku-swiss/tools/
 /projects/miku-swiss/.backup-before-rules.json
 
@@ -34,6 +35,7 @@ List.efu
 # reference app / design refs (local only)
 参考程序/
 参考设计/
+/给AI的截图/
 
 # python bytecode
 __pycache__/
