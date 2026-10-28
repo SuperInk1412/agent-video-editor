@@ -299,20 +299,24 @@ export function openLinkMenu({
     for (const target of choice.targets) {
       items.push({
         label: `${target.label}${target.current ? '（当前）' : target.cycle ? '（会成环）' : ''}`,
-        disabled: target.current || target.cycle,
+        disabled: target.current,
         title: target.cycle
           ? '这个方向会形成属性循环，不能链接'
           : target.current
             ? '已经是当前父级属性'
             : `链接到 ${choice.label} · ${target.label}`,
-        run: () => runOp({
-          op: 'propLink',
-          host: kind,
-          id: String(host.id),
-          to: childPath,
-          from: { host: choice.kind, id: choice.id, path: target.path },
-          t: roundT(t),
-        }),
+        run: () => {
+          // Same unit but incompatible: say why instead of silently doing nothing.
+          if (target.cycle) { toast?.('这个方向会形成属性循环，不能链接', 'warn'); return; }
+          runOp({
+            op: 'propLink',
+            host: kind,
+            id: String(host.id),
+            to: childPath,
+            from: { host: choice.kind, id: choice.id, path: target.path },
+            t: roundT(t),
+          });
+        },
       });
     }
     return items;
