@@ -2476,9 +2476,9 @@ async function boot() {
     }
     const tips = {
       empty: '已添加空元素；可把其它元素挂到它下面',
-      image: '已添加图片平面；检查器「内容」里可换素材和适配',
-      video: '已添加视频平面；检查器「内容」里可换素材、入点和速度',
-      text: '已添加 3D 文字；检查器「内容」里可改文字、字号和字体',
+      image: '已添加图片平面；属性面板「内容」里可换素材和适配',
+      video: '已添加视频平面；属性面板「内容」里可换素材、入点和速度',
+      text: '已添加 3D 文字；属性面板「内容」里可改文字、字号和字体',
     };
     // Same insertion path as 2D rows: playhead start, 5s, above the selection,
     // one batch that also extends the project and persists the row order.

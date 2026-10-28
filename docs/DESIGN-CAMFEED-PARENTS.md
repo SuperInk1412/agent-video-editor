@@ -63,7 +63,7 @@ HUD 空元素（远离场景，比如 x = 10 km）
 - **迁移**：打开带贴屏元素的旧项目时，自动换成上面的结构（内存升级，和现有迁移一样；保存时写盘前提示）。
   `scripts/migrate-camfeed.mjs` 也能显式迁移副本做对拍。真实 miku-swiss 迁移前单独备份，并逐帧对拍成片。
 - **删除**：`elementParent` / `elementUnparent` op（保留为"拒绝 + 提示改用投屏"一个版本）、`@live`、`elementCarrier`、
-  预览的 `u_carry`、Blender 的 `VDM_Carry` / `elementCarriers`、`SCREEN_LOCK_DEPTH`、检查器"贴屏"开关、相关测试与文档。
+  预览的 `u_carry`、Blender 的 `VDM_Carry` / `elementCarriers`、`SCREEN_LOCK_DEPTH`、属性面板"贴屏"开关、相关测试与文档。
 
 ## 3. 父子只剩两种
 
@@ -94,7 +94,7 @@ HUD 空元素（远离场景，比如 x = 10 km）
 
 ## 6. 分工
 
-- **B**：上面 1–6 的数据、求值、预览、成片、迁移、检查器（`inspector.js`）。
+- **B**：上面 1–6 的数据、求值、预览、成片、迁移、属性面板（`inspector.js`）。
 - **A**：右键相机"创建投屏元素"菜单、时间轴相机行"仅投屏"标记与开关、时间轴里贴屏相关入口的删除、空间父级 strength 的时间轴行。
 - 共享文件登记：`app/renderer/js/preview.js`（B 改投屏绘制和去掉 carry）、`core/spatial-parent.js`（B 加 strength）、
   `core/schema.js` / `core/contracts.js`（追加 `camfeed`、`output`）、`engine/shot.js`、`engine/blender.js`、`blender/vdm_build.py`。
@@ -115,8 +115,8 @@ HUD 空元素（远离场景，比如 x = 10 km）
   B 的 420 条单测、`check:preview` / `check:evaluate` / `blender:check` /
   `check-render-parity` / `check-camfeed` 均 PASS。
 - 右键相机「创建投屏元素」：按相机片段范围建 `type:"camfeed"` 元素（默认 delay 0、置顶），并选中它。
-- 时间轴相机行：`output:false` 显示「仅投屏」标记，点击恢复出画；相机菜单和相机检查器都能切 `output`。
-- camfeed 检查器补「来源相机 / 延迟一帧」，修改写 `updateElement {feed}`。
+- 时间轴相机行：`output:false` 显示「仅投屏」标记，点击恢复出画；相机菜单和相机属性面板都能切 `output`。
+- camfeed 属性面板补「来源相机 / 延迟一帧」，修改写 `updateElement {feed}`。
 - 2D 元素的屏幕锁 carry 从视口拖拽里删除；`elementCarrier` 暂留空桩给测试。
 - **未做**：空间父级 `strength` 的时间轴行（读 `parentStrengthAt`，写 `spatialParentKey/Unkey`）。
 - 注：`35b523a` 之后，打开旧项目会按 §2 在内存里迁到 HUD 机位；真实 `projects/miku-swiss` 仍是原文件，保存前请先备份。

@@ -54,7 +54,7 @@
 ### 方案乙（DESIGN-SCENE-EDITOR §8 的长期方向）：元素并入 3D 物体
 
 - `elements[]` 迁移成 `scene.objects`（`core/migrate.js` 已经实现，只在 CLI 里用，要求旧项目 golden 帧逐像素不变）；
-- 一套数据模型，但 2D 的运动预设 / 淡入淡出 / 节拍冲击 / 文字排版要全部在 objects 侧重做，检查器、时间轴、ops、AGENT-PROTOCOL 都要改。
+- 一套数据模型，但 2D 的运动预设 / 淡入淡出 / 节拍冲击 / 文字排版要全部在 objects 侧重做，属性面板、时间轴、ops、AGENT-PROTOCOL 都要改。
 
 **建议**：先做甲，把"所有项目都是 3D"这件事在渲染层落地，用户马上能用；乙作为后续整合，等甲稳定、
 golden 帧比对基线建立之后再评估。请 A 表态（§9-2）。下文都按甲写。
@@ -134,7 +134,7 @@ golden 帧比对基线建立之后再评估。请 A 表态（§9-2）。下文�
 | 2 | 坐标与默认相机：`core/space.js`；加载时迁移（补世界 + 默认相机） | **B** | `core/space.js`（新）、`core/migrate.js`、测试 | 旧 2D 项目打开后有相机，数据其余不变 |
 | 3 | 新建项目直接带空世界 + 默认相机；删除「启用 3D」相关入口设想；编辑网格 | **A** | `engine/server.js`（create）、`main.js`、gizmo | 新建项目即可加 3D 元素、相机行可见 |
 | 4 | 元素进 3D：`elementPlane`、`bakeElements`、`vdm_elements.py`、预览画元素平面、图层偏移 + 补偿 | **B** | `core/space.js`、`engine/shot.js`、`blender/vdm_elements.py`（新）、`preview3d.js`、`preview.js`（抽函数） | demo / miku-swiss 的 golden 帧逐像素一致；推相机出现视差 |
-| 5 | 编辑：`transform.z` 进时间轴属性行（并入 INTERACTION-ISSUES 问题 2）、检查器纵深字段、视口拖拽沿深度 | **A**（时间轴/视口）+ **B**（检查器） | `timeline.js`、`main.js`、`inspector.js` | 界面里能改 z、打 z 关键帧 |
+| 5 | 编辑：`transform.z` 进时间轴属性行（并入 INTERACTION-ISSUES 问题 2）、属性面板纵深字段、视口拖拽沿深度 | **A**（时间轴/视口）+ **B**（属性面板） | `timeline.js`、`main.js`、`inspector.js` | 界面里能改 z、打 z 关键帧 |
 | 6 | 元素以相机为父（贴屏） | **B**（数据/求值）+ **A**（选择/拖拽） | `core/hierarchy.js`、`core/space.js`、`main.js` | 相机运动时贴屏字幕不动 |
 | 7 | 退役旧 2D 路径与 W3 叠加；更新 `ARCHITECTURE.md` / `SPEC-PROJECT.md` / `AGENTS.md` / `AGENT-PROTOCOL.md` | **B** 主笔，A review | 见 §7 | golden 帧全部通过后才删 |
 
@@ -156,14 +156,14 @@ A 对其他细节有异议，通过 `docs/AGENT-MAIL.md` 的信箱提出，B 改
 ## 10. 进度登记
 
 （每一步做完在这里追加：日期 · 步号 · 负责方 · sha · 验收结果）
-- 2026-10-27 · 第 1 步 · B · `076ca3c` `39cdff8` `5f36cf5`（已快进合入 master）· 空世界 `source:'none'`：空城市同形状；Blender 跳过地面/楼/霓虹，透明底片 + 合成器纯色底，雾只作用于物体；检查器世界面板「空 / 程序化城市」。验收：空世界预览与 Blender 中物体位置一致（红方块包围盒横向 0.229–0.484、纵向 0.30–0.70 两边相同），无城市；带城市的 nightcity still 改动前后逐像素一致（max diff 0）。
+- 2026-10-27 · 第 1 步 · B · `076ca3c` `39cdff8` `5f36cf5`（已快进合入 master）· 空世界 `source:'none'`：空城市同形状；Blender 跳过地面/楼/霓虹，透明底片 + 合成器纯色底，雾只作用于物体；属性面板世界面板「空 / 程序化城市」。验收：空世界预览与 Blender 中物体位置一致（红方块包围盒横向 0.229–0.484、纵向 0.30–0.70 两边相同），无城市；带城市的 nightcity still 改动前后逐像素一致（max diff 0）。
 - 2026-10-27 · 第 2 步 · B · `4046ce7` `ccd114a`（已快进合入 master）· `core/space.js`（`SCREEN_DISTANCE` / `screenCenterY` / `defaultFov` / `screenToWorld` / `defaultWorld(meta)` / `defaultCamera(meta)` / `hasCamera` / `ensureSpace`）；`store.loadProject` 打开时内存升级（不写盘）。验收：miku-swiss 升级前后 Blender still max diff 7/255（颗粒）、预览视口 max diff 4/255；单测 `tests/space.test.mjs` 4 条。**已知阻塞**：A 的单关键点相机 1 s 后 look 塌缩（见信 B-002），默认相机是单关键点，第 3/4 步验收前需要修掉。
 - 2026-10-27 · 相机阻塞修复 · A · `0c69388` · 单关键点带 look 的相机在 t=0..end 都保持目标方向；无 look 的静止相机回退到 -Z；新增回归测试，`tests/camera.test.mjs` 27/27。
 - 2026-10-27 · 第 3 步 · A · `5ca0f6b` · `/api/projects/create` 调 `ensureSpace`，新建项目直接有空世界+默认相机；Electron 实测相机行/编辑网格/3D 立方体可见，默认相机 look 不塌缩。
 - 2026-10-27 · 第 4 步 · B · `a291ad4` `c624c68` `cb49c9d`（已快进合入 master）· 2D 元素进世界：`transform.z`（米）进入两边求值；预览在 Scene3D 内用相机矩阵画 2D 图层（深度测试、不写深度、远到近）；Blender 用 2D 构建器嵌入 3D 场景、挂 `VDM_Screen` 支架（每层 0.1 mm），空世界像素滤镜 0.8；默认相机关闭运动模糊 / 抖动 / 自动侧倾。验收：miku-swiss 对旧 2D 路径 Blender 5 个时刻平均差 0.006–0.014/255、差值 > 8 的像素 ≤ 0.04%；视差测试（z=0 与 z=4 m 两块、相机平移 3 m）Blender 与预览都与针孔投影误差 < 0.6 px；带城市的 nightcity 逐像素不变。**与 §4 的偏差**：第一阶段复用 Python `eval_element`（2D 构建器）而不是 JS 烘焙，方案乙时再换。**限制**：多相机（VSE）路径仍是贴屏叠加；预览 2D 点选仍按画面坐标（相机移动后不准，归第 5 步）。
-- 2026-10-27 · 第 5 步（B 部分）· B · `7054ee8` · 检查器 2D 元素「纵深 z (m)」字段，可改基础值 / 打 `transform.z` 关键帧；Electron 实测改值落盘。
+- 2026-10-27 · 第 5 步（B 部分）· B · `7054ee8` · 属性面板 2D 元素「纵深 z (m)」字段，可改基础值 / 打 `transform.z` 关键帧；Electron 实测改值落盘。
 - 2026-10-27 · 第 5 步（A 部分）· A · `cdf04c5` `6811df4` · 时间轴 2D 行可展开：X/Y（项目 px）、纵深 z（m，步长 0.05）、缩放、旋转、不透明度，各有 ◆ 和关键帧菱形；基础值走 `updateElement`，已有键的轴走 `keySet`。预览点选用 `scene3d.lastVP` 把四角投到画布做点在多边形内判断，选中框同一套投影；视口拖拽把射线投到元素 z 平面，再按 100 px/m 换回像素，已打键的轴写键、未打键的轴改基础值，Esc 回滚。验收：Electron 实测 z 改 1.25 后打帧，`transform.z` 键值 1.25；z=4 的横线拖拽落盘 x=134.74 / y=-282.63；已给 x 打键后拖拽，x 新增键 89.82、base x 保持 0，未打键的 y 改 base；`check:preview` PASS，全部单测 PASS。
-- 2026-10-27 · 第 6 步（B 部分）· B · `2375a14` `1cd7347` `0fcb5be`（已快进合入 master）· 元素以相机为父（贴屏）：`elementParent` / `elementUnparent`；`elementCarrier` 用与渲染器相同的相机基，预览乘 `u_carry`、Blender 用烘焙的 `elementCarriers` 驱动 `VDM_Carry`；检查器「贴屏」开关。验收：相机平移 3 m 时贴屏方块在 Blender 与预览都保持 x=559.5/559.6 px，较近元素的遮挡正确；miku-swiss 与 nightcity 逐像素不变；单测 `tests/element-parent.test.mjs` 4 条（含平移+转向+roll 下画面坐标不变）。
+- 2026-10-27 · 第 6 步（B 部分）· B · `2375a14` `1cd7347` `0fcb5be`（已快进合入 master）· 元素以相机为父（贴屏）：`elementParent` / `elementUnparent`；`elementCarrier` 用与渲染器相同的相机基，预览乘 `u_carry`、Blender 用烘焙的 `elementCarriers` 驱动 `VDM_Carry`；属性面板「贴屏」开关。验收：相机平移 3 m 时贴屏方块在 Blender 与预览都保持 x=559.5/559.6 px，较近元素的遮挡正确；miku-swiss 与 nightcity 逐像素不变；单测 `tests/element-parent.test.mjs` 4 条（含平移+转向+roll 下画面坐标不变）。
 - 2026-10-27 · 第 4 步更正 · B · `e6bbb90` · 预览里世界图层原按到元素中心的距离排序，全屏底色块被排到最后盖住同平面所有元素（miku-swiss 预览一片底色）。改为按视线深度（clip w）排序，同平面保持图层顺序。补做预览 golden：与第 2 步路径在 1 / 4.5 / 11 / 14.3 s 逐像素一致（max 2/255）。第 4 步当时只做了 Blender golden，漏了预览。
 - 2026-10-27 · 第 4 步再更正 · B · `3f59f7b` · 视线深度排序在斜视角下仍会打乱同一平面的图层（编辑视口从左上看时「犠牲」被底板盖住）。改为按相机到元素所在平面的距离排序（同平面同键，保持图层顺序），绘制与点选（A 的 hitTest，df264b1）共用 `_planeDist`。正视逐像素不变；Blender 本来正确。**请 A 知悉**：hitTest 的排序键被我改成了 `_planeDist`。
 - 2026-10-27 · miku-swiss 完整版（B）· 渲染修复 `9d98936`（贴屏元素渲染时拉到相机前 1 m，特写下不再被画面平面/底板挡住）`9b81fb9`（Blender 2D 文字按预览语义排版：左/右对齐以文字框居中、竖直按字形中心、字号按 em）。**请 A 知悉**：贴屏绑定数据新增 `bind.depth`，`elementCarrier(project, el, t, {rigid})` 渲染时带缩放，点选/拖拽贴屏元素请用 `{ rigid: true }` 的刚体部分或直接用渲染矩阵投影。

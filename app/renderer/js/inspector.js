@@ -1042,7 +1042,7 @@ export class Inspector {
           },
         },
       }),
-      h('div', { class: 'hint' }, '拖球面上的点改朝向（写 dir 关键帧）；旋转球和速度曲线留在检查器，其余基础属性在时间轴左侧。'),
+      h('div', { class: 'hint' }, '拖球面上的点改朝向（写 dir 关键帧）；旋转球和速度曲线留在属性面板，其余基础属性在时间轴左侧。'),
     ));
 
     if (MEDIA_TYPES.has(obj.type)) this.root.appendChild(this._renderMedia(obj));
