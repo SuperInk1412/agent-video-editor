@@ -10,7 +10,7 @@ import { objectPose } from '/core/scene.js';
 import { childrenOf } from '/core/hierarchy.js';
 import { pathPos, cameraTransform, cameraParamValue, cameraRange } from '/core/camera.js';
 import {
-  emptySelection, normalizeSelection, selectOne, pickSelection,
+  emptySelection, normalizeSelection, selectOne, pickSelection, legacyFields,
   cameraRef, objectRef, elementRef, propertyRef, keyframeRef, splitRef,
 } from '/core/selection.js';
 import {
@@ -593,14 +593,35 @@ export class Timeline {
           : sel?.elementId ? selectOne('element', elementRef(sel.elementId))
             : emptySelection()
     ));
+    // The pool primary drives the legacy fields, so a mixed cam / ob / el pool
+    // still highlights exactly one row. Main derives the same values.
+    const host = legacyFields(this.pool, {
+      elementId: sel?.elementId, objectId: sel?.objectId, camera: sel?.camera,
+    });
     this.segmentId = sel?.segmentId || null;
-    this.elementId = sel?.elementId || null;
-    this.objectId = sel?.objectId || null;
-    this.cameraSel = !!sel?.camera;
+    this.elementId = host.elementId;
+    this.objectId = host.objectId;
+    this.cameraSel = host.camera;
     if (this.objectId !== prev || this.elementId !== prevEl) this.propSel = null;
     // Selection alone never opens a property group. A second click on the
     // already-selected row does that (see _down / viewport click handling).
     this._paintSelection();
+  }
+
+  /**
+   * Adopt the pool primary as the timeline's own single-selection fields and
+   * tell main. Every pick path goes through here: a Ctrl toggle that removes a
+   * host has to move the legacy selection to the surviving primary, otherwise
+   * Delete / the inspector would keep acting on the ref that just left the pool.
+   */
+  _selectPoolHost(explicit = {}) {
+    const host = legacyFields(this.pool, explicit);
+    this.elementId = host.elementId;
+    this.objectId = host.objectId;
+    this.cameraSel = host.camera;
+    const segmentId = host.elementId ? (this._element(host.elementId)?.segment || null) : null;
+    this.onSelect?.({ ...host, segmentId, pool: this.pool });
+    return host;
   }
 
   setTime(t) {
@@ -1064,28 +1085,33 @@ export class Timeline {
     // a text element/object wants the double-click for inline text editing.
     const toggleAfterClick = (kind === 'el' || kind === 'ob') && wasInPool && wasSelected && !additive;
 
-    if (kind === 'el') {
+    if (kind === 'cam') {
+      if (additive) {
+        // Ctrl/Cmd-click appends or toggles the camera in the shared element
+        // pool. Activation stays on the plain-click path, so building a mixed
+        // cam / ob / el selection never changes the live picture.
+        this._pickPool('element', ref, ev);
+        this.propSel = null;
+        this._selectPoolHost();
+        this._paintSelection();
+        return;
+      }
+    } else if (kind === 'el') {
       if (!wasInPool || additive) this._pickPool('element', ref, ev);
       else if (this.pool?.kind === 'element' && this.pool.ids.includes(ref)) {
         // Preserve the multi-selection but make the grabbed row its primary.
         this.pool = normalizeSelection({ ...this.pool, primary: ref });
       }
-      this.elementId = id;
-      this.objectId = null;
-      this.cameraSel = false;
       this.propSel = null;
-      this.onSelect?.({ elementId: id, segmentId: this._element(id)?.segment || null, pool: this.pool });
+      this._selectPoolHost();
       this._paintSelection();
     } else if (kind === 'ob') {
       if (!wasInPool || additive) this._pickPool('element', ref, ev);
       else if (this.pool?.kind === 'element' && this.pool.ids.includes(ref)) {
         this.pool = normalizeSelection({ ...this.pool, primary: ref });
       }
-      this.objectId = id;
-      this.elementId = null;
-      this.cameraSel = false;
       this.propSel = null;
-      this.onSelect?.({ objectId: id, pool: this.pool });
+      this._selectPoolHost();
       this._paintSelection();
     }
     // Cameras are activated on pointerup (activation is an op and a render
@@ -1375,6 +1401,16 @@ export class Timeline {
     const orig = { start: range.start, duration: range.duration };
     const active = this._activeCameraId() === cam.id;
     const wasSelected = this.cameraSel && !ev.ctrlKey && !ev.metaKey && !ev.shiftKey && active;
+    if (ev.ctrlKey || ev.metaKey || ev.shiftKey) {
+      // Ctrl/Cmd-click on a camera clip: add / toggle it in the shared element
+      // pool. It must not activate or start a trim drag, so building a mixed
+      // selection never changes the live shot.
+      this._pickPool('element', cameraRef(cam.id), ev);
+      this.propSel = null;
+      this._selectPoolHost();
+      this._paintSelection();
+      return;
+    }
     // Select on pointerdown, but do not activate through an op here: an op
     // reply re-renders the timeline and detaches the block mid-drag. Activation
     // is batched with the move on pointerup instead (one save / one undo).
@@ -3063,21 +3099,13 @@ export class Timeline {
     if (!ref) return false;
     this._pickPool('keyframe', ref, ev);
     if (node.dataset.cam) {
-      this.cameraSel = true;
-      this.elementId = null; this.segmentId = null; this.objectId = null;
-      this.onSelect?.({ camera: true, pool: this.pool });
+      this._selectPoolHost();
     } else if (node.dataset.el) {
-      const id = node.dataset.el;
-      this.elementId = id;
-      this.objectId = null; this.segmentId = null; this.cameraSel = false;
-      this.propSel = { elId: id, path: node.dataset.path };
-      this.onSelect?.({ elementId: id, pool: this.pool });
+      this.propSel = { elId: node.dataset.el, path: node.dataset.path };
+      this._selectPoolHost();
     } else if (node.dataset.obj) {
-      const id = node.dataset.obj;
-      this.objectId = id;
-      this.elementId = null; this.segmentId = null; this.cameraSel = false;
-      this.propSel = { objId: id, path: node.dataset.path };
-      this.onSelect?.({ objectId: id, pool: this.pool });
+      this.propSel = { objId: node.dataset.obj, path: node.dataset.path };
+      this._selectPoolHost();
     }
     this._paintSelection();
     return true;
@@ -3087,21 +3115,9 @@ export class Timeline {
   _selectProperty(kind, id, path, ev) {
     const host = kind === 'cam' ? cameraRef(id) : kind === 'ob' ? objectRef(id) : elementRef(id);
     this._pickPool('property', propertyRef(host, path), ev);
-    if (kind === 'cam') {
-      this.cameraSel = true;
-      this.elementId = null; this.segmentId = null; this.objectId = null;
-      this.onSelect?.({ camera: true, pool: this.pool });
-    } else if (kind === 'ob') {
-      this.objectId = id;
-      this.elementId = null; this.segmentId = null; this.cameraSel = false;
-      this.propSel = { objId: id, path };
-      this.onSelect?.({ objectId: id, pool: this.pool });
-    } else {
-      this.elementId = id;
-      this.objectId = null; this.segmentId = null; this.cameraSel = false;
-      this.propSel = { elId: id, path };
-      this.onSelect?.({ elementId: id, pool: this.pool });
-    }
+    if (kind === 'ob') this.propSel = { objId: id, path };
+    else if (kind === 'el') this.propSel = { elId: id, path };
+    this._selectPoolHost();
     this._paintSelection();
   }
 
@@ -3171,10 +3187,8 @@ export class Timeline {
     if (objBlk) {
       const id = objBlk.dataset.obj;
       const wasSelected = this.objectId === id && !ev.ctrlKey && !ev.metaKey && !ev.shiftKey;
-      this.objectId = id;
       this._pickPool('element', objectRef(id), ev);
-      this.elementId = null; this.segmentId = null; this.cameraSel = false;
-      this.onSelect?.({ objectId: id, pool: this.pool });
+      this._selectPoolHost();
       this._paintSelection();
       const item = this._obj(id);
       if (!item) return;
@@ -3253,11 +3267,9 @@ export class Timeline {
     if (blk) {
       const id = blk.dataset.id;
       const wasSelected = this.elementId === id && !ev.ctrlKey && !ev.metaKey && !ev.shiftKey;
-      this.elementId = id;
       this._pickPool('element', elementRef(id), ev);
-      this.objectId = null; this.segmentId = null; this.cameraSel = false;
       this.propSel = null;
-      this.onSelect?.({ elementId: id, segmentId: this.project.elements.find((e) => e.id === id)?.segment || null, pool: this.pool });
+      this._selectPoolHost();
       this._paintSelection();
 
       const p = this.project;

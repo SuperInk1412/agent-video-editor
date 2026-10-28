@@ -351,8 +351,10 @@ body.tl-scrubbing, body.tl-scrubbing * { cursor: ew-resize !important; user-sele
 .tl-camposrow.sel { background: var(--sel-row); }
 .tl-camposrow.sel .tl-gutter { background: var(--sel-row); color: var(--text-1); }
 .tl-camposrow.sel .tl-track { background: var(--sel-row); }
-/* Homogeneous selection pool: extra refs beyond the primary. */
-.tl-camhead.poolsel, .tl-objhead.poolsel, .tl-prop.poolsel, .tl-camprop.poolsel,
+/* Homogeneous selection pool: extra refs beyond the primary. Cameras, 3D
+   objects and 2D elements share one pool, so all three head rows need it. */
+.tl-camhead.poolsel, .tl-objhead.poolsel, .tl-elhead.poolsel,
+.tl-prop.poolsel, .tl-camprop.poolsel, .tl-elprop.poolsel,
 .blk.poolsel { background: var(--accent-bg); box-shadow: inset 0 0 0 1px var(--accent-border); }
 .tl-key.poolsel { background: var(--edit); border-color: var(--surface-0); }
 
