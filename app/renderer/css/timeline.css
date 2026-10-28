@@ -64,6 +64,11 @@
 
 /* ---------------- rows ---------------- */
 .tl-inner { position: relative; padding-bottom: 10px; }
+/* Lanes and headers are drag surfaces: a marquee must never paint a text
+   selection across the rows. Fields keep their normal text behaviour. */
+.tl-inner, .tl-row, .tl-sect, .tl-gutter { user-select: none; }
+.tl-inner :is(input, textarea, select) { user-select: text; }
+.tl-track, .tl-sect, .tl-gutter, .tl-key { touch-action: none; }
 /* The current-frame band: one element per track, positioned from these two
    variables by timeline.js _syncFrameBand (no per-band JS on pointermove). */
 .tl-rows { position: relative; --tl-frame-left: 0px; --tl-frame-w: 0px; }
@@ -287,6 +292,10 @@ body.tl-scrubbing, body.tl-scrubbing * { cursor: ew-resize !important; user-sele
   transform: rotate(45deg); background: var(--accent-hover); border: 1px solid var(--surface-0);
   cursor: pointer; z-index: 4;
 }
+/* Invisible hit target: the drawn diamond is only 7px, too small to click.
+   Counter-rotated so the extra area is an axis-aligned 11px box, not a bigger
+   diamond that would overlap the neighbouring key at high zoom. */
+.tl-key::after { content: ''; position: absolute; inset: -3px; transform: rotate(-45deg); }
 .tl-key:hover { background: var(--text-1); }
 .tl-key.at {
   width: 9px; height: 9px; margin: -4.5px 0 0 -4.5px;

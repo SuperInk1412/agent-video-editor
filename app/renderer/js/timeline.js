@@ -10,7 +10,7 @@ import { objectPose } from '/core/scene.js';
 import { childrenOf } from '/core/hierarchy.js';
 import { pathPos, cameraTransform, cameraParamValue, cameraRange } from '/core/camera.js';
 import {
-  emptySelection, normalizeSelection, selectOne, addSelection, toggleSelection,
+  emptySelection, normalizeSelection, selectOne, pickSelection,
   cameraRef, objectRef, elementRef, propertyRef, keyframeRef, splitRef,
 } from '/core/selection.js';
 import { attachNumberField, readNumber, writeNumber } from './numfield.js';
@@ -2096,16 +2096,22 @@ export class Timeline {
 
   _sectionRow(title, key, hint = '') {
     const row = el('div', 'tl-row tl-sect');
+    row.dataset.sec = key;
     const g = el('div', 'tl-gutter');
     g.append(this._groupCaret(key), el('span', '', title));
     if (hint) g.append(el('span', 'tl-sub', hint));
     row.append(g, el('div', 'tl-track'));
-    row.addEventListener('click', () => {
-      const m = this.sections[key];
-      this.sections[key] = m === 'full' ? 'collapsed' : m === 'collapsed' ? 'full' : 'collapsed';
-      this.render(true);
-    });
+    // Clicks are resolved by _down: a tap on the gutter toggles the group, a
+    // drag starting anywhere on the row becomes a marquee.
     return row;
+  }
+
+  /** Cycle a section between expanded, keyed-only and collapsed. */
+  _toggleSection(key) {
+    if (!key || !(key in this.sections)) return;
+    const m = this.sections[key];
+    this.sections[key] = m === 'full' ? 'collapsed' : m === 'collapsed' ? 'full' : 'collapsed';
+    this.render(true);
   }
 
   _numBox(axis, letter) {
@@ -2629,10 +2635,9 @@ export class Timeline {
       this.inner.querySelectorAll('.tl-elprop[data-el][data-path]').forEach((n) => mark(n, propertyRef(elementRef(n.dataset.el), n.dataset.path)));
       this.inner.querySelectorAll('.tl-camprop[data-cam][data-path]').forEach((n) => mark(n, propertyRef(cameraRef(n.dataset.cam), n.dataset.path)));
     } else if (pool.kind === 'keyframe') {
-      this.inner.querySelectorAll('.tl-key[data-t]').forEach((n) => {
-        if (n.dataset.cam) mark(n, keyframeRef(cameraRef(n.dataset.cam), n.dataset.path || 'path', n.dataset.t));
-        else if (n.dataset.obj) mark(n, keyframeRef(objectRef(n.dataset.obj), n.dataset.path, n.dataset.t));
-        else if (n.dataset.el) mark(n, keyframeRef(elementRef(n.dataset.el), n.dataset.path, n.dataset.t));
+      this.inner.querySelectorAll('.tl-key').forEach((n) => {
+        const ref = keyframeRefOf(n);
+        if (ref) mark(n, ref);
       });
     }
   }
@@ -2674,10 +2679,10 @@ export class Timeline {
 
   _pickPool(kind, ref, ev) {
     const additive = !!(ev?.ctrlKey || ev?.metaKey || ev?.shiftKey);
-    // Keyframes cannot mix into an element/property pool: Ctrl-clicking one is
-    // ignored until the pool is cleared and keyframes are selected on their own.
-    if (kind === 'keyframe' && additive && this.pool.kind !== 'keyframe') return false;
-    this.pool = additive ? addSelection(this.pool, kind, ref) : selectOne(kind, ref);
+    // The pool is homogeneous: additive picks toggle inside it and enter it
+    // from an empty / foreign pool, so the first Ctrl+click on a diamond is
+    // never swallowed (see pickSelection in core/selection.js).
+    this.pool = pickSelection(this.pool, kind, ref, additive);
     return true;
   }
 
@@ -2724,17 +2729,21 @@ export class Timeline {
   }
 
   /**
-   * Drag a box over the lower lanes to select keyframe diamonds. This replaces
-   * the old "empty lane click scrubs" behaviour; the ruler is now the only
-   * seek surface. A click without movement clears the keyframe pool.
+   * Drag a box over the lanes to select keyframe diamonds. The band ends at the
+   * pointerup coordinates (never a stale last move), is clipped to the visible
+   * lane area so diamonds hidden under the sticky name column cannot be caught,
+   * and hits by rect intersection with a little tolerance instead of only the
+   * diamond centre. A press without movement clears the selection; callers that
+   * need a click action arm it through `_deferGesture` and only hand over once
+   * the pointer really moved.
    */
-  _startMarquee(ev) {
-    const startClient = { x: ev.clientX, y: ev.clientY };
-    let lastClient = { ...startClient };
+  _startMarquee(ev, { slop = 3, at = null } = {}) {
+    const start = { x: ev.clientX, y: ev.clientY };
+    let last = at ? { x: at.x, y: at.y } : { ...start };
+    let moved = !!at;
     const box = el('div', 'tl-marquee');
-    box.hidden = true;
+    box.hidden = !moved;
     this.inner.appendChild(box);
-    let moved = false;
 
     // A mostly-horizontal drag still needs a visible band around its row.
     const padded = (a, b) => {
@@ -2755,52 +2764,92 @@ export class Timeline {
       return { left, right, top, bottom };
     };
 
-    const update = (e) => {
-      lastClient = { x: e.clientX, y: e.clientY };
-      const rect = this.inner.getBoundingClientRect();
-      const band = padded(startClient, lastClient);
-      box.style.left = `${band.left - rect.left}px`;
-      box.style.top = `${band.top - rect.top}px`;
-      box.style.width = `${band.right - band.left}px`;
-      box.style.height = `${band.bottom - band.top}px`;
-      if (!moved && Math.hypot(e.clientX - startClient.x, e.clientY - startClient.y) > 3) {
-        moved = true;
-        box.hidden = false;
-      }
+    /** Client-space band, clamped to the lane area right of the sticky gutter. */
+    const bandRect = () => {
+      const scrollRect = this.scroll.getBoundingClientRect();
+      const band = padded(start, last);
+      band.left = Math.max(band.left, scrollRect.left + this._gutter());
+      band.right = Math.min(Math.max(band.left, band.right), scrollRect.right);
+      band.top = Math.max(band.top, scrollRect.top);
+      band.bottom = Math.min(Math.max(band.top, band.bottom), scrollRect.bottom);
+      return band;
     };
 
-    const up = () => {
-      window.removeEventListener('pointermove', update);
-      window.removeEventListener('pointerup', up);
-      box.remove();
-      if (!moved) {
-        this.pool = emptySelection();
+    const draw = () => {
+      const rect = this.inner.getBoundingClientRect();
+      const band = bandRect();
+      box.style.left = `${band.left - rect.left}px`;
+      box.style.top = `${band.top - rect.top}px`;
+      box.style.width = `${Math.max(0, band.right - band.left)}px`;
+      box.style.height = `${Math.max(0, band.bottom - band.top)}px`;
+    };
+
+    const samePointer = (e) => !e || e.pointerId == null || e.pointerId === ev.pointerId;
+
+    const update = (e) => {
+      if (!samePointer(e)) return;
+      last = { x: e.clientX, y: e.clientY };
+      if (!moved && Math.hypot(last.x - start.x, last.y - start.y) > slop) moved = true;
+      if (!moved) return;
+      box.hidden = false;
+      draw();
+    };
+
+    /** Refs of the diamonds intersecting the band; deduped and order-stable. */
+    const hitRefs = () => {
+      const band = bandRect();
+      const tol = 2;
+      const refs = [];
+      const seen = new Set();
+      this.inner.querySelectorAll('.tl-key').forEach((node) => {
+        if (!node.getClientRects().length) return; // hidden by the filter
+        const ref = keyframeRefOf(node);
+        if (!ref || seen.has(ref)) return;
+        const r = node.getBoundingClientRect();
+        const hit = r.right + tol >= band.left && r.left - tol <= band.right
+          && r.bottom + tol >= band.top && r.top - tol <= band.bottom;
+        if (!hit) return;
+        seen.add(ref);
+        refs.push(ref);
+      });
+      return refs;
+    };
+
+    /** Take the keyframe pool and keep the primary key's host row selected. */
+    const apply = () => {
+      const ids = hitRefs();
+      const primary = ids.length ? splitRef(ids[0]) : null;
+      this.pool = ids.length
+        ? normalizeSelection({ kind: 'keyframe', ids, primary: ids[0] })
+        : emptySelection();
+      this.segmentId = null;
+      this.propSel = null;
+      if (!primary) {
         this.cameraSel = false;
         this.objectId = null;
         this.elementId = null;
-        this.segmentId = null;
-        this.propSel = null;
         this.onSelect?.({ elementId: null, segmentId: null, objectId: null, camera: false, pool: this.pool });
         this._paintSelection();
         return;
       }
-      const band = padded(startClient, lastClient);
-      const ids = [];
-      this.inner.querySelectorAll('.tl-key[data-t]').forEach((node) => {
-        if (!node.getClientRects().length) return; // hidden by the filter
-        const r = node.getBoundingClientRect();
-        const cx = (r.left + r.right) / 2;
-        const cy = (r.top + r.bottom) / 2;
-        if (cx < band.left || cx > band.right || cy < band.top || cy > band.bottom) return;
-        let ref = null;
-        if (node.dataset.cam) ref = keyframeRef(cameraRef(node.dataset.cam), node.dataset.path || 'path', Number(node.dataset.t));
-        else if (node.dataset.obj) ref = keyframeRef(objectRef(node.dataset.obj), node.dataset.path, Number(node.dataset.t));
-        else if (node.dataset.id && node.dataset.path) ref = keyframeRef(elementRef(node.dataset.id), node.dataset.path, Number(node.dataset.t));
-        if (ref && !ids.includes(ref)) ids.push(ref);
+      const oneProp = ids.every((id) => {
+        const s = splitRef(id);
+        return s && s.host === primary.host && s.path === primary.path;
       });
-      this.pool = ids.length
-        ? normalizeSelection({ kind: 'keyframe', ids, primary: ids[0] })
-        : emptySelection();
+      this.cameraSel = primary.type === 'cam';
+      this.elementId = primary.type === 'el' ? primary.id : null;
+      this.objectId = primary.type === 'ob' ? primary.id : null;
+      if (oneProp && primary.type === 'el') this.propSel = { elId: primary.id, path: primary.path };
+      if (oneProp && primary.type === 'ob') this.propSel = { objId: primary.id, path: primary.path };
+      if (primary.type === 'cam') this.onSelect?.({ camera: true, pool: this.pool });
+      else if (primary.type === 'ob') this.onSelect?.({ objectId: primary.id, pool: this.pool });
+      else this.onSelect?.({ elementId: primary.id, pool: this.pool });
+      this._paintSelection();
+    };
+
+    /** Press without drag on an empty lane: clear the selection. */
+    const clear = () => {
+      this.pool = emptySelection();
       this.cameraSel = false;
       this.objectId = null;
       this.elementId = null;
@@ -2810,16 +2859,172 @@ export class Timeline {
       this._paintSelection();
     };
 
+    let done = false;
+    const cleanup = () => {
+      done = true;
+      window.removeEventListener('pointermove', update);
+      window.removeEventListener('pointerup', finish);
+      window.removeEventListener('pointercancel', cancel);
+      window.removeEventListener('keydown', onKey, true);
+      this.inner.removeEventListener('lostpointercapture', lost);
+      box.remove();
+      try {
+        if (this.inner.hasPointerCapture(ev.pointerId)) this.inner.releasePointerCapture(ev.pointerId);
+      } catch { /* synthetic pointer / already released */ }
+    };
+
+    const finish = (e) => {
+      if (done || !samePointer(e)) return;
+      if (e) last = { x: e.clientX, y: e.clientY };
+      const dragged = moved;
+      cleanup();
+      if (!dragged) clear();
+      else {
+        this._swallowNextClick();
+        apply();
+      }
+    };
+
+    const cancel = () => {
+      if (!done) cleanup();
+    };
+
+    const onKey = (e) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopPropagation();
+      cancel();
+    };
+
+    // A lost capture (window switch, pointer stolen) ends the gesture; the box
+    // must not stay behind and no click should be synthesised from it.
+    const lost = () => cancel();
+
     window.addEventListener('pointermove', update);
+    window.addEventListener('pointerup', finish);
+    window.addEventListener('pointercancel', cancel);
+    window.addEventListener('keydown', onKey, true);
+    this.inner.addEventListener('lostpointercapture', lost);
+
+    // Keep receiving moves when the pointer leaves the window. Synthetic
+    // pointers (capture runs, preview scripts) have nothing to capture and fall
+    // back to the window listeners above.
+    try {
+      this.inner.setPointerCapture(ev.pointerId);
+    } catch { /* no active pointer */ }
+  }
+
+  /**
+   * Press and wait: a tap runs `onTap`, a drag past `slop` hands the same press
+   * to the marquee. Keyframe diamonds and section / property gutters need both
+   * (click to select or toggle, drag to box-select).
+   */
+  _deferGesture(ev, { slop = 4, onTap = null } = {}) {
+    const start = { x: ev.clientX, y: ev.clientY };
+    let handed = false;
+    const samePointer = (e) => !e || e.pointerId == null || e.pointerId === ev.pointerId;
+    const cleanup = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', cancel);
+      window.removeEventListener('keydown', onKey, true);
+    };
+    const move = (e) => {
+      if (handed || !samePointer(e)) return;
+      if (Math.hypot(e.clientX - start.x, e.clientY - start.y) <= slop) return;
+      handed = true;
+      cleanup();
+      this._startMarquee(ev, { at: { x: e.clientX, y: e.clientY } });
+    };
+    const up = (e) => {
+      if (!samePointer(e)) return;
+      cleanup();
+      if (!handed) onTap?.();
+    };
+    const cancel = () => cleanup();
+    const onKey = (e) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopPropagation();
+      cancel();
+    };
+    window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', cancel);
+    window.addEventListener('keydown', onKey, true);
+  }
+
+  /** A real drag can still synthesise a click; eat exactly that one. */
+  _swallowNextClick() {
+    if (this._clickSwallow) clearTimeout(this._clickSwallow.timer);
+    const eat = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      clearTimeout(this._clickSwallow?.timer);
+      this._clickSwallow = null;
+    };
+    this.inner.addEventListener('click', eat, { capture: true, once: true });
+    this._clickSwallow = {
+      timer: setTimeout(() => {
+        this.inner.removeEventListener('click', eat, true);
+        this._clickSwallow = null;
+      }, 350),
+    };
+  }
+
+  /** A tap on a diamond: pick its ref (additive toggles) and adopt its host. */
+  _selectKeyNode(node, ev) {
+    const ref = keyframeRefOf(node);
+    if (!ref) return false;
+    this._pickPool('keyframe', ref, ev);
+    if (node.dataset.cam) {
+      this.cameraSel = true;
+      this.elementId = null; this.segmentId = null; this.objectId = null;
+      this.onSelect?.({ camera: true, pool: this.pool });
+    } else if (node.dataset.el) {
+      const id = node.dataset.el;
+      this.elementId = id;
+      this.objectId = null; this.segmentId = null; this.cameraSel = false;
+      this.propSel = { elId: id, path: node.dataset.path };
+      this.onSelect?.({ elementId: id, pool: this.pool });
+    } else if (node.dataset.obj) {
+      const id = node.dataset.obj;
+      this.objectId = id;
+      this.elementId = null; this.segmentId = null; this.cameraSel = false;
+      this.propSel = { objId: id, path: node.dataset.path };
+      this.onSelect?.({ objectId: id, pool: this.pool });
+    }
+    this._paintSelection();
+    return true;
+  }
+
+  /** A tap on a property gutter: pick the property and its host row. */
+  _selectProperty(kind, id, path, ev) {
+    const host = kind === 'cam' ? cameraRef(id) : kind === 'ob' ? objectRef(id) : elementRef(id);
+    this._pickPool('property', propertyRef(host, path), ev);
+    if (kind === 'cam') {
+      this.cameraSel = true;
+      this.elementId = null; this.segmentId = null; this.objectId = null;
+      this.onSelect?.({ camera: true, pool: this.pool });
+    } else if (kind === 'ob') {
+      this.objectId = id;
+      this.elementId = null; this.segmentId = null; this.cameraSel = false;
+      this.propSel = { objId: id, path };
+      this.onSelect?.({ objectId: id, pool: this.pool });
+    } else {
+      this.elementId = id;
+      this.objectId = null; this.segmentId = null; this.cameraSel = false;
+      this.propSel = { elId: id, path };
+      this.onSelect?.({ elementId: id, pool: this.pool });
+    }
+    this._paintSelection();
   }
 
   _down(ev) {
     if (ev.button !== 0) return;
     const target = ev.target;
-    // controls / fields handle themselves (focus, clicks)
-    if (/INPUT|TEXTAREA|SELECT/.test(target.tagName || '') || target.closest('button')) return;
-    if (target.closest('.tl-sect')) return;
+    // controls / fields handle themselves (focus, clicks); they never drag
+    if (/INPUT|TEXTAREA|SELECT/.test(target.tagName || '') || target.closest('button, .tl-num, .tl-kf')) return;
     // Only the time ruler seeks; the rows below are selection surfaces.
     if (target.closest('.tl-ruler')) {
       if (target.closest('.tl-gutter')) return;
@@ -2831,72 +3036,41 @@ export class Timeline {
       this._startScrub(ev);
       return;
     }
+    // A diamond is a click on release, but dragging it starts a marquee. The
+    // marquee may include element keys (`data-el`), not just camera/3D ones.
+    const keyNode = target.closest?.('.tl-key');
+    if (keyNode && keyframeRefOf(keyNode)) {
+      ev.preventDefault();
+      this._deferGesture(ev, { slop: 3, onTap: () => this._selectKeyNode(keyNode, ev) });
+      return;
+    }
+    // Section rows: a click anywhere on the row (gutter or lane) still toggles
+    // the group, but a drag becomes a marquee instead.
+    const sect = target.closest?.('.tl-sect');
+    if (sect) {
+      ev.preventDefault();
+      this._deferGesture(ev, {
+        slop: 3,
+        onTap: () => { if (sect.dataset.sec) this._toggleSection(sect.dataset.sec); },
+      });
+      return;
+    }
     ev.preventDefault();
     this._noSnap = ev.altKey;
     const blk = target.closest?.('.blk');
     const gutterEl = target.closest?.('.tl-gutter[data-id]');
 
-    // ---- 3D elements ----
-    const camKeyEl = target.closest?.('.tl-key[data-cam]');
-    if (camKeyEl) {
-      const t = Number(camKeyEl.dataset.t);
-      const ref = keyframeRef(cameraRef(camKeyEl.dataset.cam), camKeyEl.dataset.path || 'path', t);
-      if (!this._pickPool('keyframe', ref, ev)) return;
-      this.cameraSel = true;
-      this.elementId = null; this.segmentId = null; this.objectId = null;
-      this.onSelect?.({ camera: true, pool: this.pool });
-      this._paintSelection();
-      return;
-    }
-    const elKeyEl = target.closest?.('.tl-key[data-el]');
-    if (elKeyEl) {
-      const t = Number(elKeyEl.dataset.t);
-      const id = elKeyEl.dataset.el;
-      const ref = keyframeRef(elementRef(id), elKeyEl.dataset.path, t);
-      if (!this._pickPool('keyframe', ref, ev)) return;
-      this.elementId = id;
-      this.objectId = null; this.segmentId = null; this.cameraSel = false;
-      this.propSel = { elId: id, path: elKeyEl.dataset.path };
-      this.onSelect?.({ elementId: id, pool: this.pool });
-      this._paintSelection();
-      return;
-    }
-    const key = target.closest?.('.tl-key');
-    if (key && key.dataset.obj) {
-      const t = Number(key.dataset.t);
-      const ref = keyframeRef(objectRef(key.dataset.obj), key.dataset.path, t);
-      if (!this._pickPool('keyframe', ref, ev)) return;
-      this.objectId = key.dataset.obj;
-      this.elementId = null; this.segmentId = null; this.cameraSel = false;
-      this.propSel = { objId: key.dataset.obj, path: key.dataset.path };
-      this.onSelect?.({ objectId: this.objectId, pool: this.pool });
-      this._paintSelection();
-      return;
-    }
+    // ---- property rows: tap selects, drag box-selects keyframes ----
     const elPropGutter = target.closest?.('.tl-elprop[data-el] .tl-gutter');
     if (elPropGutter) {
       const pr = elPropGutter.closest('.tl-elprop');
-      const id = pr.dataset.el;
-      const ref = propertyRef(elementRef(id), pr.dataset.path);
-      if (!this._pickPool('property', ref, ev)) return;
-      this.elementId = id;
-      this.objectId = null; this.segmentId = null; this.cameraSel = false;
-      this.propSel = { elId: id, path: pr.dataset.path };
-      this.onSelect?.({ elementId: id, pool: this.pool });
-      this._paintSelection();
+      this._deferGesture(ev, { onTap: () => this._selectProperty('el', pr.dataset.el, pr.dataset.path, ev) });
       return;
     }
     const propGutter = target.closest?.('.tl-prop[data-obj] .tl-gutter');
     if (propGutter) {
       const pr = propGutter.closest('.tl-prop');
-      const id = pr.dataset.obj;
-      const ref = propertyRef(objectRef(id), pr.dataset.path);
-      if (!this._pickPool('property', ref, ev)) return;
-      this.objectId = id;
-      this.elementId = null; this.segmentId = null; this.cameraSel = false;
-      this.propSel = { objId: id, path: pr.dataset.path };
-      this.onSelect?.({ objectId: id, pool: this.pool });
-      this._paintSelection();
+      this._deferGesture(ev, { onTap: () => this._selectProperty('ob', pr.dataset.obj, pr.dataset.path, ev) });
       return;
     }
     // Any header row in the left list: press + drag vertically to reorder.
@@ -2968,21 +3142,22 @@ export class Timeline {
       if (cam) this._startCameraClipDrag(cam, blk, ev);
       return;
     }
-    // camera property labels (the lane below is for marquee selection, not scrubbing)
+    // camera property labels: tap selects the row, drag box-selects keyframes
     if (target.closest?.('.tl-camprop .tl-gutter')) {
       const row = target.closest('.tl-camprop');
       const camId = row.dataset.cam || this._activeCameraId();
       const path = row.dataset.path;
-      if (path) {
-        const ref = propertyRef(cameraRef(camId), path);
-        if (!this._pickPool('property', ref, ev)) return;
-      } else {
+      this._deferGesture(ev, { onTap: () => {
+        if (path) {
+          this._selectProperty('cam', camId, path, ev);
+          return;
+        }
         this.pool = selectOne('element', cameraRef(camId));
-      }
-      this.cameraSel = true;
-      this.elementId = null; this.segmentId = null; this.objectId = null;
-      this.onSelect?.({ camera: true, pool: this.pool });
-      this._paintSelection();
+        this.cameraSel = true;
+        this.elementId = null; this.segmentId = null; this.objectId = null;
+        this.onSelect?.({ camera: true, pool: this.pool });
+        this._paintSelection();
+      } });
       return;
     }
     if (target.closest?.('.tl-camhint .tl-gutter')) {
@@ -3080,6 +3255,23 @@ export class Timeline {
 }
 
 const round3 = (v) => Math.round(v * 1000) / 1000;
+
+/**
+ * Stable keyframe ref for a `.tl-key` diamond, or null when the node is not a
+ * real key. Cameras tag diamonds with `data-cam`, 3D objects with `data-obj` and
+ * 2D elements with `data-el` (there is no `data-id` on a diamond); every ref
+ * must round-trip through core/selection.js so the pool and Delete agree.
+ */
+function keyframeRefOf(node) {
+  if (!node?.classList?.contains('tl-key')) return null;
+  const t = Number(node.dataset.t);
+  if (!Number.isFinite(t)) return null;
+  if (node.dataset.cam) return keyframeRef(cameraRef(node.dataset.cam), node.dataset.path || 'path', t);
+  if (!node.dataset.path) return null;
+  if (node.dataset.obj) return keyframeRef(objectRef(node.dataset.obj), node.dataset.path, t);
+  if (node.dataset.el) return keyframeRef(elementRef(node.dataset.el), node.dataset.path, t);
+  return null;
+}
 
 // ------------------------------------------------------------ row / clip helpers
 const filterKey = (name, id) => `${name ?? ''} ${id ?? ''}`.toLowerCase();

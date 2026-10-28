@@ -61,6 +61,20 @@ export function toggleSelection(sel, kind, id) {
   return { kind, ids, primary: cur.primary === ref ? ids[ids.length - 1] : cur.primary };
 }
 
+/**
+ * One pointer pick. Without the additive modifier the pool is replaced; an
+ * additive pick toggles within the same kind (a first pick also enters an empty
+ * or foreign pool) and starts a fresh pool when the kind changes.
+ */
+export function pickSelection(sel, kind, id, additive = false) {
+  const ref = String(id);
+  if (!additive) return selectOne(kind, ref);
+  const cur = normalizeSelection(sel);
+  if (cur.kind !== kind) return selectOne(kind, ref);
+  // toggleSelection only removes; a new ref has to be appended first.
+  return cur.ids.includes(ref) ? toggleSelection(cur, kind, ref) : addSelection(cur, kind, ref);
+}
+
 export function hasRef(sel, id) {
   const p = normalizeSelection(sel);
   return p.ids.includes(String(id));

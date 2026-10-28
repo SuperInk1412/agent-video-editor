@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  emptySelection, normalizeSelection, selectOne, addSelection, toggleSelection,
+  emptySelection, normalizeSelection, selectOne, addSelection, toggleSelection, pickSelection,
   hasRef, splitRef, cameraRef, objectRef, elementRef, propertyRef, keyframeRef,
   keyframeExists, keyframeDeleteOps,
 } from '../core/selection.js';
@@ -50,6 +50,38 @@ test('normalizeSelection drops invalid kinds and primary refs', () => {
   assert.deepEqual(q, { kind: null, ids: [], primary: null });
   const r = normalizeSelection({ kind: 'property', ids: ['a'], primary: 'z' });
   assert.equal(r.primary, 'a');
+});
+
+// ------------------------------------------------------------ pointer picks
+// The timeline's Ctrl+click used to be swallowed by a guard, so the first
+// keyframe pick from an empty / element pool never entered the pool.
+
+test('additive keyframe picks go empty -> one -> two -> one -> empty', () => {
+  const a = keyframeRef(elementRef('el_1'), 'transform.y', 0);
+  const b = keyframeRef(elementRef('el_1'), 'transform.z', 0.2);
+  let p = pickSelection(emptySelection(), 'keyframe', a, true);
+  assert.deepEqual(p, { kind: 'keyframe', ids: [a], primary: a });
+  p = pickSelection(p, 'keyframe', b, true);
+  assert.deepEqual(p.ids, [a, b]);
+  assert.equal(p.primary, b);
+  // Ctrl+click the primary (last picked) removes it.
+  p = pickSelection(p, 'keyframe', p.primary, true);
+  assert.deepEqual(p.ids, [a]);
+  assert.equal(p.primary, a);
+  p = pickSelection(p, 'keyframe', a, true);
+  assert.deepEqual(p, emptySelection());
+});
+
+test('an additive pick of another kind starts a fresh pool; plain picks replace', () => {
+  const pool = selectOne('element', elementRef('el_1'));
+  const ref = keyframeRef(elementRef('el_1'), 'transform.y', 0);
+  const p = pickSelection(pool, 'keyframe', ref, true);
+  assert.deepEqual(p, { kind: 'keyframe', ids: [ref], primary: ref });
+  const q = pickSelection(pool, 'keyframe', ref, false);
+  assert.deepEqual(q, { kind: 'keyframe', ids: [ref], primary: ref });
+  assert.deepEqual(pickSelection(p, 'element', elementRef('el_2'), false), {
+    kind: 'element', ids: [elementRef('el_2')], primary: elementRef('el_2'),
+  });
 });
 
 // ------------------------------------------------------------- keyframe delete
