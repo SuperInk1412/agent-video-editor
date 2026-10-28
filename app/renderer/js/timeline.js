@@ -2102,10 +2102,35 @@ export class Timeline {
       }
       return;
     }
-    this._appendSection(host, '变换', 'transform', 'px / m');
+    this._appendSection(host, '变换', 'transform', e.node ? 'm / 度 / 倍' : 'px / m');
     const mode = this._groupMode('transform');
     if (mode === 'collapsed') return;
     const show = (path) => mode === 'full' || this._elTrack(e, this._elKeyPath(e, path)).length > 0;
+    if (e.node) {
+      // Unified node rows: pivot / position / scale xyz + roll + opacity. One
+      // scalar row per axis keeps the existing keyframe lane / drag machinery.
+      const nodeRows = [
+        ['pivot.x', '中心点 X', { step: 0.05, axis: 'x', letter: 'X', unit: 'm' }],
+        ['pivot.y', '中心点 Y', { step: 0.05, axis: 'y', letter: 'Y', unit: 'm' }],
+        ['pivot.z', '中心点 Z', { step: 0.05, axis: 'z', letter: 'Z', unit: 'm' }],
+        ['position.x', '位置 X', { step: 0.05, axis: 'x', letter: 'X', unit: 'm' }],
+        ['position.y', '位置 Y', { step: 0.05, axis: 'y', letter: 'Y', unit: 'm' }],
+        ['position.z', '位置 Z', { step: 0.05, axis: 'z', letter: 'Z', unit: 'm' }],
+        ['scale.x', '缩放 X', { step: 0.01, axis: 'x', letter: 'X', unit: '', min: 0 }],
+        ['scale.y', '缩放 Y', { step: 0.01, axis: 'y', letter: 'Y', unit: '', min: 0 }],
+        ['scale.z', '缩放 Z', { step: 0.01, axis: 'z', letter: 'Z', unit: '', min: 0 }],
+        ['roll', '旋转°', { step: 0.5, axis: 'd', letter: '', unit: '°' }],
+      ];
+      for (const [path, label, opts] of nodeRows) {
+        if (show(path)) host.appendChild(this._elementNumRow(e, path, label, opts));
+      }
+      if (show('transform.opacity')) {
+        host.appendChild(this._elementNumRow(e, 'transform.opacity', '不透明度', {
+          step: 0.01, axis: 'd', letter: '', unit: '', min: 0, max: 1,
+        }));
+      }
+      return;
+    }
     if (show('transform.x')) host.appendChild(this._elementNumRow(e, 'transform.x', 'X', { step: 0.1, axis: 'x', letter: 'X', unit: 'px' }));
     if (show('transform.y')) host.appendChild(this._elementNumRow(e, 'transform.y', 'Y', { step: 0.1, axis: 'y', letter: 'Y', unit: 'px' }));
     if (show('transform.z')) {
@@ -2847,7 +2872,7 @@ export class Timeline {
     const target = elementRowTarget(e, path);
     const keyed = pr.keyedAtFocus ?? this._elTrack(e, keyPath).length > 0;
     if (keyed) {
-      const value = target ? rowToTarget(e, this.project?.meta, target, v) : v;
+      const value = target ? rowToTarget(e, this.project?.meta, target, v, path) : v;
       this.onOp?.({ op: 'keySet', id: elId, path: keyPath, t, value: value == null ? v : value });
       return;
     }
@@ -2879,7 +2904,7 @@ export class Timeline {
     }
     const local = this._elValue(e, path, t);
     const target = elementRowTarget(e, path);
-    const value = target ? rowToTarget(e, this.project?.meta, target, local) : local;
+    const value = target ? rowToTarget(e, this.project?.meta, target, local, path) : local;
     this.onOp?.({ op: 'keySet', id: elId, path: keyPath, t, value: value == null ? local : value });
   }
 

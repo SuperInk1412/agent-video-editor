@@ -116,6 +116,9 @@ export function linkSummary(project, host) {
 /** Linkable target paths of a 2D element row (`transform.x`, `audio.volume`, …). */
 export function elementRowLinkPaths(el, rowPath) {
   const path = String(rowPath ?? '');
+  // A node element can expose the node paths directly (unified four-attribute
+  // rows: pivot.* / position.* / scale.* / roll / opacity).
+  if (isRecord(el?.node) && /^(pivot|position|scale)\.[xyz]$|^roll$|^opacity$/.test(path)) return [path];
   switch (path) {
     case 'transform.x': return ['pivot.x'];
     case 'transform.y': return ['pivot.y'];

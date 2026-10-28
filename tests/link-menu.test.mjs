@@ -78,6 +78,11 @@ test('link-menu: legacy 2D rows link pivot.* / roll / scale.*, never transform.*
   assert.deepEqual(elementRowLinkPaths(node, 'transform.y'), ['pivot.y']);
   assert.deepEqual(elementRowLinkPaths(node, 'transform.z'), ['pivot.z']);
   assert.deepEqual(elementRowLinkPaths(node, 'transform.scale'), ['scale.x']);
+  // The unified node rows expose the node paths directly.
+  assert.deepEqual(elementRowLinkPaths(node, 'pivot.x'), ['pivot.x']);
+  assert.deepEqual(elementRowLinkPaths(node, 'position.y'), ['position.y']);
+  assert.deepEqual(elementRowLinkPaths(node, 'scale.z'), ['scale.z']);
+  assert.deepEqual(elementRowLinkPaths(node, 'roll'), ['roll']);
 });
 
 test('link-menu: 3D and camera timeline rows map to catalog paths', () => {
