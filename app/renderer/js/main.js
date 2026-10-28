@@ -17,6 +17,7 @@ import { evalCamera, pathPos, cameraTransform, cameraRange } from '/core/camera.
 import { curveSegments } from '/core/curves.js';
 import { worldPose, toLocalPoint, toLocalVector, ancestors, childrenOf, elementCarrier, carrierMatrix } from '/core/hierarchy.js';
 import { defaultCamera } from '/core/space.js';
+import { newId } from '/core/schema.js';
 import { sampleTrack } from '/core/time.js';
 import { clearCompiledTracks } from '/core/tracks.js';
 import {
@@ -33,6 +34,7 @@ const S = {
   selection: { segmentId: null, elementId: null, objectId: null, camera: false, pool: emptySelection() },
   media: [],
   sourceDurations: new Map(),
+  mediaDrag: null,
   blender: null,
   agentAvailable: false,
   pipeline: null,
@@ -1071,41 +1073,105 @@ function pickMedia(kind) {
   });
 }
 
-/** 资源 panel (assets.js): add a media file to the timeline at time t. */
-function addMediaFile(m, kind, t = S.time) {
-  if (kind === 'audio') return addAudioAt(m, t);
-  if (kind === 'image' || kind === 'video') return addMediaAt(m, kind === 'video', t);
+/**
+ * Add a media file to the timeline. `start` = null means "at the playhead's
+ * frame-left time"; a drop passes the ghost's snapped left edge. Audio becomes
+ * a normal audio element, images/videos become 2D layers.
+ */
+function addMediaFile(m, kind, start = null) {
+  if (kind === 'audio') return addAudioAt(m, start);
+  if (kind === 'image' || kind === 'video') return addMediaAt(m, kind === 'video', start);
   toast('只能把图片、视频和声音放进时间线', 'warn');
   return null;
 }
 
-/** Timeline drop target for cards dragged from the 资源 panel: add at the drop time. */
+/**
+ * Timeline drop target + drag preview for cards dragged from 资源. The ghost's
+ * left edge is the prospective clip start: it is frame-snapped while dragging
+ * and reused verbatim on drop (never recomputed from the pointer), with a width
+ * of the prospective duration (probed source length, or 5s until the probe
+ * resolves). Ghost is a pointer-events:none floating preview in the track area.
+ */
+let mediaDropApi = null;
 function initMediaDrop() {
   const tl = $('#timeline');
+  if (!tl) return null;
   const isMedia = (e) => [...(e.dataTransfer?.types || [])].includes(MEDIA_MIME);
-  const clear = () => tl.classList.remove('media-drop');
+  let drag = null; // { m, kind, duration, pointer:{x,y}, start }
+  let ghost = null;
+
+  const clearGhost = () => {
+    ghost?.remove();
+    ghost = null;
+    tl.classList.remove('media-drop');
+  };
+  const clear = () => {
+    clearGhost();
+    drag = null;
+    S.mediaDrag = null;
+  };
+
+  const paint = () => {
+    if (!drag?.pointer) return;
+    const at = timeline.frameStart(timeline._timeAt(drag.pointer.x));
+    drag.start = at;
+    if (!ghost) {
+      ghost = document.createElement('div');
+      ghost.className = 'tl-drop-ghost';
+      ghost.setAttribute('aria-hidden', 'true');
+      ghost.innerHTML = '<span class="tl-drop-ghost-label"></span>';
+      timeline.inner.appendChild(ghost);
+    }
+    const dur = Number(drag.duration) > 0 ? Number(drag.duration) : 5;
+    ghost.style.left = `${timeline._trackX(at)}px`;
+    ghost.style.width = `${Math.max(3, dur * timeline.pps)}px`;
+    const inner = timeline.inner.getBoundingClientRect();
+    ghost.style.top = `${Math.max(0, drag.pointer.y - inner.top - 14)}px`;
+    const label = ghost.firstChild;
+    if (label) label.textContent = `${at.toFixed(2)}s · ${dur.toFixed(2)}s`;
+  };
+
+  const begin = (m, kind) => {
+    if (!m || (kind !== 'image' && kind !== 'video' && kind !== 'audio')) return;
+    // The source length is only known after probing; the ghost starts at 5s and
+    // grows once the probe lands (setData is not readable during dragover).
+    drag = { m, kind, duration: 5, pointer: null, start: null };
+    S.mediaDrag = drag;
+    if (kind === 'image') return;
+    const mine = drag;
+    probeSourceDuration(m.path).then((d) => {
+      if (drag !== mine || !(d > 0)) return;
+      mine.duration = d;
+      if (mine.pointer) paint();
+    }).catch(() => {});
+  };
+
   tl.addEventListener('dragover', (e) => {
     if (!isMedia(e)) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'copy';
-    const r = tl.getBoundingClientRect();
-    const x = timeline._trackX(timeline._timeAt(e.clientX)) - (timeline.scroll?.scrollLeft || 0)
-      + ((timeline.scroll?.getBoundingClientRect().left ?? r.left) - r.left);
-    tl.style.setProperty('--drop-x', `${Math.round(x)}px`);
+    if (!drag) drag = { m: null, kind: null, duration: 5, pointer: null, start: null };
+    drag.pointer = { x: e.clientX, y: e.clientY };
     tl.classList.add('media-drop');
+    paint();
   });
-  tl.addEventListener('dragleave', (e) => { if (!tl.contains(e.relatedTarget)) clear(); });
-  window.addEventListener('dragend', clear);
+  tl.addEventListener('dragleave', (e) => {
+    if (!isMedia(e)) return;
+    if (!tl.contains(e.relatedTarget)) clearGhost();
+  });
   tl.addEventListener('drop', (e) => {
     if (!isMedia(e)) return;
     e.preventDefault();
-    clear();
     const path = e.dataTransfer.getData(MEDIA_MIME);
-    const m = (S.media || []).find((x) => x.path === path);
-    if (!m || !S.project) return;
-    const t = Math.round(Math.min(S.project.meta.duration, timeline._timeAt(e.clientX)) * 1000) / 1000;
-    addMediaFile(m, mediaKind(m.path), t);
+    const m = drag?.m || (S.media || []).find((x) => x.path === path);
+    const kind = drag?.kind || (m ? mediaKind(m.path) : null);
+    const start = drag?.start ?? null;
+    clear();
+    if (!m || !kind) return;
+    addMediaFile(m, kind, start);
   });
+  window.addEventListener('dragend', clear);
+  return { begin, end: clear };
 }
 
 async function setSoundtrack(m) {
@@ -1153,30 +1219,112 @@ async function setSoundtrack(m) {
 /** segment under time t, if any */
 const segmentAt = (t) => S.project.segments.find((s) => t >= s.start && t < s.start + s.duration) || null;
 
-/** latest start <= t at which `dur` seconds still fit inside the project */
-const fitStart = (t, dur) => Math.round(Math.max(0, Math.min(t, S.project.meta.duration - dur)) * 1000) / 1000;
+// Insertions are serialized: a rapid double-click on an asset plans its row
+// against the project the previous insert produced, so the persisted
+// timelineOrder / z values cannot race each other. Duplicates are never blocked.
+let insertionChain = Promise.resolve();
 
-/** Text / colour block at the playhead, on top of everything, then select it. */
-async function add2DElement(kind) {
-  if (!S.project) return null;
-  const len = Math.min(3, S.project.meta.duration);
-  // Use the playhead time exactly. Rounding to milliseconds could move the
-  // start just past the playhead (e.g. 2.0167 -> 2.017), so the new element
-  // would not appear until the user scrubbed forward.
-  const start = Math.max(0, Math.min(S.time, S.project.meta.duration - len));
-  const base = {
-    start, duration: len, segment: segmentAt(start)?.id || null,
-    transform: { x: 0, y: 0, scale: 1, rotation: 0, opacity: 1 }, fadeIn: 0.2, fadeOut: 0.2,
-  };
-  const element = kind === 'text'
-    ? { ...base, type: 'text', name: '文字', style: { text: '新文字', size: 120, color: '#ffffff', align: 'center' } }
-    : { ...base, type: 'shape', name: '色块', style: { shape: 'rect', fill: '#ff2a4d', w: 640, h: 120, radius: 0 } };
-  const j = await op({ op: 'addElement', element });
-  const id = j?.changed?.[0];
-  if (!id) return null;
-  select({ elementId: id });
+/**
+ * The ONE insertion path for newly created timeline rows: 2D elements (toolbar
+ * text/shape, asset quick add, media drop, audio add) and 3D objects. The new
+ * row goes one row above the current selection — or the top row when nothing
+ * is selected — and its order is persisted in `meta.ui.timelineOrder` in the
+ * same batch as the add. For 2D, `el.z` is planned from the resulting display
+ * slot (midpoint, or a whole-stack renumber). The project grows automatically
+ * (`syncDuration`), so no start/duration is clamped to the old length.
+ *
+ * One `batch` op = one rev = one undo step. The caller gets the new id after
+ * it has been selected, revealed and the inspector has switched to 属性.
+ *
+ * @param {object} o
+ * @param {object|Function} [o.element]  2D payload (no id/start/duration/z)
+ * @param {object|Function} [o.object]   3D payload (no id/start/duration)
+ * @param {number} [o.start]  start time; null = playhead's frame-left time
+ * @param {number} [o.duration=5]  clip length (media passes the source length)
+ * @param {string} [o.note]  toast text; a duration-extension note is appended
+ * @param {'success'|'info'|'warn'} [o.level]
+ * @returns {Promise<string|null>} new element / object id
+ */
+function insertTimelineRow(o = {}) {
+  const pending = insertionChain.then(() => insertTimelineRowNow(o), () => insertTimelineRowNow(o));
+  insertionChain = pending.catch(() => {});
+  return pending;
+}
+
+async function insertTimelineRowNow({
+  element = null, object = null, start = null, duration = 5, note = '', level = 'success',
+} = {}) {
+  if (!S.project || !timeline || (!element && !object)) return null;
+  const p = S.project;
+  const at = start == null ? timeline.playheadStart() : Math.max(0, Number(start) || 0);
+  const dur = Math.max(0.001, Number(duration) || 5);
+  const before = Number(p.meta.duration) || 0;
+  const build = (v) => (typeof v === 'function' ? v(at) : { ...v });
+  let id;
+  let ref;
+  let plan;
+  let ops;
+
+  if (element) {
+    const taken = new Set([...p.elements.map((e) => e.id), ...p.segments.map((s) => s.id)]);
+    id = newId('el', taken);
+    ref = elementRef(id);
+    plan = timeline.rowInsertPlan(ref);
+    const payload = { ...build(element), id, start: at, duration: dur };
+    // Audio rows are display-only in the stack; all other 2D rows must land on
+    // the z slot that matches their display rank.
+    const zPlan = payload.type === 'audio'
+      ? { z: null, ops: [] }
+      : timeline.planElementInsertion(payload, plan.order);
+    if (zPlan.z != null) payload.z = zPlan.z;
+    ops = [
+      { op: 'addElement', element: payload },
+      ...zPlan.ops,
+      { op: 'setMeta', path: 'ui.timelineOrder', value: plan.order },
+    ];
+  } else {
+    const taken = new Set((p.scene?.objects || []).map((o) => o.id));
+    id = newId('ob', taken);
+    ref = objectRef(id);
+    plan = timeline.rowInsertPlan(ref);
+    // objectAdd clamps start/duration to the current project total, so extend
+    // the duration first inside the same batch.
+    ops = [
+      { op: 'setMeta', path: 'duration', value: Math.max(before, at + dur) },
+      { op: 'objectAdd', object: { ...build(object), id, start: at, duration: dur } },
+      { op: 'setMeta', path: 'ui.timelineOrder', value: plan.order },
+    ];
+  }
+
+  const j = await op({ op: 'batch', ops });
+  if (!j) return null;
+  if (element) select({ elementId: id });
+  else select({ objectId: id });
   switchRightTab('insp');
-  if (kind === 'text') {
+  timeline.afterInsertRow({ index: plan.index, ref });
+  const grew = (Number(S.project.meta.duration) || 0) > before + 1e-6;
+  const parts = [note, grew ? `项目时长延长到 ${S.project.meta.duration.toFixed(2)}s` : ''].filter(Boolean);
+  if (parts.length) toast(parts.join(' · '), note ? level : 'info');
+  return id;
+}
+
+/**
+ * Text / colour block at the playhead, inserted above the selected row. Starts
+ * at the frame-left display time and runs 5s; the project extends to fit.
+ */
+async function add2DElement(kind, start = null) {
+  if (!S.project) return null;
+  const element = (at) => {
+    const base = {
+      segment: segmentAt(at)?.id || null,
+      transform: { x: 0, y: 0, scale: 1, rotation: 0, opacity: 1 }, fadeIn: 0.2, fadeOut: 0.2,
+    };
+    return kind === 'text'
+      ? { ...base, type: 'text', name: '文字', style: { text: '新文字', size: 120, color: '#ffffff', align: 'center' } }
+      : { ...base, type: 'shape', name: '色块', style: { shape: 'rect', fill: '#ff2a4d', w: 640, h: 120, radius: 0 } };
+  };
+  const id = await insertTimelineRow({ element, start, duration: 5 });
+  if (id && kind === 'text') {
     const ta = $('#panelInsp textarea');
     if (ta) { ta.focus(); ta.select(); }
   }
@@ -1322,52 +1470,47 @@ async function pasteClipboard() {
   return j;
 }
 
-async function addMediaAt(m, isVid, t = S.time) {
+/**
+ * Add an image / video at `start` (null = playhead frame-left). Video length is
+ * the probed source duration, image is always 5s, unknown source length falls
+ * back to 5s. No 4s cap, no fit-inside-project clamp: the project extends.
+ */
+async function addMediaAt(m, isVid, start = null) {
   if (!S.project) return null;
   const sourceDuration = isVid ? await probeSourceDuration(m.path) : null;
-  const maxDur = sourceDuration ? Math.max(0.05, sourceDuration) : Infinity;
-  const dur = Math.max(0.05, Math.min(4, S.project.meta.duration, maxDur));
-  const start = fitStart(t, dur);
-  const seg = segmentAt(start);
-  return op({
-    op: 'addElement',
-    element: {
-      type: isVid ? 'video' : 'image', src: m.path, start, duration: dur,
-      segment: seg?.id || null, transform: { x: 0, y: 0, scale: 1, rotation: 0, opacity: 1 },
-      style: { fit: 'cover' }, motion: { type: 'in', amount: 0.08 },
-      fadeIn: 0.2, fadeOut: 0.2,
-      meta: sourceDuration ? { sourceDuration } : {},
-    },
-  }).then((j) => { if (j?.changed?.[0]) select({ elementId: j.changed[0] }); });
+  const duration = isVid && sourceDuration ? sourceDuration : 5;
+  const element = (at) => ({
+    type: isVid ? 'video' : 'image', name: m.name, src: m.path,
+    segment: segmentAt(at)?.id || null,
+    transform: { x: 0, y: 0, scale: 1, rotation: 0, opacity: 1 },
+    style: { fit: 'cover' }, motion: { type: 'in', amount: 0.08 },
+    fadeIn: 0.2, fadeOut: 0.2,
+    ...(sourceDuration ? { meta: { sourceDuration } } : {}),
+  });
+  return insertTimelineRow({
+    element, start, duration,
+    note: isVid && !sourceDuration ? `未能读取「${m.name}」的时长，按 5s 加入` : '',
+    level: isVid && !sourceDuration ? 'warn' : 'success',
+  });
 }
 
-/** Add a sound file as a normal timeline element at the playhead (or time t). */
-async function addAudioAt(m, t = S.time) {
+/**
+ * Add a sound file as a normal timeline element at the playhead (or start).
+ * Repeated adds are allowed (no source de-duplication): the row goes above the
+ * selection like any other new row, duration = source length (unknown → 5s).
+ */
+async function addAudioAt(m, start = null) {
   if (!S.project) return null;
-  const existing = S.project.elements.find((e) => e.type === 'audio' && e.src === m.path);
-  if (existing) {
-    select({ elementId: existing.id });
-    toast('这段声音已经在时间线里了', 'info');
-    return existing.id;
-  }
   const sourceDuration = await probeSourceDuration(m.path);
-  const total = Math.max(0.05, Number(S.project.meta.duration) || 12);
-  const start = Math.max(0, Math.min(total - 0.05, t));
-  const wanted = Math.max(0.05, total - start);
-  const duration = sourceDuration ? Math.min(wanted, Math.max(0.05, sourceDuration)) : wanted;
-  return op({
-    op: 'addElement',
-    element: {
-      type: 'audio', name: m.name, src: m.path, start, duration, srcIn: 0, volume: 1,
-      meta: sourceDuration ? { sourceDuration } : {},
-    },
-  }).then((j) => {
-    if (!j) return null;
-    if (j.changed?.[0]) select({ elementId: j.changed[0] });
-    toast(sourceDuration && wanted > duration + 1e-6
-      ? `声音已加入时间线：${m.name}（已按素材长度截到 ${duration.toFixed(2)}s，右键可开启循环）`
-      : `声音已加入时间线：${m.name}`, 'success');
-    return j.changed?.[0] || null;
+  const duration = sourceDuration || 5;
+  const element = () => ({
+    type: 'audio', name: m.name, src: m.path, srcIn: 0, volume: 1,
+    ...(sourceDuration ? { meta: { sourceDuration } } : {}),
+  });
+  return insertTimelineRow({
+    element, start, duration,
+    note: sourceDuration ? `声音已加入时间线：${m.name}` : `未能读取「${m.name}」的时长，按 5s 加入`,
+    level: sourceDuration ? 'success' : 'warn',
   });
 }
 
@@ -2031,6 +2174,8 @@ async function boot() {
     onAdd: (m, kind) => addMediaFile(m, kind),
     onSoundtrack: (m) => setSoundtrack(m),
     onList: (list) => { S.media = list; },
+    onDragStart: (m, kind) => mediaDropApi?.begin(m, kind),
+    onDragEnd: () => mediaDropApi?.end(),
     menu: (x, y, items) => showContextMenu(x, y, items),
     toast,
   });
@@ -2044,7 +2189,7 @@ async function boot() {
     reveal: (ref) => timeline.reveal?.(ref),
     seek: (t) => { pause(); setTime(t); },
   });
-  initMediaDrop();
+  mediaDropApi = initMediaDrop();
   statusBar.setCapabilities({ blender: S.blender, ffmpeg: state.ffmpeg, ai: S.agentAvailable });
   if (S.render) statusBar.setRender(S.render, { initial: true });
 
@@ -2100,13 +2245,12 @@ async function boot() {
     const dist = kind === 'image' || kind === 'video' ? 26 : kind === 'text' ? 24 : 30;
     const base = [c.pos[0] + fwd[0] * dist, c.pos[1] + fwd[1] * dist, c.pos[2] + fwd[2] * dist];
     const pivot = base.map((v, i) => Math.round((v + right[i] * ox + up[i] * oy) * 100) / 100);
-    const id = `ob_${Date.now().toString(36)}`;
     const labels = { box: '立方体', cylinder: '圆柱', empty: '空元素', image: '图片', video: '视频', text: '3D 文字' };
     const label = labels[kind] || '立方体';
     // Images/text are single-sided: turn their front towards the camera that
     // is placing them, otherwise the viewport/Blender show a mirrored back.
     const facing = { dir: fwd.map((v) => -v), roll: 0 };
-    const common = { id, name: `${label} ${n}`, pivot, start: 0, duration: S.project.meta.duration };
+    const common = { name: `${label} ${n}`, pivot };
     let object;
     if (kind === 'empty') {
       object = { ...common, type: 'empty', geom: { w: 1, h: 1, d: 1 } };
@@ -2132,21 +2276,25 @@ async function boot() {
         style: { color: '#17d9ff', emissive: 1 },
       };
     }
-    const j = await op({ op: 'objectAdd', object });
-    if (!j) return null;
-    select({ objectId: id });
-    switchRightTab('insp');
-    if (kind === 'text') {
-      const ta = $('#panelInsp textarea');
-      if (ta) { ta.focus(); ta.select(); }
-    }
     const tips = {
       empty: '已添加空元素；可把其它元素挂到它下面',
       image: '已添加图片平面；检查器「内容」里可换素材和适配',
       video: '已添加视频平面；检查器「内容」里可换素材、入点和速度',
       text: '已添加 3D 文字；检查器「内容」里可改文字、字号和字体',
     };
-    toast(tips[kind] || `已添加${label}；拖动它会在当前时间打位置关键帧`, 'success');
+    // Same insertion path as 2D rows: playhead start, 5s, above the selection,
+    // one batch that also extends the project and persists the row order.
+    const id = await insertTimelineRow({
+      object,
+      start: timeline.playheadStart(),
+      duration: 5,
+      note: tips[kind] || `已添加${label}；拖动它会在当前时间打位置关键帧`,
+    });
+    if (!id) return null;
+    if (kind === 'text') {
+      const ta = $('#panelInsp textarea');
+      if (ta) { ta.focus(); ta.select(); }
+    }
     return id;
   };
 
@@ -3302,6 +3450,8 @@ async function boot() {
     setEditMode: (on) => setEditMode(on),
     setViewMode: (m) => setViewMode(m),
     addElement: addSceneElement,
+    add2DElement: (kind) => add2DElement(kind),
+    addMediaFile: (m, kind, start) => addMediaFile(m, kind, start),
     pause: () => pause(),
     play: () => play(),
     renderActions,
