@@ -1,6 +1,6 @@
 // Edit operations: the ONE way anything (UI, CLI, AI) mutates a project.
 // Ops are plain JSON so they can be logged, replayed, diffed and undone.
-import { DEFAULT_TRANSFORM, DEFAULT_STYLE, DEFAULT_FX, ELEMENT_TYPES, newId } from './schema.js';
+import { DEFAULT_TRANSFORM, DEFAULT_STYLE, DEFAULT_FX, ELEMENT_TYPES, newId, normalizeSpatialNode } from './schema.js';
 import { SCENE_VERSION, normalizeObject } from './scene.js';
 import { normalizeCamera, retimeCamSpans, retimePathSpan, cameraRange } from './camera.js';
 import { assertSafeData, pathParts } from './json.js';
@@ -553,6 +553,9 @@ export function applyOp(p, op) {
         srcIn: el.srcIn ?? 0,
         meta: el.meta || {},
       };
+      // A migrated/upgraded 2D element carries its unified node on create.
+      // Old callers that only send transform keep the legacy path.
+      if (el.node !== undefined) full.node = normalizeSpatialNode(el.node);
       // Property links travel with the element on create (never auto-created).
       const links = el.links === undefined ? [] : normalizeLinks(el.links, { strict: true });
       if (links.length) full.links = links;
