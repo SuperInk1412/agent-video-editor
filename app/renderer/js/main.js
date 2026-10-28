@@ -16,8 +16,8 @@ import { frameStep } from './timeline-math.js';
 import { initCommands, register as registerCommand, dispatch as dispatchCommand, openPalette, openShortcuts } from './commands.js';
 import { pathPos, cameraTransform, cameraRange } from '/core/camera.js';
 import { curveSegments } from '/core/curves.js';
-import { toLocalPoint, toLocalVector, ancestors, childrenOf, elementCarrier, carrierMatrix } from '/core/hierarchy.js';
-import { evalCameraWorld, objectWorldPose } from '/core/spatial-parent.js';
+import { ancestors, childrenOf, elementCarrier, carrierMatrix } from '/core/hierarchy.js';
+import { evalCameraWorld, objectLocalPoint, objectLocalVector, objectWorldPose } from '/core/spatial-parent.js';
 import { defaultCamera } from '/core/space.js';
 import { newId } from '/core/schema.js';
 import { sampleTrack } from '/core/time.js';
@@ -2002,7 +2002,7 @@ async function boot() {
         run: () => {
           const d = [cam.pos[0] - pose.worldPos[0], cam.pos[1] - pose.worldPos[1], cam.pos[2] - pose.worldPos[2]];
           const l = Math.hypot(d[0], d[1], d[2]) || 1;
-          const local = toLocalVector(S.project, o, at, d.map((v) => v / l));
+          const local = objectLocalVector(S.project, o, at, d.map((v) => v / l));
           op({ op: 'objectKey', id, path: 'dir', t: at, v: local });
         },
       },
@@ -2012,7 +2012,7 @@ async function boot() {
         run: () => {
           const h = Number(o.geom?.h) || 2;
           const worldPivot = [pose.pivot[0], h / 2, pose.pivot[2]];
-          const local = toLocalPoint(S.project, o, at, worldPivot);
+          const local = objectLocalPoint(S.project, o, at, worldPivot);
           op({ op: 'objectKey', id, path: 'pivot', t: at, v: local.map((v) => Math.round(v * 100) / 100) });
         },
       },
@@ -2996,7 +2996,7 @@ async function boot() {
         r2(drag.world0[1] + w[1] - drag.hit[1]),
         r2(drag.world0[2] + w[2] - drag.hit[2]),
       ], e);
-      drag.pivot = toLocalPoint(S.project, obj, drag.keyT, target).map(r2);
+      drag.pivot = objectLocalPoint(S.project, obj, drag.keyT, target).map(r2);
       const key = obj.tracks?.pivot?.[drag.index];
       if (key) key.v = drag.pivot.slice();
       drag.moved = true;
@@ -3018,7 +3018,7 @@ async function boot() {
         r2(drag.p0[1] + drag.axis[1] * delta),
         r2(drag.p0[2] + drag.axis[2] * delta),
       ], e);
-      drag.pivot = toLocalPoint(S.project, obj, S.time, target).map(r2);
+      drag.pivot = objectLocalPoint(S.project, obj, S.time, target).map(r2);
       setLiveKey(obj, 'pivot', drag.pivot);
       drag.moved = true;
       preview.render(S.time);
@@ -3038,7 +3038,7 @@ async function boot() {
         r2(drag.world0[1] + w[1] - drag.hit[1]),
         r2(drag.world0[2] + w[2] - drag.hit[2]),
       ], e);
-      drag.pivot = toLocalPoint(S.project, obj, S.time, target).map(r2);
+      drag.pivot = objectLocalPoint(S.project, obj, S.time, target).map(r2);
       setLiveKey(obj, 'pivot', drag.pivot);
       drag.moved = true;
       preview.render(S.time);

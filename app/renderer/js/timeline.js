@@ -7,7 +7,7 @@
 // its attributes are folded inside the camera row.
 import { timecode, sampleTrack } from '/core/time.js';
 import { objectPose } from '/core/scene.js';
-import { childrenOf, wouldCycle } from '/core/hierarchy.js';
+import { childrenOf } from '/core/hierarchy.js';
 import { pathPos, cameraTransform, cameraParamValue, cameraRange } from '/core/camera.js';
 import {
   emptySelection, normalizeSelection, selectOne, pickSelection, legacyFields,
@@ -1485,7 +1485,7 @@ export class Timeline {
     kind.dataset.tip = camRank == null
       ? '相机'
       : `相机叠层：从上往下第 ${camRank + 1} / ${this._rankCam.size} 层；拖到另一台相机上下会改叠层（并激活），拖过其它类型只改显示`;
-    g.append(eye, caret, dot, name, kind);
+    g.append(eye, this._parentButton('cam', cam), caret, dot, name, kind);
 
     const track = el('div', 'tl-track');
     const block = el('div', 'blk cam');
@@ -3109,16 +3109,17 @@ export class Timeline {
   }
 
   /**
-   * Parent button in a header row. 2D children use the world-space spatialParent
-   * op (any element/object/camera parent); 3D children keep the existing
-   * objectParent (3D object parents only). Press and drag to a target row;
-   * a plain click removes the current parent.
+   * Parent button in a header row. Every host can be a spatial child now
+   * (core/spatial-parent.js::spatialParent writes `el.parent` for 2D elements,
+   * `ob.frameParent` / `cam.frameParent` for 3D objects and cameras). Press and
+   * drag to a target row of any kind; a plain click removes the parent.
    */
   _parentButton(kind, host) {
+    const record = kind === 'el' ? host.parent : (host.frameParent || (kind === 'ob' ? host.parent : null));
     const btn = h('button', {
-      type: 'button', class: `tl-objparentbtn${host.parent?.id ? ' on' : ''}`,
-      'aria-label': '空间父级', 'data-tip': host.parent?.id
-        ? `空间父级：${this._parentName(host.parent)}\n拖动到别的元素换父级；单击解除`
+      type: 'button', class: `tl-objparentbtn${record?.id ? ' on' : ''}`,
+      'aria-label': '空间父级', 'data-tip': record?.id
+        ? `空间父级：${this._parentName(record)}\n拖动到别的元素换父级；单击解除`
         : '空间父级\n按住拖到目标元素行',
     }, '↳');
     btn.addEventListener('pointerdown', (ev) => {
@@ -3139,12 +3140,19 @@ export class Timeline {
   }
 
   _removeParent(kind, host) {
-    if (!host?.parent?.id) return;
     if (kind === 'el') {
+      if (!host?.parent?.id) return;
       this._runParentOp(host.parent.mode === 'world'
         ? { op: 'spatialUnparent', id: host.id }
         : { op: 'elementUnparent', id: host.id, t: round3(this.time) });
-    } else {
+      return;
+    }
+    if (host?.frameParent?.id) {
+      this._runParentOp({ op: 'spatialUnparent', id: host.id });
+      return;
+    }
+    // Keep the old 3D parent button behaviour when only obj.parent is set.
+    if (kind === 'ob' && host?.parent?.id) {
       this._runParentOp({ op: 'objectUnparent', id: host.id, t: round3(this.time) });
     }
   }
@@ -3215,14 +3223,9 @@ export class Timeline {
       }
       const target = targetOf(row);
       if (!target) return this.onToast?.('没有落在元素行上');
-      if (target.kind === 'el' && target.id === childId) return this.onToast?.('不能把自己设成父级');
-      if (kind === 'ob') {
-        if (target.kind !== 'ob') return this.onToast?.('3D 子级目前只能挂 3D 对象父级');
-        const objects = this.project?.scene?.objects || [];
-        if (wouldCycle(objects, childId, target.id)) return this.onToast?.('父子级会成环');
-        this._runParentOp({ op: 'objectParent', id: childId, parent: target.id, t: round3(this.time) });
-        return;
-      }
+      if (target.id === childId) return this.onToast?.('不能把自己设成父级');
+      // One op for every child kind: 2D elements, 3D objects and cameras all
+      // become spatial children (op writes `el.parent` / `*.frameParent`).
       this._runParentOp({ op: 'spatialParent', id: childId, parent: target.id, t: round3(this.time) });
     };
     const cancel = () => clean();

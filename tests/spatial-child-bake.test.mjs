@@ -11,7 +11,8 @@ import { applyOp } from '../core/ops.js';
 import { ensureSpace, screenCenterY } from '../core/space.js';
 import { evalCamera } from '../core/camera.js';
 import { worldPose } from '../core/hierarchy.js';
-import { evalCameraWorld, objectWorldPose } from '../core/spatial-parent.js';
+import { evalCameraWorld, objectLocalPoint, objectLocalVector, objectWorldPose } from '../core/spatial-parent.js';
+import { objectPose } from '../core/scene.js';
 import { bakeObjects, buildShot } from '../engine/shot.js';
 
 const near = (a, b, eps = 1e-3, msg = '') => {
@@ -74,6 +75,21 @@ test('spatial-child-bake: baked objects follow the same objectWorldPose as the p
   const freeObj = plain.scene.objects.find((o) => o.id === free);
   const freeTrack = bakeObjects(plain, { fps: 24, from: 0, to: 1 }).find((o) => o.id === free).frames;
   near(freeTrack[0].loc, worldPose(plain.scene.objects, freeObj, 0).worldPos.map(r3), 1e-12, 'plain bake unchanged');
+});
+
+test('spatial-child-bake: the gizmo inverse maps a parented object world pose back to its local values', () => {
+  const p = fresh();
+  const parent = addEl(p, [0, cy, 0]);
+  keyRoll(p, parent.id, 0, 90);
+  const ob = addEmpty(p, [2, cy, 0]);
+  const obj = p.scene.objects.find((o) => o.id === ob);
+  applyOp(p, { op: 'spatialParent', id: ob, parent: parent.id, t: 0 });
+  for (const t of [0, 1, 2]) {
+    const world = objectWorldPose(p, obj, t);
+    const local = objectPose(obj, t);
+    near(objectLocalPoint(p, obj, t, world.pivot), local.pivot, 1e-6, `local pivot t=${t}`);
+    near(objectLocalVector(p, obj, t, world.basis.forward), local.dir, 1e-6, `local dir t=${t}`);
+  }
 });
 
 test('spatial-child-bake: a camera frameParent is baked into the shot and camera layers', () => {
