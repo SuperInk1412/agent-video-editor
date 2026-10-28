@@ -30,20 +30,20 @@
 // (length / angle / ratio / number); units are never auto-converted.
 //
 // Integration is deliberately one-sided: nothing in core/evaluate.js resolves
-// links on its own. `elementOverlay` (legacy 2D `evalElement` consumers),
-// `objectPoseWithLinks` and `cameraValueWithLinks` are the pure bridges a
-// preview, the timeline or the bake can call:
+// links on its own. `elementOverlay` (2D `evalElement` consumers),
+// `objectPoseWithLinks` and `cameraValueWithLinks` are the pure bridges; the
+// picture producers call the wrappers in core/link-eval.js, which also thread
+// the resolvers through spatial parents and the camera evaluator:
 //
-//   evalElement(el, t, meta, elementOverlay(project, el, t))   // core/evaluate.js
-//   objectPoseWithLinks(project, obj, t)                       // instead of objectPose
-//   cameraValueWithLinks(project, cam, path, t)                // instead of cameraParamValue
+//   evalElement(el, t, meta, elementOverlay(project, el, t))      // core/evaluate.js
+//   elementWorldNodeWithLinks(project, el, t)                     // 2D node viewport
+//   objectWorldPoseWithLinks(project, obj, t)                     // 3D + shot bake
+//   evalCameraWorldWithLinks(project, t, cam)                     // camera + shot bake
+//   elementLinkOverlay / elementLinkOverlayTable(project, el, …)  // blender overlay
 //
-// TODO(ui-round3 integration): preview.js / preview3d.js / engine/shot.js still
-// call evalElement/objectPose/cameraParamValue without these helpers, and
-// blender/vdm_build.py::eval_element has no overlay argument yet. Property
-// links therefore do not change the picture until those call sites pass the
-// bridges (and the Python side mirrors the overlay order: keyframes → layout
-// links → motion presets → fades).
+// This module imports no spatial module on purpose: core/spatial-parent.js →
+// core/spatial.js → core/space.js → core/ops.js imports the op lists here, so a
+// back-edge would be a TDZ cycle. core/link-eval.js sits above both.
 import { isRecord, pathParts } from './json.js';
 import { clamp, sampleTrack } from './time.js';
 import { PX_PER_M, basisFromDir, objectPose, sampleAxes, sampleChannel } from './scene.js';
@@ -929,24 +929,30 @@ const hasLink = (host, path) => Array.isArray(host?.links)
   && host.links.some((link) => isRecord(link) && link.enabled !== false && link.to === path);
 
 /**
- * Legacy 2D elements: effective `evalElement` fields, in legacy units (x/y in
- * project pixels, z in metres, rotation in degrees, uniform scale). Migrated
- * elements (`el.node`) return null: they render through the node model, which
- * should call `resolveEffectiveValue` for each node channel instead.
+ * Effective `evalElement` fields, in legacy units (x/y in project pixels, z in
+ * metres, rotation in degrees, uniform scale).
+ *
+ * Legacy 2D elements get every linked channel. A migrated element (`el.node`)
+ * renders its placement through the node model (core/link-eval.js::
+ * elementNodeWithLinks), so only the non-node fields it still reads through
+ * `evalElement` are returned here: opacity, style.size and fx.glow.
  */
 export function elementOverlay(project, el, t) {
-  if (!isRecord(el) || isRecord(el.node)) return null;
+  if (!isRecord(el)) return null;
   if (!Array.isArray(el.links) || !el.links.length) return null;
+  const node = isRecord(el.node);
   const ref = hostRefFor('el', el);
   const cy = screenCenterY(project?.meta || {});
   const value = (path) => effectiveFor(project, ref, path, t);
   const out = {};
-  if (hasLink(el, 'pivot.x')) out.x = value('pivot.x') * PX_PER_M;
-  if (hasLink(el, 'pivot.y')) out.y = (cy - value('pivot.y')) * PX_PER_M;
-  if (hasLink(el, 'pivot.z')) out.z = value('pivot.z');
-  if (hasLink(el, 'scale.x')) out.scale = value('scale.x');
-  else if (hasLink(el, 'scale.y')) out.scale = value('scale.y');
-  if (hasLink(el, 'roll')) out.rotation = value('roll');
+  if (!node) {
+    if (hasLink(el, 'pivot.x')) out.x = value('pivot.x') * PX_PER_M;
+    if (hasLink(el, 'pivot.y')) out.y = (cy - value('pivot.y')) * PX_PER_M;
+    if (hasLink(el, 'pivot.z')) out.z = value('pivot.z');
+    if (hasLink(el, 'scale.x')) out.scale = value('scale.x');
+    else if (hasLink(el, 'scale.y')) out.scale = value('scale.y');
+    if (hasLink(el, 'roll')) out.rotation = value('roll');
+  }
   if (hasLink(el, 'opacity')) out.opacity = value('opacity');
   if (hasLink(el, 'style.size')) out.size = value('style.size');
   if (hasLink(el, 'fx.glow')) out.glow = value('fx.glow');

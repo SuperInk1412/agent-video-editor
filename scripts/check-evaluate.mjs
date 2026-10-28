@@ -46,6 +46,19 @@ try {
     { t: 0, path: 'transform.x', value: 0, curve },
     { t: 4, path: 'transform.x', value: 128 },
   ] });
+  // Property links: engine/blender.js attaches `_linkOverlay` to 2D elements
+  // (core/link-eval.js::elementLinkOverlayTable), and vdm_build.py must apply
+  // it BEFORE the motion preset / fades, exactly like evalElement's overlay.
+  // Times are frame-aligned so JS and Python index the same table row.
+  const linkValues = Array.from({ length: 4 * 24 + 1 }, (_, f) => (f >= 24 && f <= 72
+    ? { x: f * 2, scale: 1 + f / 100, rotation: f / 10, opacity: 0.5 }
+    : {}));
+  add({ keyframes: [
+    { t: 0, path: 'transform.x', value: 3, ease: 'linear' },
+    { t: 4, path: 'transform.x', value: 11 },
+  ], _linkOverlay: { fps: 24, values: linkValues } }, [0, 1, 2, 3, 4]);
+  add({ fadeIn: 0.5, motion: { type: 'in', amount: 0.5, span: [0, 4] },
+    _linkOverlay: { fps: 24, values: linkValues } }, [1, 2, 3]);
   const input = path.join(temporary, 'cases.json');
   const output = path.join(temporary, 'results.json');
   const script = path.join(temporary, 'check.py');
@@ -60,8 +73,14 @@ try {
   await promisify(execFile)(await findBlender(), ['-b', '--factory-startup', '--python-exit-code', '1', '-P', script], { timeout: 60000, maxBuffer: 4 * 1024 * 1024 });
   const results = JSON.parse(await fs.readFile(output, 'utf8'));
   const fields = ['x', 'y', 'scale', 'rotation', 'opacity', 'glow', 'text', 'size', 'color'];
+  const overlayAt = (element, time) => {
+    const table = element._linkOverlay;
+    if (!table) return null;
+    const index = Math.max(0, Math.min(table.values.length - 1, Math.round(time * table.fps)));
+    return table.values[index] || null;
+  };
   cases.forEach((item, i) => {
-    const expected = evalElement(item.element, item.time, item.meta);
+    const expected = evalElement(item.element, item.time, item.meta, overlayAt(item.element, item.time));
     for (const field of fields) assert.equal(results[i][field], expected[field], `case ${i} ${field} at ${item.time}s`);
   });
   console.log(`[check] PASS — ${cases.length} JS / Blender samples match exactly (${fields.length} fields each)`);

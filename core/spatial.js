@@ -225,10 +225,10 @@ const cameraProject = (cam) => ({
 });
 
 /** Normalised camera + its whole evaluated state at t (null for no camera). */
-function cameraState(cam, t) {
+function cameraState(cam, t, opts = null) {
   if (!cam) return null;
   const at = Number.isFinite(Number(t)) ? Number(t) : 0;
-  return evalCamera(cameraProject(normalizeCamera(cam)), at);
+  return evalCamera(cameraProject(normalizeCamera(cam)), at, opts);
 }
 
 /**
@@ -238,8 +238,8 @@ function cameraState(cam, t) {
  * framing. pictureScale / picturePivot / pictureOffset / fov are NOT node
  * fields (fov is lens zoom, the picture* values are the legacy compositor).
  */
-export function cameraNode(cam, t = 0) {
-  const st = cameraState(cam, t);
+export function cameraNode(cam, t = 0, opts = null) {
+  const st = cameraState(cam, t, opts);
   if (!st) return normalizeSpatialNode(null);
   let dir = V.sub(st.look, st.pos);
   if (V.len(dir) < 1e-9) dir = [0, 0, -1];
@@ -257,9 +257,13 @@ export function cameraNode(cam, t = 0) {
  * convention, shake included), basis from the evaluated look direction + roll,
  * scale from the camera scale. Use this — not frameOf(cameraNode) — whenever a
  * camera is a parent or is attached to a parent.
+ *
+ * `opts.param(cam, path, t)` resolves property links (core/links.js), so a
+ * parented child follows the camera's *effective* roll/scale, not its local
+ * value.
  */
-export function cameraWorldFrame(cam, t = 0) {
-  const st = cameraState(cam, t);
+export function cameraWorldFrame(cam, t = 0, opts = null) {
+  const st = cameraState(cam, t, opts);
   if (!st) return { pos: [0, 0, 0], basis: IDENTITY_BASIS(), scale: [1, 1, 1] };
   let dir = V.sub(st.look, st.pos);
   if (V.len(dir) < 1e-9) dir = [0, 0, -1];

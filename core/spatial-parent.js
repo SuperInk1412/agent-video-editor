@@ -119,8 +119,10 @@ function elementById(project, id) {
  * exactly like `app/renderer/js/node-at.js::elementNodeAt`. Kept here so core
  * ops can bind at a playhead without importing the renderer; keep the two
  * samplers in sync (tests cross-check them).
+ *
+ * `core/links.js::elementNodeWithLinks` wraps this with property links.
  */
-function sampledElementNode(project, el, t) {
+export function elementLocalNode(project, el, t) {
   const meta = isRecord(project?.meta) ? project.meta : {};
   const base = normalizeSpatialNode(elementNode(el, meta, t));
   if (!isRecord(el?.node)) return base;
@@ -162,6 +164,7 @@ function sampledElementNode(project, el, t) {
  * guards and are safe to omit.
  */
 export function hostFrameAt(project, id, t = 0, opts = {}) {
+  opts = opts || {};
   const key = id == null ? '' : String(id);
   if (!key) return null;
   const depth = Number(opts.depth) || 0;
@@ -175,12 +178,12 @@ export function hostFrameAt(project, id, t = 0, opts = {}) {
   seen.add(key);
   const where = { ...opts, depth, seen };
   if (kind === 'element') {
-    const node = elementWorldNodeAt(project, host, t, opts.localNodeAt, depth, seen);
+    const node = elementWorldNodeAt(project, host, t, opts.localNodeAt, depth, seen, opts);
     return { kind, host, frame: frameOf(node), node, bind: bindFrameFor(node) };
   }
   const base = kind === 'object'
-    ? poseFrameOf(worldPose(project, host, t))
-    : cameraWorldFrame(host, t);
+    ? poseFrameOf(worldPose(project, host, t, null, 0, opts.poseAt))
+    : cameraWorldFrame(host, t, opts.param ? { param: opts.param } : null);
   const parent = worldFrameParent(host);
   if (!parent || depth >= MAX_DEPTH || seen.has(String(parent.id))) {
     return { kind, host, frame: base, bind: bindFrameFrom(base) };
@@ -203,13 +206,17 @@ export function hostWorldNode(project, id, t = 0, opts = {}) {
  * `frameParent` this is byte-for-byte `worldPose`, so every existing render /
  * bake stays identical. `src` may be the project or its scene.objects array;
  * `cache` is the same Map `worldPose` takes.
+ *
+ * `opts.poseAt(obj, t)` overrides every local pose in both graphs (property
+ * links: core/links.js::objectWorldPoseWithLinks); `opts.param`,
+ * `opts.localNodeAt` and `opts.poseAt` also reach the frameParent host.
  */
-export function objectWorldPose(project, obj, t, cache = null) {
+export function objectWorldPose(project, obj, t, cache = null, opts = null) {
   const src = Array.isArray(project) ? { scene: { objects: project } } : project;
-  const base = worldPose(src, obj, t, cache);
+  const base = worldPose(src, obj, t, cache, 0, opts?.poseAt);
   const parent = worldFrameParent(obj);
   if (!parent) return base;
-  const resolved = hostFrameAt(src, parent.id, t);
+  const resolved = hostFrameAt(src, parent.id, t, opts);
   if (!resolved) return base;
   const delta = parentDelta(resolved.frame, parent.bind, parent.inherit);
   if (!delta) return base;
@@ -234,25 +241,31 @@ export function objectWorldPose(project, obj, t, cache = null) {
 /**
  * evalCamera-compatible camera state with the camera's `frameParent` applied:
  * `pos` / `look` / `roll` are the parented world frame, everything else
- * (`fov`, `opacity`, picture transform, dof, ...) is the untouched local
- * evaluation. Without `frameParent` this returns exactly `evalCamera`.
+ * (`fov`, `opacity`, picture transform, dof, ...) is the local evaluation.
+ * Without `frameParent` this returns exactly `evalCamera`.
+ *
+ * `opts.param(cam, path, t)` resolves property links for both the camera itself
+ * and its frameParent host (core/links.js::evalCameraWorldWithLinks).
  *
  * Pass `cam` to evaluate a specific camera (camera stack layer); omit it for
  * the shot that is live at t (evalCamera's current-shot rule).
  */
-export function evalCameraWorld(project, t = 0, cam = null) {
+export function evalCameraWorld(project, t = 0, cam = null, opts = null) {
   const at = Number.isFinite(Number(t)) ? Number(t) : 0;
   const host = cam
     ? normalizeCamera(cam)
     : (cameraAtTime(project, at) || normalizeCamera(project?.camera || null));
   const base = cam
-    ? evalCamera({ camera: host, cameras: [host], activeCameraId: host.id }, at)
-    : evalCamera(project, at);
+    ? evalCamera({ camera: host, cameras: [host], activeCameraId: host.id }, at, opts)
+    : evalCamera(project, at, opts);
   const parent = worldFrameParent(host);
   if (!parent) return base;
-  const resolved = hostFrameAt(project, parent.id, at);
+  const resolved = hostFrameAt(project, parent.id, at, opts);
   if (!resolved) return base;
-  const frame = applyParentToFrame(cameraWorldFrame(host, at), resolved.frame, parent.bind, parent.inherit);
+  const frame = applyParentToFrame(
+    cameraWorldFrame(host, at, opts?.param ? { param: opts.param } : null),
+    resolved.frame, parent.bind, parent.inherit,
+  );
   const forward = frame.basis[2].slice();
   const pos = frame.pos.slice();
   const distance = Math.max(1e-3, len(sub(base.look, base.pos)) || 1);
@@ -272,23 +285,23 @@ export function evalCameraWorld(project, t = 0, cam = null) {
  * then the shipped 3D parent chain, so dragging a parented object under the
  * pointer does not jump.
  */
-export function objectLocalPoint(project, obj, t, worldPoint) {
+export function objectLocalPoint(project, obj, t, worldPoint, opts = null) {
   const parent = worldFrameParent(obj);
-  const resolved = parent ? hostFrameAt(project, parent.id, t) : null;
-  if (!resolved) return toLocalPoint(project, obj, t, worldPoint);
+  const resolved = parent ? hostFrameAt(project, parent.id, t, opts) : null;
+  if (!resolved) return toLocalPoint(project, obj, t, worldPoint, opts?.poseAt);
   const delta = parentDelta(resolved.frame, parent.bind, parent.inherit);
   const local = delta ? inverseMapPoint(delta, worldPoint) : worldPoint;
-  return toLocalPoint(project, obj, t, local);
+  return toLocalPoint(project, obj, t, local, opts?.poseAt);
 }
 
 /** Inverse world direction -> object local direction (frameParent aware). */
-export function objectLocalVector(project, obj, t, worldVector) {
+export function objectLocalVector(project, obj, t, worldVector, opts = null) {
   const parent = worldFrameParent(obj);
-  const resolved = parent ? hostFrameAt(project, parent.id, t) : null;
-  if (!resolved) return toLocalVector(project, obj, t, worldVector);
+  const resolved = parent ? hostFrameAt(project, parent.id, t, opts) : null;
+  if (!resolved) return toLocalVector(project, obj, t, worldVector, opts?.poseAt);
   const delta = parentDelta(resolved.frame, parent.bind, parent.inherit);
   const local = delta ? inverseMapVector(delta, worldVector) : worldVector;
-  return toLocalVector(project, obj, t, local);
+  return toLocalVector(project, obj, t, local, opts?.poseAt);
 }
 
 // ---------------------------------------------------------------- element nodes
@@ -298,21 +311,24 @@ export function objectLocalVector(project, obj, t, worldVector) {
  *
  * `localNodeAt(el, t)` optionally overrides how a local node is sampled (the
  * renderer passes `elementNodeAt`); the default is the core sampler above.
+ * `opts` (poseAt / param / localNodeAt) reaches every host in the chain, so a
+ * property-link-aware caller resolves links on element, object and camera
+ * parents alike.
  * Cycles, missing parents and chains deeper than MAX_DEPTH fall back to the
  * local node instead of throwing (hand-edited project data must not crash the
  * preview).
  */
-export function elementWorldNode(project, el, t = null, localNodeAt = null) {
+export function elementWorldNode(project, el, t = null, localNodeAt = null, opts = null) {
   const sampler = typeof localNodeAt === 'function'
     ? localNodeAt
-    : (host, at) => sampledElementNode(project, host, at);
-  return elementWorldNodeAt(project, el, t, sampler, 0, new Set([String(el?.id ?? '')]));
+    : (host, at) => elementLocalNode(project, host, at);
+  return elementWorldNodeAt(project, el, t, sampler, 0, new Set([String(el?.id ?? '')]), opts);
 }
 
-function elementWorldNodeAt(project, el, t, localNodeAt, depth, seen) {
+function elementWorldNodeAt(project, el, t, localNodeAt, depth, seen, opts = null) {
   const sampler = typeof localNodeAt === 'function'
     ? localNodeAt
-    : (host, at) => sampledElementNode(project, host, at);
+    : (host, at) => elementLocalNode(project, host, at);
   const local = normalizeSpatialNode(sampler(el, t));
   const parent = elementWorldParent(el);
   if (!parent || depth >= MAX_DEPTH) return local;
@@ -320,7 +336,7 @@ function elementWorldNodeAt(project, el, t, localNodeAt, depth, seen) {
   const visited = seen || new Set();
   if (visited.has(pid)) return local; // a stored loop: stop at the child
   const resolved = hostFrameAt(project, pid, t, {
-    depth: depth + 1, seen: visited, localNodeAt,
+    ...(opts || {}), depth: depth + 1, seen: visited, localNodeAt,
   });
   if (!resolved) return local; // missing parent host: keep the local placement
   return applyParentToNode(local, resolved.frame, parent.bind, parent.inherit);
