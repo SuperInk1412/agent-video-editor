@@ -20,7 +20,9 @@ import {
 } from '/core/timeline-order.js';
 import { attachNumberField, readNumber, writeNumber } from './numfield.js';
 import { h, icon, token, prefs } from './ui.js';
-import { findLinkTarget } from '/core/links.js';
+import {
+  cameraValueWithLinks, findLinkTarget, objectPoseWithLinks, writeBackLocalValue,
+} from '/core/links.js';
 import {
   cameraRowLinkPaths, elementRowLinkPaths, linkOf, linkPropLabel, linkSourceLabel,
   objectRowLinkPaths, openLinkMenu,
@@ -1858,7 +1860,8 @@ export class Timeline {
   }
 
   _camValue(cam, path, t = this.time) {
-    return cameraParamValue(cam, path, t);
+    const linked = cameraValueWithLinks(this.project, cam, path, t);
+    return linked == null ? cameraParamValue(cam, path, t) : linked;
   }
 
   _camHasTrack(cam, path) {
@@ -1871,8 +1874,20 @@ export class Timeline {
     if (!cam || !pr) return;
     const values = pr.inputs.map((i) => readNumber(i));
     if (!values.every(Number.isFinite)) return;
-    const v = pr.dims === 1 ? values[0] : values;
+    let v = pr.dims === 1 ? values[0] : values;
     const t = this._editTimes.get(`cam:${camId}:${path}`) ?? this._frameTime();
+    // Camera rows display effective values; store the local value so the same
+    // picture remains after the edit. center -> pivot.*, scale -> scale.*.
+    if (path === 'center' || path === 'scale') {
+      const group = path === 'center' ? 'pivot' : 'scale';
+      v = values.map((n, i) => {
+        const back = writeBackLocalValue(this.project, { host: 'cam', id: camId }, `${group}.${AX[i]}`, t, n);
+        return Number.isFinite(back) ? back : n;
+      });
+    } else if (pr.dims === 1) {
+      const back = writeBackLocalValue(this.project, { host: 'cam', id: camId }, path, t, Number(v));
+      if (Number.isFinite(back)) v = back;
+    }
     if (this._camHasTrack(cam, path)) {
       this.onOp?.({ op: 'cameraParamKey', id: camId, path, t, v });
     } else {
@@ -1907,7 +1922,7 @@ export class Timeline {
       this.onOp?.({ op: 'cameraParamUnkey', id: camId, path, t });
       return;
     }
-    const v = this._camValue(cam, path, t);
+    const v = cameraParamValue(cam, path, t);
     this.onOp?.({ op: 'cameraParamKey', id: camId, path, t, v });
   }
 
@@ -2689,7 +2704,7 @@ export class Timeline {
     for (const pr of this._propRows) {
       const o = this._obj(pr.objId);
       if (!o) continue;
-      const pose = objectPose(o, t);
+      const pose = objectPoseWithLinks(this.project, o, t);
       if (pr.kind === 'geom') {
         const g = o.geom || {};
         ['w', 'h', 'd'].forEach((ax, i) => set(pr.inputs[i], Number(g[ax]) || 2));
@@ -2741,11 +2756,21 @@ export class Timeline {
     for (const pr of this._camPropRows) {
       const cam = this._camById(pr.camId);
       if (!cam) continue;
-      const value = this._camValue(cam, pr.path, t);
-      if (pr.kind === 'select') {
-        if (pr.sel && document.activeElement !== pr.sel) pr.sel.value = String(value);
+      let values;
+      if (pr.path === 'center' || pr.path === 'scale') {
+        const group = pr.path === 'center' ? 'pivot' : 'scale';
+        const tr = cameraTransform(cam, t);
+        values = AX.map((ax, i) => {
+          const linked = cameraValueWithLinks(this.project, cam, `${group}.${ax}`, t);
+          return Number.isFinite(linked) ? linked : tr[pr.path][i];
+        });
       } else {
-        const values = pr.dims === 1 ? [value] : (value || []);
+        const value = this._camValue(cam, pr.path, t);
+        values = pr.dims === 1 ? [value] : (value || []);
+      }
+      if (pr.kind === 'select') {
+        if (pr.sel && document.activeElement !== pr.sel) pr.sel.value = String(values[0]);
+      } else {
         pr.inputs.forEach((inp, i) => set(inp, values[i]));
       }
       if (pr.kf) {
@@ -2806,17 +2831,25 @@ export class Timeline {
     const v = pr.inputs.map((i) => readNumber(i));
     if (v.some((n) => !Number.isFinite(n))) return;
     const t = this._editTimes.get(`${objId}:${path}`) ?? this._frameTime();
-    if (this._hasTrack(o, path)) this.onOp?.({ op: 'objectKey', id: objId, path, t, v });
-    else this.onOp?.({ op: 'objectPatch', id: objId, patch: { [path]: v } });
+    // Rows display effective values; store the local value each linked axis
+    // needs at the playhead (unlinked axes pass through).
+    const local = v.map((n, i) => {
+      const back = writeBackLocalValue(this.project, { host: 'ob', id: objId }, `${path}.${'xyz'[i]}`, t, n);
+      return Number.isFinite(back) ? back : n;
+    });
+    if (this._hasTrack(o, path)) this.onOp?.({ op: 'objectKey', id: objId, path, t, v: local });
+    else this.onOp?.({ op: 'objectPatch', id: objId, patch: { [path]: local } });
   }
 
   _commitOpacity(objId) {
     const pr = this._propRows.find((x) => x.objId === objId && x.path === 'opacity');
     const o = this._obj(objId);
     if (!pr || !o) return;
-    const v = readNumber(pr.inputs[0]);
+    let v = readNumber(pr.inputs[0]);
     if (!Number.isFinite(v)) return;
     const t = this._editTimes.get(`${objId}:opacity`) ?? this._frameTime();
+    const back = writeBackLocalValue(this.project, { host: 'ob', id: objId }, 'opacity', t, v);
+    if (Number.isFinite(back)) v = back;
     if (this._hasTrack(o, 'opacity')) this.onOp?.({ op: 'objectKey', id: objId, path: 'opacity', t, v });
     else this.onOp?.({ op: 'objectPatch', id: objId, patch: { opacity: Math.max(0, Math.min(1, v)) } });
   }
