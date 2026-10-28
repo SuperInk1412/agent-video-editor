@@ -29,3 +29,5 @@
 | 2026-10-28 | `64aac91` | Blender 2D 世界矩阵烘焙（空间父级 / 节点） | 2D 元素挂父级后成片位置正确 | `engine/element-bake.js`（新）、`engine/blender.js`、`blender/vdm_build.py`、`scripts/check-render-parity.mjs`（新） | `git revert 64aac91` |
 | 2026-10-28 | `e83808d` | 父子只剩空间父级（加强度），旧 3D 父级打开时迁移 | 用户拍板：父子只有两种 | `core/parent-strength.js`（新）、`core/spatial.js`、`core/spatial-parent.js`、`core/ops-ext.js`、`core/contracts.js`、`engine/storage.js`、`inspector.js`、测试 | `git revert e83808d` |
 | 2026-10-28 | `4c0fdf9` | 贴屏退役，打开时迁到 HUD 机位 | 用户拍板：贴屏用投屏替代 | `core/screen-lock-migrate.js`（新）、`core/hierarchy.js`、`preview.js`、`engine/shot.js`、`blender/*.py`、`inspector.js`、测试 | `git revert 4c0fdf9` |
+| 2026-10-28 | `0626929` | 设计定稿：投屏修正、三轴旋转、姿态预设、新建相机、路径推广 | 用户逐条拍板 | `docs/DESIGN-TRANSFORM-UNIFY.md`（新） | `git revert 0626929` |
+| 2026-10-28 | `b6c6217` | 去掉"仅投屏"（出画只看相机栈）；贴屏改为按镜头切段挂到镜头相机，HUD 机位项目先还原 | 用户拍板：投屏不该决定出画、不自动搭全屏拍屏 | `core/camfeed.js`、`core/screen-lock-migrate.js`、`engine/*`、`preview.js`、测试、文档 | `git revert b6c6217` |
