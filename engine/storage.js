@@ -9,6 +9,7 @@ import { normalizeProject, assertValidProject } from '../core/schema.js';
 import { ensureSpace } from '../core/space.js';
 import { migrateLegacyParents } from '../core/parent-strength.js';
 import { migrateScreenLocks } from '../core/screen-lock-migrate.js';
+import { snapClipFrames } from '../core/clip-frames.js';
 import { ensureAudioElements } from '../core/audio.js';
 
 export const PROJECT_FILE = 'project.vdm.json';
@@ -71,12 +72,33 @@ export async function loadProject(dir) {
   ensureSpace(project);
   // One placement parent kind: old 3D parents become spatial parents with the
   // same bind / switches / strength (docs/DESIGN-CAMFEED-PARENTS.md §3).
-  migrateLegacyParents(project);
+  const legacy = migrateLegacyParents(project);
   // The screen lock (贴屏) is retired: locked elements move into a HUD rig that
   // films the shots through camera feeds (core/screen-lock-migrate.js).
-  migrateScreenLocks(project);
+  const screen = migrateScreenLocks(project);
   // Old projects kept their song only in meta.audio; show it as a real element.
   ensureAudioElements(project);
+  // Every clip window lands on the frame grid (both heads and tails). This is
+  // the data fix behind "existing clips did not snap": the drag helpers only
+  // touched the edge being dragged, so untouched legacy spans stayed off-grid.
+  const clipFrames = snapClipFrames(project);
+  const notes = [];
+  const legacyCount = (Number(legacy?.migrated) || 0) + (Number(legacy?.flattened) || 0);
+  if (legacyCount) notes.push(`${legacyCount} 个旧 3D 父级已并成空间父级`);
+  if (screen) notes.push(`${screen.elements} 个贴屏元素已迁到 HUD 机位（${screen.feeds} 个投屏）`);
+  if (clipFrames) notes.push(`${clipFrames} 个片段的头/尾已对齐到帧`);
+  if (notes.length) {
+    project.meta.ui = {
+      ...(project.meta.ui || {}),
+      migration: {
+        at: new Date().toISOString(),
+        notes,
+        // The file on disk is still the old format: saveProject copies it to
+        // .vdm/backups before the first write and flips this flag.
+        backupPending: true,
+      },
+    };
+  }
   assertValidProject(project);
   return project;
 }
@@ -84,6 +106,27 @@ export async function loadProject(dir) {
 export async function saveProject(dir, project, { by = 'ui' } = {}) {
   const p = await ensureProjectDirs(dir);
   assertValidProject(project);
+  // First save after an in-memory upgrade: copy the old-format file to
+  // .vdm/backups and verify it parses before writing anything. This is the
+  // safety net for retired screen locks / merged 3D parents / clip snapping.
+  const migration = project.meta?.ui?.migration;
+  if (migration?.backupPending) {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const name = `project-${project.rev}-${stamp}.vdm.json`;
+    const backup = path.join(p.vdm, 'backups', name);
+    try {
+      await fs.mkdir(path.dirname(backup), { recursive: true });
+      await fs.copyFile(p.file, backup);
+      JSON.parse(await fs.readFile(backup, 'utf8'));
+      migration.backup = path.join(VDM_DIR, 'backups', name);
+      migration.backupPending = false;
+    } catch (e) {
+      if (e.code !== 'ENOENT') throw e;
+      // A project with no file on disk cannot lose old data.
+      migration.backup = null;
+      migration.backupPending = false;
+    }
+  }
   const next = JSON.parse(JSON.stringify(project));
   next.rev++;
   next.meta.savedAt = new Date().toISOString();

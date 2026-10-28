@@ -207,12 +207,19 @@ function syncWorld(p) {
   }, 250);
 }
 
+let migrationNoticeAt = '';
+
 function applyProject(p, source) {
   if (source !== 'boot' && S.project && p.rev <= S.project.rev) return;
   const prevDuration = S.project?.meta?.duration;
   // A fresh project (boot) invalidates every panel the back stack could restore.
   if (!S.project || source === 'boot') linkNavStack.length = 0;
   S.project = p;
+  const migration = p?.meta?.ui?.migration;
+  if (migration?.backupPending && migration.at && migration.at !== migrationNoticeAt) {
+    migrationNoticeAt = migration.at;
+    toast('旧项目已在内存升级（贴屏→投屏 / 父子 / 片段贴帧）；首次保存会先自动备份到 .vdm/backups/', 'info');
+  }
   // JSON responses cannot preserve the server-side `camera` alias identity;
   // re-point it at the active stack entry so edits and reads share one object.
   if (p?.activeCameraId) p.camera = (p.cameras || []).find((c) => c.id === p.activeCameraId) || p.camera;
