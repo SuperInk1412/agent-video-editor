@@ -503,10 +503,16 @@ export const SCREEN_LOCK_DEPTH = 1; // m in front of the camera (render only)
  * The carry map of an element at t ({c, p0, L} like parentMap) or null.
  * `rigid: true` gives the plain camera motion (used to keep the element in
  * place when it is unparented); the default also pulls it toward the camera.
+ *
+ * `mode:'world'` parents (core/spatial-parent.js) are matrix parents: their
+ * child's SpatialNode already carries the parent frame, so they must not get
+ * the legacy screen-lock pull-in as well. Only the legacy camera lock (no
+ * `mode`, written by applyElementParentOp) and `@live` are carried here.
  */
 export function elementCarrier(project, el, t, { rigid = false } = {}) {
   const par = el?.parent;
   if (!par?.id) return null;
+  if (par.mode === 'world') return null;
   const now = cameraFrame(project, par.id, t);
   if (!now) return null;
   const bind = normalizeBind(par.bind);

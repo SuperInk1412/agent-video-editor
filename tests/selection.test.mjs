@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   emptySelection, normalizeSelection, selectOne, addSelection, toggleSelection, pickSelection,
   hasRef, splitRef, cameraRef, objectRef, elementRef, propertyRef, keyframeRef,
-  keyframeExists, keyframeDeleteOps,
+  keyframeExists, keyframeDeleteOps, legacyFields,
 } from '../core/selection.js';
 import { applyOp } from '../core/ops.js';
 
@@ -81,6 +81,72 @@ test('an additive pick of another kind starts a fresh pool; plain picks replace'
   assert.deepEqual(q, { kind: 'keyframe', ids: [ref], primary: ref });
   assert.deepEqual(pickSelection(p, 'element', elementRef('el_2'), false), {
     kind: 'element', ids: [elementRef('el_2')], primary: elementRef('el_2'),
+  });
+});
+
+// ------------------------------------------------- cam / ob / el mixed pools
+// One element pool holds cameras, 3D objects and 2D elements at once; only the
+// primary decides which legacy single-selection field is set.
+
+test('one element pool mixes cameras, 3D objects and 2D elements', () => {
+  let p = pickSelection(emptySelection(), 'element', cameraRef('cam_1'), false);
+  p = pickSelection(p, 'element', objectRef('ob_1'), true);
+  p = pickSelection(p, 'element', elementRef('el_1'), true);
+  assert.deepEqual(p, {
+    kind: 'element',
+    ids: ['cam:cam_1', 'ob:ob_1', 'el:el_1'],
+    primary: 'el:el_1',
+  });
+  // Ctrl+click the primary again: it leaves the pool and the previous ref wins.
+  p = pickSelection(p, 'element', elementRef('el_1'), true);
+  assert.deepEqual(p.ids, ['cam:cam_1', 'ob:ob_1']);
+  assert.equal(p.primary, 'ob:ob_1');
+  // ... down to one, then out.
+  p = toggleSelection(p, 'element', objectRef('ob_1'));
+  assert.deepEqual(p, { kind: 'element', ids: ['cam:cam_1'], primary: 'cam:cam_1' });
+  p = toggleSelection(p, 'element', cameraRef('cam_1'));
+  assert.deepEqual(p, emptySelection());
+});
+
+test('legacy selection fields follow the pool primary', () => {
+  const pool = { kind: 'element', ids: ['cam:cam_1', 'ob:ob_1', 'el:el_1'], primary: 'el:el_1' };
+  assert.deepEqual(legacyFields(pool), { elementId: 'el_1', objectId: null, camera: false });
+  assert.deepEqual(legacyFields({ ...pool, primary: 'ob:ob_1' }), {
+    elementId: null, objectId: 'ob_1', camera: false,
+  });
+  assert.deepEqual(legacyFields({ ...pool, primary: 'cam:cam_1' }), {
+    elementId: null, objectId: null, camera: true,
+  });
+  // A property / keyframe ref anchors to the same host row.
+  assert.deepEqual(legacyFields(selectOne('property', propertyRef(cameraRef('cam_1'), 'fov'))), {
+    elementId: null, objectId: null, camera: true,
+  });
+  assert.deepEqual(legacyFields(selectOne('keyframe', keyframeRef(objectRef('ob_1'), 'pivot', 2))), {
+    elementId: null, objectId: 'ob_1', camera: false,
+  });
+  assert.deepEqual(legacyFields(emptySelection()), { elementId: null, objectId: null, camera: false });
+  assert.deepEqual(legacyFields({ kind: 'element', ids: ['bogus'], primary: 'bogus' }), {
+    elementId: null, objectId: null, camera: false,
+  });
+});
+
+test('explicit selection fields win and are never cleared by the pool primary', () => {
+  const pool = { kind: 'element', ids: ['cam:cam_1', 'ob:ob_1'], primary: 'cam:cam_1' };
+  // An explicit object id survives a camera primary instead of being wiped.
+  assert.deepEqual(legacyFields(pool, { objectId: 'ob_9' }), {
+    elementId: null, objectId: 'ob_9', camera: false,
+  });
+  // Two explicit host fields both stay; the pool does not pick a winner.
+  assert.deepEqual(legacyFields(pool, { elementId: 'el_9', objectId: 'ob_9' }), {
+    elementId: 'el_9', objectId: 'ob_9', camera: false,
+  });
+  // Explicit `camera: false` is not a host: the primary still fills the hole.
+  assert.deepEqual(legacyFields(pool, { camera: false }), {
+    elementId: null, objectId: null, camera: true,
+  });
+  // Explicit camera true is authoritative.
+  assert.deepEqual(legacyFields(pool, { camera: true }), {
+    elementId: null, objectId: null, camera: true,
   });
 });
 

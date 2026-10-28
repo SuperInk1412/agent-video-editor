@@ -10,7 +10,17 @@ import { RotBall } from './rotball.js';
 import { SpeedCurve, SPEED_PRESETS } from './speedcurve.js';
 import { attachNumberField, readNumber, writeNumber } from './numfield.js';
 import { widthFor, isWidth } from './field-width.js';
+import { frameWriteTime } from './timeline-math.js';
+import { elementNodeAt } from './node-at.js';
+import { splitRef } from '/core/selection.js';
 import { h, icon, prefs } from './ui.js';
+import {
+  linkJumpTarget, linkOf, linkSourceLabel, linkSummary, openLinkMenu,
+} from './link-menu.js';
+import {
+  effectiveElementRowValue, elementRowKeyPath, elementRowTarget, localElementRowValue,
+  localElementRowValueAt, nodeRowPatch, rowToTarget,
+} from './element-link-value.js';
 
 const MOTIONS = ['none', 'in', 'out', 'left', 'right', 'up', 'down', 'drift', 'shake'];
 const FONTS = ['SimHei', 'Microsoft YaHei', 'Arial', 'Impact', 'Bahnschrift', 'Consolas'];
@@ -26,6 +36,9 @@ const PATH_LABELS = {
   'transform.x': 'X', 'transform.y': 'Y', 'transform.z': '纵深', 'transform.scale': '缩放',
   'transform.rotation': '旋转', 'transform.opacity': '不透明度', 'style.size': '字号', 'style.color': '颜色',
   'style.fill': '填充', 'fx.glow': '辉光', 'audio.volume': '音量', dir: '朝向', roll: '自转',
+  'pivot.x': '中心点 X', 'pivot.y': '中心点 Y', 'pivot.z': '中心点 Z',
+  'position.x': '位置 X', 'position.y': '位置 Y', 'position.z': '位置 Z',
+  'scale.x': '缩放 X', 'scale.y': '缩放 Y', 'scale.z': '缩放 Z',
 };
 const KF_TIP = '打关键帧\nShift+点击 删除当前帧关键帧';
 
@@ -72,19 +85,31 @@ export class Inspector {
     const active = document.activeElement;
     if (this._ballDragging || this._speedDragging) return;
     if (this.root.contains(active) && /INPUT|TEXTAREA|SELECT/.test(active?.tagName || '')) { this._syncKeys(); return; }
-    const key = `${project.rev}|${sel?.camera ? 'cam' : ''}|${sel?.elementId}|${sel?.objectId}|${sel?.segmentId}|${Math.round(time * 10)}`;
+    // The pool primary is what the panel edits; legacy single-selection fields
+    // stay as a fallback for callers that pass no pool. A cam / ob / el mixed
+    // selection still shows only the primary entity (plus a count).
+    const primary = sel?.pool?.kind ? splitRef(sel.pool.primary) : null;
+    const multi = sel?.pool?.kind === 'element' && sel.pool.ids.length > 1 ? sel.pool.ids.length : 0;
+    const key = `${project.rev}|${primary ? `${primary.type}:${primary.id}` : (sel?.camera ? 'cam' : '')}|${sel?.elementId}|${sel?.objectId}|${sel?.segmentId}|${multi}|${Math.round(time * 10)}`;
     if (key === this.lastRenderKey) { this._syncKeys(); return; }
     this.lastRenderKey = key;
     this.root.innerHTML = '';
     this._kfSync = [];
     this._elId = null;
     this.root.classList.add('insp');
-    const object = (project.scene?.objects || []).find((o) => o.id === sel?.objectId);
-    const element = project.elements.find((e) => e.id === sel?.elementId);
-    if (object) this._renderObject(project, object, time);
-    else if (element) this._renderElement(project, element, time);
+    // The back chip belongs to the sticky header so a scrolled panel cannot hide
+    // it; it is only present after a "转到父级" jump.
+    this._back = !!this.opts.canGoBack?.();
+    const objectId = primary?.type === 'ob' ? primary.id : (primary ? null : sel?.objectId);
+    const elementId = primary?.type === 'el' ? primary.id : (primary ? null : sel?.elementId);
+    const camera = primary ? primary.type === 'cam' : !!sel?.camera;
+    const object = (project.scene?.objects || []).find((o) => o.id === objectId);
+    const element = project.elements.find((e) => e.id === elementId);
+    const cam = camera ? ((project.cameras || []).find((c) => c.id === primary?.id) || project.camera) : null;
+    if (object) this._renderObject(project, object, time, multi);
+    else if (element) this._renderElement(project, element, time, multi);
     else if (sel?.segmentId) this._renderSegment(project, sel.segmentId);
-    else if (sel?.camera && project.camera) this._renderCamera(project, time);
+    else if (cam) this._renderCamera(project, time, cam, multi);
     else this._renderProject(project);
   }
 
@@ -93,6 +118,16 @@ export class Inspector {
     for (const fn of this._kfSync) {
       try { fn(); } catch { /* stale node */ }
     }
+  }
+
+  /**
+   * Time to write for a new key: the playhead frame's 3-decimal left edge
+   * (timeline-math.js frameWriteTime), so the ◆ and the timelane diamond agree
+   * at 24/30/60fps. Existing non-frame keys are only ever read, never rewritten.
+   */
+  _keyTime() {
+    const p = this._last?.project;
+    return frameWriteTime(this.opts.getTime(), p?.meta?.fps, p?.meta?.duration || 0);
   }
 
   _refresh() {
@@ -106,7 +141,7 @@ export class Inspector {
    * Sticky header: type badge · name (click to rename) · dim id · icon actions.
    * actions: [{ icon, label, tip, danger, run }]
    */
-  _header({ type, badge, name, id, onRename, actions = [] }) {
+  _header({ type, badge, name, id, onRename, actions = [], multi = 0 }) {
     const nameBtn = onRename
       ? h('button', { type: 'button', class: 'insp-name', 'data-tip': '单击改名', 'aria-label': `名称：${name}，单击改名` }, name || '—')
       : h('span', { class: 'insp-name static', title: name }, name || '—');
@@ -138,9 +173,16 @@ export class Inspector {
       });
     }
     const head = h('div', { class: 'insp-head' },
+      this._back ? h('button', {
+        type: 'button', class: 'mini insp-back', 'data-tip': '返回上一个属性面板（Alt+←）',
+        onclick: () => this.opts.onBack?.(),
+      }, '← 返回') : null,
       h('span', { class: `badge${type ? ` badge-${type}` : ''} insp-kind` }, badge),
       nameBtn,
       id ? h('span', { class: 'insp-id', title: id }, id) : null,
+      multi > 1 ? h('span', {
+        class: 'insp-multi', 'data-tip': '多选：面板、Delete 都只作用于最后选中的那个（primary）',
+      }, `${multi} 个选中`) : null,
       actions.length ? h('div', { class: 'insp-actions' }, ...actions.map((a) => h('button', {
         type: 'button', class: `icon-btn${a.danger ? ' danger' : ''}`,
         'aria-label': a.label, 'data-tip': a.tip || a.label, onclick: a.run,
@@ -188,14 +230,90 @@ export class Inspector {
   }
 
   // ---------------------------------------------------------------- property rows
-  // Label and ◆ stay direct children of the grid; the control sits in a .ctl
-  // wrapper so the width classes (w-third / w-half / w-full) can size it
-  // without touching the keyframe column.
-  _row(label, control, kfNode, cls = '') {
+  // Label, control, `↳` property-link button and ◆ are direct children of the
+  // grid; the control sits in a .ctl wrapper so the width classes (w-third /
+  // w-half / w-full) can size it without touching the link / keyframe columns.
+  _row(label, control, kfNode, cls = '', linkNode = null, linked = false) {
     return h('div', { class: `prop fld${cls ? ` ${cls}` : ''}` },
-      h('label', { title: label }, label),
+      h('label', { title: label }, label,
+        linked ? h('span', { class: 'parent-mark', 'data-tip': '这个属性有属性父级' }, '父') : null),
       h('span', { class: 'ctl' }, control),
+      h('span', { class: 'link-slot' }, linkNode),
       kfNode || h('span', { class: 'kf-slot' }));
+  }
+
+  // ---------------------------------------------------------------- property links
+  /** Host by kind + id, always read from the project the panel last rendered. */
+  _linkHost(kind, id) {
+    const p = this._last?.project;
+    if (!p) return null;
+    const key = String(id ?? '');
+    const list = kind === 'el' ? (p.elements || [])
+      : kind === 'ob' ? (p.scene?.objects || [])
+        : [...(p.cameras || []), ...(p.camera ? [p.camera] : [])];
+    return list.find((host) => String(host?.id ?? '') === key) || null;
+  }
+
+  _linked(link) {
+    return !!link && !!linkOf(this._linkHost(link.kind, link.id), link.path);
+  }
+
+  /**
+   * `↳` next to a property input (PLAN-ui-round3 §4.2). Left click opens the
+   * link menu; right click opens the same menu at the pointer, where the jump /
+   * unlink entries live. Lit = this property has a property parent.
+   */
+  _linkButton(link) {
+    const btn = h('button', { type: 'button', class: 'link-btn', 'aria-label': '属性父级' });
+    btn.textContent = '↳';
+    const paint = () => {
+      const current = linkOf(this._linkHost(link.kind, link.id), link.path);
+      btn.classList.toggle('on', !!current);
+      btn.dataset.tip = current
+        ? `属性父级：${linkSourceLabel(this._last?.project, current)}（右键：转到 / 解除）`
+        : '属性父级：点击选择父级属性（右键也可）';
+    };
+    const open = (anchor, x, y) => {
+      this._flush();
+      openLinkMenu({
+        project: this._last?.project,
+        hostKind: link.kind,
+        id: link.id,
+        to: link.path,
+        anchor, x, y,
+        t: this.opts.getTime?.(),
+        onOp: this.opts.onOp,
+        onJump: this.opts.onLinkJump,
+        toast: this.opts.onToast,
+      });
+    };
+    btn.addEventListener('click', (ev) => { ev.stopPropagation(); open(btn); });
+    btn.addEventListener('contextmenu', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      open(null, ev.clientX, ev.clientY);
+    });
+    paint();
+    this._kfSync.push(paint);
+    return btn;
+  }
+
+  /** First line under the header: linked property parents (count + host chips). */
+  _linksSummary(project, host) {
+    const summary = linkSummary(project, host);
+    if (!summary) return null;
+    return h('div', { class: 'insp-links' },
+      h('span', { class: 'insp-links-k' }, '属性父级'),
+      h('span', { class: 'insp-links-count', 'data-tip': '已链接的属性数量' }, String(summary.count)),
+      h('div', { class: 'insp-link-chips' }, ...summary.links.map((link) => h('button', {
+        type: 'button', class: 'link-chip',
+        'data-tip': `转到父级：${linkSourceLabel(project, link)}（不激活相机、不改项目）`,
+        onclick: () => {
+          this._flush();
+          const target = linkJumpTarget(link, link.to);
+          if (target) this.opts.onLinkJump?.(target);
+        },
+      }, linkSourceLabel(project, link)))));
   }
 
   /** ◆ with three states; getState() -> 'none' | 'anim' | 'on' (re-read on every playhead sync). */
@@ -224,7 +342,7 @@ export class Inspector {
     return this._kfButton(
       () => this._elKeyState(paths),
       () => {
-        const t = Math.round(this.opts.getTime() * 1000) / 1000;
+        const t = this._keyTime();
         for (const path of paths) this.opts.onOp({ op: 'keySet', id: this._elId, path, t, value: this.opts.getTimeValue(path) });
       },
       () => {
@@ -270,18 +388,23 @@ export class Inspector {
     return box;
   }
 
-  _field({ label, value, type = 'number', step = 0.01, min, max, path, kf, keyer, options, onChange, placeholder, percent = false, unit, w }) {
+  _field({
+    label, value, type = 'number', step = 0.01, min, max, path, kf, keyer, options, onChange,
+    placeholder, percent = false, unit, w, link = null,
+  }) {
     const kfNode = keyer ? this._kfButton(keyer.state, keyer.set, keyer.unset)
       : kf ? this._elKfButton([path]) : null;
+    const linkNode = link ? this._linkButton(link) : null;
+    const linked = this._linked(link);
     // Width is decided from type/value/step/bounds once per build; an explicit
     // `w` (e.g. a path field that should not shrink while it is empty) wins.
     const width = isWidth(w) ? w : widthFor({ type, value, step, min, max, unit, percent, placeholder, key: label });
     const cls = `w-${width}${type === 'textarea' ? ' tall' : ''}`;
     if (type === 'number') {
       const box = this._num({ value, step, min, max, percent, unit, placeholder, aria: label, onChange });
-      return this._row(label, box, kfNode, cls);
+      return this._row(label, box, kfNode, cls, linkNode, linked);
     }
-    if (type === 'color') return this._row(label, this._color(label, value, onChange), kfNode, cls);
+    if (type === 'color') return this._row(label, this._color(label, value, onChange), kfNode, cls, linkNode, linked);
     let input;
     if (type === 'select') {
       input = h('select', { 'aria-label': label }, ...options.map((o) => {
@@ -306,7 +429,7 @@ export class Inspector {
     else input.addEventListener('input', emit);
     input.addEventListener('blur', () => this._flush());
     const control = type === 'checkbox' ? h('span', { class: 'chk' }, input) : input;
-    return this._row(label, control, kfNode, cls);
+    return this._row(label, control, kfNode, cls, linkNode, linked);
   }
 
   /** 24×24 swatch + hex text, both editing the same value */
@@ -342,8 +465,14 @@ export class Inspector {
   _vec({ label, items, keyPaths, keyer }) {
     const kfNode = keyer ? this._kfButton(keyer.state, keyer.set, keyer.unset)
       : keyPaths ? this._elKfButton(keyPaths) : null;
-    const boxes = items.map((it) => this._num(it));
-    return this._row(label, h('div', { class: `vec vec-${items.length}` }, ...boxes), kfNode, 'w-full');
+    // A per-input `link` gets its own `↳` right of that input (X/Y rows link
+    // independently); the row label carries the small 父 mark when any does.
+    const boxes = items.map((it) => {
+      const box = this._num(it);
+      return it.link ? h('span', { class: 'vec-cell' }, box, this._linkButton(it.link)) : box;
+    });
+    const linked = items.some((it) => it.link && this._linked(it.link));
+    return this._row(label, h('div', { class: `vec vec-${items.length}` }, ...boxes), kfNode, 'w-full', null, linked);
   }
 
   /** read-only value row */
@@ -362,12 +491,12 @@ export class Inspector {
   }
 
   // ---------------------------------------------------------------- 2D element
-  _renderElement(project, el, time) {
+  _renderElement(project, el, time, multi = 0) {
     this._elId = el.id;
     this._kind = el.type;
     const set = (path, patch) => this._commit(`${el.id}:${path}`, { op: 'updateElement', id: el.id, patch });
     this._header({
-      type: el.type, badge: EL_LABELS[el.type] || el.type, name: el.name, id: el.id,
+      type: el.type, badge: EL_LABELS[el.type] || el.type, name: el.name, id: el.id, multi,
       onRename: (v) => set('name', { name: v }),
       actions: [
         {
@@ -383,16 +512,75 @@ export class Inspector {
         },
       ],
     });
+    const linksSummary = this._linksSummary(project, el);
+    if (linksSummary) this.root.appendChild(linksSummary);
+
+    if (el.parent?.id) {
+      const parentId = String(el.parent.id);
+      const parentHost = parentId === '@live' ? null
+        : (project.elements || []).find((x) => x.id === parentId)
+          || (project.scene?.objects || []).find((x) => x.id === parentId)
+          || (project.cameras || []).find((x) => x.id === parentId);
+      const parentName = parentId === '@live' ? '当前镜头 (@live，随剪辑切换)' : (parentHost?.name || parentId);
+      const jump = () => {
+        if (parentId === '@live') this.opts.onSelect?.({ camera: true });
+        else if ((project.elements || []).some((x) => x.id === parentId)) this.opts.onSelect?.({ elementId: parentId });
+        else if ((project.scene?.objects || []).some((x) => x.id === parentId)) this.opts.onSelect?.({ objectId: parentId });
+        else if ((project.cameras || []).some((x) => x.id === parentId)) this.opts.onSelect?.({ camera: true });
+      };
+      const unparent = () => this.opts.onOp(el.parent.mode === 'world'
+        ? { op: 'spatialUnparent', id: el.id }
+        : { op: 'elementUnparent', id: el.id, t: tNow() });
+      this.root.appendChild(h('div', { class: 'hint pad insp-parent' },
+        h('span', { class: 'insp-parent-name' }, `空间父级：${parentName}`),
+        h('button', { type: 'button', class: 'mini', onclick: jump }, '转到父级'),
+        h('button', { type: 'button', class: 'mini', onclick: unparent }, '解除')));
+    }
 
     // Keyable fields show the keyed value at the playhead (before motion presets
     // and fades). Once a property has keys, typing a value keys it at the
     // playhead; otherwise it edits the base value.
-    const keyed = (path) => (el.keyframes || []).some((k) => k.path === path);
-    const kv = (path, base) => sampleTrack(el.keyframes, path, time, base);
+    const keyed = (rowPath) => (el.keyframes || []).some((k) => k.path === elementRowKeyPath(el, rowPath));
+    const kp = (rowPath) => elementRowKeyPath(el, rowPath);
+    const kv = (rowPath, base) => {
+      const local = localElementRowValueAt(project, el, rowPath, time);
+      const fallback = local != null
+        ? local
+        : sampleTrack(el.keyframes, elementRowKeyPath(el, rowPath), time, base);
+      return effectiveElementRowValue(project, el, rowPath, time, fallback);
+    };
+    // binding re-reads the pose at the playhead; keys land on the frame edge
     const tNow = () => Math.round(this.opts.getTime() * 1000) / 1000;
-    const edit = (path, patch) => (v) => {
-      if (keyed(path)) this._commit(`${el.id}:${path}`, { op: 'keySet', id: el.id, path, t: tNow(), value: v });
-      else set(path, patch(v));
+    const keyT = () => this._keyTime();
+    const edit = (rowPath, patch) => (v) => {
+      // A linked row displays the effective value; the project still stores the
+      // local value (writeBackLocalValue inverts the link at the playhead).
+      const local = localElementRowValue(project, el, rowPath, time, v);
+      const rowValue = local == null ? v : local;
+      if (keyed(rowPath)) {
+        const target = elementRowTarget(el, rowPath);
+        const value = target ? rowToTarget(el, project.meta, target, rowValue, rowPath) : rowValue;
+        this._commit(`${el.id}:${rowPath}`, {
+          op: 'keySet', id: el.id, path: elementRowKeyPath(el, rowPath), t: keyT(),
+          value: value == null ? rowValue : value,
+        });
+        return;
+      }
+      if (el.node) {
+        const nodePatch = nodeRowPatch(el, rowPath, rowValue, project.meta);
+        if (nodePatch) {
+          this._commit(`${el.id}:node`, { op: 'updateElement', id: el.id, patch: nodePatch });
+          return;
+        }
+      }
+      set(rowPath, patch(rowValue));
+    };
+    // Property links target core/links.js paths: a legacy 2D element links
+    // pivot.* / roll / scale.* / opacity, never transform.* (PLAN §3.3).
+    const linkPath = (rowPath) => elementRowTarget(el, rowPath);
+    const link = (rowPath) => {
+      const path = linkPath(rowPath);
+      return path ? { kind: 'el', id: el.id, path } : null;
     };
 
     const timeRows = [
@@ -429,6 +617,7 @@ export class Inspector {
         this._field({
           label: '音量', value: round(kv('audio.volume', el.volume ?? 1), 3),
           step: 0.01, min: 0, max: 1, percent: true, kf: true, path: 'audio.volume',
+          link: link('audio.volume'),
           onChange: edit('audio.volume', (v) => ({ volume: v })),
         }),
         this._field({ label: '源入点', unit: 's', value: round(el.srcIn || 0), step: 0.05, min: 0, onChange: (v) => set('srcIn', { srcIn: v }) }),
@@ -438,28 +627,85 @@ export class Inspector {
       return;
     }
 
-    this.root.appendChild(this._sec('变换', {},
-      this._vec({
-        label: '位置', keyPaths: ['transform.x', 'transform.y'],
-        items: [
-          { axis: 'x', value: round(kv('transform.x', el.transform.x)), unit: 'px', aria: 'X', onChange: edit('transform.x', (v) => ({ transform: { x: v } })) },
-          { axis: 'y', value: round(kv('transform.y', el.transform.y)), unit: 'px', aria: 'Y', onChange: edit('transform.y', (v) => ({ transform: { y: v } })) },
-        ],
-      }),
-      this._field({ label: '纵深 z', unit: 'm', value: round(kv('transform.z', el.transform.z ?? 0), 3), step: 0.05, kf: true, path: 'transform.z', onChange: edit('transform.z', (v) => ({ transform: { z: v } })) }),
-      this._field({ label: '缩放', value: round(kv('transform.scale', el.transform.scale), 3), step: 0.01, kf: true, path: 'transform.scale', onChange: edit('transform.scale', (v) => ({ transform: { scale: v } })) }),
-      this._field({ label: '旋转', unit: '°', value: round(kv('transform.rotation', el.transform.rotation), 2), step: 0.5, kf: true, path: 'transform.rotation', onChange: edit('transform.rotation', (v) => ({ transform: { rotation: v } })) }),
-      this._field({ label: '不透明度', value: round(kv('transform.opacity', el.transform.opacity), 3), step: 0.01, min: 0, max: 1, percent: true, kf: true, path: 'transform.opacity', onChange: edit('transform.opacity', (v) => ({ transform: { opacity: v } })) }),
+    const node = el.node ? elementNodeAt(el, project.meta, time) : null;
+    const nodeVec = (group, label, step, unit) => {
+      const arr = Array.isArray(node?.[group]) ? node[group] : [0, 0, 0];
+      return this._vec({
+        label,
+        keyPaths: ['x', 'y', 'z'].map((ax) => `${group}.${ax}`),
+        items: ['x', 'y', 'z'].map((ax, i) => ({
+          axis: ax, value: round(kv(`${group}.${ax}`, arr[i]), 3), step, unit,
+          aria: `${label} ${ax.toUpperCase()}`,
+          link: link(`${group}.${ax}`),
+          onChange: edit(`${group}.${ax}`, null),
+        })),
+      });
+    };
+    const dirVec = () => {
+      const dir = Array.isArray(el.node?.dir) ? el.node.dir : [0, 0, 1];
+      const setDir = (i) => (v) => {
+        const next = (Array.isArray(el.node?.dir) ? el.node.dir : [0, 0, 1]).slice();
+        next[i] = Number(v) || 0;
+        const len = Math.hypot(next[0], next[1], next[2]);
+        if (!(len > 1e-9)) return;
+        this._commit(`${el.id}:dir`, {
+          op: 'updateElement', id: el.id,
+          patch: { node: { ...el.node, dir: next.map((n) => n / len) } },
+        });
+      };
+      return this._vec({
+        label: '朝向',
+        items: ['x', 'y', 'z'].map((ax, i) => ({
+          axis: ax, value: round(dir[i], 3), step: 0.01, aria: `朝向 ${ax.toUpperCase()}`,
+          onChange: setDir(i),
+        })),
+      });
+    };
+    const opacityField = this._field({
+      label: '不透明度', value: round(kv('transform.opacity', el.transform.opacity), 3),
+      step: 0.01, min: 0, max: 1, percent: true, kf: true, path: kp('transform.opacity'),
+      link: link('transform.opacity'), onChange: edit('transform.opacity', (v) => ({ transform: { opacity: v } })),
+    });
+    const bindRows = [
       this._field({ label: '跟随节拍', value: el.punch || 0, step: 0.05, min: 0, max: 2, onChange: (v) => set('punch', { punch: v }) }),
-      this._field({
-        label: '贴屏', type: 'checkbox', value: !!el.parent,
+      el.parent?.id ? null : this._field({
+        label: '贴屏', type: 'checkbox', value: false,
         // screen-locked = parented to the active camera, bound at the playhead (no jump either way)
         onChange: (v) => this.opts.onOp(v
           ? { op: 'elementParent', id: el.id, parent: project.activeCameraId, t: tNow() }
           : { op: 'elementUnparent', id: el.id, t: tNow() }),
       }),
-      el.parent ? h('div', { class: 'hint' }, `跟随相机 ${(project.cameras || []).find((c) => c.id === el.parent.id)?.name || el.parent.id}：相机怎么动，它在画面上就停在哪里。取消时元素留在当前位置。`) : null,
-    ));
+    ];
+    if (node) {
+      // Unified SpatialNode editor: pivot / position / orientation / xyz scale.
+      this.root.appendChild(this._sec('变换', {},
+        nodeVec('pivot', '中心点', 0.05, 'm'),
+        nodeVec('position', '位置', 0.05, 'm'),
+        dirVec(),
+        this._field({
+          label: '绕轴自转', unit: '°', value: round(node.roll, 2), step: 0.5,
+          kf: true, path: 'roll', link: link('roll'), onChange: edit('roll', null),
+        }),
+        nodeVec('scale', '缩放', 0.01, ''),
+        opacityField,
+        ...bindRows,
+      ));
+    } else {
+      this.root.appendChild(this._sec('变换', {},
+        this._vec({
+          label: '位置', keyPaths: [kp('transform.x'), kp('transform.y')],
+          items: [
+            { axis: 'x', value: round(kv('transform.x', el.transform.x)), unit: 'px', aria: 'X', link: link('transform.x'), onChange: edit('transform.x', (v) => ({ transform: { x: v } })) },
+            { axis: 'y', value: round(kv('transform.y', el.transform.y)), unit: 'px', aria: 'Y', link: link('transform.y'), onChange: edit('transform.y', (v) => ({ transform: { y: v } })) },
+          ],
+        }),
+        this._field({ label: '纵深 z', unit: 'm', value: round(kv('transform.z', el.transform.z ?? 0), 3), step: 0.05, kf: true, path: kp('transform.z'), link: link('transform.z'), onChange: edit('transform.z', (v) => ({ transform: { z: v } })) }),
+        this._field({ label: '缩放', value: round(kv('transform.scale', el.transform.scale), 3), step: 0.01, kf: true, path: kp('transform.scale'), link: link('transform.scale'), onChange: edit('transform.scale', (v) => ({ transform: { scale: v } })) }),
+        this._field({ label: '旋转', unit: '°', value: round(kv('transform.rotation', el.transform.rotation), 2), step: 0.5, kf: true, path: kp('transform.rotation'), link: link('transform.rotation'), onChange: edit('transform.rotation', (v) => ({ transform: { rotation: v } })) }),
+        opacityField,
+        ...bindRows,
+      ));
+    }
 
     this.root.appendChild(this._sec('时间', {}, ...timeRows));
 
@@ -590,7 +836,10 @@ export class Inspector {
   /** 父级: pick a parent, inherit switches, keyable rotation/scale strength. */
   _renderParent(project, obj, time) {
     const id = obj.id;
+    // binding re-reads the pose at the playhead, so it keeps the exact time;
+    // strength keys are new keyframes and land on the frame edge
     const tNow = () => Math.round(this.opts.getTime() * 1000) / 1000;
+    const keyT = () => this._keyTime();
     const objs = project.scene?.objects || [];
     const par = obj.parent || null;
     const reparent = (extra) => this.opts.onOp({ op: 'objectParent', id, parent: par?.id, t: tNow(), ...extra });
@@ -626,7 +875,7 @@ export class Inspector {
           label, value: Math.round(Number(v) * 1000) / 1000, step: 0.01, min: 0, max: 1, percent: true,
           // Keyed channel: write a key at the playhead; otherwise change the base strength (re-binds at the playhead).
           onChange: (nv) => this._commit(`${id}:parent.${ch}`, track.length
-            ? { op: 'objectParentKey', id, channel: ch, t: tNow(), v: nv }
+            ? { op: 'objectParentKey', id, channel: ch, t: keyT(), v: nv }
             : { op: 'objectParent', id, parent: par.id, t: tNow(), strength: { [ch]: nv } }),
           keyer: {
             state: () => {
@@ -635,8 +884,8 @@ export class Inspector {
               const now = this.opts.getTime();
               return tr.some((k) => Math.abs(k.t - now) <= tol) ? 'on' : 'anim';
             },
-            set: () => this.opts.onOp({ op: 'objectParentKey', id, channel: ch, t: tNow(), v: Number(v) }),
-            unset: () => this.opts.onOp({ op: 'objectParentUnkey', id, channel: ch, t: atKey ? atKey.t : tNow() }),
+            set: () => this.opts.onOp({ op: 'objectParentKey', id, channel: ch, t: keyT(), v: Number(v) }),
+            unset: () => this.opts.onOp({ op: 'objectParentUnkey', id, channel: ch, t: atKey ? atKey.t : keyT() }),
           },
         }));
       }
@@ -648,17 +897,46 @@ export class Inspector {
     return this._sec('父级', {}, ...kids);
   }
 
+  /**
+   * 空间父级 summary for a 3D object / camera: `frameParent` is the unified
+   * matrix parent (core/spatial-parent.js), separate from the old 3D `obj.parent`
+   * shown in the 父级 section below. Header row, same shape as the 2D summary.
+   */
+  _spatialParentSummary(project, host) {
+    const par = host?.frameParent;
+    if (!par?.id) return null;
+    const parentId = String(par.id);
+    const parentHost = (project.elements || []).find((x) => x.id === parentId)
+      || (project.scene?.objects || []).find((x) => x.id === parentId)
+      || (project.cameras || []).find((x) => x.id === parentId);
+    const name = parentHost?.name || parentId;
+    const jump = () => {
+      if ((project.elements || []).some((x) => x.id === parentId)) this.opts.onSelect?.({ elementId: parentId });
+      else if ((project.scene?.objects || []).some((x) => x.id === parentId)) this.opts.onSelect?.({ objectId: parentId });
+      else if ((project.cameras || []).some((x) => x.id === parentId)) this.opts.onSelect?.({ camera: true });
+    };
+    const unparent = () => this.opts.onOp({ op: 'spatialUnparent', id: host.id });
+    return h('div', { class: 'hint pad insp-parent' },
+      h('span', { class: 'insp-parent-name' }, `空间父级：${name}`),
+      h('button', { type: 'button', class: 'mini', onclick: jump }, '转到父级'),
+      h('button', { type: 'button', class: 'mini', onclick: unparent }, '解除'));
+  }
+
   // ---------------------------------------------------------------- 3D object
-  _renderObject(project, obj, time) {
+  _renderObject(project, obj, time, multi = 0) {
     const id = obj.id;
     this._kind = `3d.${obj.type}`;
     const pose = objectPose(obj, time);
-    const tNow = () => Math.round(this.opts.getTime() * 1000) / 1000;
+    const tNow = () => this._keyTime();
     const key = (path, v) => this.opts.onOp({ op: 'objectKey', id, path, t: tNow(), v });
     const tol = 0.5 / (project.meta?.fps || 24);
     const liveObj = () => (this._last?.project?.scene?.objects || []).find((o) => o.id === id) || obj;
 
-    this._header({ type: 'object', badge: OBJ_LABELS[obj.type] || '3D 元素', name: obj.name || id, id });
+    this._header({ type: 'object', badge: OBJ_LABELS[obj.type] || '3D 元素', name: obj.name || id, id, multi });
+    const linksSummary = this._linksSummary(project, obj);
+    if (linksSummary) this.root.appendChild(linksSummary);
+    const spatialParent = this._spatialParentSummary(project, obj);
+    if (spatialParent) this.root.appendChild(spatialParent);
     this.root.appendChild(h('div', { class: 'hint pad' },
       '内容、中心点、位置、缩放、不透明度已移到时间轴左侧：选中元素后点元素行的 ▾ 展开编辑。',
       '复制 / 删除 / 面向镜头 / 落地在元素行的 ⋯ 菜单里。'));
@@ -677,6 +955,7 @@ export class Inspector {
       ballHost,
       this._field({
         label: '绕轴自转', unit: '°', value: Math.round(pose.roll * 10) / 10, step: 1,
+        link: { kind: 'ob', id, path: 'roll' },
         onChange: (v) => key('roll', v),
         keyer: {
           state: () => {
@@ -781,7 +1060,7 @@ export class Inspector {
         }, ...EASES.map((e) => h('option', { value: e, selected: e === k.ease }, e))),
         h('button', {
           type: 'button', class: 'icon-btn mini', 'aria-label': '复制到播放头', 'data-tip': '复制到播放头\n在当前时间放一个同值关键帧',
-          onclick: () => this.opts.onOp({ op: 'keySet', id: el.id, path: k.path, t: round(time), value: k.value, ease: k.ease }),
+          onclick: () => this.opts.onOp({ op: 'keySet', id: el.id, path: k.path, t: this._keyTime(), value: k.value, ease: k.ease }),
         }, icon('plus', 'ic-sm')),
         h('button', {
           type: 'button', class: 'icon-btn mini danger', 'aria-label': '删除关键帧', 'data-tip': '删除这个关键帧',
@@ -849,13 +1128,18 @@ export class Inspector {
     );
   }
 
-  _renderCamera(project, time) {
-    const cam = project.camera;
+  _renderCamera(project, time, cam = project.camera, multi = 0) {
+    if (!cam) return;
     this._kind = 'camera';
     this._header({
-      type: 'camera', badge: '镜头', name: cam.name || '镜头', id: `${cam.path.length} 关键点 · FOV ${round(cam.fov, 0)}°`,
+      type: 'camera', badge: '镜头', name: cam.name || '镜头',
+      id: `${(cam.path || []).length} 关键点 · FOV ${round(cam.fov, 0)}°`, multi,
       actions: [{ icon: 'film', label: '渲染', tip: '渲染\n从头到尾渲染这个镜头', run: () => this.opts.onRenderAll?.() }],
     });
+    const linksSummary = this._linksSummary(project, cam);
+    if (linksSummary) this.root.appendChild(linksSummary);
+    const spatialParent = this._spatialParentSummary(project, cam);
+    if (spatialParent) this.root.appendChild(spatialParent);
     this.root.appendChild(h('div', { class: 'hint pad' },
       '相机属性折叠在时间轴相机行里：点行首 ▾ 展开；位置是飞行路径关键帧，中心点 / 画面 / 透明度 / 缩放也能逐帧打点。'));
     this.root.appendChild(this._worldSection(project, true));

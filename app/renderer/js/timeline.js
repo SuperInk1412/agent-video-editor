@@ -10,15 +10,28 @@ import { objectPose } from '/core/scene.js';
 import { childrenOf } from '/core/hierarchy.js';
 import { pathPos, cameraTransform, cameraParamValue, cameraRange } from '/core/camera.js';
 import {
-  emptySelection, normalizeSelection, selectOne, pickSelection,
+  emptySelection, normalizeSelection, selectOne, pickSelection, legacyFields,
   cameraRef, objectRef, elementRef, propertyRef, keyframeRef, splitRef,
 } from '/core/selection.js';
+import { poolHostKeys } from '/core/timeline-keys.js';
+import { keyframeMoveOps } from '/core/keyframe-edit.js';
 import {
   planRowInsert, planInsertionZ, planMoveZ, renumber2D, poolAnchors, sameOrder,
 } from '/core/timeline-order.js';
 import { attachNumberField, readNumber, writeNumber } from './numfield.js';
 import { h, icon, token, prefs } from './ui.js';
-import { normalizeFps, frameIndex, frameStart, frameBand, planRulerTicks } from './timeline-math.js';
+import {
+  cameraValueWithLinks, findLinkTarget, objectPoseWithLinks, writeBackLocalValue,
+} from '/core/links.js';
+import {
+  cameraRowLinkPaths, elementRowLinkPaths, linkOf, linkPropLabel, linkSourceLabel,
+  objectRowLinkPaths, openLinkMenu,
+} from './link-menu.js';
+import {
+  effectiveElementRowValue, elementRowKeyPath, elementRowTarget, localElementRowValue,
+  localElementRowValueAt, nodeRowPatch, rowToTarget,
+} from './element-link-value.js';
+import { normalizeFps, frameIndex, frameStart, frameBand, planRulerTicks, frameWriteTime, frameClipEdit } from './timeline-math.js';
 
 const el = (tag, cls, html) => {
   const n = document.createElement(tag);
@@ -50,10 +63,30 @@ const sliderToZoom = (v) => Math.exp(Math.log(ZOOM_MIN) + (Number(v) / ZOOM_STEP
 // Clips narrower than this hide their right-side meta ("7 关键点", "2.00s").
 const CLIP_META_MIN = 90;
 
+// Link target path -> the row `data-path` this timeline draws for it. Used by
+// revealProperty() after a "转到父级" jump. `transform.*` is the legacy 2D row
+// path; link data itself is always pivot.* / roll / scale.* (core/links.js).
+const EL_LINK_ROW_PATH = Object.freeze({
+  'pivot.x': 'transform.x', 'pivot.y': 'transform.y', 'pivot.z': 'transform.z',
+  'position.x': null, 'position.y': null,
+  'scale.x': 'transform.scale', 'scale.y': 'transform.scale', scale: 'transform.scale',
+  roll: 'transform.rotation', opacity: 'transform.opacity',
+  'audio.volume': 'audio.volume',
+});
+const OB_LINK_ROW_PATH = (path) => {
+  if (path === 'opacity' || path === 'roll') return path;
+  return /^(pivot|position|scale)\./.test(path) ? path.slice(0, path.indexOf('.')) : null;
+};
+const CAM_LINK_ROW_PATH = (path) => {
+  if (path.startsWith('pivot.')) return 'center';
+  if (path.startsWith('scale.')) return 'scale';
+  return path;
+};
+
 export class Timeline {
   constructor(root, {
     onSeek, onSelect, onOp, onPause, onElementMenu, onCameraMenu, onClipMenu, onSplit, onTextEdit,
-    onToggleCurves, isCurvesOpen, sourceDuration, onSourceLimit,
+    onToggleCurves, isCurvesOpen, sourceDuration, onSourceLimit, onToast, onLinkJump,
   } = {}) {
     this.root = root;
     this.onSeek = onSeek;
@@ -69,6 +102,8 @@ export class Timeline {
     this.isCurvesOpen = isCurvesOpen;
     this.sourceDuration = sourceDuration;
     this.onSourceLimit = onSourceLimit;
+    this.onToast = onToast;
+    this.onLinkJump = onLinkJump;
     this.project = null;
     this.time = 0;
     this.pool = emptySelection();
@@ -97,9 +132,15 @@ export class Timeline {
     this._editTimes = new Map();
     this._propRows = [];
     this._elPropRows = [];
+    this._linkButtons = [];
     this._objHeads = new Map();
     this._elHeads = new Map();
     this.expandedEls = new Set();
+    // "Keyed only" pass (U): the row expansion / group state from before the
+    // pass, restored by the second U. `_keyedOnly` itself forces every group
+    // into keyed mode and hides the group label rows.
+    this._keyedOnly = false;
+    this._keyedSnapshot = null;
     this._snapOn = prefs.get('snap', true) !== false;
     this._gutterW = clampGutter(prefs.get('tlGutter', GUTTER_DEFAULT));
     this.filterText = '';
@@ -296,6 +337,7 @@ export class Timeline {
       keyed.classList.add('shake');
     });
     keyed.addEventListener('animationend', () => keyed.classList.remove('shake'));
+    this._keyedBtn = keyed;
     this._snapBtn = btn('magnet', '吸附', '吸附到 0 / 结尾 / 节拍（拖动时按住 Alt 临时关闭）', null,
       () => this.setSnap(!this._snapOn), { 'aria-pressed': 'false' });
     const split = btn('scissors', '切开', '在播放头切开', 'Ctrl+D', () => this.onSplit?.());
@@ -320,6 +362,7 @@ export class Timeline {
       zOut, this._zoomRange, zIn, this._zoomLabel, zFit);
     this.root.appendChild(this.toolbar);
     this._syncSnapBtn();
+    this._syncKeyedBtn();
     this._syncZoomUi();
   }
 
@@ -339,6 +382,13 @@ export class Timeline {
 
   _syncSnapBtn() {
     this._snapBtn?.setAttribute('aria-pressed', String(this._snapOn));
+  }
+
+  /** Toolbar 仅带键 button reflects the keyed-only pass (U). */
+  _syncKeyedBtn() {
+    if (!this._keyedBtn) return;
+    this._keyedBtn.setAttribute('aria-pressed', String(this._keyedOnly));
+    this._keyedBtn.classList.toggle('on', this._keyedOnly);
   }
 
   _syncCurvesBtn() {
@@ -429,6 +479,50 @@ export class Timeline {
     const viewR = this.scroll.scrollLeft + this.scroll.clientWidth;
     if (x < viewL + 8 || x > viewR - 40) this.scroll.scrollLeft = Math.max(0, x - this._gutter() - 40);
     return true;
+  }
+
+  /**
+   * Scroll to an expanded property row (property-link "转到父级"). `path` is the
+   * link source path (`pivot.x`, `roll`, `fov`, …); it is mapped onto the row
+   * path this timeline draws. Falls back to the host header when the row is not
+   * rendered (collapsed group, keyed-only pass, or a 3D roll with no row here).
+   * Returns false only when neither the row nor the header can be shown.
+   */
+  revealProperty(ref, path) {
+    let kind = null;
+    let id = null;
+    if (ref && typeof ref === 'object') {
+      kind = ref.kind;
+      id = ref.id;
+    } else {
+      const r = splitRef(ref);
+      if (r) {
+        kind = r.type === 'cam' ? 'camera' : r.type === 'ob' ? 'object' : 'element';
+        id = r.id;
+      }
+    }
+    if (!kind || id == null || !this.project) return false;
+    const source = String(path ?? '');
+    const rowPath = kind === 'camera' ? CAM_LINK_ROW_PATH(source)
+      : kind === 'object' ? OB_LINK_ROW_PATH(source)
+        : EL_LINK_ROW_PATH[source] ?? null;
+    if (rowPath) {
+      const q = CSS.escape(String(id));
+      const sel = kind === 'camera' ? `.tl-camprop[data-cam="${q}"][data-path="${CSS.escape(rowPath)}"]`
+        : kind === 'object' ? `.tl-prop[data-obj="${q}"][data-path="${CSS.escape(rowPath)}"]`
+          : `.tl-elprop[data-el="${q}"][data-path="${CSS.escape(rowPath)}"]`;
+      const row = this.inner.querySelector(sel);
+      if (row && row.getClientRects().length) {
+        const sr = this.scroll.getBoundingClientRect();
+        const r = row.getBoundingClientRect();
+        const top = sr.top + (this.rulerRow?.offsetHeight || 26);
+        const bottom = sr.top + this.scroll.clientHeight;
+        if (r.top < top) this.scroll.scrollTop -= (top - r.top) + 4;
+        else if (r.bottom > bottom) this.scroll.scrollTop += (r.bottom - bottom) + 4;
+        return true;
+      }
+    }
+    return this.reveal({ kind, id });
   }
 
   // ------------------------------------------------------------ row insertion
@@ -593,14 +687,35 @@ export class Timeline {
           : sel?.elementId ? selectOne('element', elementRef(sel.elementId))
             : emptySelection()
     ));
+    // The pool primary drives the legacy fields, so a mixed cam / ob / el pool
+    // still highlights exactly one row. Main derives the same values.
+    const host = legacyFields(this.pool, {
+      elementId: sel?.elementId, objectId: sel?.objectId, camera: sel?.camera,
+    });
     this.segmentId = sel?.segmentId || null;
-    this.elementId = sel?.elementId || null;
-    this.objectId = sel?.objectId || null;
-    this.cameraSel = !!sel?.camera;
+    this.elementId = host.elementId;
+    this.objectId = host.objectId;
+    this.cameraSel = host.camera;
     if (this.objectId !== prev || this.elementId !== prevEl) this.propSel = null;
     // Selection alone never opens a property group. A second click on the
     // already-selected row does that (see _down / viewport click handling).
     this._paintSelection();
+  }
+
+  /**
+   * Adopt the pool primary as the timeline's own single-selection fields and
+   * tell main. Every pick path goes through here: a Ctrl toggle that removes a
+   * host has to move the legacy selection to the surviving primary, otherwise
+   * Delete / the inspector would keep acting on the ref that just left the pool.
+   */
+  _selectPoolHost(explicit = {}) {
+    const host = legacyFields(this.pool, explicit);
+    this.elementId = host.elementId;
+    this.objectId = host.objectId;
+    this.cameraSel = host.camera;
+    const segmentId = host.elementId ? (this._element(host.elementId)?.segment || null) : null;
+    this.onSelect?.({ ...host, segmentId, pool: this.pool });
+    return host;
   }
 
   setTime(t) {
@@ -645,6 +760,30 @@ export class Timeline {
   _gutter() { return this._gutterW; }
   _trackX(t) { return this._gutter() + t * this.pps; }
   _fps() { return normalizeFps(this.project?.meta.fps); }
+
+  /**
+   * Time to write into the project for a new key or a dragged clip edge: the
+   * left edge of the frame under `t`, rounded up to the stored millisecond so
+   * frameIndex() still reads the same frame (round3 can drop one frame).
+   * Callers snap first (`_snap`: 0 / end / beats), so Alt — which turns the
+   * magnet off — still lands on the frame grid. A snap that lands exactly on
+   * the project end keeps its exact duration instead of rounding past the tail.
+   */
+  _frameTime(t = this.time) {
+    return frameWriteTime(t, this._fps(), this.project?.meta.duration || 0);
+  }
+
+  /** Quantized start/duration for a block drag; see frameClipEdit. */
+  _clipEdit(mode, start, duration, { maxDuration = null } = {}) {
+    return frameClipEdit({
+      mode,
+      start,
+      duration,
+      fps: this._fps(),
+      tail: this.project?.meta.duration || 0,
+      maxDuration,
+    });
+  }
 
   /**
    * Where the playhead line is drawn: the start of the frame under `t`, except
@@ -825,6 +964,7 @@ export class Timeline {
     this._camPropRows = [];
     this._propRows = [];
     this._elPropRows = [];
+    this._linkButtons = [];
     this._objHeads = new Map();
     this._elHeads = new Map();
     // Open camera pages survive activation changes (the active camera may well be
@@ -1064,28 +1204,33 @@ export class Timeline {
     // a text element/object wants the double-click for inline text editing.
     const toggleAfterClick = (kind === 'el' || kind === 'ob') && wasInPool && wasSelected && !additive;
 
-    if (kind === 'el') {
+    if (kind === 'cam') {
+      if (additive) {
+        // Ctrl/Cmd-click appends or toggles the camera in the shared element
+        // pool. Activation stays on the plain-click path, so building a mixed
+        // cam / ob / el selection never changes the live picture.
+        this._pickPool('element', ref, ev);
+        this.propSel = null;
+        this._selectPoolHost();
+        this._paintSelection();
+        return;
+      }
+    } else if (kind === 'el') {
       if (!wasInPool || additive) this._pickPool('element', ref, ev);
       else if (this.pool?.kind === 'element' && this.pool.ids.includes(ref)) {
         // Preserve the multi-selection but make the grabbed row its primary.
         this.pool = normalizeSelection({ ...this.pool, primary: ref });
       }
-      this.elementId = id;
-      this.objectId = null;
-      this.cameraSel = false;
       this.propSel = null;
-      this.onSelect?.({ elementId: id, segmentId: this._element(id)?.segment || null, pool: this.pool });
+      this._selectPoolHost();
       this._paintSelection();
     } else if (kind === 'ob') {
       if (!wasInPool || additive) this._pickPool('element', ref, ev);
       else if (this.pool?.kind === 'element' && this.pool.ids.includes(ref)) {
         this.pool = normalizeSelection({ ...this.pool, primary: ref });
       }
-      this.objectId = id;
-      this.elementId = null;
-      this.cameraSel = false;
       this.propSel = null;
-      this.onSelect?.({ objectId: id, pool: this.pool });
+      this._selectPoolHost();
       this._paintSelection();
     }
     // Cameras are activated on pointerup (activation is an op and a render
@@ -1340,7 +1485,7 @@ export class Timeline {
     kind.dataset.tip = camRank == null
       ? '相机'
       : `相机叠层：从上往下第 ${camRank + 1} / ${this._rankCam.size} 层；拖到另一台相机上下会改叠层（并激活），拖过其它类型只改显示`;
-    g.append(eye, caret, dot, name, kind);
+    g.append(eye, this._parentButton('cam', cam), caret, dot, name, kind);
 
     const track = el('div', 'tl-track');
     const block = el('div', 'blk cam');
@@ -1375,6 +1520,16 @@ export class Timeline {
     const orig = { start: range.start, duration: range.duration };
     const active = this._activeCameraId() === cam.id;
     const wasSelected = this.cameraSel && !ev.ctrlKey && !ev.metaKey && !ev.shiftKey && active;
+    if (ev.ctrlKey || ev.metaKey || ev.shiftKey) {
+      // Ctrl/Cmd-click on a camera clip: add / toggle it in the shared element
+      // pool. It must not activate or start a trim drag, so building a mixed
+      // selection never changes the live shot.
+      this._pickPool('element', cameraRef(cam.id), ev);
+      this.propSel = null;
+      this._selectPoolHost();
+      this._paintSelection();
+      return;
+    }
     // Select on pointerdown, but do not activate through an op here: an op
     // reply re-renders the timeline and detaches the block mid-drag. Activation
     // is batched with the move on pointerup instead (one save / one undo).
@@ -1421,14 +1576,20 @@ export class Timeline {
         return;
       }
       const ns = block._ns, nd = block._nd;
-      const changed = ns != null && (Math.abs(ns - orig.start) >= 1e-4 || Math.abs(nd - orig.duration) >= 1e-4);
+      const q = ns == null ? null : this._clipEdit(mode, ns, nd);
+      const changed = q != null
+        && (Math.abs(q.start - orig.start) >= 1e-4 || Math.abs(q.duration - orig.duration) >= 1e-4);
       if (!changed) {
         if (!active) this._activateCamera(cam.id);
         return;
       }
       const ops = [];
       if (!active) ops.push({ op: 'activateCamera', id: cam.id });
-      ops.push({ op: 'moveElement', id: cam.id, start: round3(ns), duration: round3(nd) });
+      // A move keeps the clip length exactly (keyframes travel with it); a trim
+      // keeps the opposite edge and lands the dragged edge on the frame grid.
+      ops.push(mode === 'move'
+        ? { op: 'moveElement', id: cam.id, start: q.start }
+        : { op: 'moveElement', id: cam.id, start: q.start, duration: q.duration });
       this.onOp?.(ops.length > 1 ? { op: 'batch', ops } : ops[0]);
     };
     window.addEventListener('pointermove', move);
@@ -1440,8 +1601,8 @@ export class Timeline {
     // One "位置" property (path keys) plus the rest of the base transform.
     // The camera transform group stays open by default: it is what users edit
     // most, while lens/shake/DOF stay folded with summaries.
-    host.appendChild(this._sectionRow('变换', 'camPos'));
-    const xformMode = this.sections.camPos;
+    this._appendSection(host, '变换', 'camPos');
+    const xformMode = this._groupMode('camPos');
     if (xformMode !== 'collapsed') {
       const tr = cameraTransform(cam, this.time);
       const show = (path) => xformMode === 'full' || this._camTracked(cam, path);
@@ -1476,8 +1637,8 @@ export class Timeline {
     const lensSummary = `FOV ${Math.round(fov)}°${fov >= 180 ? ' · 鱼眼' : ''}`;
     const shakeSummary = `${round2(shakeAmp)}m · ${round2(shakeFreq)}Hz`;
     const dofSummary = `f/${round2(fstop)} · 模糊 ${Math.round((cam.motionBlur.shutter || 0) * 360)}°`;
-    host.appendChild(this._sectionRow('镜头 / 构图', 'camMain', lensSummary));
-    const lensMode = this.sections.camMain;
+    this._appendSection(host, '镜头 / 构图', 'camMain', lensSummary);
+    const lensMode = this._groupMode('camMain');
     if (lensMode !== 'collapsed') {
       const show = (path) => lensMode === 'full' || this._camTracked(cam, path);
       if (show('fov')) {
@@ -1510,8 +1671,8 @@ export class Timeline {
       }
     }
 
-    host.appendChild(this._sectionRow('抖动', 'camShake', shakeSummary));
-    const shakeMode = this.sections.camShake;
+    this._appendSection(host, '抖动', 'camShake', shakeSummary);
+    const shakeMode = this._groupMode('camShake');
     if (shakeMode !== 'collapsed') {
       const show = (path) => shakeMode === 'full' || this._camTracked(cam, path);
       if (show('shake.amp')) {
@@ -1536,8 +1697,8 @@ export class Timeline {
       }
     }
 
-    host.appendChild(this._sectionRow('景深 / 模糊', 'camDof', dofSummary));
-    const dofMode = this.sections.camDof;
+    this._appendSection(host, '景深 / 模糊', 'camDof', dofSummary);
+    const dofMode = this._groupMode('camDof');
     if (dofMode !== 'collapsed') {
       const show = (path) => dofMode === 'full' || this._camTracked(cam, path);
       if (show('dof.enabled')) {
@@ -1560,18 +1721,21 @@ export class Timeline {
   }
 
   _camPosRow(cam) {
-    const row = el('div', 'tl-row tl-camprop tl-camposrow');
+    // Camera path position is animation, not a linkable scalar (PLAN §3.3):
+    // the placeholder keeps this row aligned with the linkable rows above it.
+    const row = el('div', 'tl-row tl-camprop tl-camposrow tl-linkrow');
     row.dataset.cam = cam.id;
     row.dataset.path = 'path';
     const g = el('div', 'tl-gutter');
     g.dataset.cam = cam.id;
+    g.appendChild(this._linkButton('cam', cam, cameraRowLinkPaths('position')));
     g.appendChild(el('span', 'tl-plabel', '位置'));
     const inputs = [];
     for (const ax of AX) {
       const { box, inp } = this._numBox(ax, ax.toUpperCase());
       inp.addEventListener('focus', () => this.onPause?.());
       inp.addEventListener('input', () => {
-        this._editTimes.set(camPosEditKey(cam.id), round3(this.time));
+        this._editTimes.set(camPosEditKey(cam.id), this._frameTime());
         this._schedule(camPosEditKey(cam.id), () => this._commitCamPos(cam.id));
       });
       inp.addEventListener('blur', () => { this._flush(camPosEditKey(cam.id)); this._syncProps(); });
@@ -1598,7 +1762,7 @@ export class Timeline {
     if (!cam || !posRow) return;
     const v = posRow.inputs.map((i) => readNumber(i));
     if (v.some((n) => !Number.isFinite(n))) return;
-    const t = this._editTimes.get(camPosEditKey(camId)) ?? round3(this.time);
+    const t = this._editTimes.get(camPosEditKey(camId)) ?? this._frameTime();
     const old = (cam.path || []).find((k) => Math.abs(k.t - t) <= 1e-4);
     this.onOp?.({ op: 'cameraKey', id: camId, t, pos: v, look: old?.look ?? null, fov: old?.fov ?? null });
   }
@@ -1607,7 +1771,7 @@ export class Timeline {
     const cam = this._camById(camId);
     if (!cam) return;
     this.onPause?.();
-    const t = round3(this.time);
+    const t = this._frameTime();
     const key = (cam.path || []).find((k) => Math.abs(k.t - t) < 1e-3);
     if (key) {
       this.onOp?.({ op: 'cameraRemove', id: camId, t: key.t });
@@ -1635,15 +1799,16 @@ export class Timeline {
         return { t, node: d };
       });
     }
-    for (const k of posRow.keys) k.node.classList.toggle('at', Math.abs(k.t - this.time) < 5e-4);
+    for (const k of posRow.keys) k.node.classList.toggle('at', Math.abs(k.t - this.time) < 1e-3);
   }
 
   _camVecRow(cam, path, label, dims, values, { step = 0.1, min, max, letter } = {}) {
-    const row = el('div', 'tl-row tl-camprop tl-camxform');
+    const row = el('div', 'tl-row tl-camprop tl-camxform tl-linkrow');
     row.dataset.cam = cam.id;
     row.dataset.path = path;
     const g = el('div', 'tl-gutter');
     g.dataset.cam = cam.id;
+    g.appendChild(this._linkButton('cam', cam, cameraRowLinkPaths(path)));
     g.appendChild(el('span', 'tl-plabel', label));
     const inputs = [];
     for (let i = 0; i < dims; i++) {
@@ -1659,7 +1824,7 @@ export class Timeline {
       const editKey = `cam:${cam.id}:${path}`;
       inp.addEventListener('focus', () => this.onPause?.());
       inp.addEventListener('input', () => {
-        this._editTimes.set(editKey, round3(this.time));
+        this._editTimes.set(editKey, this._frameTime());
         this._schedule(editKey, () => this._commitCamParam(cam.id, path));
       });
       inp.addEventListener('blur', () => { this._flush(editKey); this._syncProps(); });
@@ -1695,7 +1860,8 @@ export class Timeline {
   }
 
   _camValue(cam, path, t = this.time) {
-    return cameraParamValue(cam, path, t);
+    const linked = cameraValueWithLinks(this.project, cam, path, t);
+    return linked == null ? cameraParamValue(cam, path, t) : linked;
   }
 
   _camHasTrack(cam, path) {
@@ -1708,8 +1874,20 @@ export class Timeline {
     if (!cam || !pr) return;
     const values = pr.inputs.map((i) => readNumber(i));
     if (!values.every(Number.isFinite)) return;
-    const v = pr.dims === 1 ? values[0] : values;
-    const t = this._editTimes.get(`cam:${camId}:${path}`) ?? round3(this.time);
+    let v = pr.dims === 1 ? values[0] : values;
+    const t = this._editTimes.get(`cam:${camId}:${path}`) ?? this._frameTime();
+    // Camera rows display effective values; store the local value so the same
+    // picture remains after the edit. center -> pivot.*, scale -> scale.*.
+    if (path === 'center' || path === 'scale') {
+      const group = path === 'center' ? 'pivot' : 'scale';
+      v = values.map((n, i) => {
+        const back = writeBackLocalValue(this.project, { host: 'cam', id: camId }, `${group}.${AX[i]}`, t, n);
+        return Number.isFinite(back) ? back : n;
+      });
+    } else if (pr.dims === 1) {
+      const back = writeBackLocalValue(this.project, { host: 'cam', id: camId }, path, t, Number(v));
+      if (Number.isFinite(back)) v = back;
+    }
     if (this._camHasTrack(cam, path)) {
       this.onOp?.({ op: 'cameraParamKey', id: camId, path, t, v });
     } else {
@@ -1722,7 +1900,7 @@ export class Timeline {
     const cam = this._camById(camId);
     if (!cam) return;
     const v = raw === 'true' ? true : raw === 'false' ? false : raw;
-    const t = round3(this.time);
+    const t = this._frameTime();
     if (this._camHasTrack(cam, path)) {
       this.onOp?.({ op: 'cameraParamKey', id: camId, path, t, v });
     } else {
@@ -1738,13 +1916,13 @@ export class Timeline {
     const cam = this._camById(camId);
     if (!cam) return;
     this.onPause?.();
-    const t = round3(this.time);
+    const t = this._frameTime();
     const track = cam.tracks?.[path] || [];
     if (track.some((k) => Math.abs(k.t - t) < 1e-3)) {
       this.onOp?.({ op: 'cameraParamUnkey', id: camId, path, t });
       return;
     }
-    const v = this._camValue(cam, path, t);
+    const v = cameraParamValue(cam, path, t);
     this.onOp?.({ op: 'cameraParamKey', id: camId, path, t, v });
   }
 
@@ -1767,15 +1945,16 @@ export class Timeline {
         return { t, node: d };
       });
     }
-    for (const k of pr.keys || []) k.node.classList.toggle('at', Math.abs(k.t - this.time) < 5e-4);
+    for (const k of pr.keys || []) k.node.classList.toggle('at', Math.abs(k.t - this.time) < 1e-3);
   }
 
   _camParamNumRow(cam, path, label, value, { step = 0.1, min, max, badge = '', keyable = true } = {}) {
-    const row = el('div', 'tl-row tl-camprop tl-camparamrow');
+    const row = el('div', 'tl-row tl-camprop tl-camparamrow tl-linkrow');
     row.dataset.cam = cam.id;
     row.dataset.path = path;
     const g = el('div', 'tl-gutter');
     g.dataset.cam = cam.id;
+    g.appendChild(this._linkButton('cam', cam, cameraRowLinkPaths(path)));
     g.appendChild(el('span', 'tl-plabel', label));
     const { box, inp } = this._numBox('d', '');
     box.classList.add('tl-camnum');
@@ -1786,7 +1965,7 @@ export class Timeline {
     const editKey = `cam:${cam.id}:${path}`;
     inp.addEventListener('focus', () => this.onPause?.());
     inp.addEventListener('input', () => {
-      this._editTimes.set(editKey, round3(this.time));
+      this._editTimes.set(editKey, this._frameTime());
       this._schedule(editKey, () => {
         if (keyable) this._commitCamParam(cam.id, path);
         else {
@@ -1815,11 +1994,12 @@ export class Timeline {
   }
 
   _camParamSelectRow(cam, path, label, value, options, { badge = '', keyable = true } = {}) {
-    const row = el('div', 'tl-row tl-camprop tl-camparamrow');
+    const row = el('div', 'tl-row tl-camprop tl-camparamrow tl-linkrow');
     row.dataset.cam = cam.id;
     row.dataset.path = path;
     const g = el('div', 'tl-gutter');
     g.dataset.cam = cam.id;
+    g.appendChild(this._linkButton('cam', cam, []));
     g.appendChild(el('span', 'tl-plabel', label));
     const sel = document.createElement('select');
     sel.className = 'tl-camselect';
@@ -1893,7 +2073,8 @@ export class Timeline {
     if (e.type !== 'audio' && rank2D != null) {
       kind.dataset.tip = `2D 图层：当前第 ${rank2D + 1} / ${this._rank2D.size} 个（越靠上越高；同面才看得出；拖过相机/3D/声音只改显示）`;
     }
-    g.append(eye, caret, dot, name, kind);
+    const parentBtn = e.type === 'audio' ? null : this._parentButton('el', e);
+    g.append(eye, parentBtn || '', caret, dot, name, kind);
 
     const track = el('div', 'tl-track');
     const b = el('div', `blk el t-${e.type}`);
@@ -1925,8 +2106,10 @@ export class Timeline {
 
     if (!open) return;
     if (e.type === 'audio') {
-      host.appendChild(this._sectionRow('声音', 'audio'));
-      if (this.sections.audio !== 'collapsed') {
+      this._appendSection(host, '声音', 'audio');
+      const mode = this._groupMode('audio');
+      if (mode === 'collapsed') return;
+      if (mode === 'full' || this._elTrack(e, 'audio.volume').length > 0) {
         host.appendChild(this._elementNumRow(e, 'audio.volume', '音量', {
           step: 0.01, axis: 'd', letter: '', unit: '0..1', min: 0, max: 1,
           title: '音量 0..1；◆ 在当前时间打关键帧',
@@ -1934,10 +2117,35 @@ export class Timeline {
       }
       return;
     }
-    host.appendChild(this._sectionRow('变换', 'transform', 'px / m'));
-    if (this.sections.transform === 'collapsed') return;
-    const mode = this.sections.transform;
-    const show = (path) => mode === 'full' || this._elTrack(e, path).length > 0;
+    this._appendSection(host, '变换', 'transform', e.node ? 'm / 度 / 倍' : 'px / m');
+    const mode = this._groupMode('transform');
+    if (mode === 'collapsed') return;
+    const show = (path) => mode === 'full' || this._elTrack(e, this._elKeyPath(e, path)).length > 0;
+    if (e.node) {
+      // Unified node rows: pivot / position / scale xyz + roll + opacity. One
+      // scalar row per axis keeps the existing keyframe lane / drag machinery.
+      const nodeRows = [
+        ['pivot.x', '中心点 X', { step: 0.05, axis: 'x', letter: 'X', unit: 'm' }],
+        ['pivot.y', '中心点 Y', { step: 0.05, axis: 'y', letter: 'Y', unit: 'm' }],
+        ['pivot.z', '中心点 Z', { step: 0.05, axis: 'z', letter: 'Z', unit: 'm' }],
+        ['position.x', '位置 X', { step: 0.05, axis: 'x', letter: 'X', unit: 'm' }],
+        ['position.y', '位置 Y', { step: 0.05, axis: 'y', letter: 'Y', unit: 'm' }],
+        ['position.z', '位置 Z', { step: 0.05, axis: 'z', letter: 'Z', unit: 'm' }],
+        ['scale.x', '缩放 X', { step: 0.01, axis: 'x', letter: 'X', unit: '', min: 0 }],
+        ['scale.y', '缩放 Y', { step: 0.01, axis: 'y', letter: 'Y', unit: '', min: 0 }],
+        ['scale.z', '缩放 Z', { step: 0.01, axis: 'z', letter: 'Z', unit: '', min: 0 }],
+        ['roll', '旋转°', { step: 0.5, axis: 'd', letter: '', unit: '°' }],
+      ];
+      for (const [path, label, opts] of nodeRows) {
+        if (show(path)) host.appendChild(this._elementNumRow(e, path, label, opts));
+      }
+      if (show('transform.opacity')) {
+        host.appendChild(this._elementNumRow(e, 'transform.opacity', '不透明度', {
+          step: 0.01, axis: 'd', letter: '', unit: '', min: 0, max: 1,
+        }));
+      }
+      return;
+    }
     if (show('transform.x')) host.appendChild(this._elementNumRow(e, 'transform.x', 'X', { step: 0.1, axis: 'x', letter: 'X', unit: 'px' }));
     if (show('transform.y')) host.appendChild(this._elementNumRow(e, 'transform.y', 'Y', { step: 0.1, axis: 'y', letter: 'Y', unit: 'px' }));
     if (show('transform.z')) {
@@ -1955,11 +2163,12 @@ export class Timeline {
   }
 
   _elementNumRow(e, path, label, { step = 0.1, axis = 'd', letter = '', unit = '', min, max, title } = {}) {
-    const row = el('div', 'tl-row tl-prop tl-elprop');
+    const row = el('div', 'tl-row tl-prop tl-elprop tl-linkrow');
     row.dataset.el = e.id;
     row.dataset.path = path;
     const g = el('div', 'tl-gutter');
     g.dataset.el = e.id;
+    g.appendChild(this._linkButton('el', e, elementRowLinkPaths(e, path)));
     const lab = el('span', 'tl-plabel', label);
     lab.dataset.tip = title || `${label}${unit ? ` (${unit})` : ''}`;
     g.appendChild(lab);
@@ -1972,13 +2181,16 @@ export class Timeline {
     // Decide once, when editing starts: an unkeyed property keeps editing its
     // base value for the whole gesture. Otherwise a stray key created while a
     // field is focused would silently turn the next keystroke into a keyframe.
-    const pr = { elId: e.id, path, input: inp, kf: null, lane: null, row, sig: '', keyedAtFocus: null };
+    const pr = {
+      elId: e.id, path, keyPath: this._elKeyPath(e, path), input: inp, kf: null, lane: null, row, sig: '',
+      keyedAtFocus: null,
+    };
     inp.addEventListener('focus', () => {
       this.onPause?.();
-      pr.keyedAtFocus = this._elTrack(e, path).length > 0;
+      pr.keyedAtFocus = this._elTrack(e, pr.keyPath).length > 0;
     });
     inp.addEventListener('input', () => {
-      this._editTimes.set(`${e.id}:${path}`, round3(this.time));
+      this._editTimes.set(`${e.id}:${path}`, this._frameTime());
       this._schedule(`${e.id}:${path}`, () => this._commitElementNum(e.id, path));
     });
     inp.addEventListener('blur', () => { this._flush(`${e.id}:${path}`); pr.keyedAtFocus = null; this._syncProps(); });
@@ -2016,14 +2228,7 @@ export class Timeline {
     name.textContent = o.name || o.id;
     name.dataset.tip = '双击重命名';
     name.addEventListener('dblclick', () => this._inlineName(name, o));
-    if (o.parent?.id) {
-      const p = (this.project?.scene?.objects || []).find((x) => x.id === o.parent.id);
-      const link = el('span', 'tl-objparent', '↳');
-      link.dataset.tip = `父级：${p?.name || o.parent.id}`;
-      g.append(eye, caret, dot, link, name);
-    } else {
-      g.append(eye, caret, dot, name);
-    }
+    g.append(eye, this._parentButton('ob', o), caret, dot, name);
     const kind = el('span', 'tl-objkind badge badge-object', o.type === 'empty' ? '空' : '3D');
     kind.dataset.tip = '3D 物体按深度遮挡；上下拖动只改列表显示，不影响画面';
     const kids = childrenOf(this.project, o.id).length;
@@ -2066,14 +2271,18 @@ export class Timeline {
     }
 
     if (!open) return;
-    host.appendChild(this._sectionRow('内容', 'content'));
-    if (this.sections.content === 'full') {
-      host.appendChild(this._geomRow(o));
-      host.appendChild(this._colorRow(o));
+    // Content rows (geometry / colour) are not keyable, so the keyed-only pass
+    // hides the whole group, label included.
+    if (!this._keyedOnly) {
+      host.appendChild(this._sectionRow('内容', 'content'));
+      if (this.sections.content === 'full') {
+        host.appendChild(this._geomRow(o));
+        host.appendChild(this._colorRow(o));
+      }
     }
-    host.appendChild(this._sectionRow('变换', 'transform', 'm / 倍'));
-    if (this.sections.transform !== 'collapsed') {
-      const mode = this.sections.transform;
+    this._appendSection(host, '变换', 'transform', 'm / 倍');
+    const mode = this._groupMode('transform');
+    if (mode !== 'collapsed') {
       const show = (path) => mode === 'full' || this._propKeys(o, path).length > 0;
       if (show('pivot')) host.appendChild(this._vecRow(o, 'pivot', '中心点'));
       if (show('position')) host.appendChild(this._vecRow(o, 'position', '位置'));
@@ -2102,75 +2311,75 @@ export class Timeline {
     return (cam?.tracks?.[path] || []).length > 0;
   }
 
-  _camGroupKeyed(cam, group) {
-    if (!cam) return false;
-    if (group === 'transform') {
-      return (cam.path || []).length > 0
-        || ['center', 'opacity', 'scale', 'picturePivot', 'pictureOffset']
-          .some((p) => this._camTracked(cam, p));
-    }
-    if (group === 'lens') {
-      return ['fov', 'lookAhead', 'bankGain', 'maxRoll', 'roll'].some((p) => this._camTracked(cam, p));
-    }
-    if (group === 'shake') {
-      return ['shake.amp', 'shake.freq', 'shake.speedGain'].some((p) => this._camTracked(cam, p));
-    }
-    if (group === 'dofMb') {
-      return ['dof.enabled', 'dof.fstop'].some((p) => this._camTracked(cam, p));
-    }
-    return false;
-  }
-
-  _objGroupKeyed(o, group) {
-    if (!o) return false;
-    if (group === 'transform') {
-      return ['pivot', 'position', 'scale', 'opacity'].some((p) => this._propKeys(o, p).length > 0);
-    }
-    return false; // content (primitive / geom / color) is not keyable
-  }
-
-  /** U: show only the properties carrying keys for the selected element. */
+  /**
+   * U: keep only the hosts of the current pool that actually carry keys, with
+   * every group label row hidden and every group in keyed mode. A second U
+   * restores the expansion / group / scroll state from before the pass; the
+   * pool and the filter are never touched. Returns false when nothing has keys,
+   * so the toolbar keeps its shake and the shortcut stays unhandled.
+   *
+   * `core/timeline-keys.js` owns the "which host has keys / which groups must
+   * stay open" rules, so the pass sees exactly the rows this timeline can draw.
+   */
   applyKeyedFilter() {
-    const pool = this.pool;
-    if (pool.kind !== 'element') return false;
-    const refs = pool.ids.map(splitRef).filter(Boolean);
-    const objects = refs.filter((r) => r.type === 'ob');
-    if (objects.length) {
-      for (const r of objects) this.expanded.add(r.id);
-      this.sections.content = 'collapsed';
-      this.sections.transform = objects.some((r) => this._objGroupKeyed(this._obj(r.id), 'transform'))
-        ? 'keyed' : 'collapsed';
-      this.render(true);
-      return true;
+    if (this._keyedOnly) return this.exitKeyedOnly();
+    const keyed = poolHostKeys(this.project, this.pool).filter((s) => s.keyed);
+    if (!keyed.length) return false;
+    this._keyedSnapshot = {
+      sections: { ...this.sections },
+      expanded: [...this.expanded],
+      expandedEls: [...this.expandedEls],
+      openCams: [...this.openCams],
+      scrollTop: this.scroll.scrollTop,
+      scrollLeft: this.scroll.scrollLeft,
+    };
+    this._keyedOnly = true;
+    // Only keyed hosts open. Cameras get their page opened but are never
+    // activated: activation would change the live picture.
+    this.expanded = new Set(keyed.filter((s) => s.type === 'ob').map((s) => s.id));
+    this.expandedEls = new Set(keyed.filter((s) => s.type === 'el').map((s) => s.id));
+    this.openCams = new Set(keyed.filter((s) => s.type === 'cam').map((s) => s.id));
+    this._syncKeyedBtn();
+    this.render(true);
+    return true;
+  }
+
+  /** Second U: leave the keyed-only pass and restore the pre-pass state. */
+  exitKeyedOnly() {
+    if (!this._keyedOnly) return false;
+    const snap = this._keyedSnapshot;
+    this._keyedSnapshot = null;
+    this._keyedOnly = false;
+    if (snap) {
+      this.sections = { ...snap.sections };
+      this.expanded = new Set(snap.expanded);
+      this.expandedEls = new Set(snap.expandedEls);
+      this.openCams = new Set(snap.openCams);
     }
-    const elements = refs.filter((r) => r.type === 'el');
-    if (elements.length) {
-      for (const r of elements) this.expandedEls.add(r.id);
-      this.sections.transform = elements.some((r) => {
-        const e = this._element(r.id);
-        return ['transform.x', 'transform.y', 'transform.z', 'transform.scale', 'transform.rotation', 'transform.opacity']
-          .some((p) => this._elTrack(e, p).length > 0);
-      }) ? 'keyed' : 'collapsed';
-      this.render(true);
-      return true;
+    this._scrollTo = null;
+    this._syncKeyedBtn();
+    this.render(true);
+    if (snap) {
+      this.scroll.scrollTop = snap.scrollTop;
+      this.scroll.scrollLeft = snap.scrollLeft;
     }
-    const cams = refs.filter((r) => r.type === 'cam');
-    if (cams.length) {
-      const primary = splitRef(pool.primary);
-      const id = (primary?.type === 'cam' && cams.some((r) => r.id === primary.id)) ? primary.id : cams[0].id;
-      const cam = this._camById(id);
-      if (!cam) return false;
-      // U opens every selected camera; sections are shared, so they follow the
-      // primary one. Other open camera pages stay open.
-      for (const r of cams) if (this._camById(r.id)) this.openCams.add(r.id);
-      for (const g of ['transform', 'lens', 'shake', 'dofMb']) {
-        const key = g === 'transform' ? 'camPos' : g === 'lens' ? 'camMain' : g === 'shake' ? 'camShake' : 'camDof';
-        this.sections[key] = this._camGroupKeyed(cam, g) ? 'keyed' : 'collapsed';
-      }
-      this.render(true);
-      return true;
-    }
-    return false;
+    return true;
+  }
+
+  /**
+   * Effective mode of a property group. The keyed-only pass forces 'keyed' for
+   * every group without writing `sections`, so exiting restores what was there.
+   */
+  _groupMode(key) {
+    return this._keyedOnly ? 'keyed' : this.sections[key];
+  }
+
+  /** Section label row; skipped entirely during the keyed-only pass. */
+  _appendSection(host, title, key, hint = '') {
+    if (this._keyedOnly) return null;
+    const row = this._sectionRow(title, key, hint);
+    host.appendChild(row);
+    return row;
   }
 
   _sectionRow(title, key, hint = '') {
@@ -2204,6 +2413,74 @@ export class Timeline {
     return { box, inp };
   }
 
+  // ------------------------------------------------------------ property links
+  /**
+   * `↳` button for a property row (PLAN-ui-round3 §4.2). A row that cannot be
+   * linked keeps a 20px placeholder so the name column does not jump between
+   * rows. Lit = the host carries a link for one of `paths`.
+   */
+  _linkButton(kind, host, paths) {
+    const usable = (paths || []).filter((path) => findLinkTarget(kind, host, path));
+    if (!usable.length) return el('span', 'tl-linkflag');
+    const btn = el('button', 'tl-linkbtn');
+    btn.type = 'button';
+    btn.textContent = '↳';
+    btn.setAttribute('aria-label', '属性父级');
+    const rec = { node: btn, kind, hostId: String(host?.id ?? ''), paths: usable };
+    this._linkButtons.push(rec);
+    const open = (anchor, x, y) => {
+      this.onPause?.();
+      openLinkMenu({
+        project: this.project,
+        hostKind: kind,
+        id: rec.hostId,
+        to: usable,
+        labels: usable.map((path) => linkPropLabel(path)),
+        anchor, x, y,
+        t: this._frameTime(),
+        onOp: (op) => this.onOp?.(op),
+        onJump: (jump) => this.onLinkJump?.(jump),
+        toast: this.onToast,
+      });
+    };
+    btn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      open(btn);
+    });
+    btn.addEventListener('contextmenu', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      open(null, ev.clientX, ev.clientY);
+    });
+    this._paintLink(rec);
+    return btn;
+  }
+
+  _paintLink(rec) {
+    if (!rec?.node) return;
+    const host = this._linkHost(rec.kind, rec.hostId);
+    const links = host ? rec.paths.map((path) => linkOf(host, path)).filter(Boolean) : [];
+    rec.node.classList.toggle('on', links.length > 0);
+    rec.node.dataset.tip = links.length
+      ? `属性父级：${links.map((link) => linkSourceLabel(this.project, link)).join('；')}`
+      : '属性父级：点击选择父级属性（右键也可）';
+  }
+
+  /** Repaint every link button from the live project (called by _syncProps). */
+  _paintLinks() {
+    for (const rec of this._linkButtons) this._paintLink(rec);
+  }
+
+  _linkHost(kind, id) {
+    const p = this.project;
+    if (!p) return null;
+    const key = String(id ?? '');
+    const list = kind === 'el' ? (p.elements || [])
+      : kind === 'ob' ? (p.scene?.objects || [])
+        : [...(p.cameras || []), ...(p.camera ? [p.camera] : [])];
+    return list.find((host) => String(host?.id ?? '') === key) || null;
+  }
+
   _geomRow(o) {
     const row = el('div', 'tl-row tl-prop');
     row.dataset.obj = o.id;
@@ -2216,7 +2493,7 @@ export class Timeline {
       const { box, inp } = this._numBox('d', letter);
       inp.addEventListener('focus', () => this.onPause?.());
       inp.addEventListener('input', () => {
-        this._editTimes.set(`${o.id}:geom`, round3(this.time));
+        this._editTimes.set(`${o.id}:geom`, this._frameTime());
         this._schedule(`${o.id}:geom`, () => this._commitGeom(o.id));
       });
       inp.addEventListener('blur', () => { this._flush(`${o.id}:geom`); this._syncProps(); });
@@ -2245,7 +2522,7 @@ export class Timeline {
     hex.className = 'tl-hex';
     hex.spellcheck = false;
     color.addEventListener('input', () => {
-      this._editTimes.set(`${o.id}:color`, round3(this.time));
+      this._editTimes.set(`${o.id}:color`, this._frameTime());
       this._schedule(`${o.id}:color`, () => this._commitColor(o.id, color.value));
     });
     color.addEventListener('blur', () => { this._flush(`${o.id}:color`); this._syncProps(); });
@@ -2262,11 +2539,12 @@ export class Timeline {
   }
 
   _vecRow(o, path, label) {
-    const row = el('div', 'tl-row tl-prop');
+    const row = el('div', 'tl-row tl-prop tl-linkrow');
     row.dataset.obj = o.id;
     row.dataset.path = path;
     const g = el('div', 'tl-gutter');
     g.dataset.obj = o.id;
+    g.appendChild(this._linkButton('ob', o, objectRowLinkPaths(path)));
     const lab = el('span', 'tl-plabel');
     if (o.parent?.id) {
       const local = el('span', 'tl-plocal', '本');
@@ -2280,7 +2558,7 @@ export class Timeline {
       const { box, inp } = this._numBox(ax, ax.toUpperCase());
       inp.addEventListener('focus', () => this.onPause?.());
       inp.addEventListener('input', () => {
-        this._editTimes.set(`${o.id}:${path}`, round3(this.time));
+        this._editTimes.set(`${o.id}:${path}`, this._frameTime());
         this._schedule(`${o.id}:${path}`, () => this._commitVec(o.id, path));
       });
       inp.addEventListener('blur', () => { this._flush(`${o.id}:${path}`); this._syncProps(); });
@@ -2298,11 +2576,12 @@ export class Timeline {
   }
 
   _opacityRow(o) {
-    const row = el('div', 'tl-row tl-prop');
+    const row = el('div', 'tl-row tl-prop tl-linkrow');
     row.dataset.obj = o.id;
     row.dataset.path = 'opacity';
     const g = el('div', 'tl-gutter');
     g.dataset.obj = o.id;
+    g.appendChild(this._linkButton('ob', o, objectRowLinkPaths('opacity')));
     g.appendChild(el('span', 'tl-plabel', '不透明度'));
     const { box, inp } = this._numBox('d', '');
     box.classList.add('tl-scalar');
@@ -2312,7 +2591,7 @@ export class Timeline {
     inp.dataset.unit = '%';
     inp.addEventListener('focus', () => this.onPause?.());
     inp.addEventListener('input', () => {
-      this._editTimes.set(`${o.id}:opacity`, round3(this.time));
+      this._editTimes.set(`${o.id}:opacity`, this._frameTime());
       this._schedule(`${o.id}:opacity`, () => this._commitOpacity(o.id));
     });
     inp.addEventListener('blur', () => { this._flush(`${o.id}:opacity`); this._syncProps(); });
@@ -2343,11 +2622,23 @@ export class Timeline {
 
   /** Base / keyed value of a 2D element property (no motion presets or fades). */
   _elValue(e, path, t) {
+    const viaNode = localElementRowValueAt(this.project, e, path, t);
+    if (viaNode != null) return viaNode;
     const prop = path.slice(path.lastIndexOf('.') + 1);
     let base = path.startsWith('transform.') ? e?.transform?.[prop] : undefined;
     if (path === 'audio.volume') base = e?.volume;
     if (base == null) base = (prop === 'scale' || prop === 'opacity' || path === 'audio.volume') ? 1 : 0;
     return sampleTrack(e?.keyframes, path, t, Number(base));
+  }
+
+  /** Actual keyframe path behind a 2D row (node elements key pivot.* / roll / scale.*). */
+  _elKeyPath(e, path) {
+    return elementRowKeyPath(e, path);
+  }
+
+  /** Display value of a 2D row: local plus its property-link contribution. */
+  _elEffective(e, path, t) {
+    return effectiveElementRowValue(this.project, e, path, t, this._elValue(e, path, t));
   }
 
   _propKeys(o, path) {
@@ -2381,11 +2672,12 @@ export class Timeline {
         return { t, node: d };
       });
     }
-    for (const k of pr.keys || []) k.node.classList.toggle('at', Math.abs(k.t - this.time) < 5e-4);
+    for (const k of pr.keys || []) k.node.classList.toggle('at', Math.abs(k.t - this.time) < 1e-3);
   }
 
   _refreshElLane(pr, e) {
-    const keys = this._elTrack(e, pr.path).map((k) => Math.round(Number(k.t) * 1000) / 1000);
+    const keyPath = pr.keyPath || pr.path;
+    const keys = this._elTrack(e, keyPath).map((k) => Math.round(Number(k.t) * 1000) / 1000);
     const sig = keys.join(',');
     if (sig !== pr.sig) {
       pr.sig = sig;
@@ -2393,15 +2685,15 @@ export class Timeline {
       pr.keys = keys.map((t) => {
         const d = el('div', 'tl-key');
         d.dataset.el = e.id;
-        d.dataset.path = pr.path;
+        d.dataset.path = keyPath;
         d.dataset.t = String(t);
         d.style.left = `${t * this.pps}px`;
-        d.dataset.tip = `${pr.path} · ${t.toFixed(2)}s`;
+        d.dataset.tip = `${keyPath} · ${t.toFixed(2)}s`;
         pr.lane.appendChild(d);
         return { t, node: d };
       });
     }
-    for (const k of pr.keys || []) k.node.classList.toggle('at', Math.abs(k.t - this.time) < 5e-4);
+    for (const k of pr.keys || []) k.node.classList.toggle('at', Math.abs(k.t - this.time) < 1e-3);
   }
 
   _syncProps(force = false) {
@@ -2412,7 +2704,7 @@ export class Timeline {
     for (const pr of this._propRows) {
       const o = this._obj(pr.objId);
       if (!o) continue;
-      const pose = objectPose(o, t);
+      const pose = objectPoseWithLinks(this.project, o, t);
       if (pr.kind === 'geom') {
         const g = o.geom || {};
         ['w', 'h', 'd'].forEach((ax, i) => set(pr.inputs[i], Number(g[ax]) || 2));
@@ -2440,8 +2732,8 @@ export class Timeline {
     for (const pr of this._elPropRows) {
       const e = this._element(pr.elId);
       if (!e) continue;
-      set(pr.input, this._elValue(e, pr.path, t));
-      const keys = this._elTrack(e, pr.path);
+      set(pr.input, this._elEffective(e, pr.path, t));
+      const keys = this._elTrack(e, pr.keyPath || pr.path);
       const at = keys.some((k) => Math.abs(Number(k.t) - t) < 1e-3);
       const has = keys.length > 0;
       pr.kf.classList.toggle('on', at);
@@ -2464,11 +2756,21 @@ export class Timeline {
     for (const pr of this._camPropRows) {
       const cam = this._camById(pr.camId);
       if (!cam) continue;
-      const value = this._camValue(cam, pr.path, t);
-      if (pr.kind === 'select') {
-        if (pr.sel && document.activeElement !== pr.sel) pr.sel.value = String(value);
+      let values;
+      if (pr.path === 'center' || pr.path === 'scale') {
+        const group = pr.path === 'center' ? 'pivot' : 'scale';
+        const tr = cameraTransform(cam, t);
+        values = AX.map((ax, i) => {
+          const linked = cameraValueWithLinks(this.project, cam, `${group}.${ax}`, t);
+          return Number.isFinite(linked) ? linked : tr[pr.path][i];
+        });
       } else {
-        const values = pr.dims === 1 ? [value] : (value || []);
+        const value = this._camValue(cam, pr.path, t);
+        values = pr.dims === 1 ? [value] : (value || []);
+      }
+      if (pr.kind === 'select') {
+        if (pr.sel && document.activeElement !== pr.sel) pr.sel.value = String(values[0]);
+      } else {
         pr.inputs.forEach((inp, i) => set(inp, values[i]));
       }
       if (pr.kf) {
@@ -2514,6 +2816,7 @@ export class Timeline {
       setClipLoopMark(h.block, isLooping(e));
       h.block.dataset.tip = elementClipTip(e, label);
     }
+    this._paintLinks();
   }
 
   _hasTrack(o, path) {
@@ -2527,18 +2830,26 @@ export class Timeline {
     if (!pr || !o) return;
     const v = pr.inputs.map((i) => readNumber(i));
     if (v.some((n) => !Number.isFinite(n))) return;
-    const t = this._editTimes.get(`${objId}:${path}`) ?? round3(this.time);
-    if (this._hasTrack(o, path)) this.onOp?.({ op: 'objectKey', id: objId, path, t, v });
-    else this.onOp?.({ op: 'objectPatch', id: objId, patch: { [path]: v } });
+    const t = this._editTimes.get(`${objId}:${path}`) ?? this._frameTime();
+    // Rows display effective values; store the local value each linked axis
+    // needs at the playhead (unlinked axes pass through).
+    const local = v.map((n, i) => {
+      const back = writeBackLocalValue(this.project, { host: 'ob', id: objId }, `${path}.${'xyz'[i]}`, t, n);
+      return Number.isFinite(back) ? back : n;
+    });
+    if (this._hasTrack(o, path)) this.onOp?.({ op: 'objectKey', id: objId, path, t, v: local });
+    else this.onOp?.({ op: 'objectPatch', id: objId, patch: { [path]: local } });
   }
 
   _commitOpacity(objId) {
     const pr = this._propRows.find((x) => x.objId === objId && x.path === 'opacity');
     const o = this._obj(objId);
     if (!pr || !o) return;
-    const v = readNumber(pr.inputs[0]);
+    let v = readNumber(pr.inputs[0]);
     if (!Number.isFinite(v)) return;
-    const t = this._editTimes.get(`${objId}:opacity`) ?? round3(this.time);
+    const t = this._editTimes.get(`${objId}:opacity`) ?? this._frameTime();
+    const back = writeBackLocalValue(this.project, { host: 'ob', id: objId }, 'opacity', t, v);
+    if (Number.isFinite(back)) v = back;
     if (this._hasTrack(o, 'opacity')) this.onOp?.({ op: 'objectKey', id: objId, path: 'opacity', t, v });
     else this.onOp?.({ op: 'objectPatch', id: objId, patch: { opacity: Math.max(0, Math.min(1, v)) } });
   }
@@ -2565,7 +2876,7 @@ export class Timeline {
     const o = this._obj(objId);
     if (!o) return;
     this.onPause?.();
-    const t = round3(this.time);
+    const t = this._frameTime();
     const track = o.tracks?.[path] || [];
     const at = track.some((k) => Math.abs(k.t - t) < 1e-3);
     if (at) {
@@ -2585,15 +2896,29 @@ export class Timeline {
     if (!Number.isFinite(v)) return;
     if (path === 'transform.opacity' || path === 'audio.volume') v = Math.max(0, Math.min(1, v));
     if (path === 'transform.scale') v = Math.max(0, v);
-    const t = this._editTimes.get(`${elId}:${path}`) ?? round3(this.time);
-    const keyed = pr.keyedAtFocus ?? this._elTrack(e, path).length > 0;
+    const t = this._editTimes.get(`${elId}:${path}`) ?? this._frameTime();
+    // The input shows the effective value; store the local value its property
+    // link needs at this time (no-op for unlinked rows).
+    const local = localElementRowValue(this.project, e, path, t, v);
+    if (local != null && Number.isFinite(local)) v = local;
+    const keyPath = this._elKeyPath(e, path);
+    const target = elementRowTarget(e, path);
+    const keyed = pr.keyedAtFocus ?? this._elTrack(e, keyPath).length > 0;
     if (keyed) {
-      this.onOp?.({ op: 'keySet', id: elId, path, t, value: v });
+      const value = target ? rowToTarget(e, this.project?.meta, target, v, path) : v;
+      this.onOp?.({ op: 'keySet', id: elId, path: keyPath, t, value: value == null ? v : value });
       return;
     }
     if (path === 'audio.volume') {
       this.onOp?.({ op: 'updateElement', id: elId, patch: { volume: v } });
       return;
+    }
+    if (e.node) {
+      const patch = nodeRowPatch(e, path, v, this.project?.meta);
+      if (patch) {
+        this.onOp?.({ op: 'updateElement', id: elId, patch });
+        return;
+      }
     }
     const key = path.slice(path.lastIndexOf('.') + 1);
     this.onOp?.({ op: 'updateElement', id: elId, patch: { transform: { [key]: v } } });
@@ -2603,13 +2928,17 @@ export class Timeline {
     const e = this._element(elId);
     if (!e) return;
     this.onPause?.();
-    const t = round3(this.time);
-    const keys = this._elTrack(e, path);
+    const t = this._frameTime();
+    const keyPath = this._elKeyPath(e, path);
+    const keys = this._elTrack(e, keyPath);
     if (keys.some((k) => Math.abs(Number(k.t) - t) < 1e-3)) {
-      this.onOp?.({ op: 'keyRemove', id: elId, path, t });
+      this.onOp?.({ op: 'keyRemove', id: elId, path: keyPath, t });
       return;
     }
-    this.onOp?.({ op: 'keySet', id: elId, path, t, value: this._elValue(e, path, t) });
+    const local = this._elValue(e, path, t);
+    const target = elementRowTarget(e, path);
+    const value = target ? rowToTarget(e, this.project?.meta, target, local, path) : local;
+    this.onOp?.({ op: 'keySet', id: elId, path: keyPath, t, value: value == null ? local : value });
   }
 
   _schedule(key, fn) {
@@ -2627,6 +2956,11 @@ export class Timeline {
     clearTimeout(p.timer);
     this._pending.delete(key);
     p.fn();
+  }
+
+  /** Send every debounced property edit now (property-link jump must not lose typing). */
+  flushPending() {
+    for (const key of [...this._pending.keys()]) this._flush(key);
   }
 
   _toggleExpand(id) {
@@ -2760,6 +3094,151 @@ export class Timeline {
       }
     }
     this._paintPool();
+  }
+
+  /** Human name of a parent id across elements, objects and cameras. */
+  _parentName(parent) {
+    const id = parent?.id == null ? '' : String(parent.id);
+    if (!id) return '';
+    if (id === '@live') return '当前镜头 (@live)';
+    const p = this.project;
+    const host = (p?.elements || []).find((x) => x.id === id)
+      || (p?.scene?.objects || []).find((x) => x.id === id)
+      || (p?.cameras || []).find((x) => x.id === id);
+    return host?.name || id;
+  }
+
+  /**
+   * Parent button in a header row. Every host can be a spatial child now
+   * (core/spatial-parent.js::spatialParent writes `el.parent` for 2D elements,
+   * `ob.frameParent` / `cam.frameParent` for 3D objects and cameras). Press and
+   * drag to a target row of any kind; a plain click removes the parent.
+   */
+  _parentButton(kind, host) {
+    const record = kind === 'el' ? host.parent : (host.frameParent || (kind === 'ob' ? host.parent : null));
+    const btn = h('button', {
+      type: 'button', class: `tl-objparentbtn${record?.id ? ' on' : ''}`,
+      'aria-label': '空间父级', 'data-tip': record?.id
+        ? `空间父级：${this._parentName(record)}\n拖动到别的元素换父级；单击解除`
+        : '空间父级\n按住拖到目标元素行',
+    }, '↳');
+    btn.addEventListener('pointerdown', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      this._startParentDrag(ev, kind, host, btn);
+    });
+    return btn;
+  }
+
+  _runParentOp(op) {
+    try {
+      const pending = this.onOp?.(op);
+      if (pending?.catch) pending.catch((err) => this.onToast?.(String(err?.message || err)));
+    } catch (err) {
+      this.onToast?.(String(err?.message || err));
+    }
+  }
+
+  _removeParent(kind, host) {
+    if (kind === 'el') {
+      if (!host?.parent?.id) return;
+      this._runParentOp(host.parent.mode === 'world'
+        ? { op: 'spatialUnparent', id: host.id }
+        : { op: 'elementUnparent', id: host.id, t: round3(this.time) });
+      return;
+    }
+    if (host?.frameParent?.id) {
+      this._runParentOp({ op: 'spatialUnparent', id: host.id });
+      return;
+    }
+    // Keep the old 3D parent button behaviour when only obj.parent is set.
+    if (kind === 'ob' && host?.parent?.id) {
+      this._runParentOp({ op: 'objectUnparent', id: host.id, t: round3(this.time) });
+    }
+  }
+
+  _startParentDrag(ev, kind, host, btn) {
+    const start = { x: ev.clientX, y: ev.clientY };
+    let moved = false;
+    let line = null;
+    let targetRow = null;
+    const childId = host.id;
+    const clean = () => {
+      line?.remove();
+      line = null;
+      targetRow?.classList.remove('parent-target');
+      targetRow = null;
+      btn.classList.remove('drop');
+      document.body.classList.remove('tl-parent-dragging');
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', cancel);
+      window.removeEventListener('keydown', onKey, true);
+    };
+    const rowAt = (x, y) => document.elementFromPoint(x, y)?.closest?.(
+      '.tl-elhead[data-el], .tl-objhead[data-obj], .tl-camhead[data-cam]',
+    ) || null;
+    const targetOf = (row) => {
+      if (!row) return null;
+      if (row.dataset.el) return { kind: 'el', id: row.dataset.el, name: this._element(row.dataset.el)?.name };
+      if (row.dataset.obj) return { kind: 'ob', id: row.dataset.obj, name: this._obj(row.dataset.obj)?.name };
+      if (row.dataset.cam) return { kind: 'cam', id: row.dataset.cam, name: this._camById(row.dataset.cam)?.name };
+      return null;
+    };
+    const wire = (x, y) => {
+      if (!line) {
+        line = h('div', { class: 'tl-parent-wire' });
+        document.body.appendChild(line);
+      }
+      const r = btn.getBoundingClientRect();
+      const x0 = r.left + r.width / 2, y0 = r.top + r.height / 2;
+      const dx = x - x0, dy = y - y0;
+      line.style.left = `${x0}px`;
+      line.style.top = `${y0}px`;
+      line.style.width = `${Math.hypot(dx, dy)}px`;
+      line.style.transform = `rotate(${Math.atan2(dy, dx)}rad)`;
+    };
+    const move = (e) => {
+      if (!moved && Math.hypot(e.clientX - start.x, e.clientY - start.y) > 3) {
+        moved = true;
+        document.body.classList.add('tl-parent-dragging');
+        btn.classList.add('drop');
+      }
+      if (!moved) return;
+      wire(e.clientX, e.clientY);
+      const row = rowAt(e.clientX, e.clientY);
+      if (row !== targetRow) {
+        targetRow?.classList.remove('parent-target');
+        targetRow = row;
+        targetRow?.classList.add('parent-target');
+      }
+    };
+    const up = (e) => {
+      const didMove = moved;
+      const row = targetRow;
+      clean();
+      if (!didMove) {
+        this._removeParent(kind, host);
+        return;
+      }
+      const target = targetOf(row);
+      if (!target) return this.onToast?.('没有落在元素行上');
+      if (target.id === childId) return this.onToast?.('不能把自己设成父级');
+      // One op for every child kind: 2D elements, 3D objects and cameras all
+      // become spatial children (op writes `el.parent` / `*.frameParent`).
+      this._runParentOp({ op: 'spatialParent', id: childId, parent: target.id, t: round3(this.time) });
+    };
+    const cancel = () => clean();
+    const onKey = (e) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopPropagation();
+      clean();
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', cancel);
+    window.addEventListener('keydown', onKey, true);
   }
 
   _pickPool(kind, ref, ev) {
@@ -3000,11 +3479,12 @@ export class Timeline {
   }
 
   /**
-   * Press and wait: a tap runs `onTap`, a drag past `slop` hands the same press
-   * to the marquee. Keyframe diamonds and section / property gutters need both
-   * (click to select or toggle, drag to box-select).
+   * Press and wait: a tap runs `onTap`, a drag past `slop` is offered to
+   * `onDrag` first (keyframe diamonds move their selection horizontally) and
+   * falls back to the marquee. Keyframe diamonds and section / property
+   * gutters need both (click to select or toggle, drag to box-select).
    */
-  _deferGesture(ev, { slop = 4, onTap = null } = {}) {
+  _deferGesture(ev, { slop = 4, onTap = null, onDrag = null } = {}) {
     const start = { x: ev.clientX, y: ev.clientY };
     let handed = false;
     const samePointer = (e) => !e || e.pointerId == null || e.pointerId === ev.pointerId;
@@ -3019,6 +3499,7 @@ export class Timeline {
       if (Math.hypot(e.clientX - start.x, e.clientY - start.y) <= slop) return;
       handed = true;
       cleanup();
+      if (onDrag?.(e)) return;
       this._startMarquee(ev, { at: { x: e.clientX, y: e.clientY } });
     };
     const up = (e) => {
@@ -3063,23 +3544,181 @@ export class Timeline {
     if (!ref) return false;
     this._pickPool('keyframe', ref, ev);
     if (node.dataset.cam) {
-      this.cameraSel = true;
-      this.elementId = null; this.segmentId = null; this.objectId = null;
-      this.onSelect?.({ camera: true, pool: this.pool });
+      this._selectPoolHost();
     } else if (node.dataset.el) {
-      const id = node.dataset.el;
-      this.elementId = id;
-      this.objectId = null; this.segmentId = null; this.cameraSel = false;
-      this.propSel = { elId: id, path: node.dataset.path };
-      this.onSelect?.({ elementId: id, pool: this.pool });
+      this.propSel = { elId: node.dataset.el, path: node.dataset.path };
+      this._selectPoolHost();
     } else if (node.dataset.obj) {
-      const id = node.dataset.obj;
-      this.objectId = id;
-      this.elementId = null; this.segmentId = null; this.cameraSel = false;
-      this.propSel = { objId: id, path: node.dataset.path };
-      this.onSelect?.({ objectId: id, pool: this.pool });
+      this.propSel = { objId: node.dataset.obj, path: node.dataset.path };
+      this._selectPoolHost();
     }
     this._paintSelection();
+    return true;
+  }
+
+  /**
+   * A horizontal drag on a diamond moves the whole keyframe pool by whole
+   * frames; a vertical drag keeps the old marquee gesture. An unselected
+   * diamond is selected first (Ctrl/Shift still toggle), then its pool is
+   * dragged: a multi-host pool keeps every key on its own host and track.
+   * Returns false when the press should fall back to the marquee.
+   */
+  _dragKeys(ev, node, at) {
+    const ref = keyframeRefOf(node);
+    if (!ref) return false;
+    // Only horizontal movement changes time; a mostly-vertical drag is still a
+    // box-select, like it was before keyframe dragging existed.
+    const dx = at.clientX - ev.clientX;
+    const dy = at.clientY - ev.clientY;
+    if (Math.abs(dx) <= Math.abs(dy)) return false;
+    if (!(this.pool?.kind === 'keyframe' && this.pool.ids.includes(ref))) {
+      this._selectKeyNode(node, ev);
+    }
+    if (this.pool?.kind !== 'keyframe' || !this.pool.ids.length) return false;
+    this._beginKeyframeDrag(ev, [...this.pool.ids], at.clientX);
+    return true;
+  }
+
+  /**
+   * One batch per drag, one undo step. The preview only writes `style.left` on
+   * the diamonds that are on screen (no render per pointermove); the commit
+   * recomputes the same frame-quantized times through core/keyframe-edit.js.
+   * Esc / pointercancel restores the preview and commits nothing.
+   */
+  _beginKeyframeDrag(ev, refs, atClientX = null) {
+    const list = [...new Set(refs.map(String))];
+    if (!list.length) return false;
+    this.onPause?.();
+    const fps = this._fps();
+    const pxPerFrame = Math.max(0.01, this.pps / fps);
+    const startX = ev.clientX;
+    const wanted = new Set(list);
+    const nodes = [];
+    const seen = new Set();
+    this.inner.querySelectorAll('.tl-key').forEach((node) => {
+      const ref = keyframeRefOf(node);
+      if (!ref || !wanted.has(ref) || seen.has(ref)) return;
+      const t = Number(node.dataset.t);
+      if (!Number.isFinite(t)) return;
+      seen.add(ref);
+      nodes.push({ ref, node, left: node.style.left });
+    });
+    for (const n of nodes) n.node.classList.add('dragging');
+
+    const framesAt = (clientX) => Math.round((clientX - startX) / pxPerFrame);
+    let lastFrames = null;
+    let done = false;
+    const samePointer = (e) => !e || e.pointerId == null || e.pointerId === ev.pointerId;
+
+    const resetPreview = () => {
+      for (const n of nodes) n.node.style.left = n.left;
+    };
+    const draw = (res) => {
+      if (res.error || !res.deltaFrames || !res.moves.length) {
+        resetPreview();
+        return;
+      }
+      const byRef = new Map(res.moves.map((m) => [m.ref, m.to]));
+      for (const n of nodes) {
+        const to = byRef.get(n.ref);
+        if (to != null) n.node.style.left = `${to * this.pps}px`;
+      }
+    };
+
+    const cleanup = () => {
+      done = true;
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', down);
+      window.removeEventListener('keydown', onKey, true);
+      this.inner.removeEventListener('lostpointercapture', lost);
+      for (const n of nodes) n.node.classList.remove('dragging');
+      try {
+        if (this.inner.hasPointerCapture(ev.pointerId)) this.inner.releasePointerCapture(ev.pointerId);
+      } catch { /* synthetic pointer / already released */ }
+    };
+
+    const move = (e) => {
+      if (done || !samePointer(e)) return;
+      const frames = framesAt(e.clientX);
+      if (frames === lastFrames) return;
+      lastFrames = frames;
+      draw(keyframeMoveOps(list, frames, this.project, fps));
+    };
+
+    const up = (e) => {
+      if (done || !samePointer(e)) return;
+      const frames = framesAt(e.clientX);
+      cleanup();
+      this._swallowNextClick();
+      const res = keyframeMoveOps(list, frames, this.project, fps);
+      if (res.error) {
+        resetPreview();
+        this.onToast?.(res.error, 'warn');
+        return;
+      }
+      if (!res.ops.length) {
+        resetPreview();
+        return;
+      }
+      if (!this.onOp) {
+        resetPreview();
+        return;
+      }
+      const oldPool = this.pool;
+      const remap = new Map(res.moves.map((m) => [m.ref, m.refNew]));
+      // adopt the new refs before the op lands: applyProject() prunes keyframe
+      // pool refs that no longer resolve, and the old times are about to vanish
+      this.pool = normalizeSelection({
+        kind: 'keyframe',
+        ids: oldPool.ids.map((id) => remap.get(id) || id),
+        primary: remap.get(oldPool.primary) || oldPool.primary,
+      });
+      this._selectPoolHost();
+      const pending = this.onOp(res.batch);
+      if (!pending?.then) return;
+      pending.then((ok) => {
+        if (ok) return; // applyProject() rebuilds the rows at the new times
+        this.pool = oldPool;
+        this._selectPoolHost();
+        resetPreview();
+      }).catch(() => {
+        this.pool = oldPool;
+        this._selectPoolHost();
+        resetPreview();
+      });
+    };
+
+    const down = () => {
+      if (done) return;
+      cleanup();
+      resetPreview();
+      this._swallowNextClick();
+    };
+
+    const onKey = (e) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopPropagation();
+      down();
+    };
+
+    const lost = () => down();
+
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', down);
+    window.addEventListener('keydown', onKey, true);
+    this.inner.addEventListener('lostpointercapture', lost);
+    try {
+      this.inner.setPointerCapture(ev.pointerId);
+    } catch { /* no active pointer */ }
+    // The move that crossed the slop threshold was dispatched before these
+    // listeners existed; preview it now so the diamond never lags one event.
+    if (atClientX != null) {
+      lastFrames = framesAt(atClientX);
+      draw(keyframeMoveOps(list, lastFrames, this.project, fps));
+    }
     return true;
   }
 
@@ -3087,21 +3726,9 @@ export class Timeline {
   _selectProperty(kind, id, path, ev) {
     const host = kind === 'cam' ? cameraRef(id) : kind === 'ob' ? objectRef(id) : elementRef(id);
     this._pickPool('property', propertyRef(host, path), ev);
-    if (kind === 'cam') {
-      this.cameraSel = true;
-      this.elementId = null; this.segmentId = null; this.objectId = null;
-      this.onSelect?.({ camera: true, pool: this.pool });
-    } else if (kind === 'ob') {
-      this.objectId = id;
-      this.elementId = null; this.segmentId = null; this.cameraSel = false;
-      this.propSel = { objId: id, path };
-      this.onSelect?.({ objectId: id, pool: this.pool });
-    } else {
-      this.elementId = id;
-      this.objectId = null; this.segmentId = null; this.cameraSel = false;
-      this.propSel = { elId: id, path };
-      this.onSelect?.({ elementId: id, pool: this.pool });
-    }
+    if (kind === 'ob') this.propSel = { objId: id, path };
+    else if (kind === 'el') this.propSel = { elId: id, path };
+    this._selectPoolHost();
     this._paintSelection();
   }
 
@@ -3121,12 +3748,17 @@ export class Timeline {
       this._startScrub(ev);
       return;
     }
-    // A diamond is a click on release, but dragging it starts a marquee. The
-    // marquee may include element keys (`data-el`), not just camera/3D ones.
+    // A diamond is a click on release; a horizontal drag moves the keyframe
+    // pool, any other drag still starts a marquee. The marquee may include
+    // element keys (`data-el`), not just camera/3D ones.
     const keyNode = target.closest?.('.tl-key');
     if (keyNode && keyframeRefOf(keyNode)) {
       ev.preventDefault();
-      this._deferGesture(ev, { slop: 3, onTap: () => this._selectKeyNode(keyNode, ev) });
+      this._deferGesture(ev, {
+        slop: 3,
+        onTap: () => this._selectKeyNode(keyNode, ev),
+        onDrag: (e) => this._dragKeys(ev, keyNode, e),
+      });
       return;
     }
     // Section rows: a click anywhere on the row (gutter or lane) still toggles
@@ -3171,10 +3803,8 @@ export class Timeline {
     if (objBlk) {
       const id = objBlk.dataset.obj;
       const wasSelected = this.objectId === id && !ev.ctrlKey && !ev.metaKey && !ev.shiftKey;
-      this.objectId = id;
       this._pickPool('element', objectRef(id), ev);
-      this.elementId = null; this.segmentId = null; this.cameraSel = false;
-      this.onSelect?.({ objectId: id, pool: this.pool });
+      this._selectPoolHost();
       this._paintSelection();
       const item = this._obj(id);
       if (!item) return;
@@ -3213,8 +3843,12 @@ export class Timeline {
           return;
         }
         const ns = objBlk._ns, nd = objBlk._nd;
-        if (ns == null || (Math.abs(ns - orig.start) < 1e-4 && Math.abs(nd - orig.duration) < 1e-4)) return;
-        this.onOp?.({ op: 'objectPatch', id, patch: { start: round3(ns), duration: round3(nd) } });
+        if (ns == null) return;
+        const q = this._clipEdit(mode, ns, nd);
+        if (Math.abs(q.start - orig.start) < 1e-4 && Math.abs(q.duration - orig.duration) < 1e-4) return;
+        this.onOp?.(mode === 'move'
+          ? { op: 'objectPatch', id, patch: { start: q.start } }
+          : { op: 'objectPatch', id, patch: { start: q.start, duration: q.duration } });
       };
       window.addEventListener('pointermove', move);
       window.addEventListener('pointerup', up);
@@ -3253,11 +3887,9 @@ export class Timeline {
     if (blk) {
       const id = blk.dataset.id;
       const wasSelected = this.elementId === id && !ev.ctrlKey && !ev.metaKey && !ev.shiftKey;
-      this.elementId = id;
       this._pickPool('element', elementRef(id), ev);
-      this.objectId = null; this.segmentId = null; this.cameraSel = false;
       this.propSel = null;
-      this.onSelect?.({ elementId: id, segmentId: this.project.elements.find((e) => e.id === id)?.segment || null, pool: this.pool });
+      this._selectPoolHost();
       this._paintSelection();
 
       const p = this.project;
@@ -3317,8 +3949,16 @@ export class Timeline {
         const hitSource = !!blk._sourceHit && moved;
         if (hitSource) this.onSourceLimit?.(mode === 'l' ? 'start' : 'end');
         const ns = blk._ns, nd = blk._nd;
-        if (ns == null || (Math.abs(ns - orig.start) < 1e-4 && Math.abs(nd - orig.duration) < 1e-4)) return;
-        this.onOp?.({ op: 'moveElement', id, start: round3(ns), duration: round3(nd) });
+        if (ns == null) return;
+        const q = this._clipEdit(mode, ns, nd, {
+          // The source end is not a frame boundary; it keeps its exact seconds.
+          // A left trim only extends away from that limit, so it needs no cap.
+          maxDuration: mode === 'r' && sourceLimit ? Math.max(0.08, sourceLimit - srcIn) : null,
+        });
+        if (Math.abs(q.start - orig.start) < 1e-4 && Math.abs(q.duration - orig.duration) < 1e-4) return;
+        this.onOp?.(mode === 'move'
+          ? { op: 'moveElement', id, start: q.start }
+          : { op: 'moveElement', id, start: q.start, duration: q.duration });
       };
       window.addEventListener('pointermove', move);
       window.addEventListener('pointerup', up);

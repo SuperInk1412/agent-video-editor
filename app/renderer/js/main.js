@@ -14,15 +14,17 @@ import { showMenu, hideMenu, initTooltips, icon, prefs } from './ui.js';
 import { initLayout, markTab, Timecode, StatusBar, LogDrawer } from './shell.js';
 import { frameStep } from './timeline-math.js';
 import { initCommands, register as registerCommand, dispatch as dispatchCommand, openPalette, openShortcuts } from './commands.js';
-import { evalCamera, pathPos, cameraTransform, cameraRange } from '/core/camera.js';
+import { pathPos, cameraTransform, cameraRange } from '/core/camera.js';
 import { curveSegments } from '/core/curves.js';
-import { worldPose, toLocalPoint, toLocalVector, ancestors, childrenOf, elementCarrier, carrierMatrix } from '/core/hierarchy.js';
+import { ancestors, childrenOf, elementCarrier, carrierMatrix } from '/core/hierarchy.js';
+import { evalCameraWorld, objectLocalPoint, objectLocalVector, objectWorldPose } from '/core/spatial-parent.js';
 import { defaultCamera } from '/core/space.js';
 import { newId } from '/core/schema.js';
 import { sampleTrack } from '/core/time.js';
 import { clearCompiledTracks } from '/core/tracks.js';
+import { elementNodeAt } from './node-at.js';
 import {
-  emptySelection, normalizeSelection, selectOne, cameraRef, objectRef, elementRef, splitRef,
+  emptySelection, normalizeSelection, selectOne, pickSelection, legacyFields, cameraRef, objectRef, elementRef, splitRef,
   keyframeExists, keyframeDeleteOps,
 } from '/core/selection.js';
 
@@ -54,6 +56,11 @@ const S = {
 };
 
 let preview, timeline, inspector, agentPanel, pipelinePanel, logPanel, gizmo, projects, curvePanel;
+// Property-link "转到父级" navigation stack (PLAN-ui-round3 §4.3). Jumping never
+// writes the project and never touches Ctrl+Z; Alt+← / the inspector chip walks
+// back through the panels the user came from.
+const linkNavStack = [];
+const LINK_NAV_MAX = 20;
 let layout, timecodeUI, statusBar, logDrawer; // shell (shell.js)
 let assetsPanel, outliner; // left column (assets.js / outliner.js)
 
@@ -200,6 +207,8 @@ function syncWorld(p) {
 function applyProject(p, source) {
   if (source !== 'boot' && S.project && p.rev <= S.project.rev) return;
   const prevDuration = S.project?.meta?.duration;
+  // A fresh project (boot) invalidates every panel the back stack could restore.
+  if (!S.project || source === 'boot') linkNavStack.length = 0;
   S.project = p;
   // JSON responses cannot preserve the server-side `camera` alias identity;
   // re-point it at the active stack entry so edits and reads share one object.
@@ -223,6 +232,10 @@ function applyProject(p, source) {
       return elIds.has(s.id);
     });
     S.selection.pool = normalizeSelection({ ...S.selection.pool, ids });
+    // The pool is the source of truth: after pruning, re-derive the legacy
+    // fields so the inspector / transport never point at a host that just
+    // disappeared (a Ctrl-mixed pool drops refs of any type).
+    S.selection = { ...S.selection, ...legacyFields(S.selection.pool) };
   }
   if (gizmo) gizmo.objSel = S.selection.objectId || null;
   preview.setProject(p);
@@ -286,31 +299,33 @@ function stepFrames(dir, { pauseFirst = false } = {}) {
 }
 
 // ---------------------------------------------------------------- selection
+/**
+ * Apply a selection. The pool is the source of truth: when one is present its
+ * primary fills in `elementId / objectId / camera`, so a single element pool
+ * can hold 2D elements, 3D objects and cameras at once. Explicit ids still win
+ * (legacyFields) and the backfill never clears one, so older callers keep
+ * working unchanged when they pass no pool.
+ */
 function select(sel = {}) {
-  let next;
-  if (sel.camera) {
-    next = { segmentId: null, elementId: null, objectId: null, camera: true };
-  } else if (sel.objectId) {
-    next = { segmentId: null, elementId: null, objectId: sel.objectId, camera: false };
-  } else {
-    next = {
-      segmentId: sel.segmentId ?? S.selection.segmentId,
-      elementId: sel.elementId ?? null,
-      objectId: sel.objectId ?? null,
-      camera: false,
-    };
-    if (sel.elementId) {
-      const el = S.project.elements.find((e) => e.id === sel.elementId);
-      if (el?.segment) next.segmentId = el.segment;
-    }
-  }
   let pool;
   if (sel.pool) pool = normalizeSelection(sel.pool);
   else if (sel.camera && S.project?.camera) pool = selectOne('element', cameraRef(S.project.camera.id));
   else if (sel.objectId) pool = selectOne('element', objectRef(sel.objectId));
   else if (sel.elementId) pool = selectOne('element', elementRef(sel.elementId));
   else pool = emptySelection();
-  S.selection = { ...next, pool };
+  const host = legacyFields(pool, {
+    elementId: sel.elementId, objectId: sel.objectId, camera: sel.camera,
+  });
+  let segmentId;
+  if (host.camera || host.objectId) segmentId = null;
+  else {
+    segmentId = sel.segmentId ?? S.selection.segmentId;
+    if (host.elementId) {
+      const el = S.project?.elements?.find((e) => e.id === host.elementId);
+      if (el?.segment) segmentId = el.segment;
+    }
+  }
+  S.selection = { segmentId, ...host, pool };
   if (gizmo) {
     gizmo.objSel = S.selection.objectId || null;
     gizmo.objHover = null;
@@ -322,6 +337,116 @@ function select(sel = {}) {
   outliner?.setSelection();
   updateOverlay();
   updateSelectionInfo();
+}
+
+/**
+ * Snapshot the current panel/selection/timeline layout for the link-jump back
+ * stack. Only view state is captured: no project data, no time, no ops.
+ */
+function snapshotLinkNav() {
+  const sel = S.selection || {};
+  return {
+    selection: {
+      segmentId: sel.segmentId ?? null,
+      elementId: sel.elementId ?? null,
+      objectId: sel.objectId ?? null,
+      camera: !!sel.camera,
+      pool: sel.pool ? {
+        kind: sel.pool.kind,
+        ids: [...(sel.pool.ids || [])],
+        primary: sel.pool.primary ?? null,
+      } : emptySelection(),
+    },
+    timeline: timeline ? {
+      sections: { ...(timeline.sections || {}) },
+      expanded: [...(timeline.expanded || [])],
+      expandedEls: [...(timeline.expandedEls || [])],
+      openCams: [...(timeline.openCams || [])],
+      scrollTop: timeline.scroll?.scrollTop || 0,
+      scrollLeft: timeline.scroll?.scrollLeft || 0,
+    } : null,
+  };
+}
+
+/** Restore a snapshot taken by snapshotLinkNav (no project write, no undo step). */
+function restoreLinkNav(snap) {
+  if (!snap) return false;
+  select(snap.selection || {});
+  const tl = snap.timeline;
+  if (timeline && tl) {
+    timeline.sections = { ...(tl.sections || {}) };
+    timeline.expanded = new Set(tl.expanded || []);
+    timeline.expandedEls = new Set(tl.expandedEls || []);
+    timeline.openCams = new Set(tl.openCams || []);
+    timeline.render(true);
+    if (timeline.scroll) {
+      timeline.scroll.scrollTop = Number(tl.scrollTop) || 0;
+      timeline.scroll.scrollLeft = Number(tl.scrollLeft) || 0;
+    }
+  }
+  return true;
+}
+
+const canGoBackLink = () => linkNavStack.length > 0;
+
+/** Alt+← / inspector "← 返回": pop the last "转到父级" panel. */
+function goBackLink() {
+  const snap = linkNavStack.pop();
+  if (!snap) return false;
+  const active = document.activeElement;
+  if (active && /INPUT|TEXTAREA|SELECT/.test(active.tagName || '')) active.blur();
+  inspector?._flush();
+  timeline?.flushPending?.();
+  restoreLinkNav(snap);
+  toast('已返回上一个属性面板');
+  return true;
+}
+
+/**
+ * Property-link "转到父级" (PLAN-ui-round3 §4.3): select the parent host, open
+ * its property page and reveal the source row. Selecting a camera here only
+ * shows its inspector/rows; it never activates the camera. This path writes
+ * nothing to the project, so Ctrl+Z stays the global undo; the local back stack
+ * (Alt+← / inspector chip) restores the panel the user came from.
+ */
+function jumpToLinkParent({ host, id, path } = {}) {
+  if (!S.project || (host !== 'el' && host !== 'ob' && host !== 'cam') || id == null) return false;
+  // Flush pending typing before the selection changes: an inspector debounce or
+  // a timeline property debounce must land on the old host, not the new one.
+  const active = document.activeElement;
+  if (active && /INPUT|TEXTAREA|SELECT/.test(active.tagName || '')) active.blur();
+  inspector?._flush();
+  timeline?.flushPending?.();
+  const ref = host === 'el' ? elementRef(id) : host === 'ob' ? objectRef(id) : cameraRef(id);
+  // A jump that changes the panel is reversible. Same-host property reveals do
+  // not push, so repeated clicks cannot grow a no-op stack.
+  if (String(S.selection?.pool?.primary || '') !== String(ref)) {
+    linkNavStack.push(snapshotLinkNav());
+    if (linkNavStack.length > LINK_NAV_MAX) linkNavStack.shift();
+  }
+  const sel = { pool: selectOne('element', ref) };
+  if (host === 'el') sel.elementId = id;
+  else if (host === 'ob') sel.objectId = id;
+  else sel.camera = true;
+  select(sel);
+  // Open the host's page (element / object group, camera property rows) and the
+  // group that owns the source property, so revealProperty can find its row.
+  if (host === 'el') timeline.expandedEls.add(String(id));
+  else if (host === 'ob') timeline.expanded.add(String(id));
+  else timeline.openCams.add(String(id));
+  const source = String(path ?? '');
+  if (host === 'cam') {
+    if (source.startsWith('shake.')) timeline.sections.camShake = 'full';
+    else if (source.startsWith('dof.')) timeline.sections.camDof = 'full';
+    else if (source.startsWith('pivot.') || source.startsWith('scale.') || source === 'opacity') timeline.sections.camPos = 'full';
+    else timeline.sections.camMain = 'full';
+  } else if (host === 'el' || host === 'ob') {
+    timeline.sections.transform = 'full';
+  }
+  timeline.render(true);
+  const kind = host === 'el' ? 'element' : host === 'ob' ? 'object' : 'camera';
+  timeline.revealProperty({ kind, id: String(id) }, String(path ?? ''));
+  return true;
 }
 
 // ---------------------------------------------------------------- inline text editor
@@ -420,7 +545,7 @@ function inlineTextGeometry(kind, id, text) {
   const s3 = preview.scene3d;
   const obj = (S.project.scene?.objects || []).find((o) => o.id === id);
   if (!obj || obj.type !== 'text' || !s3?.projectPoint) return null;
-  const pose = worldPose(S.project, obj, S.time);
+  const pose = objectWorldPose(S.project, obj, S.time);
   const size = s3._planeSizes?.get(obj.id);
   const asset = s3.media?.get(obj.id);
   if (!pose || !size || !asset?.w || !asset?.h) return null;
@@ -749,7 +874,7 @@ function updateSelectionInfo() {
   if (obj) {
     const chain = ancestors(p, obj.id).reverse().map((o) => o.name || o.id);
     const path = [...chain, obj.name || obj.id].join(' › ');
-    const pose = worldPose(p, obj, S.time);
+    const pose = objectWorldPose(p, obj, S.time);
     const world = pose.worldPos.map((v) => (Math.round(Number(v) * 100) / 100).toFixed(2)).join(', ');
     const kids = childrenOf(p, obj.id).length;
     const note = obj.parent?.id ? '\n手柄和轨迹按世界位置显示；时间轴属性仍是本地值' : '';
@@ -763,8 +888,12 @@ function updateSelectionInfo() {
     return;
   }
   const pool = sel.pool;
-  const camIds = pool?.kind === 'element' ? pool.ids.map(splitRef).filter((r) => r?.type === 'cam').map((r) => r.id) : [];
-  const camId = camIds[0] || (sel.camera ? (p?.activeCameraId || p?.camera?.id) : null);
+  // The pool primary is the host the transport badge names, even in a mixed
+  // cam / ob / el selection.
+  const primary = pool?.kind ? splitRef(pool.primary) : null;
+  const camId = primary?.type === 'cam'
+    ? primary.id
+    : (!pool?.ids?.length && sel.camera ? (p?.activeCameraId || p?.camera?.id) : null);
   const cam = camId ? ((p?.cameras || []).find((c) => c.id === camId) || (p?.camera?.id === camId ? p.camera : null)) : null;
   if (cam) {
     show('相机', 'badge-camera', cam.name || cam.id, cam.id);
@@ -822,7 +951,7 @@ function setEditMode(on) {
   S.editMode = !!on;
   preview.editMode = S.editMode;
   if (S.editMode) {
-    const c = evalCamera(S.project, S.time);
+    const c = evalCameraWorld(S.project, S.time);
     S.editCam = { pos: c.pos.slice(), look: c.look.slice(), roll: c.roll || 0, fov: c.fov };
     preview.editCam = S.editCam;
   } else {
@@ -1863,8 +1992,8 @@ async function boot() {
     if (!o) return;
     const kidsCount = childrenOf(S.project, id).length;
     const at = Math.round(S.time * 1000) / 1000;
-    const pose = worldPose(S.project, o, S.time);
-    const cam = (S.editMode && S.editCam) ? S.editCam : evalCamera(S.project, S.time);
+    const pose = objectWorldPose(S.project, o, S.time);
+    const cam = (S.editMode && S.editCam) ? S.editCam : evalCameraWorld(S.project, S.time);
     showContextMenu(x, y, [
       { label: '选中元素', icon: 'pointer', run: () => select({ objectId: id }) },
       {
@@ -1873,7 +2002,7 @@ async function boot() {
         run: () => {
           const d = [cam.pos[0] - pose.worldPos[0], cam.pos[1] - pose.worldPos[1], cam.pos[2] - pose.worldPos[2]];
           const l = Math.hypot(d[0], d[1], d[2]) || 1;
-          const local = toLocalVector(S.project, o, at, d.map((v) => v / l));
+          const local = objectLocalVector(S.project, o, at, d.map((v) => v / l));
           op({ op: 'objectKey', id, path: 'dir', t: at, v: local });
         },
       },
@@ -1883,7 +2012,7 @@ async function boot() {
         run: () => {
           const h = Number(o.geom?.h) || 2;
           const worldPivot = [pose.pivot[0], h / 2, pose.pivot[2]];
-          const local = toLocalPoint(S.project, o, at, worldPivot);
+          const local = objectLocalPoint(S.project, o, at, worldPivot);
           op({ op: 'objectKey', id, path: 'pivot', t: at, v: local.map((v) => Math.round(v * 100) / 100) });
         },
       },
@@ -2099,6 +2228,8 @@ async function boot() {
     onSourceLimit: (side) => toast(side === 'start'
       ? '左边界不能早于素材开头'
       : '已到素材结尾；右键该素材勾选「开启循环」后可继续拉长', 'info'),
+    onToast: (msg, level = 'info') => toast(msg, level),
+    onLinkJump: (jump) => jumpToLinkParent(jump),
     onSplit: () => splitAtPlayhead(),
     onTextEdit: (kind, id, ev) => openTextEditor(kind, id, ev),
     onToggleCurves: () => toggleCurvePanel(),
@@ -2126,10 +2257,28 @@ async function boot() {
   inspector = new Inspector($('#panelInsp'), {
     onOp: (o) => op(o),
     getTime: () => S.time,
+    onLinkJump: (jump) => jumpToLinkParent(jump),
+    canGoBack: () => canGoBackLink(),
+    onBack: () => goBackLink(),
+    onToast: (msg, level = 'info') => toast(msg, level),
     // ◆ records what the property is at the playhead (its keyed value, or the base)
     getTimeValue: (path) => {
       const el = S.project.elements.find((e) => e.id === S.selection.elementId);
       if (!el) return 0;
+      // Node elements key pivot.* / position.* / scale.* / roll; read the same
+      // sampled node the preview draws so ◆ stores the value that is on screen.
+      if (el.node) {
+        const node = elementNodeAt(el, S.project.meta, S.time);
+        if (path === 'roll') return node.roll;
+        const dot = path.indexOf('.');
+        if (dot > 0) {
+          const group = path.slice(0, dot);
+          const i = 'xyz'.indexOf(path.slice(dot + 1));
+          if (i >= 0 && Array.isArray(node[group]) && Number.isFinite(Number(node[group][i]))) {
+            return Number(node[group][i]);
+          }
+        }
+      }
       const [a, b] = path.split('.');
       const base = a === 'transform' ? el.transform?.[b] : a === 'style' ? el.style?.[b] : a === 'fx' ? el.fx?.[b] : undefined;
       return sampleTrack(el.keyframes, path, S.time, base ?? 0);
@@ -2246,7 +2395,7 @@ async function boot() {
       if (!media) return null;
     }
     if (!S.editMode) setEditMode(true);
-    const c = S.editCam || evalCamera(S.project, S.time);
+    const c = S.editCam || evalCameraWorld(S.project, S.time);
     const fwd = v3norm(v3sub(c.look, c.pos));
     const right = v3norm(v3cross(fwd, [0, 1, 0]));
     const up = v3cross(right, fwd);
@@ -2313,7 +2462,7 @@ async function boot() {
   const createCamera = async () => {
     if (!S.project) return null;
     let view = (S.editMode && S.editCam)
-      || (S.project.camera ? evalCamera(S.project, S.time) : null)
+      || (S.project.camera ? evalCameraWorld(S.project, S.time) : null)
       || preview.scene3d.lastCam;
     if (!view) {
       // Unified space guarantees a default camera on load/create, but keep a
@@ -2412,11 +2561,23 @@ async function boot() {
   const snap3 = (v, e) => (e?.ctrlKey ? v.map((n) => Math.round(n * 2) / 2) : v);
   const camCenter = (cam, t) => cameraTransform(cam, t).center;
   const camWorldKey = (cam, key) => v3add(camCenter(cam, key.t), key.pos);
-  const selectAt = (sx, sy) => {
+  const selectAt = (sx, sy, ev) => {
+    const additive = !!(ev?.ctrlKey || ev?.metaKey || ev?.shiftKey);
     const id = preview.hitTest(sx, sy, S.time);
-    if (id) return select({ elementId: id });
-    const obj = preview.scene3d?.pickObject(S.project, S.time, sx, sy);
-    if (obj) return select({ objectId: obj.id });
+    const obj = id ? null : preview.scene3d?.pickObject(S.project, S.time, sx, sy);
+    if (id || obj) {
+      const kind = id ? 'el' : 'ob';
+      const host = id || obj.id;
+      if (additive) {
+        // One element pool for 2D / 3D / cameras; picking a selected ref again
+        // removes it (pickSelection toggles inside the same pool).
+        const ref = kind === 'el' ? elementRef(host) : objectRef(host);
+        select({ pool: pickSelection(S.selection.pool, 'element', ref, true) });
+      } else if (kind === 'el') select({ elementId: host });
+      else select({ objectId: host });
+      return;
+    }
+    if (additive) return; // Ctrl-click on empty space keeps the current pool
     const seg = S.project.segments.find((s) => S.time >= s.start && S.time < s.start + s.duration);
     if (seg) return select({ elementId: null, segmentId: seg.id });
     if (S.project.camera) return select({ camera: true });
@@ -2491,7 +2652,7 @@ async function boot() {
       label: '视口对齐到当前镜头',
       run: () => {
         if (!S.editCam) return;
-        const c = evalCamera(S.project, S.time);
+        const c = evalCameraWorld(S.project, S.time);
         S.editCam = { pos: c.pos.slice(), look: c.look.slice(), roll: c.roll || 0, fov: c.fov };
         preview.editCam = S.editCam;
         preview.render(S.time);
@@ -2582,8 +2743,12 @@ async function boot() {
     if (!S.editMode) {
       if (e.button === 0) {
         const elId = preview.hitTest(sx, sy, S.time);
-        if (elId) { begin2DElementDrag(elId, sx, sy, cx, cy, e); return; }
-        selectAt(sx, sy);
+        if (elId) {
+          if (e.ctrlKey || e.metaKey || e.shiftKey) selectAt(sx, sy, e);
+          else begin2DElementDrag(elId, sx, sy, cx, cy, e);
+          return;
+        }
+        selectAt(sx, sy, e);
       }
       return;
     }
@@ -2641,7 +2806,7 @@ async function boot() {
         select({ objectId: obj.id });
         const ac = preview.scene3d.lastCam;
         const normal = ac ? v3norm(v3sub(ac.look, ac.pos)) : [0, 0, -1];
-        const pose = worldPose(S.project, obj, okey.t);
+        const pose = objectWorldPose(S.project, obj, okey.t);
         drag = {
           kind: 'objkey', id: obj.id, index: okey.index, keyT: okey.t,
           normal, hit: okey.world, world0: pose.pivot.slice(),
@@ -2692,7 +2857,7 @@ async function boot() {
       if (obj) {
         const ac = preview.scene3d.lastCam;
         const normal = ac ? v3norm(v3sub(ac.look, ac.pos)) : [0, 0, -1];
-        const pose = worldPose(S.project, obj, S.time);
+        const pose = objectWorldPose(S.project, obj, S.time);
         drag = {
           kind: 'object', id: obj.id, normal, hit: pick.point,
           world0: pose.pivot.slice(), pivot: pose.pivot.slice(),
@@ -2831,7 +2996,7 @@ async function boot() {
         r2(drag.world0[1] + w[1] - drag.hit[1]),
         r2(drag.world0[2] + w[2] - drag.hit[2]),
       ], e);
-      drag.pivot = toLocalPoint(S.project, obj, drag.keyT, target).map(r2);
+      drag.pivot = objectLocalPoint(S.project, obj, drag.keyT, target).map(r2);
       const key = obj.tracks?.pivot?.[drag.index];
       if (key) key.v = drag.pivot.slice();
       drag.moved = true;
@@ -2853,7 +3018,7 @@ async function boot() {
         r2(drag.p0[1] + drag.axis[1] * delta),
         r2(drag.p0[2] + drag.axis[2] * delta),
       ], e);
-      drag.pivot = toLocalPoint(S.project, obj, S.time, target).map(r2);
+      drag.pivot = objectLocalPoint(S.project, obj, S.time, target).map(r2);
       setLiveKey(obj, 'pivot', drag.pivot);
       drag.moved = true;
       preview.render(S.time);
@@ -2873,7 +3038,7 @@ async function boot() {
         r2(drag.world0[1] + w[1] - drag.hit[1]),
         r2(drag.world0[2] + w[2] - drag.hit[2]),
       ], e);
-      drag.pivot = toLocalPoint(S.project, obj, S.time, target).map(r2);
+      drag.pivot = objectLocalPoint(S.project, obj, S.time, target).map(r2);
       setLiveKey(obj, 'pivot', drag.pivot);
       drag.moved = true;
       preview.render(S.time);
@@ -2963,7 +3128,7 @@ async function boot() {
       gizmo.sel = -1;
       gizmo.liveSel = false;
       gizmo.draw();
-      selectAt(sx, sy);
+      selectAt(sx, sy, e);
     }
   };
   canvas.addEventListener('pointerup', endDrag);
@@ -3107,7 +3272,7 @@ async function boot() {
   registerCommand({
     id: 'play.prevFrame', title: '上一帧', sheetTitle: '上一帧（Shift：后退 1s）', group: '播放', keys: 'ArrowLeft',
     icon: 'step-back', keywords: 'previous frame step back',
-    match: (e) => e.key === 'ArrowLeft',
+    match: (e) => e.key === 'ArrowLeft' && !e.altKey,
     run: (e) => { e?.preventDefault(); if (e?.shiftKey) stepTime(-1); else stepFrames(-1, { pauseFirst: true }); },
   });
   registerCommand({
@@ -3191,10 +3356,15 @@ async function boot() {
         }
         return;
       }
-      if (S.selection.elementId) { e?.preventDefault(); op({ op: 'removeElement', id: S.selection.elementId }); S.selection.elementId = null; }
-      else if (S.selection.objectId) {
+      // v1 deletes only the primary host of the pool: one element / object at a
+      // time, never a cross-type batch, even when cam / ob / el are mixed.
+      const primary = S.selection.pool?.kind === 'element' ? splitRef(S.selection.pool.primary) : null;
+      const elementId = primary?.type === 'el' ? primary.id : (primary ? null : S.selection.elementId);
+      const objectId = primary?.type === 'ob' ? primary.id : (primary ? null : S.selection.objectId);
+      if (elementId) { e?.preventDefault(); op({ op: 'removeElement', id: elementId }); S.selection.elementId = null; }
+      else if (objectId) {
         e?.preventDefault();
-        const obj = (S.project?.scene?.objects || []).find((o) => o.id === S.selection.objectId);
+        const obj = (S.project?.scene?.objects || []).find((o) => o.id === objectId);
         if (obj) requestObjectDelete(obj);
       }
     },
@@ -3273,6 +3443,12 @@ async function boot() {
     id: 'tl.keyedOnly', title: '只看带键属性', group: '时间轴', keys: 'U', icon: 'filter', keywords: 'keyed filter properties',
     match: (e) => e.key.toLowerCase() === 'u' && !e.ctrlKey && !e.metaKey && !e.altKey,
     run: (e) => { if (timeline?.applyKeyedFilter()) { e?.preventDefault(); return; } return false; },
+  });
+  registerCommand({
+    id: 'nav.backLink', title: '返回上一个属性面板', sheetTitle: '返回上一个属性面板（属性父级跳转后）', group: '面板', keys: 'Alt+←',
+    icon: 'step-back', keywords: 'back return parent link panel',
+    match: (e) => e.altKey && !e.ctrlKey && !e.metaKey && e.key === 'ArrowLeft',
+    run: (e) => { if (!goBackLink()) return false; e?.preventDefault(); },
   });
   registerCommand({
     id: 'tl.curves', title: '曲线面板', group: '时间轴', keys: 'F2', icon: 'curve', keywords: 'curve graph editor', global: true,

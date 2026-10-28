@@ -10,6 +10,13 @@ const nullableId = { type: ['string', 'null'] };
 const parentChannel = { enum: ['rot', 'scale'] };
 const parentStrength = { type: 'object', properties: { rot: number, scale: number }, additionalProperties: false };
 const property = { ...string, description: 'Dotted property path. 2D positions are project pixels, y down; 3D positions are metres, y up.' };
+const linkHostKind = { enum: ['el', 'ob', 'cam', 'element', 'object', 'camera'] };
+const linkFrom = {
+  type: 'object',
+  required: ['host', 'id', 'path'],
+  properties: { host: linkHostKind, id: string, path: property },
+  additionalProperties: false,
+};
 const definitions = {
   addElement: [{ element: { ...object, required: ['type'], properties: { type: { enum: ELEMENT_TYPES }, start: time, duration: { type: 'number', exclusiveMinimum: 0 }, loop: { type: 'boolean' } } } }, ['element']],
   updateElement: [{ id: string, patch: object }, ['id', 'patch']],
@@ -55,6 +62,15 @@ const definitions = {
   objectParentUnkey: [{ id: string, channel: parentChannel, t: time }, ['id', 'channel', 't']],
   elementParent: [{ id: string, parent: nullableId, t: time }, ['id', 'parent']],
   elementUnparent: [{ id: string, t: time }, ['id']],
+  spatialParent: [{ id: string, parent: string, t: time,
+    inherit: { type: 'object', properties: { pos: { type: 'boolean' }, rot: { type: 'boolean' }, scale: { type: 'boolean' } }, additionalProperties: false } }, ['id', 'parent']],
+  spatialUnparent: [{ id: string }, ['id']],
+  propLink: [{
+    host: linkHostKind, id: string, to: property, from: linkFrom,
+    combine: { enum: ['add', 'mul'] }, t: time, enabled: { type: 'boolean' }, bindParentValue: number,
+  }, ['id', 'to', 'from']],
+  propLinkPatch: [{ host: linkHostKind, id: string, to: property, patch: object, t: time }, ['id', 'to', 'patch']],
+  propUnlink: [{ host: linkHostKind, id: string, to: property }, ['id', 'to']],
 };
 
 export const PUBLIC_OPS = OP_KINDS.filter((op) => Object.hasOwn(definitions, op));

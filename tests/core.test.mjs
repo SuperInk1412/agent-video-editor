@@ -19,6 +19,21 @@ test('createProject + validate is clean', () => {
   assert.deepEqual(p.meta.fx.bloom, 0.25);
 });
 
+test('addElement preserves a unified spatial node', () => {
+  const p = fresh();
+  const { element } = applyOp(p, {
+    op: 'addElement',
+    element: {
+      type: 'text', start: 0, duration: 2, style: { text: 'node' },
+      node: { pivot: [1, 5.4, 2], position: [0.5, 0, 0], dir: [0, 0, 1], roll: 12, scale: [2, 3, 1] },
+    },
+  });
+  assert.deepEqual(element.node, {
+    pivot: [1, 5.4, 2], position: [0.5, 0, 0], dir: [0, 0, 1], roll: 12, scale: [2, 3, 1],
+  });
+  assert.deepEqual(p.elements[0].node, element.node);
+});
+
 test('addElement assigns ids and sorts by z', () => {
   const p = fresh();
   applyOp(p, { op: 'addElement', element: { type: 'text', start: 0, duration: 2, style: { text: 'hi' } } });

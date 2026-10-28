@@ -114,7 +114,7 @@ export function splitRef(ref) {
 
 const KEY_AXES = ['x', 'y', 'z'];
 
-function keyframeHost(project, split) {
+export function keyframeHost(project, split) {
   if (split.type === 'cam') {
     return (project?.cameras || []).find((c) => c.id === split.id)
       || (project?.camera?.id === split.id ? project.camera : null);
@@ -125,7 +125,7 @@ function keyframeHost(project, split) {
 
 const hasKeyAt = (list, t) => (list || []).some((k) => Math.abs(Number(k?.t) - t) <= 1e-4);
 
-function objectKeyTracks(obj, path, t) {
+export function objectKeyTracks(obj, path, t) {
   const tracks = obj?.tracks || {};
   return [path, ...KEY_AXES.map((a) => `${path}.${a}`)].filter((name) => hasKeyAt(tracks[name], t));
 }
@@ -171,6 +171,25 @@ export function keyframeDeleteOps(refs, project) {
     push({ op: 'keyRemove', id: host.id, path: s.path, t: s.t }, `keyRemove:${host.id}:${s.path}:${s.t}`);
   }
   return ops;
+}
+
+/**
+ * Legacy single-selection fields (`elementId / objectId / camera`) for a pool.
+ * A pool is homogeneous in *kind*, but its element ids mix `cam:` / `ob:` /
+ * `el:` refs, so the primary decides which legacy field is set. Explicit values
+ * win: the pool only fills what the caller left empty and never clears an
+ * explicit id, so callers can pass `{ objectId, pool }` and keep both.
+ */
+export function legacyFields(pool, explicit = {}) {
+  const elementId = explicit.elementId || null;
+  const objectId = explicit.objectId || null;
+  const camera = !!explicit.camera;
+  if (elementId || objectId || camera) return { elementId, objectId, camera };
+  const split = splitRef(primaryRef(pool));
+  if (!split) return { elementId: null, objectId: null, camera: false };
+  if (split.type === 'cam') return { elementId: null, objectId: null, camera: true };
+  if (split.type === 'ob') return { elementId: null, objectId: split.id, camera: false };
+  return { elementId: split.id, objectId: null, camera: false };
 }
 
 /** Legacy single-selection fields -> the element pool used before P4. */

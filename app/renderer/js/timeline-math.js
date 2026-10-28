@@ -35,6 +35,79 @@ export function frameStep(t, dir, fps) {
 }
 
 /**
+ * Time to store for frame `frame` so that frameIndex(time, fps) still answers
+ * `frame` after the project's 3-decimal time rounding.
+ *
+ * Frame starts are exact fractions (43/24 = 1.7916666…). round3() can land
+ * *below* the left edge and push the key back one frame: 7/30 rounds down to
+ * 0.233 (frame 6), 11/24 to 0.458 (frame 10), 5/60 to 0.083 (frame 4).
+ * Rounding the millisecond *up* never leaves the frame: the result is at or
+ * after the left edge, and one millisecond is less than a frame at any sane
+ * rate (0.024 frame at 24fps, 0.06 at 60fps). Below 1000fps the stored time is
+ * strictly inside the frame, so the frame band and the key diamond agree.
+ */
+export function frameKeyTimeForFrame(frame, fps) {
+  const rate = normalizeFps(fps);
+  const f = Math.max(0, Math.floor(Number(frame) || 0));
+  return Math.ceil((f * 1000) / rate) / 1000;
+}
+
+/** frameKeyTimeForFrame(frameIndex(t, fps), fps): the stored time for `t`'s frame. */
+export function frameKeyTime(t, fps) {
+  const rate = normalizeFps(fps);
+  return frameKeyTimeForFrame(frameIndex(t, rate), rate);
+}
+
+/**
+ * Time to write for a new key or a dragged clip edge: `frameKeyTime`, except
+ * that a time already sitting exactly on `duration` (the snap magnet / the end
+ * playhead) keeps the project's exact tail instead of rounding past it.
+ */
+export function frameWriteTime(t, fps, duration = 0) {
+  const time = Math.max(0, Number(t) || 0);
+  const dur = Math.max(0, Number(duration) || 0);
+  if (dur > 0 && Math.abs(time - dur) <= 1e-9) return dur;
+  return frameKeyTime(time, fps);
+}
+
+const roundMillis = (v) => Math.round(v * 1000) / 1000;
+
+/**
+ * Start / duration to submit for a clip drag, with the dragged edge on the
+ * frame's 3-decimal left edge (`frameKeyTime`).
+ *
+ * - 'move': only `start` changes; `duration` is kept untouched so the clip
+ *   length (and its keyframes) travel with it.
+ * - 'l' / 'r': one edge is dragged, the opposite edge stays exactly where the
+ *   caller had it (`start`/`duration` are the previewed range).
+ *
+ * `tail` is the project end. When the snapped edge lands exactly there the
+ * exact duration wins over the frame grid, so the last frame is not pushed
+ * past the tail. `maxDuration` is the media/source limit for a right trim: the
+ * source end is not a frame boundary, so it also wins over the grid.
+ */
+export function frameClipEdit({
+  mode = 'move', start = 0, duration = 0, fps = 24, tail = null, maxDuration = null,
+} = {}) {
+  const rate = normalizeFps(fps);
+  const s0 = Math.max(0, Number(start) || 0);
+  const d0 = Math.max(0, Number(duration) || 0);
+  const at = (t) => (tail != null && Math.abs(t - tail) <= 1e-9 ? tail : frameKeyTime(t, rate));
+  const limit = maxDuration == null || !Number.isFinite(Number(maxDuration))
+    ? null : Math.max(0, Number(maxDuration));
+
+  if (mode === 'move') return { start: at(s0), duration: d0 };
+  const end = s0 + d0;
+  if (mode === 'r') {
+    const next = at(end) - s0;
+    return { start: s0, duration: roundMillis(Math.max(0, limit == null ? next : Math.min(next, limit))) };
+  }
+  const s = at(s0);
+  const next = end - s;
+  return { start: s, duration: roundMillis(Math.max(0, limit == null ? next : Math.min(next, limit))) };
+}
+
+/**
  * The frame under the playhead as a pixel band inside one track:
  * `left` = frame start, `width` = one frame clipped to `duration`.
  * At/after the end, or when a frame is thinner than `minPx`, width is 0 (the

@@ -4,6 +4,7 @@ import { normalizeWorld } from './world.js';
 import { OBJECT_TYPES } from './scene.js';
 import { assertSafeData, isRecord, pathParts } from './json.js';
 import { PROJECT_SCHEMA } from './version.js';
+import { linkIssues, normalizeLinks, projectLinkIssues } from './links.js';
 // A "project" is the single source of truth on disk: <project>/project.vdm.json
 
 export const SCHEMA = PROJECT_SCHEMA;
@@ -48,7 +49,82 @@ export const DEFAULT_FX = {
 
 export const DEFAULT_MOTION = { type: 'none', amount: 0, dir: 'in' };
 
+// Unified spatial node (PLAN-ui-round3 §2, core/spatial.js): the single
+// transform source once a 2D element is upgraded. Old elements keep using
+// `transform`; normalisation never creates `node` by itself.
+export const DEFAULT_SPATIAL_NODE = Object.freeze({
+  pivot: Object.freeze([0, 0, 0]),
+  position: Object.freeze([0, 0, 0]),
+  dir: Object.freeze([0, 0, -1]),
+  roll: 0,
+  scale: Object.freeze([1, 1, 1]),
+});
+
+const isNum = (n) => Number.isFinite(Number(n));
+const nodeVec = (v, fallback) => (Array.isArray(v) && v.length >= 2 && v.slice(0, 3).every(isNum)
+  ? [Number(v[0]), Number(v[1]), Number(v[2] ?? fallback[2])]
+  : fallback.slice());
+
+function unitDir(v, fallback) {
+  const d = nodeVec(v, fallback);
+  const len = Math.hypot(d[0], d[1], d[2]);
+  if (len > 1e-12) return [d[0] / len, d[1] / len, d[2] / len];
+  const fb = nodeVec(fallback, DEFAULT_SPATIAL_NODE.dir);
+  const fl = Math.hypot(fb[0], fb[1], fb[2]) || 1;
+  return [fb[0] / fl, fb[1] / fl, fb[2] / fl];
+}
+
+/**
+ * Smallest tolerant normaliser for a SpatialNode. Missing/invalid fields fall
+ * back to `base` (another node) or the defaults; arrays are copied, never
+ * shared. This is also what `core/spatial.js` uses for readers.
+ */
+export function normalizeSpatialNode(node, base = null) {
+  const src = isRecord(node) ? node : {};
+  const fb = isRecord(base) ? base : DEFAULT_SPATIAL_NODE;
+  return {
+    pivot: nodeVec(src.pivot, nodeVec(fb.pivot, DEFAULT_SPATIAL_NODE.pivot)),
+    position: nodeVec(src.position, nodeVec(fb.position, DEFAULT_SPATIAL_NODE.position)),
+    dir: unitDir(src.dir, nodeVec(fb.dir, DEFAULT_SPATIAL_NODE.dir)),
+    roll: isNum(src.roll) ? Number(src.roll) : (isNum(fb.roll) ? Number(fb.roll) : 0),
+    scale: nodeVec(src.scale, nodeVec(fb.scale, DEFAULT_SPATIAL_NODE.scale)),
+  };
+}
+
+/** Validation problems for an optional element `node` (no repair, no mutation). */
+export function spatialNodeIssues(node, at = 'node') {
+  const issues = [];
+  if (node === undefined) return issues;
+  if (!isRecord(node)) return [{ path: at, msg: 'must be an object' }];
+  for (const name of ['pivot', 'position', 'dir', 'scale']) {
+    const v = node[name];
+    if (!Array.isArray(v) || v.length !== 3 || !v.every(Number.isFinite)) {
+      issues.push({ path: `${at}.${name}`, msg: 'must be a finite 3-vector' });
+    } else if (name === 'dir' && Math.hypot(v[0], v[1], v[2]) < 1e-12) {
+      issues.push({ path: `${at}.dir`, msg: 'must be a nonzero direction' });
+    }
+  }
+  if (node.roll !== undefined && !Number.isFinite(node.roll)) {
+    issues.push({ path: `${at}.roll`, msg: 'must be a finite number' });
+  }
+  return issues;
+}
+
+export const isValidSpatialNode = (node) => spatialNodeIssues(node).length === 0;
+
 const clone = (o) => JSON.parse(JSON.stringify(o));
+
+/**
+ * Property links (core/links.js) are stored on the host and normalised on load:
+ * valid entries are kept, unusable ones dropped, an empty array removed. They
+ * are never created here — a project without links must load write-free.
+ */
+function normalizeHostLinks(host) {
+  if (!isRecord(host) || host.links === undefined) return;
+  const links = normalizeLinks(host.links);
+  if (links.length) host.links = links;
+  else delete host.links;
+}
 
 export function newId(prefix, taken) {
   const used = taken instanceof Set ? taken : new Set(taken || []);
@@ -177,18 +253,24 @@ export function normalizeProject(p) {
     e.duration ??= 1;
     e.z ??= 0;
     e.transform = { ...DEFAULT_TRANSFORM, ...(e.transform || {}) };
+    // Unified space: an existing `node` is the authoritative 2D transform and
+    // is preserved verbatim (readers normalise it, `validateProject` checks it).
+    // Never fabricate one here: loading an old project must stay write-free.
     e.style = { ...DEFAULT_STYLE, ...(e.style || {}) };
     e.fx = { glow: 0, ...(e.fx || {}) };
     e.motion = { ...DEFAULT_MOTION, ...(e.motion || {}) };
     e.keyframes ??= [];
     e.visible = e.visible !== false;
     e.name = e.name || (e.type === 'text' ? (e.style.text || 'text') : e.type);
+    normalizeHostLinks(e);
     return e;
   });
   elIds.clear();
   p.elements.forEach((e) => elIds.add(e.id));
 
   normalizeCameraStack(p);
+  for (const obj of Array.isArray(p.scene?.objects) ? p.scene.objects : []) normalizeHostLinks(obj);
+  for (const cam of Array.isArray(p.cameras) ? p.cameras : []) normalizeHostLinks(cam);
   p.world = normalizeWorld(p.world);
   return p;
 }
@@ -289,6 +371,8 @@ export function validateProject(p) {
     if (e.transform !== undefined && record(e.transform, `${at}.transform`)) {
       for (const name of Object.keys(DEFAULT_TRANSFORM)) if (e.transform[name] !== undefined) number(e.transform[name], `${at}.transform.${name}`);
     }
+    if (e.node !== undefined) issues.push(...spatialNodeIssues(e.node, `${at}.node`));
+    if (e.links !== undefined) issues.push(...linkIssues(e.links, `${at}.links`));
     if (e.style?.size !== undefined) number(e.style.size, `${at}.style.size`, { min: 0 });
     if (e.segment && !segIds.has(e.segment)) push(`elements[${i}].segment`, `unknown segment ${e.segment}`);
     array(e.keyframes, `${at}.keyframes`, true).forEach((k, j) => {
@@ -315,6 +399,7 @@ export function validateProject(p) {
       vector(key.pos, `${loc}.pos`, 3);
       if (key.look != null) vector(key.look, `${loc}.look`, 3);
     });
+    if (c.links !== undefined) issues.push(...linkIssues(c.links, `${at}.links`));
     tracks(c.tracks, `${at}.tracks`);
   });
   const order = array(p.cameraOrder, 'cameraOrder', true);
@@ -340,10 +425,13 @@ export function validateProject(p) {
         number(obj.rot.roll, `${at}.rot.roll`);
       }
       if (obj.opacity !== undefined) number(obj.opacity, `${at}.opacity`, { min: 0, max: 1 });
+      if (obj.links !== undefined) issues.push(...linkIssues(obj.links, `${at}.links`));
       if (obj.geom !== undefined && record(obj.geom, `${at}.geom`)) for (const name of ['w', 'h', 'd']) number(obj.geom[name], `${at}.geom.${name}`, { min: 0, exclusive: true });
       tracks(obj.tracks, `${at}.tracks`);
     });
   }
+  // Cross-host link graph: known hosts/paths, matching units, no cycles/depth.
+  issues.push(...projectLinkIssues(p));
   return issues;
 }
 

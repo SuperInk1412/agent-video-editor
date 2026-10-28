@@ -2,9 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   normalizeFps, frameIndex, frameStart, frameStep, frameBand, planRulerTicks,
+  frameKeyTime, frameKeyTimeForFrame, frameWriteTime, frameClipEdit,
 } from '../app/renderer/js/timeline-math.js';
 
 const close = (a, b, eps = 1e-9) => assert.ok(Math.abs(a - b) <= eps, `${a} != ${b}`);
+const round3 = (v) => Math.round(v * 1000) / 1000;
 
 test('timeline-math: fps normalizes to a positive integer rate', () => {
   assert.equal(normalizeFps(24), 24);
@@ -75,6 +77,102 @@ test('timeline-math: frameBand spans one frame and hides when useless', () => {
   // a frame shorter than minPx is dropped, one at or above it is kept
   assert.equal(frameBand({ t: 0.5, fps: 24, pps: 11.9, duration: 10 }).width, 0);
   assert.ok(frameBand({ t: 0.5, fps: 24, pps: 12, duration: 10 }).width >= 0.5);
+});
+
+test('timeline-math: frameKeyTime survives 3-decimal storage at 24/30/60fps', () => {
+  for (const fps of [24, 30, 60]) {
+    for (let f = 0; f <= fps * 20; f++) {
+      const t = frameKeyTimeForFrame(f, fps);
+      const where = `${fps}fps frame ${f} -> ${t}`;
+      assert.equal(frameIndex(t, fps), f, where);
+      assert.ok(t >= f / fps - 1e-12, `${where} is before the frame start`);
+      assert.ok(t < (f + 1) / fps, `${where} crosses into the next frame`);
+      assert.ok(Math.abs(t * 1000 - Math.round(t * 1000)) < 1e-6, `${where} is not 3-decimal`);
+      // a raw frame start (and its in-memory integer-frame time) resolves to
+      // the same stored time, so the playhead band and the key agree.
+      assert.equal(frameKeyTime(f / fps, fps), t, where);
+      assert.equal(frameKeyTime(frameStart(f / fps, fps), fps), t, where);
+    }
+  }
+  // mid-frame times resolve to the frame that is visibly under the playhead
+  const t = 43.9 / 24;
+  assert.equal(frameKeyTime(t, 24), frameKeyTimeForFrame(43, 24));
+  assert.equal(frameKeyTime(1.8, 24), frameKeyTimeForFrame(43, 24));
+  assert.equal(frameKeyTimeForFrame(-5, 24), 0);
+  assert.equal(frameKeyTime(-3, 24), 0);
+  // 60fps: 1/60 -> 17ms, not 16ms, so it is still frame 1
+  assert.equal(frameKeyTimeForFrame(1, 60), 0.017);
+  assert.equal(frameIndex(0.016, 60), 0);
+});
+
+test('timeline-math: frameKeyTime rounds up because round3 falls back a frame', () => {
+  // 30fps: 7/30 = 233.333ms; round3 -> 0.233 is *before* the left edge
+  assert.equal(frameIndex(7 / 30, 30), 7);
+  assert.equal(frameIndex(round3(7 / 30), 30), 6);
+  assert.equal(frameIndex(frameKeyTime(7 / 30, 30), 30), 7);
+  // 24fps: 11/24 = 458.333ms; round3 -> 0.458 is frame 10
+  assert.equal(frameIndex(11 / 24, 24), 11);
+  assert.equal(frameIndex(round3(11 / 24), 24), 10);
+  assert.equal(frameIndex(frameKeyTime(11 / 24, 24), 24), 11);
+  // 60fps: 5/60 = 83.333ms; round3 -> 0.083 is frame 4
+  assert.equal(frameIndex(5 / 60, 60), 5);
+  assert.equal(frameIndex(round3(5 / 60), 60), 4);
+  assert.equal(frameIndex(frameKeyTime(5 / 60, 60), 60), 5);
+});
+
+test('timeline-math: frameWriteTime keeps the exact project tail', () => {
+  const tail = 9.995; // 24fps: 239.88 frames, not a frame boundary
+  assert.equal(frameWriteTime(tail, 24, tail), tail);
+  // the frame before the tail still quantizes normally
+  assert.equal(frameWriteTime(9.99, 24, tail), frameKeyTimeForFrame(239, 24));
+  assert.equal(frameWriteTime(1.8, 24, tail), frameKeyTimeForFrame(43, 24));
+  assert.equal(frameWriteTime(0, 24, tail), 0);
+  // without a tail the same time rounds up onto the frame grid
+  assert.equal(frameWriteTime(tail, 24), frameKeyTimeForFrame(239, 24));
+  // float noise around the tail still keeps it exact
+  assert.equal(frameWriteTime(tail + 1e-10, 24, tail), tail);
+});
+
+test('timeline-math: frameClipEdit snaps the dragged edge only', () => {
+  // move: start lands on the frame, duration is untouched
+  const move = frameClipEdit({ mode: 'move', start: 1.83, duration: 2.345, fps: 24 });
+  assert.equal(move.start, frameKeyTimeForFrame(43, 24));
+  assert.equal(move.duration, 2.345);
+
+  // right trim: end lands on frame 75 at 30fps (2.501 -> 2.5)
+  const r = frameClipEdit({ mode: 'r', start: 1, duration: 1.501, fps: 30 });
+  assert.equal(r.start, 1);
+  assert.equal(r.start + r.duration, 2.5);
+
+  // left trim: start lands on frame 41 at 30fps, the right edge stays at 2.501
+  const l = frameClipEdit({ mode: 'l', start: 1.37, duration: 2.501 - 1.37, fps: 30 });
+  assert.equal(l.start, frameKeyTimeForFrame(41, 30));
+  close(l.start + l.duration, 2.501);
+
+  // a right trim onto the project tail keeps the exact duration
+  const tail = 9.995;
+  const rt = frameClipEdit({ mode: 'r', start: 1.792, duration: tail - 1.792, fps: 24, tail });
+  assert.equal(rt.start, 1.792);
+  assert.equal(rt.duration, 8.203);
+  close(rt.start + rt.duration, tail);
+  // the frame grid would have pulled the end back to the last frame start
+  assert.equal(frameKeyTime(tail, 24), frameKeyTimeForFrame(239, 24));
+  assert.notEqual(frameKeyTime(tail, 24), tail);
+
+  // the media/source limit is not a frame boundary and wins over the grid
+  const capped = frameClipEdit({ mode: 'r', start: 0, duration: 5.5, fps: 24, maxDuration: 5.1234 });
+  assert.equal(capped.duration, 5.123);
+  // moving onto the tail start keeps it exact as well
+  assert.equal(frameClipEdit({ mode: 'move', start: tail, duration: 2, fps: 24, tail }).start, tail);
+});
+
+test('timeline-math: frameClipEdit never returns negative values', () => {
+  const r = frameClipEdit({ mode: 'r', start: 2, duration: 0.001, fps: 24 });
+  assert.ok(r.duration >= 0);
+  const l = frameClipEdit({ mode: 'l', start: 0, duration: 0, fps: 24 });
+  assert.equal(l.start, 0);
+  assert.equal(l.duration, 0);
+  assert.deepEqual(frameClipEdit({ mode: 'move', start: -4, duration: 0, fps: 24 }), { start: 0, duration: 0 });
 });
 
 test('timeline-math: ruler keeps its labels on whole seconds when zoomed out', () => {

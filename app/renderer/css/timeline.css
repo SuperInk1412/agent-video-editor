@@ -224,6 +224,22 @@ body.tl-scrubbing, body.tl-scrubbing * { cursor: ew-resize !important; user-sele
 .tl-objname input { font-size: var(--fs-sm); padding: 1px 4px; }
 .tl-objkind { margin-left: auto; flex: 0 0 auto; }
 .tl-objparent { color: var(--edit); font-size: var(--fs-xs); flex: 0 0 auto; }
+.tl-objparentbtn {
+  display: grid; place-items: center; width: 18px; height: 22px; flex: 0 0 18px; padding: 0;
+  border: 0; border-radius: var(--r-sm); background: transparent; color: var(--text-3);
+  font-size: var(--fs-xs); cursor: pointer;
+}
+.tl-objparentbtn:hover { color: var(--text-1); background: var(--surface-3); }
+.tl-objparentbtn.on { color: var(--edit); }
+.tl-objparentbtn.on:hover { background: var(--edit-bg); }
+.tl-parent-wire {
+  position: fixed; z-index: 80; height: 1px; background: var(--edit);
+  transform-origin: 0 50%; pointer-events: none; opacity: .9;
+}
+.tl-objhead.parent-target, .tl-camhead.parent-target, .tl-elhead.parent-target {
+  outline: 1px solid var(--edit-border); background: var(--edit-bg);
+}
+body.tl-parent-dragging, body.tl-parent-dragging * { cursor: crosshair !important; }
 .tl-objkids {
   font-size: var(--fs-xs); line-height: 16px; color: var(--text-3); border: 1px solid var(--border);
   border-radius: var(--r-sm); padding: 0 4px; flex: 0 0 auto;
@@ -274,6 +290,36 @@ body.tl-scrubbing, body.tl-scrubbing * { cursor: ew-resize !important; user-sele
 .tl-num i:empty { display: none; }
 .tl-scalar { grid-column: span 3; }
 .tl-keyspace { width: 22px; }
+
+/* ---------------- property links (PLAN-ui-round3 §4.2) ---------------- */
+/* A 20px `↳` column leads every linkable property row; rows that cannot be
+   linked keep a placeholder of the same width so the name column never jumps.
+   The button is the first grid item, so the label and value columns keep their
+   order; only this row's template gets the extra first track. */
+.tl-linkbtn {
+  justify-self: center; display: grid; place-items: center;
+  width: 20px; height: 20px; padding: 0; flex: 0 0 20px;
+  font-size: var(--fs-sm); line-height: 1;
+  color: var(--text-disabled); background: transparent;
+  border: 1px solid transparent; border-radius: var(--r-sm); cursor: pointer;
+}
+.tl-linkbtn:hover { color: var(--accent); background: var(--accent-bg); border-color: var(--accent-border); }
+.tl-linkbtn.on { color: var(--accent); background: var(--accent-bg); border-color: var(--accent-border); }
+.tl-linkflag { width: 20px; }
+.tl-linkrow .tl-linkbtn, .tl-linkrow .tl-linkflag { grid-column: 1; }
+.tl-prop.tl-linkrow .tl-gutter {
+  grid-template-columns: 20px 54px repeat(3, minmax(0, 1fr)) 24px;
+}
+.tl-camxform.tl-linkrow .tl-gutter,
+.tl-camposrow.tl-linkrow .tl-gutter {
+  grid-template-columns: 20px clamp(56px, calc(var(--tl-gutter, 340px) - 268px), 96px) repeat(3, minmax(0, 1fr)) 24px;
+}
+.tl-camxform.tl-linkrow .tl-kf { grid-column: 6; }
+.tl-camparamrow.tl-linkrow .tl-gutter {
+  grid-template-columns: 20px clamp(72px, calc(var(--tl-gutter, 340px) - 260px), 104px) 110px minmax(0, 1fr) 24px;
+}
+.tl-camparamrow.tl-linkrow .tl-camfish { grid-column: 4; }
+.tl-camparamrow.tl-linkrow .tl-kf { grid-column: 5; }
 .tl-color { width: 100%; height: var(--h-sm); padding: 1px; }
 .tl-kf {
   width: 22px; height: 22px; padding: 0; font-size: var(--fs-xs); color: var(--text-disabled);
@@ -351,10 +397,14 @@ body.tl-scrubbing, body.tl-scrubbing * { cursor: ew-resize !important; user-sele
 .tl-camposrow.sel { background: var(--sel-row); }
 .tl-camposrow.sel .tl-gutter { background: var(--sel-row); color: var(--text-1); }
 .tl-camposrow.sel .tl-track { background: var(--sel-row); }
-/* Homogeneous selection pool: extra refs beyond the primary. */
-.tl-camhead.poolsel, .tl-objhead.poolsel, .tl-prop.poolsel, .tl-camprop.poolsel,
+/* Homogeneous selection pool: extra refs beyond the primary. Cameras, 3D
+   objects and 2D elements share one pool, so all three head rows need it. */
+.tl-camhead.poolsel, .tl-objhead.poolsel, .tl-elhead.poolsel,
+.tl-prop.poolsel, .tl-camprop.poolsel, .tl-elprop.poolsel,
 .blk.poolsel { background: var(--accent-bg); box-shadow: inset 0 0 0 1px var(--accent-border); }
 .tl-key.poolsel { background: var(--edit); border-color: var(--surface-0); }
+/* A diamond being dragged horizontally: same size, grab cursor, above peers. */
+.tl-key.dragging { cursor: ew-resize; background: var(--keyframe); z-index: 6; }
 
 /* marquee selection over the lower timeline lanes (keyframes only) */
 .tl-marquee {

@@ -1,11 +1,8 @@
 // 3D viewport for camera shots: instanced boxes from the SAME city json Blender uses.
 // Draws into the preview's scene FBO so the existing post chain (bloom/grain/…) applies.
-import { evalCamera } from '/core/camera.js';
+import { evalCameraWorld, objectWorldPose } from '/core/spatial-parent.js';
 import { poseMatrix } from '/core/scene.js';
-import { worldPose } from '/core/hierarchy.js';
-import {
-  isText, mediaSpec, textSpec, fitPlane, mediaUrl, isFontFile, videoTime, MEDIA_TYPES,
-} from '/core/objects-media.js';
+import { isText, mediaSpec, textSpec, fitPlane, mediaUrl, isFontFile, videoTime, MEDIA_TYPES } from '/core/objects-media.js';
 
 const VERT = `#version 300 es
 in vec3 a_corner;
@@ -537,7 +534,7 @@ export class Scene3D {
       };
     };
     for (const obj of objs) {
-      const pose = worldPose(all, obj, time, poses);
+      const pose = objectWorldPose(project, obj, time, poses);
       if (obj.type === 'empty') {
         for (const size of locatorBars(pose)) {
           opaque.push({ ...boxItem(pose, size), col: LOCATOR_COLOR, alpha: 1, dist: 0, emissive: 1 });
@@ -858,7 +855,7 @@ export class Scene3D {
     const gl = this.gl;
     const city = this.city;
     if (!city) return;
-    const cam = overrideCam || evalCamera(project, time);
+    const cam = overrideCam || evalCameraWorld(project, time);
     this.lastCam = cam;
     this.lastW = W;
     this.lastH = H;
@@ -954,7 +951,7 @@ export class Scene3D {
     for (const obj of all) {
       const empty = obj.type === 'empty';
       if (!(DRAWABLE.has(obj.type) || empty) || !objectVisibleAt(obj, time)) continue;
-      const pose = worldPose(all, obj, time, poses);
+      const pose = objectWorldPose(project, obj, time, poses);
       if (!empty && pose.opacity <= 0.003) continue;
       const size = empty ? locatorBars(pose).map((b, i) => b[i])
         : MEDIA_TYPES.has(obj.type) ? [...(this._planeSizes.get(obj.id) || [1, 1]), 0.05]
