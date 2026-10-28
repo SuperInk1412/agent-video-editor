@@ -796,9 +796,11 @@ function curveTracksFor(host, id) {
 
 /**
  * Open the F2 curve drawer.
- * With a keyframe pool it edits exactly that property; otherwise it falls back
- * to the selected element/object/camera and picks its keyed property (the
- * header dropdown can switch between them).
+ * A keyframe pool decides what the panel is about: the host that owns most of
+ * the pool, and inside it every selected key (across property tracks). The
+ * drawer opens on the track with the most selected keys and lists the others
+ * in its property picker, so a selection is never silently retargeted.
+ * Without a pool it falls back to the selected element/object/camera.
  */
 function openCurvePanel() {
   if (!curvePanel || !S.project) return;
@@ -806,29 +808,37 @@ function openCurvePanel() {
   let host = null;
   let id = null;
   let wantedPath = null;
-  let spanFrom = null;
-  let spanTo = null;
-  let selectedTimes = null;
+  let selected = null;
 
-  if (pool?.kind === 'keyframe' && pool.ids.length >= 2) {
-    const parts = pool.ids.map((ref) => splitRef(ref));
-    if (parts.every((p) => p && p.path && p.t != null)) {
-      const first = parts[0];
-      if (parts.every((p) => p.type === first.type && p.id === first.id && p.path === first.path)) {
-        if (first.type === 'cam' && first.path === 'path') {
-          const times = [...new Set(parts.map((p) => p.t))].sort((a, b) => a - b);
-          selectedTimes = times;
-          spanFrom = times[0];
-          spanTo = times[times.length - 1];
-          if (times.length < 2) {
-            toast('相机轨迹曲线需要至少选中两个路径键', 'warn');
-            return;
-          }
-        }
-        host = first.type === 'cam' ? 'camera' : first.type === 'ob' ? 'object' : 'element';
-        id = first.id;
-        wantedPath = first.path;
+  if (pool?.kind === 'keyframe' && pool.ids.length) {
+    const parts = pool.ids
+      .map((ref) => splitRef(ref))
+      .filter((p) => p && p.path && p.t != null && Number.isFinite(Number(p.t)));
+    if (parts.length) {
+      // One drawer edits one host: keep the host that owns most of the pool.
+      const byHost = new Map();
+      for (const p of parts) {
+        const key = `${p.type}:${p.id}`;
+        if (!byHost.has(key)) byHost.set(key, []);
+        byHost.get(key).push(p);
       }
+      let best = null;
+      for (const list of byHost.values()) if (!best || list.length > best.length) best = list;
+      const first = best[0];
+      host = first.type === 'cam' ? 'camera' : first.type === 'ob' ? 'object' : 'element';
+      id = first.id;
+      const seen = new Set();
+      selected = [];
+      for (const p of best) {
+        const t = Math.round(Number(p.t) * 1000) / 1000;
+        const key = `${p.path}:${t}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        selected.push({ path: p.path, t });
+      }
+      const counts = new Map();
+      for (const s of selected) counts.set(s.path, (counts.get(s.path) || 0) + 1);
+      wantedPath = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
     }
   }
   if (!host) {
@@ -838,7 +848,7 @@ function openCurvePanel() {
     else if (S.selection.elementId) { host = 'element'; id = S.selection.elementId; }
   }
   if (!host || !id) {
-    toast('先选中一个元素/物体/相机，或选中两个以上关键帧', 'warn');
+    toast('先选中一个元素/物体/相机，或选中关键帧', 'warn');
     return;
   }
   const tracks = curveTracksFor(host, id);
@@ -847,9 +857,15 @@ function openCurvePanel() {
     return;
   }
   let index = tracks.findIndex((t) => t.path === wantedPath);
+  // The busiest selected track may have no segment (a single key); prefer the
+  // other selected tracks over opening an unrelated one.
+  if (index < 0 && selected?.length) {
+    const paths = new Set(selected.map((s) => s.path));
+    index = tracks.findIndex((t) => paths.has(t.path));
+  }
   if (index < 0 && host === 'camera') index = tracks.findIndex((t) => t.path === 'path');
   if (index < 0) index = 0;
-  curvePanel.open({ host, id, tracks, index, spanFrom, spanTo, selectedTimes });
+  curvePanel.open({ host, id, tracks, index, selected });
 }
 
 function toggleCurvePanel() {

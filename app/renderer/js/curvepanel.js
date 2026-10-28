@@ -15,7 +15,7 @@ import {
   curveHandles, moveCurveHandle, curveRange, curveParamsText,
 } from '/core/curves.js';
 import { retimePathSpan } from '/core/camera.js';
-import { cameraRef, keyframeRef } from '/core/selection.js';
+import { cameraRef, elementRef, keyframeRef, objectRef } from '/core/selection.js';
 import { h, icon, token } from './ui.js';
 
 const el = (tag, cls, html) => {
@@ -50,7 +50,8 @@ const canvasFont = () => `11px ${token('--font-ui') || 'system-ui, sans-serif'}`
 const PATH_LABELS = {
   path: '飞行轨迹',
   'transform.x': '位置 X', 'transform.y': '位置 Y', 'transform.scale': '缩放',
-  'transform.rotation': '旋转', 'transform.opacity': '不透明度', 'style.size': '字号',
+  'transform.z': '纵深 Z', 'transform.rotation': '旋转', 'transform.opacity': '不透明度',
+  'style.size': '字号', 'style.color': '颜色',
   'fx.glow': '辉光', opacity: '透明度', scale: '缩放', center: '中心点',
   picturePivot: '画面中心', pictureOffset: '画面位置', fov: 'FOV', roll: 'Roll',
   lookAhead: '看向距离', bankGain: '转弯侧倾', 'shake.amp': '抖动幅度',
@@ -83,6 +84,8 @@ export class CurvePanel {
     this._liveRaf = 0;
     this.curve = null;
     this.drag = null;
+    this.selected = [];
+    this.marquee = null;
     this._playheadT = NaN;
     this._build();
   }
@@ -126,8 +129,9 @@ export class CurvePanel {
 
     const foot = el('div', 'cp-foot');
     foot.innerHTML = '<span>拖动圆点调整曲线 / 参数</span><span class="cp-sep">|</span>'
+      + '<span>拖动框选关键帧（Ctrl/Shift 加选）</span><span class="cp-sep">|</span>'
       + '<span>点段切换编辑段</span><span class="cp-sep">|</span>'
-      + '<span>预设作用于全部选中段</span><span class="cp-sep">|</span>'
+      + '<span>预设作用于选中段</span><span class="cp-sep">|</span>'
       + '<span>时间轴缩放同步（Ctrl+滚轮 / 缩放按钮）</span><span class="cp-sep">|</span>'
       + '<span><b>F2</b> / <b>Esc</b> 关闭</span>';
     this.root.append(head, body, foot);
@@ -145,11 +149,25 @@ export class CurvePanel {
   // ------------------------------------------------------------ open / close
   open(state) {
     this.openState = state;
+    // The F2 pool decides what the panel is about: every selected key of this
+    // host, across property tracks. It is never replaced by an invented range.
+    this.selected = Array.isArray(state?.selected)
+      ? state.selected
+        .map((s) => ({ path: String(s.path || ''), t: Number(s.t) }))
+        .filter((s) => s.path && Number.isFinite(s.t))
+      : [];
+    this.marquee = null;
     this.active = 0;
     this._spanNotice = null;
     const track = this._track();
     if (track?.path === 'path') this._refreshSpan();
-    else this.curve = normalizeCurve(track?.segments[0]?.a?.curve) || presetCurve('easeInOut');
+    else {
+      const segs = track?.segments || [];
+      const first = this._selectedFor(track?.path)[0];
+      const i = first == null ? 0 : segs.findIndex((s) => Math.abs(s.from - first) <= 1e-4);
+      this.active = i >= 0 ? i : 0;
+      this.curve = normalizeCurve(segs[this.active]?.a?.curve) || presetCurve('easeInOut');
+    }
     this.root.hidden = false;
     this.railGroup = this._groupIndex();
     this._buildRail();
@@ -159,12 +177,13 @@ export class CurvePanel {
     this.draw();
   }
 
-  /** Scroll the timeline so the edited segment is at least partly visible. */
+  /** Scroll the timeline so the edited segment (or first selected key) is visible. */
   _reveal() {
     const tl = this.getTimeline();
+    const track = this._track();
     const seg = this._isPathMode() && this.span
       ? { from: this.span.from }
-      : this._track()?.segments[0];
+      : track?.segments[this.active] || track?.segments[0];
     if (!tl || !seg) return;
     const x0 = tl._trackX(seg.from);
     const viewL = tl.scroll.scrollLeft;
@@ -209,11 +228,9 @@ export class CurvePanel {
     }
     const keys = [...cam.path].sort((a, b) => a.t - b.t);
     const find = (t) => keys.findIndex((k) => Math.abs(k.t - t) <= 1e-4);
-    const explicit = Array.isArray(this.openState?.selectedTimes);
-    let selected = explicit
-      ? [...new Set(this.openState.selectedTimes.map(Number))].filter((t) => find(t) >= 0).sort((a, b) => a - b)
-      : [keys[0].t, keys[keys.length - 1].t];
-    if (!explicit) selected = [keys[0].t, keys[keys.length - 1].t];
+    // The panel never invents a selection: with no selected path key the whole
+    // path is the edit scope and no key is drawn as selected.
+    const selected = this._selectedFor('path').filter((t) => find(t) >= 0);
 
     const spans = [];
     keys.forEach((k, i) => {
@@ -251,9 +268,8 @@ export class CurvePanel {
     const firstCurve = segments.length ? this._segmentCurve(segments[0]) : null;
     // No curve means no preset should look active. The rail may still show
     // thumbnails, but the header says 未应用 until the user picks one.
-    this.curve = firstCurve || null;
+    this.curve = firstCurve || (spans.length ? spans[0].curve : null);
     if (this.openState) {
-      this.openState.selectedTimes = [...selected];
       this.openState.spanFrom = first;
       this.openState.spanTo = last;
     }
@@ -289,6 +305,8 @@ export class CurvePanel {
     this.root.hidden = true;
     this.openState = null;
     this.drag = null;
+    this.selected = [];
+    this.marquee = null;
     this.span = null;
     this.path = null;
     this.previewInner = null;
@@ -365,10 +383,13 @@ export class CurvePanel {
     const st = this.openState;
     if (!st) return;
     this.pathSel.innerHTML = '';
+    const counts = new Map();
+    for (const s of this.selected) counts.set(s.path, (counts.get(s.path) || 0) + 1);
     st.tracks.forEach((t, i) => {
       const o = document.createElement('option');
       o.value = String(i);
-      o.textContent = t.label || t.path;
+      const n = counts.get(t.path) || 0;
+      o.textContent = `${t.label || t.path}${n ? ` · ${n} 键` : ''}`;
       this.pathSel.appendChild(o);
     });
     this.pathSel.value = String(st.index);
@@ -379,6 +400,9 @@ export class CurvePanel {
     const st = this.openState;
     const track = this._track();
     if (!st || !track) return;
+    const otherPaths = this._selectedPaths().filter((path) => path !== track.path);
+    const otherKeys = this.selected.filter((s) => s.path !== track.path).length;
+    const suffix = otherPaths.length ? ` · 另 ${otherPaths.length} 条属性 ${otherKeys} 键` : '';
     this.titleEl.textContent = `曲线 · ${track.label || track.path}`;
     if (track.path === 'path' && this.path) {
       const p = this.path;
@@ -386,13 +410,19 @@ export class CurvePanel {
       const applied = curves.filter(Boolean);
       const same = applied.length === curves.length && applied.length > 0
         && applied.every((c) => JSON.stringify(c) === JSON.stringify(applied[0]));
-      const from = p.selected[0] ?? this.span?.from ?? 0;
-      const to = p.selected[p.selected.length - 1] ?? this.span?.to ?? 0;
-      this.rangeEl.textContent = `${from.toFixed(2)}s → ${to.toFixed(2)}s · `
-        + `${p.selected.length} 键 · ${p.segments.length} 段 · ${p.spans.length} 条已存曲线`;
+      const from = p.selected.length ? p.selected[0] : p.keys[0].t;
+      const to = p.selected.length ? p.selected[p.selected.length - 1] : p.keys[p.keys.length - 1].t;
+      this.rangeEl.textContent = p.selected.length === 1
+        ? `${from.toFixed(2)}s · 1 键 · ${p.spans.length} 条已存曲线`
+        : p.selected.length
+          ? `${from.toFixed(2)}s → ${to.toFixed(2)}s · ${p.selected.length} 键 · ${p.segments.length} 段 · ${p.spans.length} 条已存曲线`
+          : `整条轨迹 ${from.toFixed(2)}s → ${to.toFixed(2)}s · 未选关键帧 · ${p.spans.length} 条已存曲线`;
       let label;
-      if (!p.segments.length) label = '至少选中两个关键帧';
-      else if (same) {
+      if (!p.selected.length) {
+        label = p.spans.length ? `${curveLabel(p.spans[0].curve)} · 点预设套用整条` : '未应用 · 点预设套用整条轨迹';
+      } else if (p.selected.length === 1) {
+        label = '再选一个关键帧才能成段';
+      } else if (same) {
         const detail = curveParamsText(applied[0]);
         label = `${curveLabel(applied[0])}${p.segments.length > 1 ? ` ×${p.segments.length}` : ''}`
           + (detail ? ` · ${detail}` : '');
@@ -407,9 +437,27 @@ export class CurvePanel {
       return;
     }
     const s = track.segments[this.active] || track.segments[0];
-    this.rangeEl.textContent = `${s.from.toFixed(2)}s → ${s.to.toFixed(2)}s · ${track.segments.length} 段 · 第 ${this.active + 1} 段`;
-    const detail = curveParamsText(this.curve);
-    this.presetEl.textContent = detail ? `${curveLabel(this.curve)} · ${detail}` : curveLabel(this.curve);
+    const sel = this._selectedFor(track.path);
+    const pairs = sel.length ? this._selectedPairs(track.path) : [];
+    if (sel.length) {
+      const span = sel.length === 1
+        ? `${sel[0].toFixed(2)}s · 1 键`
+        : `${sel[0].toFixed(2)}s → ${sel[sel.length - 1].toFixed(2)}s · ${sel.length} 键`;
+      this.rangeEl.textContent = `${span} · ${pairs.length} 段${suffix}`;
+    } else if (s) {
+      this.rangeEl.textContent = `${s.from.toFixed(2)}s → ${s.to.toFixed(2)}s · ${track.segments.length} 段 · `
+        + `第 ${this.active + 1} 段${suffix}`;
+    } else {
+      this.rangeEl.textContent = `未选关键帧${suffix}`;
+    }
+    // Show what is actually stored; with nothing stored the drawn shape is the
+    // fallback the first handle drag or preset will write.
+    const stored = normalizeCurve(track.segments[this.active]?.a?.curve);
+    const live = this.drag?.mode === 'segment' ? this.curve : stored;
+    const detail = live ? curveParamsText(live) : '';
+    this.presetEl.textContent = live
+      ? (detail ? `${curveLabel(live)} · ${detail}` : curveLabel(live))
+      : '未应用 · 拖动圆点或点预设';
     this.presetEl.title = this.presetEl.textContent;
   }
 
@@ -464,8 +512,15 @@ export class CurvePanel {
     this._markPreset();
   }
 
+  /** Curve actually stored for the active segment (the drawn fallback is not). */
+  _storedCurve() {
+    if (this._isPathMode()) return this.curve;
+    return normalizeCurve(this._track()?.segments[this.active]?.a?.curve);
+  }
+
   _markPreset() {
-    const name = normalizeCurve(this.curve)?.preset || '';
+    const live = this.drag?.mode === 'segment' ? this.curve : this._storedCurve();
+    const name = normalizeCurve(live)?.preset || '';
     this.rail.querySelectorAll('.cp-thumb').forEach((b) => {
       b.classList.toggle('on', b.dataset.preset === name);
     });
@@ -578,8 +633,67 @@ export class CurvePanel {
     };
   }
 
-  _isSelectedKey(t) {
-    return !!this.path?.selected.some((x) => Math.abs(x - t) <= 1e-4);
+  _isSelectedKey(t, path = this._track()?.path) {
+    return this.selected.some((s) => s.path === path && Math.abs(s.t - t) <= 1e-4);
+  }
+
+  /** Selected times on one property track (the panel's edit scope unit). */
+  _selectedFor(path) {
+    return this.selected
+      .filter((s) => s.path === path)
+      .map((s) => s.t)
+      .sort((a, b) => a - b);
+  }
+
+  _selectedPaths() {
+    return [...new Set(this.selected.map((s) => s.path))];
+  }
+
+  _hostRef() {
+    const st = this.openState;
+    if (!st) return null;
+    if (st.host === 'camera') return cameraRef(st.id);
+    if (st.host === 'object') return objectRef(st.id);
+    return elementRef(st.id);
+  }
+
+  /** Every key of one property track, sorted by time. */
+  _trackKeys(path) {
+    const p = this.getProject?.();
+    const st = this.openState;
+    if (!p || !st || !path) return [];
+    if (st.host === 'element') {
+      const el = (p.elements || []).find((e) => e.id === st.id);
+      return (el?.keyframes || []).filter((k) => k.path === path).sort((a, b) => a.t - b.t);
+    }
+    const host = st.host === 'object'
+      ? (p.scene?.objects || []).find((o) => o.id === st.id)
+      : (p.cameras || []).find((c) => c.id === st.id) || (p.camera?.id === st.id ? p.camera : null);
+    return [...(host?.tracks?.[path] || [])].sort((a, b) => a.t - b.t);
+  }
+
+  /** Keys drawn on the time axis for the active track (flight keys in path mode). */
+  _activeKeys() {
+    if (this._isPathMode()) return this.path?.keys || [];
+    const path = this._track()?.path;
+    return path ? this._trackKeys(path) : [];
+  }
+
+  /**
+   * Segments a preset can own on one track. Element/object curves are stored
+   * on the left key and shape the segment to the next key, so a segment is
+   * targeted when its left key is selected (path spans are handled separately).
+   */
+  _selectedPairs(path) {
+    const keys = this._trackKeys(path);
+    const selected = new Set(this._selectedFor(path).map((t) => Math.round(t * 1000) / 1000));
+    const pairs = [];
+    for (let i = 0; i + 1 < keys.length; i++) {
+      const from = Math.round(Number(keys[i].t) * 1000) / 1000;
+      const to = Math.round(Number(keys[i + 1].t) * 1000) / 1000;
+      if (selected.has(from)) pairs.push({ path, from, to });
+    }
+    return pairs;
   }
 
   _isSelectedSegment(span) {
@@ -621,6 +735,45 @@ export class CurvePanel {
     if (t === this._playheadT) return;
     this._playheadT = t;
     this.draw();
+  }
+
+  /** Keyframe diamonds on the time axis: selected ones are bright + guided. */
+  _drawKeys(ctx, g, keys, path) {
+    const { W } = g;
+    for (const key of keys) {
+      const x = g.xOf(key.t);
+      if (x < g.plotLeft - 8 || x > W - g.rightPad + 8) continue;
+      const on = this._isSelectedKey(key.t, path);
+      if (on) {
+        ctx.setLineDash([3, 4]);
+        ctx.strokeStyle = alpha(C('--edit'), 0.4);
+        ctx.beginPath(); ctx.moveTo(x, g.top); ctx.lineTo(x, g.bottom); ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      const r = on ? 4.5 : 2.8;
+      ctx.save();
+      ctx.translate(x, g.bottom);
+      ctx.rotate(Math.PI / 4);
+      ctx.fillStyle = on ? C('--edit') : alpha(C('--text-2'), 0.5);
+      ctx.fillRect(-r, -r, r * 2, r * 2);
+      ctx.restore();
+    }
+  }
+
+  /** Box-select band drawn over the plot while the pointer is down. */
+  _drawMarquee(ctx, g) {
+    const m = this.marquee;
+    if (!m) return;
+    const x0 = clamp(Math.min(m.x0, m.x1), g.plotLeft, g.plotRight);
+    const x1 = clamp(Math.max(m.x0, m.x1), g.plotLeft, g.plotRight);
+    if (x1 - x0 < 1) return;
+    ctx.fillStyle = alpha(C('--accent'), 0.09);
+    ctx.fillRect(x0, g.top, x1 - x0, g.bottom - g.top);
+    ctx.strokeStyle = alpha(C('--accent'), 0.65);
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 3]);
+    ctx.strokeRect(x0 + 0.5, g.top + 0.5, Math.max(1, x1 - x0 - 1), Math.max(1, g.bottom - g.top - 1));
+    ctx.setLineDash([]);
   }
 
   /** Camera flight: draw every real span, then selection + keyframe markers. */
@@ -684,25 +837,8 @@ export class CurvePanel {
       ctx.fillText('未应用', (x0 + x1) / 2 - 15, g.top + 14);
     }
 
-    // All keyframes, selected (boundaries) bright, internal ones dimmed.
-    for (const key of p.keys) {
-      const x = g.xOf(key.t);
-      if (x < g.plotLeft - 8 || x > W - g.rightPad + 8) continue;
-      const on = this._isSelectedKey(key.t);
-      if (on) {
-        ctx.setLineDash([3, 4]);
-        ctx.strokeStyle = alpha(C('--edit'), 0.4);
-        ctx.beginPath(); ctx.moveTo(x, g.top); ctx.lineTo(x, g.bottom); ctx.stroke();
-        ctx.setLineDash([]);
-      }
-      const r = on ? 4.5 : 2.8;
-      ctx.save();
-      ctx.translate(x, g.bottom);
-      ctx.rotate(Math.PI / 4);
-      ctx.fillStyle = on ? C('--edit') : alpha(C('--text-2'), 0.5);
-      ctx.fillRect(-r, -r, r * 2, r * 2);
-      ctx.restore();
-    }
+    // All keyframes, selected bright, the rest dimmed.
+    this._drawKeys(ctx, g, p.keys, 'path');
 
     // Editable curve handles for the spans intersecting the selection.
     for (const span of this._pathEditableSpans()) {
@@ -786,6 +922,7 @@ export class CurvePanel {
     if (this._isPathMode() && this.span) {
       this._drawPathSpan(ctx, g);
       this._drawPlayhead(ctx, g);
+      this._drawMarquee(ctx, g);
       return;
     }
 
@@ -814,16 +951,11 @@ export class CurvePanel {
       ctx.strokeStyle = isActive ? C('--accent') : alpha(C('--accent'), 0.4);
       ctx.lineWidth = isActive ? 2.2 : 1.4;
       ctx.stroke();
-      ctx.fillStyle = isActive ? C('--text-1') : C('--text-3');
-      for (const [x, y] of [[g.xOf(seg.from), g.bottom], [g.xOf(seg.to), g.top]]) {
-        if (x < g.plotLeft - 6 || x > W - g.rightPad + 6) continue;
-        ctx.save();
-        ctx.translate(x, y);
-        ctx.rotate(Math.PI / 4);
-        ctx.fillRect(-3, -3, 6, 6);
-        ctx.restore();
-      }
     });
+
+    // Every key of the active track sits on the time axis (one row), so click
+    // and marquee selection have a shared target in both panel modes.
+    this._drawKeys(ctx, g, this._activeKeys(), this._track()?.path);
 
     // active handles with guides
     const seg = this._track()?.segments[this.active];
@@ -857,8 +989,9 @@ export class CurvePanel {
       }
     }
 
-    // playhead
+    // playhead + box-select band
     this._drawPlayhead(ctx, g);
+    this._drawMarquee(ctx, g);
   }
 
   // ------------------------------------------------------------ interaction
@@ -893,61 +1026,174 @@ export class CurvePanel {
     return best?.handle || null;
   }
 
-  _hitPathKey(x, y) {
-    const p = this.path;
-    if (!p) return null;
+  /** Keyframe diamond under the pointer (they all sit on the bottom axis). */
+  _hitKey(x, y) {
     const g = this._geo();
-    if (Math.abs(y - g.bottom) > 14) return null;
+    if (y < g.bottom - 12 || y > g.bottom + 8) return null;
+    const path = this._track()?.path;
+    if (!path) return null;
     let best = null;
-    for (const key of p.keys) {
+    for (const key of this._activeKeys()) {
       const kx = g.xOf(key.t);
       if (kx < g.plotLeft - 8 || kx > g.plotRight + 8) continue;
       const d = Math.abs(kx - x);
-      if (d <= 10 && (!best || d < best.d)) best = { t: key.t, d };
+      if (d <= 10 && (!best || d < best.d)) best = { t: key.t, path, d };
     }
-    return best?.t ?? null;
+    return best ? { path: best.path, t: best.t } : null;
   }
 
   /** Panel key clicks use the same pool rules as the timeline lanes. */
-  _pickPathKey(t, ev) {
+  _pickKey(key, ev) {
+    const path = String(key?.path || this._track()?.path || '');
+    if (!path) return;
     const additive = !!(ev?.ctrlKey || ev?.metaKey || ev?.shiftKey);
-    let selected = this.path?.selected || [];
-    if (additive) {
-      selected = selected.some((x) => Math.abs(x - t) <= 1e-4)
-        ? selected.filter((x) => Math.abs(x - t) > 1e-4)
-        : [...selected, t];
-    } else {
-      selected = [t];
+    if (!additive) {
+      this._setSelection([{ path, t: key.t }]);
+      return;
     }
-    this._setPathSelection(selected);
+    const on = this._isSelectedKey(key.t, path);
+    const next = this.selected.filter((s) => !(s.path === path && Math.abs(s.t - key.t) <= 1e-4));
+    if (!on) next.push({ path, t: key.t });
+    this._setSelection(next);
   }
 
-  _setPathSelection(times) {
-    if (!this.openState || !this.path) return;
-    const unique = [...new Set(times.map((t) => Math.round(Number(t) * 1000) / 1000))]
-      .sort((a, b) => a - b);
-    this.openState.selectedTimes = unique;
-    this._refreshSpan();
-    this._spanNotice = null;
-    const camId = this.path?.cameraId;
-    if (camId) {
-      const ids = unique.map((t) => keyframeRef(cameraRef(camId), 'path', t));
-      this.onSelect?.(ids.length
-        ? { kind: 'keyframe', ids, primary: ids[0] }
-        : { kind: null, ids: [], primary: null });
+  /**
+   * Apply a keyframe selection for the edited host. This is the panel's single
+   * selection source: it mirrors the timeline pool (so the same diamonds light
+   * up) and points the panel at the segment that starts at the first selected
+   * key, which is what a preset or handle drag will edit.
+   */
+  _setSelection(keys) {
+    const st = this.openState;
+    if (!st) return;
+    const seen = new Set();
+    const next = [];
+    for (const k of keys) {
+      const t = Math.round(Number(k.t) * 1000) / 1000;
+      const path = String(k.path || '');
+      if (!path || !Number.isFinite(t)) continue;
+      const id = `${path}:${t}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      next.push({ path, t });
     }
+    next.sort((a, b) => (a.path === b.path ? a.t - b.t : a.path.localeCompare(b.path)));
+    this.selected = next;
+
+    const trackPath = this._track()?.path;
+    const times = trackPath ? this._selectedFor(trackPath) : [];
+    if (this._isPathMode()) {
+      this._refreshSpan();
+    } else {
+      const segs = this._track()?.segments || [];
+      const i = times.length ? segs.findIndex((s) => Math.abs(s.from - times[0]) <= 1e-4) : -1;
+      if (i >= 0) {
+        this.active = i;
+        this.curve = normalizeCurve(segs[i].a?.curve) || presetCurve('easeInOut');
+      }
+    }
+
+    const hostRef = this._hostRef();
+    const ids = hostRef ? next.map((s) => keyframeRef(hostRef, s.path, s.t)) : [];
+    this.onSelect?.(ids.length
+      ? { kind: 'keyframe', ids, primary: ids[0] }
+      : { kind: null, ids: [], primary: null });
     this._syncHead();
     this._syncRailGroup();
+    this._buildPathSelect();
     this.draw();
+  }
+
+  /**
+   * Press: a tap runs the click action, a drag past the slop becomes the same
+   * marquee the timeline uses (3px slop, Ctrl/Cmd/Shift toggles, Esc cancels).
+   * The selection is only touched on release, never on press.
+   */
+  _startPress(ev, { tap = null } = {}) {
+    const start = { x: ev.clientX, y: ev.clientY };
+    const from = this._localPoint(ev);
+    const additive = !!(ev.ctrlKey || ev.metaKey || ev.shiftKey);
+    const box = { x0: from.x, x1: from.x };
+    let moved = false;
+    const samePointer = (e) => !e || e.pointerId == null || e.pointerId === ev.pointerId;
+    const update = (e) => {
+      if (!samePointer(e)) return;
+      if (!moved && Math.hypot(e.clientX - start.x, e.clientY - start.y) <= 3) return;
+      moved = true;
+      box.x1 = this._localPoint(e).x;
+      this.marquee = { x0: box.x0, x1: box.x1, additive };
+      this.draw();
+    };
+    const cleanup = () => {
+      window.removeEventListener('pointermove', update);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', cancel);
+      window.removeEventListener('keydown', onKey, true);
+      try { this.canvas.releasePointerCapture?.(ev.pointerId); } catch { /* synthetic */ }
+    };
+    const up = (e) => {
+      if (!samePointer(e)) return;
+      cleanup();
+      const m = this.marquee;
+      this.marquee = null;
+      if (!moved) {
+        this.draw();
+        tap?.();
+        return;
+      }
+      this._applyMarquee(m, additive);
+    };
+    const cancel = () => {
+      cleanup();
+      this.marquee = null;
+      this.draw();
+    };
+    const onKey = (e) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopPropagation();
+      cancel();
+    };
+    window.addEventListener('pointermove', update);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', cancel);
+    window.addEventListener('keydown', onKey, true);
+    try { this.canvas.setPointerCapture(ev.pointerId); } catch { /* synthetic pointer */ }
+  }
+
+  /** Select the keys inside the band; additive toggles them like the timeline. */
+  _applyMarquee(m, additive) {
+    const g = this._geo();
+    const path = this._track()?.path;
+    if (!path) { this.draw(); return; }
+    const x0 = Math.min(m.x0, m.x1) - 2;
+    const x1 = Math.max(m.x0, m.x1) + 2;
+    const hits = this._activeKeys()
+      .filter((k) => {
+        const x = g.xOf(k.t);
+        return x >= x0 && x <= x1 && x >= g.plotLeft - 8 && x <= g.plotRight + 8;
+      })
+      .map((k) => ({ path, t: k.t }));
+    if (!additive) {
+      this._setSelection(hits);
+      return;
+    }
+    const next = this.selected.slice();
+    for (const hit of hits) {
+      const i = next.findIndex((s) => s.path === hit.path && Math.abs(s.t - hit.t) <= 1e-4);
+      if (i >= 0) next.splice(i, 1);
+      else next.push(hit);
+    }
+    this._setSelection(next);
   }
 
   _down(e) {
     if (e.button !== 0) return;
+    e.preventDefault();
     const p = this._localPoint(e);
-    if (this._isPathMode()) {
-      e.preventDefault();
-      const hit = this._hitHandle(p.x, p.y);
-      if (hit) {
+    const hit = this._hitHandle(p.x, p.y);
+    if (hit) {
+      if (this._isPathMode()) {
         const span = hit.span;
         this._spanBackup = {
           left: span.left,
@@ -964,38 +1210,49 @@ export class CurvePanel {
           pointer: p,
           range: this._geo().range,
         };
-        this.canvas.style.cursor = 'grabbing';
-        return;
+      } else {
+        this._spanBackup = null;
+        this.drag = {
+          mode: 'segment',
+          handle: hit,
+          seg: this.active,
+          curve: this.curve,
+          pointer: p,
+          range: this._geo().range,
+        };
       }
-      const keyT = this._hitPathKey(p.x, p.y);
-      if (keyT != null) {
-        this._pickPathKey(keyT, e);
-        return;
-      }
-      this._setPathSelection([]);
-      return;
-    }
-    const handle = this._hitHandle(p.x, p.y);
-    if (handle) {
-      e.preventDefault();
-      this._spanBackup = null;
-      this.drag = {
-        mode: 'segment',
-        handle,
-        seg: this.active,
-        curve: this.curve,
-        pointer: p,
-        range: this._geo().range,
-      };
       this.canvas.style.cursor = 'grabbing';
       return;
     }
+    const key = this._hitKey(p.x, p.y);
+    if (key) {
+      this._startPress(e, { tap: () => this._pickKey(key, e) });
+      return;
+    }
+    this._startPress(e, {
+      tap: () => {
+        if (this._isPathMode()) this._setSelection([]);
+        else this._switchSegmentAt(p);
+      },
+    });
+  }
+
+  /** Tap on a segment switches the edited segment and drops the key selection. */
+  _switchSegmentAt(p) {
     const g = this._geo();
     const t = g.tOf(p.x);
-    const idx = (this._track()?.segments || []).findIndex((s) => t >= s.from && t <= s.to);
-    if (idx >= 0 && idx !== this.active) {
+    const segs = this._track()?.segments || [];
+    const idx = segs.findIndex((s) => t >= s.from && t <= s.to);
+    if (idx < 0) {
+      if (this.selected.length) this._setSelection([]);
+      return;
+    }
+    if (idx !== this.active) {
       this.active = idx;
-      this.curve = normalizeCurve(this._track()?.segments[idx]?.a?.curve) || presetCurve('easeInOut');
+      this.curve = normalizeCurve(segs[idx].a?.curve) || presetCurve('easeInOut');
+    }
+    if (this.selected.length) this._setSelection([]);
+    else {
       this._syncHead();
       this._syncRailGroup();
       this.draw();
@@ -1055,9 +1312,13 @@ export class CurvePanel {
   }
 
   _hover(e) {
-    if (this.drag) return;
+    if (this.drag || this.marquee) return;
     const p = this._localPoint(e);
-    this.canvas.style.cursor = this._hitHandle(p.x, p.y) ? 'grab' : 'default';
+    if (this._hitHandle(p.x, p.y)) {
+      this.canvas.style.cursor = 'grab';
+      return;
+    }
+    this.canvas.style.cursor = this._hitKey(p.x, p.y) ? 'pointer' : 'default';
   }
 
   _applyPreset(id) {
@@ -1067,26 +1328,57 @@ export class CurvePanel {
       this._applyPathPreset(curve);
       return;
     }
+    // Scope = every segment whose left key is selected, across the tracks the
+    // timeline pool covers. No key selected: fall back to the active segment.
+    const paths = this._selectedPaths();
+    const targets = [];
+    for (const path of paths) targets.push(...this._selectedPairs(path));
+    const seg = this._track()?.segments[this.active];
+    let list = targets;
+    if (!list.length && this.selected.length) {
+      this.toast?.('选中的关键帧后面没有可作用的关键帧', 'warn');
+      return;
+    }
+    if (!list.length) {
+      if (!seg) return;
+      list = [{ path: this._track().path, from: seg.from, to: seg.to }];
+    }
     this.curve = curve;
     this._syncHead();
     this._syncRailGroup();
     this.draw();
-    this._commit(curve, this._track()?.segments || []);
+    this._commit(curve, list);
   }
 
   /**
-   * Apply one preset to every segment between adjacent selected keys. Any old
-   * span intersecting the selection is cleared first (its whole range), then
-   * each selected pair becomes its own span and retimes its dimmed inner keys.
+   * Apply one preset to every segment between adjacent selected keys. With no
+   * key selected the whole path is the scope (the panel never invents a
+   * selection just to have one). Any old span intersecting the scope is
+   * cleared first, then each pair becomes its own span and retimes its inner
+   * keys.
    */
   _applyPathPreset(curve) {
     const p = this.path;
-    if (!p || p.selected.length < 2 || !p.segments.length) {
+    if (!p || !p.keys?.length) return;
+    if (p.selected.length === 1) {
+      this.toast?.('再选一个关键帧才能成段', 'warn');
+      return;
+    }
+    const scope = p.selected.length
+      ? p.selected
+      : [p.keys[0].t, p.keys[p.keys.length - 1].t];
+    const segments = [];
+    for (let i = 0; i + 1 < scope.length; i++) {
+      const li = p.keys.findIndex((k) => Math.abs(k.t - scope[i]) <= 1e-4);
+      const ri = p.keys.findIndex((k) => Math.abs(k.t - scope[i + 1]) <= 1e-4);
+      if (ri > li) segments.push({ from: p.keys[li].t, to: p.keys[ri].t });
+    }
+    if (!segments.length) {
       this.toast?.('至少选中两个关键帧才能套用曲线', 'warn');
       return;
     }
-    const from = p.selected[0];
-    const to = p.selected[p.selected.length - 1];
+    const from = scope[0];
+    const to = scope[scope.length - 1];
     const ops = [];
     for (const span of p.spans) {
       if (span.to > from + 1e-4 && span.from < to - 1e-4) {
@@ -1098,7 +1390,7 @@ export class CurvePanel {
         });
       }
     }
-    for (const seg of p.segments) {
+    for (const seg of segments) {
       ops.push({
         op: 'keyCurve', host: 'camera', id: p.cameraId, path: 'path',
         from: Math.round(seg.from * 1000) / 1000,
@@ -1119,7 +1411,7 @@ export class CurvePanel {
           this._syncRailGroup();
           this.draw();
         } else {
-          this.toast?.(`已套用 ${curveLabel(curve)} · ${p.segments.length} 段`, 'info');
+          this.toast?.(`已套用 ${curveLabel(curve)} · ${segments.length} 段`, 'info');
         }
       });
     }
@@ -1185,10 +1477,11 @@ export class CurvePanel {
   }
 
   _commit(curve, segments) {
-    if (!this.openState || !this._track() || !segments?.length) return;
+    if (!this.openState || !segments?.length) return;
     const st = this.openState;
+    const fallbackPath = this._track()?.path;
     const ops = segments.map((s) => ({
-      op: 'keyCurve', host: st.host, id: st.id, path: this._track()?.path,
+      op: 'keyCurve', host: st.host, id: st.id, path: s.path || fallbackPath,
       from: Math.round(Number(s.from) * 1000) / 1000,
       to: Math.round(Number(s.to) * 1000) / 1000,
       curve: curve ? normalizeCurve(curve) : null,
