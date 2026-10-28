@@ -73,7 +73,7 @@ button.insp-name:hover { background: var(--surface-2); border-color: var(--borde
 .insp .prop > label { line-height: var(--h-md); }
 .insp .prop > .ctl { grid-column: 2 / span 6; min-width: 0; }
 .insp .prop.w-third > .ctl { grid-column: 2 / span 2; min-width: 64px; }
-.insp .prop.w-half > .ctl { grid-column: 2 / span 3; min-width: 88px; }
+.insp .prop.w-half > .ctl { grid-column: 2 / span 3; min-width: 96px; }
 .insp .prop.w-full > .ctl { grid-column: 2 / span 6; }
 .insp .prop > .kf-btn,
 .insp .prop > .kf-slot { grid-column: 8; }
