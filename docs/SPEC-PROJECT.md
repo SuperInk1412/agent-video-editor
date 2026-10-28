@@ -146,7 +146,9 @@ Blender 侧这些效果由合成器节点组 `VDM_Composite` 完成。节点组�
   父级旋转会绕父级 pivot 公转，绑定时刻不跳。`spatialParent {id, parent, t, inherit?}` /
   `spatialUnparent {id}` 只增删 `parent`，从不改子级本地值或关键帧。3D 物体和相机也可以当子级，
   记录在 `obj.frameParent` / `cam.frameParent`（同样形状，不碰旧 3D `obj.parent` 层级）；
-  核心 `hostFrameAt` / `objectWorldPose` / `evalCameraWorld` 已支持，preview3d/engine 接线进行中。
+  核心 `hostFrameAt` / `objectWorldPose` / `evalCameraWorld`、preview3d 和 engine shot 烘焙都已接线，
+  3D/相机子级在预览与 Blender 成片一致。2D 元素作为子级时，Blender 2D 构建器仍未消费其
+  空间父级/属性链接。
   `@live` / 旧相机贴屏仍是渲染期屏锁，不是世界父级，也不能当世界父级的目标。
 - **属性父级（`el.links` / `ob.links` / `cam.links`）**：一条链接是
   `{ id, to, from: { host: "el"|"ob"|"cam", id, path }, combine: "add"|"mul", bindParentValue, enabled }`。
