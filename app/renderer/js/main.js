@@ -12,6 +12,7 @@ import { AssetsPanel, MEDIA_MIME } from './assets.js';
 import { Outliner } from './outliner.js';
 import { showMenu, hideMenu, initTooltips, icon, prefs } from './ui.js';
 import { initLayout, markTab, Timecode, StatusBar, LogDrawer } from './shell.js';
+import { frameStep } from './timeline-math.js';
 import { initCommands, register as registerCommand, dispatch as dispatchCommand, openPalette, openShortcuts } from './commands.js';
 import { evalCamera, pathPos, cameraTransform, cameraRange } from '/core/camera.js';
 import { curveSegments } from '/core/curves.js';
@@ -270,6 +271,17 @@ function pause() {
 }
 
 function togglePlay() { S.playing ? pause() : play(); }
+
+/**
+ * ±1 frame on the frame grid (timeline-math.js frameStep), so repeated steps
+ * cannot accumulate 1/fps float drift. The transport buttons keep playback
+ * going (only the play anchor is reset); the keyboard commands pause first.
+ */
+function stepFrames(dir, { pauseFirst = false } = {}) {
+  if (pauseFirst) pause();
+  setTime(frameStep(S.time, dir, S.project?.meta.fps || 24));
+  if (S.playing) { S.playFrom = S.time; S.playWall = performance.now(); }
+}
 
 // ---------------------------------------------------------------- selection
 function select(sel = {}) {
@@ -2060,8 +2072,8 @@ async function boot() {
   $('#btnHelp').onclick = () => document.dispatchEvent(new CustomEvent('vdm:shortcuts'));
   setLoop(S.loop);
   setPlayButton(false);
-  $('#btnPrev').onclick = () => { setTime(S.time - 1 / (S.project.meta.fps || 24)); if (S.playing) { S.playFrom = S.time; S.playWall = performance.now(); } };
-  $('#btnNext').onclick = () => { setTime(S.time + 1 / (S.project.meta.fps || 24)); if (S.playing) { S.playFrom = S.time; S.playWall = performance.now(); } };
+  $('#btnPrev').onclick = () => stepFrames(-1);
+  $('#btnNext').onclick = () => stepFrames(1);
   $('#btnUndo').onclick = async () => { try { const j = await post('/api/undo', {}); applyProject(j.project, 'undo'); } catch (e) { toast('没有可撤销的操作'); } };
   $('#btnRedo').onclick = async () => { try { const j = await post('/api/redo', {}); applyProject(j.project, 'redo'); } catch (e) { toast('没有可重做的操作'); } };
   $('#btnStill').onclick = () => renderActions.still(S.time);
@@ -2869,7 +2881,6 @@ async function boot() {
   // order does not change which command a key reaches.
   initCommands({ toast });
   const anyCtrl = (e) => !!(e.ctrlKey || e.metaKey);
-  const curFps = () => S.project?.meta.fps || 24;
   const stepTime = (dt) => { pause(); setTime(S.time + dt); };
 
   // ↑/↓: the keyframe dots the timeline draws — 2D element `keyframes`, 3D
@@ -2949,13 +2960,13 @@ async function boot() {
     id: 'play.prevFrame', title: '上一帧', sheetTitle: '上一帧（Shift：后退 1s）', group: '播放', keys: 'ArrowLeft',
     icon: 'step-back', keywords: 'previous frame step back',
     match: (e) => e.key === 'ArrowLeft',
-    run: (e) => { e?.preventDefault(); stepTime(-(e?.shiftKey ? 1 : 1 / curFps())); },
+    run: (e) => { e?.preventDefault(); if (e?.shiftKey) stepTime(-1); else stepFrames(-1, { pauseFirst: true }); },
   });
   registerCommand({
     id: 'play.nextFrame', title: '下一帧', sheetTitle: '下一帧（Shift：前进 1s）', group: '播放', keys: 'ArrowRight',
     icon: 'step-fwd', keywords: 'next frame step forward',
     match: (e) => e.key === 'ArrowRight',
-    run: (e) => { e?.preventDefault(); stepTime(e?.shiftKey ? 1 : 1 / curFps()); },
+    run: (e) => { e?.preventDefault(); if (e?.shiftKey) stepTime(1); else stepFrames(1, { pauseFirst: true }); },
   });
   registerCommand({
     id: 'play.back1s', title: '后退 1 秒', group: '播放', keys: 'Shift+ArrowLeft', sheet: false, match: false,

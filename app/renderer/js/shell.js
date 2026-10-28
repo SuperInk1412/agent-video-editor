@@ -2,6 +2,7 @@
 // timecode field, status bar, log drawer. DOM lives in index.html; main.js wires
 // the callbacks. Pure ES module, no deps.
 import { prefs } from './ui.js';
+import { frameIndex } from './timeline-math.js';
 
 const $ = (s) => document.querySelector(s);
 
@@ -145,7 +146,9 @@ export function formatClock(t) {
   return `${pad2(m)}:${s.toFixed(2).padStart(5, '0')}`;
 }
 
-export const frameOf = (t, fps) => Math.round((Number(t) || 0) * (fps || 24) + 1e-6);
+// The frame under `t`, floored like the timeline playhead (so the transport
+// frame and the highlighted frame band always agree).
+export const frameOf = (t, fps) => frameIndex(t, fps);
 
 /**
  * Parse a typed time: '1.8' / '1.8s' (seconds), '1:02.5' (m:ss), '1:02:03' (h:mm:ss),

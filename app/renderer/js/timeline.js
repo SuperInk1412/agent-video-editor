@@ -15,12 +15,19 @@ import {
 } from '/core/selection.js';
 import { attachNumberField, readNumber, writeNumber } from './numfield.js';
 import { h, icon, token, prefs } from './ui.js';
+import { normalizeFps, frameIndex, frameStart, frameBand, planRulerTicks } from './timeline-math.js';
 
 const el = (tag, cls, html) => {
   const n = document.createElement(tag);
   if (cls) n.className = cls;
   if (html != null) n.innerHTML = html;
   return n;
+};
+
+// Lanes hold the frame band plus keyframe diamonds; refreshing a lane must keep
+// the band (its only other child) and only replace the diamonds.
+const clearLaneKeys = (lane) => {
+  for (const n of [...lane.children]) if (n.classList.contains('tl-key')) n.remove();
 };
 
 // Clip-type badge labels; colors come from the --clip-* tokens (badge-* / t-* classes).
@@ -80,6 +87,7 @@ export class Timeline {
     };
     this.propSel = null;
     this._scrollTo = null;
+    this._frameBand = null; // cached { frame, left, width, atEnd } for the playhead
     this._pending = new Map();
     this._editTimes = new Map();
     this._propRows = [];
@@ -144,7 +152,7 @@ export class Timeline {
         if (!splitDragged && Math.abs(m.clientX - x0) < 3) return;
         if (!splitDragged) { splitDragged = true; this.onPause?.(); document.body.classList.add('tl-scrubbing'); }
         this._noSnap = m.altKey;
-        this.onSeek?.(this._snap(this._timeAt(m.clientX)));
+        this.onSeek?.(this._snapPlayhead(this._timeAt(m.clientX)));
       };
       const up = () => {
         window.removeEventListener('pointermove', move);
@@ -492,11 +500,12 @@ export class Timeline {
     this.time = t;
     const dur = this.project?.meta.duration || 12;
     if (this.timeLabel) this.timeLabel.textContent = `${t.toFixed(2)} / ${dur.toFixed(2)}s`;
-    const x = this._trackX(t);
+    const x = this._trackX(this._displayTime(t));
     if (this.scroll.scrollLeft > x - this._gutter() - 20) {
       this.scroll.scrollLeft = Math.max(0, x - this._gutter() - 80);
     }
     this._syncPlayhead();
+    this._syncFrameBand();
     this._syncProps(true);
   }
 
@@ -514,7 +523,7 @@ export class Timeline {
     const rect = this.scroll.getBoundingClientRect();
     const anchorX = clientX != null
       ? Math.max(0, Math.min(this.scroll.clientWidth, clientX - rect.left))
-      : Math.max(8, Math.min(this.scroll.clientWidth - 8, this._trackX(this.time) - this.scroll.scrollLeft));
+      : Math.max(8, Math.min(this.scroll.clientWidth - 8, this._trackX(this._displayTime()) - this.scroll.scrollLeft));
     const anchorTime = (anchorX + this.scroll.scrollLeft - this._gutter()) / Math.max(1, this.pps);
     this.zoom = next;
     this._layout();
@@ -528,6 +537,53 @@ export class Timeline {
 
   _gutter() { return this._gutterW; }
   _trackX(t) { return this._gutter() + t * this.pps; }
+  _fps() { return normalizeFps(this.project?.meta.fps); }
+
+  /**
+   * Where the playhead line is drawn: the start of the frame under `t`, except
+   * at/after the end where the exact duration keeps it on the last pixel.
+   * `this.time` stays exact (playback ticks, keyframe jumps); only the line,
+   * the auto-scroll x and the zoom anchor use this quantized time.
+   */
+  _displayTime(t = this.time) {
+    const dur = this.project?.meta.duration || 0;
+    const time = Math.max(0, Number(t) || 0);
+    if (time >= dur) return dur;
+    return frameStart(time, this._fps());
+  }
+
+  /**
+   * Playhead time for a scrub: clamp, keep the existing magnet (0 / duration /
+   * beats), then land on the frame grid. The exact duration is preserved at the
+   * end. Only the ruler scrub and the scissors drag use this — clip drags keep
+   * their sub-frame `_snap` behaviour.
+   */
+  _snapPlayhead(t) {
+    const dur = this.project?.meta.duration || 0;
+    const raw = Math.max(0, Math.min(Number(t) || 0, dur));
+    const snapped = this.project ? Math.max(0, Math.min(dur, this._snap(raw))) : raw;
+    if (dur > 0 && snapped >= dur) return dur;
+    return frameStart(snapped, this._fps());
+  }
+
+  /**
+   * The frame under the playhead is drawn once per track (rows create stacking
+   * contexts and selected rows paint opaque backgrounds, so a single band
+   * behind the rows would not show). Its geometry is two CSS variables on
+   * `.tl-rows`, written only here — never per-band on pointermove.
+   */
+  _syncFrameBand() {
+    if (!this.rowsWrap) return;
+    const band = frameBand({
+      t: this.time,
+      fps: this._fps(),
+      pps: this.pps,
+      duration: this.project?.meta.duration || 0,
+    });
+    this._frameBand = band;
+    this.rowsWrap.style.setProperty('--tl-frame-left', `${band.left}px`);
+    this.rowsWrap.style.setProperty('--tl-frame-w', `${band.width}px`);
+  }
 
   /** Keep the custom track inset over the scrollable (non-gutter) part. */
   _syncHScroll() {
@@ -550,7 +606,7 @@ export class Timeline {
   _syncPlayhead() {
     if (!this.playhead || !this.playheadLayer) return;
     this.playheadLayer.style.left = `${this._gutter()}px`;
-    const screen = this._trackX(this.time) - this.scroll.scrollLeft;
+    const screen = this._trackX(this._displayTime()) - this.scroll.scrollLeft;
     this.playhead.style.transform = `translateX(${screen - this._gutter()}px)`;
   }
   _timeAt(clientX) {
@@ -620,41 +676,23 @@ export class Timeline {
 
     // ruler: labels adapt to the zoom, and once a frame is wide enough the
     // minor ticks switch from seconds to exact frame boundaries. Frame counts
-    // are used (not accumulated seconds) so ticks never drift at 24/30/60 fps.
+    // are used (not accumulated seconds) so ticks never drift at 24/30/60 fps;
+    // timeline-math.js also snaps major labels onto whole seconds.
     this.rulerTrack.innerHTML = '';
-    const fps = Math.max(1, Math.round(Number(p.meta.fps) || 24));
-    const pxPerFrame = this.pps / fps;
-    const totalFrames = Math.max(0, Math.floor(dur * fps + 1e-6));
-    const NICE_FRAMES = [1, 2, 3, 5, 6, 10, 12, 15, 20, 24, 30, 48, 60, 90, 120, 150, 240, 300, 600, 1200, 1800, 3600, 7200, 18000, 36000];
-    const atLeast = (minPx) => NICE_FRAMES.find((n) => n * pxPerFrame >= minPx) || NICE_FRAMES[NICE_FRAMES.length - 1];
-    let minorFrames = pxPerFrame >= 6 ? 1
-      : pxPerFrame >= 3 ? 2
-        : pxPerFrame >= 1.5 ? 5
-          : pxPerFrame >= 0.75 ? 10
-            : atLeast(7);
-    let majorFrames = atLeast(68);
-    if (totalFrames / majorFrames > 2000) {
-      majorFrames = NICE_FRAMES.find((n) => n >= majorFrames && totalFrames / n <= 2000)
-        || Math.ceil(totalFrames / 2000);
-    }
-    minorFrames = Math.min(minorFrames, majorFrames);
-    // A very long timeline at a high zoom must not create tens of thousands of
-    // nodes; widen the minor grid until the count is bounded.
-    if (totalFrames / minorFrames > 4000) {
-      minorFrames = NICE_FRAMES.find((n) => n >= minorFrames && totalFrames / n <= 4000)
-        || Math.ceil(totalFrames / 4000);
-    }
+    const fps = this._fps();
+    const totalFrames = frameIndex(dur, fps);
+    const plan = planRulerTicks({ duration: dur, fps, pps: this.pps });
     const majorSet = new Set();
-    for (let f = 0; f <= totalFrames; f += majorFrames) majorSet.add(f);
-    if (minorFrames < majorFrames) {
-      for (let f = 0; f <= totalFrames; f += minorFrames) {
+    for (let f = 0; f <= totalFrames; f += plan.majorFrames) majorSet.add(f);
+    if (plan.minorFrames < plan.majorFrames) {
+      for (let f = 0; f <= totalFrames; f += plan.minorFrames) {
         if (majorSet.has(f)) continue;
         const tick = el('div', 'tl-tick minor');
         tick.style.left = `${(f / fps) * this.pps}px`;
         this.rulerTrack.appendChild(tick);
       }
     }
-    const useTimecode = majorFrames < fps;
+    const useTimecode = plan.useTimecode;
     for (const f of majorSet) {
       const t = f / fps;
       const tick = el('div', 'tl-tick major');
@@ -709,6 +747,14 @@ export class Timeline {
         if (e) this._elementGroup(e, this.rowsWrap);
       }
     }
+
+    // One frame band per track, created before _applyFilter so filtered rows
+    // keep their band. First child of the track: above its background, below
+    // the blocks and keyframe diamonds added after it.
+    for (const track of this.rowsWrap.querySelectorAll('.tl-track')) {
+      track.prepend(el('div', 'tl-frame-band'));
+    }
+    this._syncFrameBand();
 
     this._applyFilter();
     this.setTime(this.time);
@@ -1500,7 +1546,7 @@ export class Timeline {
     const sig = keys.join(',');
     if (sig !== posRow.sig) {
       posRow.sig = sig;
-      posRow.lane.innerHTML = '';
+      clearLaneKeys(posRow.lane);
       posRow.keys = keys.map((t) => {
         const d = el('div', 'tl-key');
         d.dataset.cam = cam.id;
@@ -1632,7 +1678,7 @@ export class Timeline {
     const sig = keys.join(',');
     if (sig !== pr.sig) {
       pr.sig = sig;
-      pr.lane.innerHTML = '';
+      clearLaneKeys(pr.lane);
       pr.keys = keys.map((t) => {
         const d = el('div', 'tl-key');
         d.dataset.cam = cam.id;
@@ -2238,7 +2284,7 @@ export class Timeline {
     const sig = keys.join(',');
     if (sig !== pr.sig) {
       pr.sig = sig;
-      pr.lane.innerHTML = '';
+      clearLaneKeys(pr.lane);
       pr.keys = keys.map((t) => {
         const d = el('div', 'tl-key');
         d.dataset.obj = o.id;
@@ -2258,7 +2304,7 @@ export class Timeline {
     const sig = keys.join(',');
     if (sig !== pr.sig) {
       pr.sig = sig;
-      pr.lane.innerHTML = '';
+      clearLaneKeys(pr.lane);
       pr.keys = keys.map((t) => {
         const d = el('div', 'tl-key');
         d.dataset.el = e.id;
@@ -2665,7 +2711,7 @@ export class Timeline {
   _startScrub(ev) {
     const seek = (e) => {
       this._noSnap = e.altKey;
-      this.onSeek?.(this._snap(this._timeAt(e.clientX)));
+      this.onSeek?.(this._snapPlayhead(this._timeAt(e.clientX)));
     };
     seek(ev);
     const move = (e) => seek(e);
