@@ -2,7 +2,8 @@
 // Draws on a transparent canvas sitting on top of the WebGL stage; the stage
 // owns pointer events, this module only knows how to draw and hit-test.
 import { evalCamera, pathPos, cameraTransform } from '/core/camera.js';
-import { worldPose, childrenOf, parentIdOf } from '/core/hierarchy.js';
+import { childrenOf, parentIdOf } from '/core/hierarchy.js';
+import { objectWorldPose } from '/core/spatial-parent.js';
 
 const CYAN = '#17d9ff';
 const YELLOW = '#ffd166';
@@ -35,9 +36,13 @@ export class PathGizmo {
     this.canvas.height = stage.height;
   }
 
-  /** World pose of a scene object (parent chain included). */
+  /**
+   * World pose of a scene object: the shipped 3D parent chain plus the unified
+   * `frameParent` matrix layer (core/spatial-parent.js::objectWorldPose), so the
+   * handles sit on the object the viewport actually draws.
+   */
   _worldPose(obj, time) {
-    return worldPose(this.opts.project(), obj, time);
+    return objectWorldPose(this.opts.project(), obj, time);
   }
 
   get scale() {
