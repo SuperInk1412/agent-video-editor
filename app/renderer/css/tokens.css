@@ -27,6 +27,7 @@
   --primary-border: #1f6d88;
   --primary-text: #a8efff;
   --playhead: #ff3b6b;
+  --playhead-band: rgba(255, 59, 107, .12);   /* added: current-frame band across timeline tracks */
   --keyframe: #ffd400;
   --keyframe-bg: rgba(255, 212, 0, .10);      /* added: tinted key / current-key rows */
   --keyframe-border: rgba(255, 212, 0, .30);  /* added: outline of a lit ◆ button */

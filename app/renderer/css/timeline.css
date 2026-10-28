@@ -64,7 +64,9 @@
 
 /* ---------------- rows ---------------- */
 .tl-inner { position: relative; padding-bottom: 10px; }
-.tl-rows { position: relative; }
+/* The current-frame band: one element per track, positioned from these two
+   variables by timeline.js _syncFrameBand (no per-band JS on pointermove). */
+.tl-rows { position: relative; --tl-frame-left: 0px; --tl-frame-w: 0px; }
 .tl-rows .tl-elhead > .tl-gutter,
 .tl-rows .tl-camhead > .tl-gutter,
 .tl-rows .tl-objhead > .tl-gutter { cursor: grab; user-select: none; }
@@ -156,6 +158,14 @@ body.tl-gutter-resizing, body.tl-gutter-resizing * { cursor: col-resize !importa
 .handle-r { right: 0; }
 
 /* ---------------- playhead + split ---------------- */
+/* Current-frame band: the first child of every .tl-track. Above the track's own
+   (often opaque) background, below the blocks and keyframe diamonds that come
+   after it; --tl-frame-w is 0 when the frame is too thin to draw. */
+.tl-frame-band {
+  position: absolute; top: 0; bottom: -1px; left: 0;
+  width: var(--tl-frame-w, 0px); transform: translateX(var(--tl-frame-left, 0px));
+  background: var(--playhead-band); pointer-events: none;
+}
 /* Clips the playhead at the name column: spans the track area below the toolbar
    (left = --tl-gutter, set again by timeline.js _syncPlayhead) down to the bottom. */
 .tl-playhead-layer {
