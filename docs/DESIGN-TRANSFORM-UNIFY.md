@@ -126,7 +126,7 @@
   - 视口：选中 3D 物体时枢轴处画 X/Y/Z 三个旋转环，拖动改对应轴；有该轴关键帧时写当前帧，否则写基础旋转。
   - 链接：`core/links.js` 增加 `rotation.x/y/z` 角度目标，覆盖对象 / 相机 / 带 `node` 的 2D 元素；`core/link-eval.js` 把有效角度应用到节点、对象和相机求值。
   - 过渡：旧 2D 元素在 2c 迁移前仍是旧的单行「旋转」；相机旧「手动 roll」暂时保留并与 `rotation.z` 叠加。
-  - 验收：`npm test` 437/437 PASS；`check:preview` PASS；`check-evaluate` 121 个样本全等；`check-camfeed` 3/3 PASS；`check-render-parity` PASS（3/144 格允许）；Electron 探针确认对象/节点/相机的三行与三格、对象/节点菱形补基础旋转、旋转球、视口旋转环、相机关键帧；截图在 `.tmp/r3-ui-shots/rot3-*.png`。
+  - 验收：`npm test` 436/436 PASS（本次新增 4 条；工作区另有一条未提交的曲线测试，所以连通工作区跑是 437）；`check:preview` PASS；`check-evaluate` 121 个样本全等；`check-camfeed` 3/3 PASS；`check-render-parity` PASS（3/144 格允许）；Electron 探针确认对象/节点/相机的三行与三格、对象/节点菱形补基础旋转、旋转球、视口旋转环、相机关键帧；截图在 `.tmp/r3-ui-shots/rot3-*.png`。
 - 2026-10-28 · 第 1 步（A 部分：投屏导航）· A · `210d71d` · 跟随相机与投屏导航：
   - F5 跟随选中相机（`view.follow` 命令）；编辑/预览双击投屏、时间轴右键「跟随投屏来源」、属性面板「来源相机 [跟随]」跟到来源相机；属性面板相机页列出「这台相机的投屏」并「飞到」。
   - 跟随进入编辑选择模式；播放头在镜头外先跳到起点；播到镜头结束自动暂停（循环开启时也停）；切移动模式脱离并保留当前机位；工具栏显示「跟随 <相机名> ×」。
