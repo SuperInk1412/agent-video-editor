@@ -1,7 +1,7 @@
 # 改动日志 · 基础能力 + 效果预设（MV/预设 agent）
 
 每个提交一条。格式：日期 · 提交号 · 改了什么 · 为什么 · 文件 · 回退方式。
-分支：`agent/presets-groundwork`（起点 `bdab52e`，2026-10-27 rebase 到 `7b93562`，同日快进合并进 master；W3 rebase 到 `18ff573` 后再次快进合并）。设计与排期见 `docs/DESIGN-PRESETS.md`。
+分支：`agent/presets-groundwork`；2026-10-28 起 `agent/camfeed`（基于 master `6c2ec5f`，未合入）（起点 `bdab52e`，2026-10-27 rebase 到 `7b93562`，同日快进合并进 master；W3 rebase 到 `18ff573` 后再次快进合并）。设计与排期见 `docs/DESIGN-PRESETS.md`。
 
 | 日期 | 提交 | 改了什么 | 为什么 | 文件 | 回退 |
 |---|---|---|---|---|---|
@@ -21,3 +21,11 @@
 | 2026-10-27 | `2c26333` | W3：3D 项目里的 2D 元素在 Blender 成片里叠到 3D 画面上（单相机走合成器，多相机走 VSE 顶层轨道） | 字幕、HUD、遮罩要盖在 3D 画面上 | `blender/vdm_build.py`（`SceneBuilder.build` 可建到指定场景、透明底）、`blender/vdm_city.py` | `git revert 2c26333` |
 | 2026-10-27 | `b729c58` | W3：预览里 3D 画面画完后再画 2D 图层 | 预览和成片一致 | `app/renderer/js/preview.js` | `git revert b729c58` |
 | 2026-10-27 | `729f839` | SPEC-PROJECT 写清 3D 项目里 2D 元素的规则、合成器输出接口的要求和已知差异 | 文档跟代码同步 | `docs/SPEC-PROJECT.md` | `git revert 729f839` |
+| 2026-10-28 | `abeed8a` | 设计：相机投屏替代贴屏、父子只剩两种 | 用户拍板 | `docs/DESIGN-CAMFEED-PARENTS.md` | `git revert abeed8a` |
+| 2026-10-28 | `98d4e64` | 投屏核心：camfeed 元素、`cam.output`、谁拍谁（断环） | 相机投屏 | `core/camfeed.js`（新）、`core/schema.js`、`core/ops.js`（addElement 带 feed，3 行） | `git revert 98d4e64` |
+| 2026-10-28 | `7734c41` | 预览投屏 | 预览能看到投屏 | `app/renderer/js/preview.js`、`scripts/check-camfeed.mjs`（新） | `git revert 7734c41` |
+| 2026-10-28 | `127b02d` | **修复**：Blender 把 3D 路线里的 2D 元素整片涂成雾色 | master 上就有的成片错误 | `blender/vdm_build.py`、`blender/vdm_city.py` | `git revert 127b02d` |
+| 2026-10-28 | `498a726` | 成片投屏（来源相机先渲成序列） | 成片能出投屏 | `engine/camfeed-render.js`（新）、`engine/blender.js`、`blender/vdm_build.py`、`scripts/check-camfeed-blender.mjs`（新） | `git revert 498a726` |
+| 2026-10-28 | `64aac91` | Blender 2D 世界矩阵烘焙（空间父级 / 节点） | 2D 元素挂父级后成片位置正确 | `engine/element-bake.js`（新）、`engine/blender.js`、`blender/vdm_build.py`、`scripts/check-render-parity.mjs`（新） | `git revert 64aac91` |
+| 2026-10-28 | `e83808d` | 父子只剩空间父级（加强度），旧 3D 父级打开时迁移 | 用户拍板：父子只有两种 | `core/parent-strength.js`（新）、`core/spatial.js`、`core/spatial-parent.js`、`core/ops-ext.js`、`core/contracts.js`、`engine/storage.js`、`inspector.js`、测试 | `git revert e83808d` |
+| 2026-10-28 | `4c0fdf9` | 贴屏退役，打开时迁到 HUD 机位 | 用户拍板：贴屏用投屏替代 | `core/screen-lock-migrate.js`（新）、`core/hierarchy.js`、`preview.js`、`engine/shot.js`、`blender/*.py`、`inspector.js`、测试 | `git revert 4c0fdf9` |

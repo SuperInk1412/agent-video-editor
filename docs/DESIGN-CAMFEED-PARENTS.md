@@ -14,8 +14,8 @@
 
 ```jsonc
 { "id": "el_12", "type": "camfeed", "start": 0, "duration": 8,
-  "camera": "cam_3",          // 画面来源相机（必填）
-  "delay": 0,                 // 0 = 当前帧（默认）；1 = 上一帧
+  "feed": { "camera": "cam_3",   // 画面来源相机（必填）
+            "delay": 0 },       // 0 = 当前帧（默认）；1 = 上一帧
   "style": { "fit": "stretch" },  // 同图片：stretch | cover | contain；平面大小 = 项目画幅
   "transform": { ... } }       // 和其它 2D 元素完全相同（位置/缩放/旋转/纵深/关键帧/空间父级）
 ```
@@ -81,6 +81,7 @@ HUD 空元素（远离场景，比如 x = 10 km）
 
 - Blender 2D 构建器消费 2D 元素的空间父级（HUD 机位依赖它）。
 - 属性链接进入所有求值入口：预览 3D 物体、相机、Blender 2D、shot 烘焙。界面显示的有效值 = 画面用的值。
+  （A 先做完并合入 master：`67b5c7e`，`core/link-eval.js`；B 只补了 Blender 2D 的世界矩阵烘焙。）
 
 ## 5. 顺序
 
@@ -97,3 +98,14 @@ HUD 空元素（远离场景，比如 x = 10 km）
 - **A**：右键相机"创建投屏元素"菜单、时间轴相机行"仅投屏"标记与开关、时间轴里贴屏相关入口的删除、空间父级 strength 的时间轴行。
 - 共享文件登记：`app/renderer/js/preview.js`（B 改投屏绘制和去掉 carry）、`core/spatial-parent.js`（B 加 strength）、
   `core/schema.js` / `core/contracts.js`（追加 `camfeed`、`output`）、`engine/shot.js`、`engine/blender.js`、`blender/vdm_build.py`。
+
+## 7. 进度登记（B）
+
+- 2026-10-28 · 分支 `agent/camfeed`（基于 master `6c2ec5f`），未合入 master。
+- `98d4e64` 投屏核心：`core/camfeed.js`（`el.feed`、`cam.output`、`feedPlan` 断环、`programProject` / `sourceProject`），9 条单测。
+- `7734c41` 预览投屏：每个来源相机一对离屏纹理（当前帧 / 上一帧），按依赖顺序先渲；`scripts/check-camfeed.mjs` 像素检查。
+- `127b02d` **修复（master 上就有的问题）**：Blender 3D 路线里 2D 平面（混合材质）不写 Mist，合成器的雾把所有 2D 元素涂成纯雾色——空世界项目的成片整片一个颜色。2D 平面改到单独的视图层（3D 世界作 holdout），雾只作用于 3D。
+- `498a726` 成片投屏：来源相机先单独渲（去全局后期，缓存在 `.vdm/cache/feeds`），投屏平面逐帧读 `f_<帧-delay>.png`；`check-camfeed --blender` 6/6 PASS。
+- `64aac91` Blender 2D 世界矩阵烘焙：带 `el.node` 或空间父级的 2D 元素逐帧烘焙平面矩阵（与预览同一个 `nodePlaneMatrix`）；`scripts/check-render-parity.mjs` 预览 vs Blender 0/144 格不同。
+- `e83808d` 父子只剩一种：空间父级加 `strength` / `strengthKeys`；打开项目时 `obj.parent` 迁移成 `obj.frameParent`（单测：迁移前后姿态差 < 1e-5）；`objectParent*` 保留名字但写空间父级；新 op `spatialParentKey` / `spatialParentUnkey`。**行为变化**：解除父级保留子级自己的数值（空间父级规则），不再烘焙世界位置。
+- `4c0fdf9` 贴屏退役：打开项目时把贴屏元素迁到 HUD 机位（`core/screen-lock-migrate.js`）；`elementParent` / `elementUnparent` 拒绝并提示用投屏。miku-swiss 副本对拍：预览 48×27 网格最大差 7/255；Blender 场景对齐到 0.02 px，字幕偏差 ≤ 0.5 px（960 宽），PSNR 31–36 dB。
