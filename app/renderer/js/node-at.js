@@ -14,6 +14,7 @@
 // the renderer branch does not have to change the shared spatial core. Relative
 // core imports keep the module importable from Node tests as well.
 import { elementNode, normalizeSpatialNode } from '../../../core/spatial.js';
+import { elementWorldNode as coreElementWorldNode } from '../../../core/spatial-parent.js';
 import { isRecord } from '../../../core/json.js';
 import { sampleTrack } from '../../../core/time.js';
 
@@ -53,4 +54,24 @@ export function elementNodeAt(el, meta = {}, t = null) {
       sample('scale.z', base.scale[2]),
     ],
   };
+}
+
+/**
+ * World SpatialNode of `el` at `t`: the sampled local node above carried by the
+ * spatial-parent chain (PLAN-ui-round3 §3.1):
+ *
+ *   elementNodeAt(el, meta, t)  then, while `el.parent.mode === 'world'`,
+ *   applyParentToNode(child, parentFrame(t), parent.bind, parent.inherit)
+ *
+ * Parent frames come from core/spatial-parent.js: an element parent resolves
+ * recursively (cycle/depth guarded), an object parent through
+ * core/hierarchy.js::worldPose, a camera parent through
+ * core/spatial.js::cameraWorldFrame. `@live` and the legacy camera lock are not
+ * world parents and keep the render-time screen carrier.
+ *
+ * Missing parents / cycles / over-deep chains fall back to the local node, so a
+ * hand-edited project cannot crash the preview.
+ */
+export function elementWorldNode(project, el, t = null) {
+  return coreElementWorldNode(project, el, t, (host, at) => elementNodeAt(host, project?.meta || {}, at));
 }

@@ -21,7 +21,8 @@ import { elementOverlay } from '/core/links.js';
 import { clamp } from '/core/time.js';
 import { cameraTransform, evalCamera, cameraLayers } from '/core/camera.js';
 import { audioElements, audioVolume } from '/core/audio.js';
-import { elementNodeAt } from './node-at.js';
+import { elementWorldNode } from './node-at.js';
+import { elementWorldParent } from '/core/spatial-parent.js';
 import { frameOf } from '/core/spatial.js';
 import { basisFromDir } from '/core/scene.js';
 import { Scene3D } from './preview3d.js';
@@ -767,7 +768,12 @@ export class Preview {
       // so it can never move an element by accident. node-at.js samples the
       // migrated `pivot.* / scale.* / roll` keyframes on top of the base node
       // (S4 convention, same reading as migrate-spatial.js::migratedNodeAt).
-      const nodeFrame = el.node ? frameOf(elementNodeAt(el, p.meta, t)) : null;
+      // A spatial parent (core/spatial-parent.js) carries the whole node chain,
+      // so a parented 2D layer also enters this world-plane path — including a
+      // legacy layer whose node is derived from its transform; an unparented
+      // legacy layer keeps the old screen path untouched.
+      const worldParent = !!elementWorldParent(el);
+      const nodeFrame = (el.node || worldParent) ? frameOf(elementWorldNode(p, el, t)) : null;
       const push = (L) => {
         if (nodeFrame) L.node = { frame: nodeFrame };
         out.push(L);
@@ -806,7 +812,9 @@ export class Preview {
       }
     }
     out.sort((a, b) => a.el.z - b.el.z);
-    // elements parented to a camera ride along with it (screen-locked)
+    // Elements with the legacy camera screen lock ride along with it. A world
+    // spatial parent (mode:'world') is a matrix parent already folded into the
+    // node frame: elementCarrier returns null for it (core/hierarchy.js).
     for (const L of out) if (L.el.parent) L.carry = carrierMatrix(elementCarrier(p, L.el, t));
     // World plane of every layer for the shared draw / pick ordering (§2.5).
     // Node layers use the SpatialNode frame; legacy layers keep the exact point

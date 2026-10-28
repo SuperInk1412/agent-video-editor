@@ -8,6 +8,12 @@ import { clearCompiledTracks } from './tracks.js';
 import { normalizeCurve } from './curves.js';
 import { EXT_OP_KINDS, applyExtOp } from './ops-ext.js';
 import { LINK_OP_KINDS, applyLinkOp, normalizeLinks, pruneLinksForHost } from './links.js';
+// Spatial parents (core/spatial-parent.js). The two op names are spelled out in
+// OP_KINDS below instead of spreading SPATIAL_PARENT_OP_KINDS: this module is
+// reachable from core/spatial.js -> core/space.js -> here, so importing the
+// exported const at evaluation time would hit a TDZ cycle. The function
+// declaration is hoisted, so dispatching to it is safe.
+import { applySpatialParentOp } from './spatial-parent.js';
 
 export const OP_KINDS = [
   'addElement', 'updateElement', 'set', 'removeElement', 'moveElement',
@@ -18,6 +24,8 @@ export const OP_KINDS = [
   'addCamera', 'removeCamera', 'reorderCamera', 'activateCamera',
   'objectAdd', 'objectRemove', 'objectPatch', 'objectKey', 'objectUnkey',
   'replaceTimeline', 'restoreProject',
+  // spatial parents for 2D elements (core/spatial-parent.js)
+  'spatialParent', 'spatialUnparent',
   // property links (core/links.js)
   ...LINK_OP_KINDS,
   // ops added by feature modules through core/ops-ext.js
@@ -1162,6 +1170,11 @@ export function applyOp(p, op) {
     case 'propUnlink':
       // Property links live in core/links.js; the switch only dispatches.
       return applyLinkOp(p, op, { fail });
+
+    case 'spatialParent':
+    case 'spatialUnparent':
+      // Spatial parents live in core/spatial-parent.js; the switch only dispatches.
+      return applySpatialParentOp(p, op, { fail });
 
     case 'batch': {
       const results = (op.ops || []).map((o) => applyOp(p, o));
