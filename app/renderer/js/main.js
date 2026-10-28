@@ -16,7 +16,7 @@ import { initLayout, markTab, Timecode, StatusBar, LogDrawer } from './shell.js'
 import { frameStep } from './timeline-math.js';
 import { initCommands, register as registerCommand, dispatch as dispatchCommand, runCommand, openPalette, openShortcuts } from './commands.js';
 import { pathPos, cameraTransform, cameraRange } from '/core/camera.js';
-import { normalizeFeed } from '/core/camfeed.js';
+import { feedPlan, hiddenFeeds, normalizeFeed } from '/core/camfeed.js';
 import { curveSegments } from '/core/curves.js';
 import { ancestors, childrenOf } from '/core/hierarchy.js';
 import {
@@ -1119,12 +1119,14 @@ function updateFeedHints() {
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
   const polys = new Map(preview.layerPolygons(true).map((p) => [p.id, p.points]));
   const cams = new Map((S.project.cameras || []).map((c) => [c.id, c]));
+  const viewer = preview.editMode ? null : (S.project.activeCameraId || S.project.camera?.id || null);
+  const hidden = viewer ? hiddenFeeds(feedPlan(S.project), viewer) : new Set();
   const stage = $('#stage');
   const cssScale = stage?.clientWidth ? stage.clientWidth / Math.max(1, W) : 1;
   const font = Math.min(30, Math.max(10, 12 / Math.max(0.05, cssScale)));
   const frag = document.createDocumentFragment();
   for (const el of S.project.elements || []) {
-    if (el.type !== 'camfeed' || el.visible === false) continue;
+    if (el.type !== 'camfeed' || el.visible === false || hidden.has(el.id)) continue;
     const points = polys.get(el.id);
     if (!points?.length) continue;
     const xs = points.map((p) => p[0]);
