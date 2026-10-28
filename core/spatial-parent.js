@@ -41,7 +41,7 @@
 import { isRecord } from './json.js';
 import { sampleTrack } from './time.js';
 import { evalCamera, cameraAtTime, normalizeCamera } from './camera.js';
-import { frameOf as poseFrameOf, worldPose } from './hierarchy.js';
+import { frameOf as poseFrameOf, inverseMapPoint, inverseMapVector, toLocalPoint, toLocalVector, worldPose } from './hierarchy.js';
 import {
   MAX_DEPTH, SCREEN_PARENT, applyParentToFrame, applyParentToNode, bindFrameFor,
   bindFrameFrom, cameraWorldFrame, elementNode, findSpatialHost, frameOf,
@@ -264,6 +264,31 @@ export function evalCameraWorld(project, t = 0, cam = null) {
     roll: rollOf({ right: frame.basis[0], up: frame.basis[1], forward }),
     frameParentId: String(parent.id),
   };
+}
+
+/**
+ * Inverse gizmo mapping for a 3D object with a `frameParent`: world point /
+ * vector -> the object's own local values. Inverts the frameParent delta first,
+ * then the shipped 3D parent chain, so dragging a parented object under the
+ * pointer does not jump.
+ */
+export function objectLocalPoint(project, obj, t, worldPoint) {
+  const parent = worldFrameParent(obj);
+  const resolved = parent ? hostFrameAt(project, parent.id, t) : null;
+  if (!resolved) return toLocalPoint(project, obj, t, worldPoint);
+  const delta = parentDelta(resolved.frame, parent.bind, parent.inherit);
+  const local = delta ? inverseMapPoint(delta, worldPoint) : worldPoint;
+  return toLocalPoint(project, obj, t, local);
+}
+
+/** Inverse world direction -> object local direction (frameParent aware). */
+export function objectLocalVector(project, obj, t, worldVector) {
+  const parent = worldFrameParent(obj);
+  const resolved = parent ? hostFrameAt(project, parent.id, t) : null;
+  if (!resolved) return toLocalVector(project, obj, t, worldVector);
+  const delta = parentDelta(resolved.frame, parent.bind, parent.inherit);
+  const local = delta ? inverseMapVector(delta, worldVector) : worldVector;
+  return toLocalVector(project, obj, t, local);
 }
 
 // ---------------------------------------------------------------- element nodes
