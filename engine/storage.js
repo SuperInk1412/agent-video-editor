@@ -7,6 +7,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { normalizeProject, assertValidProject } from '../core/schema.js';
 import { ensureSpace } from '../core/space.js';
+import { migrateLegacyParents } from '../core/parent-strength.js';
 import { ensureAudioElements } from '../core/audio.js';
 
 export const PROJECT_FILE = 'project.vdm.json';
@@ -67,6 +68,9 @@ export async function loadProject(dir) {
   // Every project is 3D: a former 2D project gets the empty world and the
   // default camera when it is opened (docs/DESIGN-UNIFIED-SPACE.md §7).
   ensureSpace(project);
+  // One placement parent kind: old 3D parents become spatial parents with the
+  // same bind / switches / strength (docs/DESIGN-CAMFEED-PARENTS.md §3).
+  migrateLegacyParents(project);
   // Old projects kept their song only in meta.audio; show it as a real element.
   ensureAudioElements(project);
   assertValidProject(project);

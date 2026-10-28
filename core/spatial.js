@@ -35,10 +35,10 @@
 // parent: it stays the legacy render-time carrier (`core/hierarchy.js::
 // elementCarrier`), and `isScreenParent` keeps it out of this path.
 import { normalizeCamera, evalCamera } from './camera.js';
-import { basisFromDir, objectPose } from './scene.js';
+import { basisFromDir, objectPose, sampleChannel } from './scene.js';
 import { normalizeSpatialNode } from './schema.js';
 import { screenToWorld } from './space.js';
-import { sampleTrack } from './time.js';
+import { clamp, sampleTrack } from './time.js';
 import { isRecord } from './json.js';
 
 export { normalizeSpatialNode, spatialNodeIssues, isValidSpatialNode } from './schema.js';
@@ -370,18 +370,69 @@ export function bindFrameFor(node) {
  * Returns null when there is no parent frame. `L` also carries the scale ratio
  * expressed along the parent's bind axes; `rot` and `scale` expose the pieces.
  */
-export function parentDelta(parentFrameAtT, bind, inherit = null) {
+/**
+ * Strength of a spatial parent record at t: `{ rot, scale }` in 0..1 (default 1).
+ * Base values live in `record.strength`, keyframes in `record.strengthKeys`
+ * (`{ rot: [{t, v, ease}], scale: [...] }`), so every host kind (2D, 3D,
+ * camera) stores them the same way.
+ */
+export function parentStrengthAt(record, t) {
+  const base = isRecord(record?.strength) ? record.strength : {};
+  const keys = isRecord(record?.strengthKeys) ? record.strengthKeys : {};
+  const at = Number.isFinite(Number(t)) ? Number(t) : 0;
+  const read = (ch) => {
+    const fallback = Number.isFinite(Number(base[ch])) ? Number(base[ch]) : 1;
+    const v = Number(sampleChannel(Array.isArray(keys[ch]) ? keys[ch] : [], at, fallback));
+    return clamp(Number.isFinite(v) ? v : 1, 0, 1);
+  };
+  return { rot: read('rot'), scale: read('scale') };
+}
+
+/** Rotation matrix scaled toward identity: angle · w around the same axis. */
+function rotPow(R, w) {
+  if (w >= 1 - 1e-9) return R;
+  if (w <= 1e-9) return M3.ident();
+  const tr = R[0][0] + R[1][1] + R[2][2];
+  const ang = Math.acos(clamp((tr - 1) / 2, -1, 1));
+  if (ang < 1e-9) return M3.ident();
+  let axis;
+  if (Math.PI - ang < 1e-6) {
+    // 180°: axis from the largest diagonal entry of (R + I) / 2.
+    const d = [0, 1, 2].map((i) => (R[i][i] + 1) / 2);
+    const i = d.indexOf(Math.max(...d));
+    const a = [0, 0, 0];
+    a[i] = Math.sqrt(Math.max(0, d[i]));
+    for (let j = 0; j < 3; j++) if (j !== i) a[j] = (R[i][j] + R[j][i]) / (4 * a[i] || 1);
+    axis = V.norm(a);
+  } else {
+    axis = V.norm([R[2][1] - R[1][2], R[0][2] - R[2][0], R[1][0] - R[0][1]]);
+  }
+  const th = ang * w;
+  const c = Math.cos(th), s = Math.sin(th), C = 1 - c;
+  const [x, y, z] = axis;
+  return [
+    [c + x * x * C, x * y * C - z * s, x * z * C + y * s],
+    [y * x * C + z * s, c + y * y * C, y * z * C - x * s],
+    [z * x * C - y * s, z * y * C + x * s, c + z * z * C],
+  ];
+}
+
+export function parentDelta(parentFrameAtT, bind, inherit = null, strength = null) {
   if (parentFrameAtT == null) return null;
   const frame = normalizeFrame(parentFrameAtT);
   const b = normalizeBind(bind);
   const inh = normalizeInherit(inherit);
   const B0 = M3.cols(...b.basis);
   const Bt = M3.cols(...frame.basis);
-  const rot = inh.rot ? M3.mul(Bt, M3.T(B0)) : M3.ident();
+  // strength (0..1, keyable): how much of the parent's rotation / scale change
+  // the child takes; 1 is the full delta, 0 none (same rule as the old 3D parent)
+  const wRot = strength && Number.isFinite(Number(strength.rot)) ? clamp(Number(strength.rot), 0, 1) : 1;
+  const wScale = strength && Number.isFinite(Number(strength.scale)) ? clamp(Number(strength.scale), 0, 1) : 1;
+  const rot = inh.rot ? rotPow(M3.mul(Bt, M3.T(B0)), wRot) : M3.ident();
   const scale = [0, 1, 2].map((i) => {
     if (!inh.scale) return 1;
     const from = Math.abs(b.scale[i]) > 1e-9 ? b.scale[i] : 1;
-    return frame.scale[i] / from;
+    return 1 + (frame.scale[i] / from - 1) * wScale;
   });
   const L = M3.mul(rot, M3.mul(B0, M3.mul(M3.diag(scale), M3.T(B0))));
   return {
@@ -427,9 +478,9 @@ export function rollOf(basis) {
  * Exact for position; the basis is re-orthonormalised and the per-axis stretch
  * of the delta is folded into the scale (same rule as core/hierarchy.js).
  */
-export function applyParentToFrame(localFrame, parentFrameAtT, bind, inherit = null) {
+export function applyParentToFrame(localFrame, parentFrameAtT, bind, inherit = null, strength = null) {
   const local = normalizeFrame(localFrame);
-  const delta = parentDelta(parentFrameAtT, bind, inherit);
+  const delta = parentDelta(parentFrameAtT, bind, inherit, strength);
   if (!delta) return local;
   const b0 = basisOf(local.basis);
   const b1 = rebasis(delta.L, b0);
@@ -451,9 +502,9 @@ export function applyParentToFrame(localFrame, parentFrameAtT, bind, inherit = n
  * `frameOf(cameraNode)` would use the wrong centre (the caller decides how the
  * transformed node becomes a camera).
  */
-export function applyParentToNode(childNode, parentFrameAtT, bind, inherit = null) {
+export function applyParentToNode(childNode, parentFrameAtT, bind, inherit = null, strength = null) {
   const node = normalizeSpatialNode(childNode);
-  const delta = parentDelta(parentFrameAtT, bind, inherit);
+  const delta = parentDelta(parentFrameAtT, bind, inherit, strength);
   if (!delta) return node;
   const b0 = basisFromDir(node.dir, node.roll);
   const b1 = rebasis(delta.L, b0);

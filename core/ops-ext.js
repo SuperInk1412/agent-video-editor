@@ -17,8 +17,11 @@
 // return the ids that changed, and stay deterministic.
 
 import { HIERARCHY_OP_KINDS, applyHierarchyOp, ELEMENT_PARENT_OP_KINDS, applyElementParentOp } from './hierarchy.js';
+import { LEGACY_PARENT_OP_KINDS, PARENT_STRENGTH_OP_KINDS, applyParentStrengthOp } from './parent-strength.js';
 
-export const EXT_OP_KINDS = [...HIERARCHY_OP_KINDS, ...ELEMENT_PARENT_OP_KINDS];
+// The old 3D parent op names (objectParent, …) now write spatial parents
+// (core/parent-strength.js); HIERARCHY_OP_KINDS keeps listing them.
+export const EXT_OP_KINDS = [...new Set([...HIERARCHY_OP_KINDS, ...ELEMENT_PARENT_OP_KINDS, ...PARENT_STRENGTH_OP_KINDS])];
 
 /**
  * @param {object} project
@@ -27,6 +30,7 @@ export const EXT_OP_KINDS = [...HIERARCHY_OP_KINDS, ...ELEMENT_PARENT_OP_KINDS];
  * @returns {{changed: string[]}|null}
  */
 export function applyExtOp(project, op, api) {
+  if (LEGACY_PARENT_OP_KINDS.includes(op?.op) || PARENT_STRENGTH_OP_KINDS.includes(op?.op)) return applyParentStrengthOp(project, op, api);
   if (HIERARCHY_OP_KINDS.includes(op?.op)) return applyHierarchyOp(project, op, api);
   if (ELEMENT_PARENT_OP_KINDS.includes(op?.op)) return applyElementParentOp(project, op, api);
   return null;

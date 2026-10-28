@@ -3,13 +3,19 @@ import assert from 'node:assert/strict';
 import { applyOp, OP_KINDS } from '../core/ops.js';
 import { createProject, normalizeProject } from '../core/schema.js';
 import { objectPose } from '../core/scene.js';
-import { worldPose, ancestors, childrenOf, wouldCycle, HIERARCHY_OP_KINDS, MAX_DEPTH, toLocalPoint, toLocalVector } from '../core/hierarchy.js';
+import { worldPose, HIERARCHY_OP_KINDS, MAX_DEPTH } from '../core/hierarchy.js';
+import { objectWorldPose, objectLocalPoint, objectLocalVector } from '../core/spatial-parent.js';
+import { migrateLegacyParents, PARENT_STRENGTH_OP_KINDS } from '../core/parent-strength.js';
 import { bakeObjects } from '../engine/shot.js';
+
+// The old 3D parent (obj.parent) is retired: its op names write spatial parents
+// (obj.frameParent) with the same inherit switches and keyable strength.
+// docs/DESIGN-CAMFEED-PARENTS.md §3.
 
 const fresh = () => normalizeProject(createProject({ title: 'hier', duration: 10 }));
 const add = (p, object) => applyOp(p, { op: 'objectAdd', object }).changed[0];
 const obj = (p, id) => p.scene.objects.find((o) => o.id === id);
-const pose = (p, id, t) => worldPose(p, obj(p, id), t);
+const pose = (p, id, t) => objectWorldPose(p, obj(p, id), t);
 
 function near(a, b, eps = 1e-6, msg = '') {
   if (Array.isArray(a)) {
@@ -39,18 +45,22 @@ function rig() {
   return { p, parent, child };
 }
 
-test('hierarchy: ops are registered through ops-ext', () => {
-  for (const k of HIERARCHY_OP_KINDS) assert.ok(OP_KINDS.includes(k), k);
+test('hierarchy: old and strength op names are registered', () => {
+  for (const k of [...HIERARCHY_OP_KINDS, ...PARENT_STRENGTH_OP_KINDS]) assert.ok(OP_KINDS.includes(k), k);
 });
 
-test('hierarchy: binding never moves the child', () => {
+test('hierarchy: objectParent writes a spatial parent and never moves the child', () => {
   const { p, parent, child } = rig();
   for (const t of [0, 0.7, 2]) {
     const before = pose(p, child, t);
     const q = structuredClone(p);
     applyOp(q, { op: 'objectParent', id: child, parent, t });
-    samePose(pose(q, child, t), before);
-    assert.deepEqual(q.scene.objects.find((o) => o.id === child).pivot, [0, 0, -5], 'own values untouched');
+    const c = obj(q, child);
+    assert.equal(c.parent, undefined, 'no old parent record');
+    assert.equal(c.frameParent.id, parent);
+    assert.equal(c.frameParent.mode, 'world');
+    samePose(objectWorldPose(q, c, t), before);
+    assert.deepEqual(c.pivot, [0, 0, -5], 'own values untouched');
   }
 });
 
@@ -61,18 +71,16 @@ test('hierarchy: child follows position and rotation', () => {
   const w = pose(p, child, 2);
   near(w.worldPos, [15, 0, 0], 1e-6, 'pos');
   near(w.basis.forward, [1, 0, 0], 1e-6, 'forward');
-  assert.equal(w.parentId, parent);
+  assert.equal(w.frameParentId, parent);
 });
 
 test('hierarchy: world points and directions can be mapped back to the child', () => {
   const { p, parent, child } = rig();
   applyOp(p, { op: 'objectParent', id: child, parent, t: 0 });
   const w = pose(p, child, 2);
-  near(toLocalPoint(p, obj(p, child), 2, w.pivot), [0, 0, -5], 1e-6, 'pivot');
-  near(toLocalPoint(p, obj(p, child), 2, [15, 2, 0]), [0, 2, -5], 1e-6, 'offset point');
-  near(toLocalVector(p, obj(p, child), 2, [1, 0, 0]), [0, 0, -1], 1e-6, 'forward');
-  const parentless = add(p, { id: 'ob_free', type: 'solid', pivot: [1, 2, 3] });
-  near(toLocalPoint(p, obj(p, parentless), 2, [4, 5, 6]), [4, 5, 6], 1e-6, 'no parent');
+  near(objectLocalPoint(p, obj(p, child), 2, w.pivot), [0, 0, -5], 1e-6, 'pivot');
+  near(objectLocalPoint(p, obj(p, child), 2, [15, 2, 0]), [0, 2, -5], 1e-6, 'offset point');
+  near(objectLocalVector(p, obj(p, child), 2, [1, 0, 0]), [0, 0, -1], 1e-6, 'forward');
 });
 
 test('hierarchy: inherit switches', () => {
@@ -94,13 +102,13 @@ test('hierarchy: rotation strength and its keys', () => {
   const half = Math.SQRT1_2;
   near(pose(p, child, 2).basis.forward, [half, 0, -half], 1e-6, 'half the 90° turn');
 
-  applyOp(p, { op: 'objectParentKey', id: child, channel: 'rot', t: 0, v: 0, ease: 'linear' });
+  applyOp(p, { op: 'spatialParentKey', id: child, channel: 'rot', t: 0, v: 0, ease: 'linear' });
   applyOp(p, { op: 'objectParentKey', id: child, channel: 'rot', t: 2, v: 1 });
   near(pose(p, child, 2).basis.forward, [1, 0, 0], 1e-6, 'keyed to full');
-  applyOp(p, { op: 'objectParentUnkey', id: child, channel: 'rot', t: 2 });
+  applyOp(p, { op: 'spatialParentUnkey', id: child, channel: 'rot', t: 2 });
   applyOp(p, { op: 'objectParentUnkey', id: child, channel: 'rot', t: 0 });
-  assert.equal(obj(p, child).tracks['parent.rot'], undefined);
-  assert.throws(() => applyOp(p, { op: 'objectParentKey', id: child, channel: 'pos', t: 0, v: 1 }), /rot\|scale/);
+  assert.equal(obj(p, child).frameParent.strengthKeys, undefined);
+  assert.throws(() => applyOp(p, { op: 'spatialParentKey', id: child, channel: 'pos', t: 0, v: 1 }), /rot\|scale/);
 });
 
 test('hierarchy: scale strength', () => {
@@ -119,7 +127,7 @@ test('hierarchy: scale strength', () => {
   near(pose(p, child, 1).worldPos, [2, 0, 0], 1e-6, 'offset no longer scaled');
 });
 
-test('hierarchy: chains compose and unparent keeps the world pose', () => {
+test('hierarchy: chains compose; unparent drops the record and keeps local values', () => {
   const { p, parent, child } = rig();
   const grand = add(p, { id: 'ob_g', type: 'empty' });
   applyOp(p, { op: 'objectKey', id: grand, path: 'pivot', t: 0, v: [0, 0, 0], ease: 'linear' });
@@ -127,25 +135,11 @@ test('hierarchy: chains compose and unparent keeps the world pose', () => {
   applyOp(p, { op: 'objectParent', id: parent, parent: grand, t: 0 });
   applyOp(p, { op: 'objectParent', id: child, parent, t: 0 });
   near(pose(p, child, 2).worldPos, [15, 4, 0], 1e-6, 'grandparent lift + parent turn');
-  assert.deepEqual(ancestors(p, child).map((o) => o.id), [parent, grand]);
-  assert.deepEqual(childrenOf(p, parent), [child]);
 
-  const before = pose(p, child, 1.3);
   applyOp(p, { op: 'objectUnparent', id: child, t: 1.3 });
-  assert.equal(obj(p, child).parent, undefined);
-  samePose(pose(p, child, 1.3), before, 1e-5);
-});
-
-test('hierarchy: unparent rewrites keyed channels', () => {
-  const { p, parent, child } = rig();
-  applyOp(p, { op: 'objectKey', id: child, path: 'pivot', t: 0, v: [0, 0, -5], ease: 'linear' });
-  applyOp(p, { op: 'objectKey', id: child, path: 'pivot', t: 2, v: [0, 2, -5] });
-  applyOp(p, { op: 'objectKey', id: child, path: 'roll', t: 0, v: 0 });
-  applyOp(p, { op: 'objectKey', id: child, path: 'roll', t: 2, v: 30 });
-  applyOp(p, { op: 'objectParent', id: child, parent, t: 0 });
-  const before = pose(p, child, 2);
-  applyOp(p, { op: 'objectUnparent', id: child, t: 2 });
-  samePose(pose(p, child, 2), before, 1e-5);
+  assert.equal(obj(p, child).frameParent, undefined);
+  assert.deepEqual(obj(p, child).pivot, [0, 0, -5], 'local values stay (spatial parent rule)');
+  samePose(pose(p, child, 1.3), objectPose(obj(p, child), 1.3));
 });
 
 test('hierarchy: loops and depth are rejected, dangling parents ignored', () => {
@@ -154,8 +148,7 @@ test('hierarchy: loops and depth are rejected, dangling parents ignored', () => 
   const b = add(p, { id: 'ob_b', type: 'empty' });
   applyOp(p, { op: 'objectParent', id: b, parent: a });
   assert.throws(() => applyOp(p, { op: 'objectParent', id: a, parent: b }), /loop/);
-  assert.throws(() => applyOp(p, { op: 'objectParent', id: a, parent: a }), /loop/);
-  assert.ok(wouldCycle(p, a, b));
+  assert.throws(() => applyOp(p, { op: 'objectParent', id: a, parent: a }), /own|loop/);
 
   let prev = b;
   for (let i = 0; i < MAX_DEPTH; i++) {
@@ -178,18 +171,43 @@ test('hierarchy: loops and depth are rejected, dangling parents ignored', () => 
   near(pose(q, 'ob_c', 0).worldPos, objectPose(obj(q, 'ob_c'), 0).worldPos);
 });
 
-test('hierarchy: parent data survives normalization and undo-style cloning', () => {
+test('hierarchy: strength survives normalization and undo-style cloning', () => {
   const { p, parent, child } = rig();
   applyOp(p, { op: 'objectParent', id: child, parent, t: 0, strength: { rot: 0.25 } });
   applyOp(p, { op: 'objectParentKey', id: child, channel: 'scale', t: 1, v: 0.5 });
   const q = normalizeProject(JSON.parse(JSON.stringify(p)));
   const c = obj(q, child);
-  assert.equal(c.parent.id, parent);
-  assert.equal(c.parent.strength.rot, 0.25);
-  assert.equal(c.tracks['parent.scale'][0].v, 0.5);
+  assert.equal(c.frameParent.id, parent);
+  assert.equal(c.frameParent.strength.rot, 0.25);
+  assert.equal(c.frameParent.strengthKeys.scale[0].v, 0.5);
   samePose(pose(q, child, 2), pose(p, child, 2));
   applyOp(q, { op: 'objectPatch', id: child, patch: { name: 'renamed' } });
-  assert.equal(obj(q, child).parent.id, parent, 'objectPatch keeps the parent');
+  assert.equal(obj(q, child).frameParent.id, parent, 'objectPatch keeps the parent');
+});
+
+test('hierarchy: migrating old 3D parents keeps every pose', () => {
+  // Old W1 data, written as the retired objectParent op stored it.
+  const { p, parent, child } = rig();
+  const grand = add(p, { id: 'ob_g', type: 'empty' });
+  applyOp(p, { op: 'objectKey', id: grand, path: 'scale', t: 0, v: [1, 1, 1], ease: 'linear' });
+  applyOp(p, { op: 'objectKey', id: grand, path: 'scale', t: 2, v: [2, 1.5, 1] });
+  applyOp(p, { op: 'objectKey', id: grand, path: 'dir', t: 0, v: [0, 0, -1], ease: 'linear' });
+  applyOp(p, { op: 'objectKey', id: grand, path: 'dir', t: 2, v: [0, 0.6, -0.8] });
+  const frameAt = (id, t) => {
+    const w = worldPose(p, obj(p, id), t);
+    return { pos: w.worldPos, basis: [w.basis.right, w.basis.up, w.basis.forward], scale: w.scale };
+  };
+  obj(p, parent).parent = { id: grand, inherit: { pos: true, rot: true, scale: true }, strength: { rot: 1, scale: 0.6 }, bind: frameAt(grand, 0.4) };
+  obj(p, child).parent = { id: parent, inherit: { pos: true, rot: true, scale: false }, strength: { rot: 0.7, scale: 1 }, bind: frameAt(parent, 0.3) };
+  obj(p, child).tracks['parent.rot'] = [{ t: 0.5, v: 0.2, ease: 'linear' }, { t: 1.8, v: 0.9 }];
+  const times = [0, 0.3, 0.9, 1.4, 2];
+  const before = times.map((t) => worldPose(p, obj(p, child), t));
+  const counts = migrateLegacyParents(p);
+  assert.deepEqual(counts, { migrated: 2, flattened: 0 });
+  assert.equal(obj(p, child).parent, undefined);
+  assert.equal(obj(p, child).tracks['parent.rot'], undefined);
+  assert.equal(obj(p, child).frameParent.strengthKeys.rot.length, 2);
+  times.forEach((t, i) => samePose(pose(p, child, t), before[i], 1e-5));
 });
 
 test('hierarchy: the Blender bake uses world poses', () => {

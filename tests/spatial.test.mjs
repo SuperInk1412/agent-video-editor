@@ -371,9 +371,13 @@ test('spatial: parent math matches the shipped 3D object hierarchy', () => {
   applyOp(p, { op: 'objectKey', id: parent, path: 'dir', t: 0, v: [0, 0, -1], ease: 'linear' });
   applyOp(p, { op: 'objectKey', id: parent, path: 'dir', t: 2, v: [1, 0, 0] });
   const child = add({ id: 'ob_box', type: 'solid', pivot: [0, 0, -5] });
-  applyOp(p, { op: 'objectParent', id: child, parent, t: 0 });
   const parentObj = p.scene.objects.find((o) => o.id === parent);
   const childObj = p.scene.objects.find((o) => o.id === child);
+  // Legacy 3D parent data (the retired objectParent now writes frameParent):
+  // bound at t=0 to the parent's world frame, stored with `pos`.
+  const w0 = worldPose(p, parentObj, 0);
+  childObj.parent = { id: parent, inherit: { pos: true, rot: true, scale: true },
+    bind: { pos: w0.worldPos, basis: [w0.basis.right, w0.basis.up, w0.basis.forward], scale: w0.scale } };
   // The stored 3D bind uses `pos`; the unified reader accepts it as `pivot`.
   const bind = childObj.parent.bind;
   assert.equal(bind.pivot, undefined);

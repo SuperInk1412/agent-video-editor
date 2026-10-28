@@ -188,14 +188,15 @@ test('audio, timeline cuts and parenting round-trip through HTTP, history and pe
     { op: 'objectParentKey', id: 'child', channel: 'rot', t: 1, v: 0.5 },
     { op: 'elementParent', id: 'el_1', parent: '@live', t: 0 },
   ]);
-  assert.equal(bound.project.scene.objects.find((obj) => obj.id === 'child').parent.id, 'parent');
+  // objectParent writes the unified spatial parent (docs/DESIGN-CAMFEED-PARENTS.md §3)
+  assert.equal(bound.project.scene.objects.find((obj) => obj.id === 'child').frameParent.id, 'parent');
   assert.equal(bound.project.elements.find((el) => el.id === 'el_1').parent.id, '@live');
   const unbound = await send([
     { op: 'objectParentUnkey', id: 'child', channel: 'rot', t: 1 },
     { op: 'objectUnparent', id: 'child', t: 1 },
     { op: 'elementUnparent', id: 'el_1', t: 1 },
   ]);
-  assert.equal(unbound.project.scene.objects.find((obj) => obj.id === 'child').parent, undefined);
+  assert.equal(unbound.project.scene.objects.find((obj) => obj.id === 'child').frameParent, undefined);
   assert.equal(unbound.project.elements.find((el) => el.id === 'el_1').parent, undefined);
   const cut = await send([{ op: 'splitAt', at: 2, ids: ['sound'] }]);
   assert.equal(cut.project.elements.filter((el) => el.type === 'audio').length, 2);

@@ -3,7 +3,7 @@
 // (label | control | ◆) with vector rows, unit suffixes and three-state keyframe buttons.
 import { sampleTrack } from '/core/time.js';
 import { objectPose, sampleChannel } from '/core/scene.js';
-import { ancestors, wouldCycle, STRENGTH_TRACKS } from '/core/hierarchy.js';
+import { parentStrengthAt, spatialAncestors, wouldSpatialCycle } from '/core/spatial.js';
 import { MEDIA_TYPES, FITS, ALIGNS, mediaSpec, textSpec } from '/core/objects-media.js';
 import { normalizeWorld } from '/core/world.js';
 import { RotBall } from './rotball.js';
@@ -833,7 +833,10 @@ export class Inspector {
   }
 
   // ---------------------------------------------------------------- 3D object: parent
-  /** 父级: pick a parent, inherit switches, keyable rotation/scale strength. */
+  /**
+   * 父级: the spatial parent (the only placement parent, docs/DESIGN-CAMFEED-PARENTS.md §3):
+   * pick any element / 3D object / camera, inherit switches, keyable rotation/scale strength.
+   */
   _renderParent(project, obj, time) {
     const id = obj.id;
     // binding re-reads the pose at the playhead, so it keeps the exact time;
@@ -841,17 +844,22 @@ export class Inspector {
     const tNow = () => Math.round(this.opts.getTime() * 1000) / 1000;
     const keyT = () => this._keyTime();
     const objs = project.scene?.objects || [];
-    const par = obj.parent || null;
-    const reparent = (extra) => this.opts.onOp({ op: 'objectParent', id, parent: par?.id, t: tNow(), ...extra });
-    const options = [{ value: '', label: '（无）' }].concat(objs
-      .filter((o) => o.id !== id && o.type !== 'audio' && !wouldCycle(objs, id, o.id))
-      .map((o) => ({ value: o.id, label: `${o.name || o.id}${o.type === 'empty' ? ' · 空' : ''}` })));
+    const par = obj.frameParent?.id ? obj.frameParent : null;
+    const reparent = (extra) => this.opts.onOp({ op: 'spatialParent', id, parent: par?.id, t: tNow(), ...extra });
+    const hosts = [
+      ...objs.filter((o) => o.type !== 'audio').map((o) => [o.id, `${o.name || o.id}${o.type === 'empty' ? ' · 空' : ' · 3D'}`]),
+      ...(project.elements || []).filter((e) => e.type !== 'audio').map((e) => [e.id, `${e.name || e.id} · 2D`]),
+      ...(project.cameras || []).map((c) => [c.id, `${c.name || c.id} · 相机`]),
+    ];
+    const options = [{ value: '', label: '（无）' }].concat(hosts
+      .filter(([hid]) => hid !== id && !wouldSpatialCycle(project, id, hid))
+      .map(([value, label]) => ({ value, label })));
     const kids = [
       this._field({
         label: '父级', type: 'select', value: par?.id || '', options,
         onChange: (v) => this.opts.onOp(v
-          ? { op: 'objectParent', id, parent: v, t: tNow() }
-          : { op: 'objectUnparent', id, t: tNow() }),
+          ? { op: 'spatialParent', id, parent: v, t: tNow() }
+          : { op: 'spatialUnparent', id }),
       }),
     ];
     if (par) {
@@ -865,18 +873,18 @@ export class Inspector {
       const tol = 0.5 / (project.meta?.fps || 24);
       const liveTrack = (ch) => {
         const o = (this._last?.project?.scene?.objects || []).find((x) => x.id === id) || obj;
-        return o.tracks?.[STRENGTH_TRACKS[ch]] || [];
+        return o.frameParent?.strengthKeys?.[ch] || [];
       };
       for (const [ch, label] of [['rot', '旋转强度'], ['scale', '缩放强度']]) {
-        const track = obj.tracks?.[STRENGTH_TRACKS[ch]] || [];
-        const v = sampleChannel(track, time, par.strength?.[ch] ?? 1);
+        const track = par.strengthKeys?.[ch] || [];
+        const v = parentStrengthAt(par, time)[ch];
         const atKey = track.find((k) => Math.abs(k.t - time) <= tol);
         kids.push(this._field({
           label, value: Math.round(Number(v) * 1000) / 1000, step: 0.01, min: 0, max: 1, percent: true,
           // Keyed channel: write a key at the playhead; otherwise change the base strength (re-binds at the playhead).
           onChange: (nv) => this._commit(`${id}:parent.${ch}`, track.length
-            ? { op: 'objectParentKey', id, channel: ch, t: keyT(), v: nv }
-            : { op: 'objectParent', id, parent: par.id, t: tNow(), strength: { [ch]: nv } }),
+            ? { op: 'spatialParentKey', id, channel: ch, t: keyT(), v: nv }
+            : { op: 'spatialParent', id, parent: par.id, t: tNow(), strength: { [ch]: nv } }),
           keyer: {
             state: () => {
               const tr = liveTrack(ch);
@@ -884,13 +892,13 @@ export class Inspector {
               const now = this.opts.getTime();
               return tr.some((k) => Math.abs(k.t - now) <= tol) ? 'on' : 'anim';
             },
-            set: () => this.opts.onOp({ op: 'objectParentKey', id, channel: ch, t: keyT(), v: Number(v) }),
-            unset: () => this.opts.onOp({ op: 'objectParentUnkey', id, channel: ch, t: atKey ? atKey.t : keyT() }),
+            set: () => this.opts.onOp({ op: 'spatialParentKey', id, channel: ch, t: keyT(), v: Number(v) }),
+            unset: () => this.opts.onOp({ op: 'spatialParentUnkey', id, channel: ch, t: atKey ? atKey.t : keyT() }),
           },
         }));
       }
-      const chain = ancestors(objs, id).map((o) => o.name || o.id).join(' ← ');
-      kids.push(h('div', { class: 'hint' }, `层级：${obj.name || id} ← ${chain}。挂上 / 取下 / 改开关都以当前时间为准，不跳位。`));
+      const chain = spatialAncestors(project, id).map((o) => o.name || o.id).join(' ← ');
+      kids.push(h('div', { class: 'hint' }, `层级：${obj.name || id} ← ${chain}。挂上和改开关以当前时间为准，不跳位；取下后回到自己的数值。`));
     } else {
       kids.push(h('div', { class: 'hint' }, '选一个元素当父级（常用「空元素」），之后它怎么动，这个元素就跟着怎么动。'));
     }
