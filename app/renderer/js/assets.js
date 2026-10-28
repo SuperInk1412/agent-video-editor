@@ -21,7 +21,7 @@ export class AssetsPanel {
    * @param {HTMLElement} root  #panelMedia
    * @param {object} o
    *   getProject(), mediaKind(path), onAdd(m, kind), onSoundtrack(m), onList(list),
-   *   menu(x, y, items), toast(msg, level)
+   *   onDragStart(m, kind), onDragEnd(), menu(x, y, items), toast(msg, level)
    */
   constructor(root, o = {}) {
     this.root = root;
@@ -44,10 +44,14 @@ export class AssetsPanel {
     this._render();
   }
 
-  /** Project changed (soundtrack may differ): repaint the badges only. */
+  /**
+   * Project changed: repaint when the used-in-timeline set or the soundtrack
+   * changed (add/delete/undo/asset swap). Ops that only touch timing keep the
+   * current grid untouched, so hover/selection do not flicker.
+   */
   syncProject() {
-    const src = this._trackSrc();
-    if (src === this._lastTrack) return;
+    const stamp = this._projectStamp(this.o.getProject?.());
+    if (stamp === this._stamp) return;
     this._render();
   }
 
@@ -151,12 +155,35 @@ export class AssetsPanel {
   }
 
   // ------------------------------------------------------------ render
-  _trackSrc() { return this.o.getProject?.()?.meta?.audio?.src || null; }
   _kind(m) { return this.o.mediaKind?.(m.path) || null; }
 
+  /**
+   * src -> number of timeline references (2D elements, 3D objects, soundtrack).
+   * Used only to dim cards as a reminder; adding is never blocked.
+   */
+  _usageOf(p) {
+    const use = new Map();
+    const add = (src) => {
+      const s = String(src || '');
+      if (s) use.set(s, (use.get(s) || 0) + 1);
+    };
+    for (const e of p?.elements || []) add(e.src);
+    for (const o of p?.scene?.objects || []) add(o.src);
+    add(p?.meta?.audio?.src);
+    return use;
+  }
+
+  _projectStamp(p) {
+    const rows = [...this._usageOf(p).entries()]
+      .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+    return JSON.stringify([p?.meta?.audio?.src || null, rows]);
+  }
+
   _render() {
-    const track = this._trackSrc();
-    this._lastTrack = track;
+    const p = this.o.getProject?.();
+    this._track = p?.meta?.audio?.src || null;
+    this._usage = this._usageOf(p);
+    this._stamp = this._projectStamp(p);
     const counts = { all: this.media.length, video: 0, image: 0, audio: 0 };
     for (const m of this.media) { const k = this._kind(m); if (k in counts) counts[k]++; }
     for (const k of KINDS) {
@@ -188,19 +215,22 @@ export class AssetsPanel {
     }
     if (this.selPath && !this.media.some((m) => m.path === this.selPath)) this.selPath = null;
     const grid = h('div', { class: 'asset-grid', role: 'listbox', 'aria-label': '素材' });
-    for (const m of shown) grid.appendChild(this._card(m, track));
+    for (const m of shown) grid.appendChild(this._card(m));
     this.body.replaceChildren(grid);
   }
 
-  _card(m, track) {
+  _card(m) {
     const kind = this._kind(m);
-    const isTrack = kind === 'audio' && track === m.path;
+    const isTrack = kind === 'audio' && this._track === m.path;
+    const usage = this._usage.get(m.path) || 0;
+    const used = usage > 0;
     const thumb = h('div', { class: 'asset-thumb' });
     if (kind === 'image') thumb.appendChild(h('img', { src: `/${m.path}`, loading: 'lazy', alt: '', draggable: 'false' }));
     else thumb.appendChild(h('span', { class: 'asset-ic' }, icon(KIND_ICON[kind] || 'assets')));
     thumb.appendChild(h('span', { class: 'asset-badges' },
       h('span', { class: `badge ${kind ? `badge-${kind}` : ''}` }, KIND_LABEL[kind] || '其他'),
       isTrack ? h('span', { class: 'badge badge-accent' }, '配乐') : null));
+    if (used) thumb.appendChild(h('span', { class: 'asset-used', 'aria-hidden': 'true' }, '已用'));
     const add = h('button', {
       type: 'button', class: 'icon-btn mini asset-add', 'aria-label': '在播放头加入', dataset: { tip: '在播放头加入' },
       onclick: (e) => { e.stopPropagation(); this._add(m); },
@@ -209,10 +239,13 @@ export class AssetsPanel {
     thumb.appendChild(add);
 
     const card = h('div', {
-      class: `asset-card${isTrack ? ' track' : ''}${this.selPath === m.path ? ' sel' : ''}`,
+      class: `asset-card${isTrack ? ' track' : ''}${used ? ' used' : ''}${this.selPath === m.path ? ' sel' : ''}`,
       role: 'option', tabindex: '0', draggable: 'true',
       'aria-selected': this.selPath === m.path ? 'true' : 'false',
-      dataset: { path: m.path, tip: m.name },
+      dataset: {
+        path: m.path,
+        tip: used ? `${m.name} · 已在时间线中使用 ${usage} 次，仍可再次加入` : m.name,
+      },
     }, thumb, h('div', { class: 'asset-name' }, m.name));
     card.addEventListener('click', () => this._select(m.path));
     card.addEventListener('dblclick', () => this._add(m));
@@ -230,8 +263,14 @@ export class AssetsPanel {
       e.dataTransfer.setData('text/plain', m.name);
       e.dataTransfer.effectAllowed = 'copy';
       card.classList.add('dragging');
+      // Tell main which media is in flight (getData is not readable during
+      // dragover, but the ghost needs the source length before the drop).
+      this.o.onDragStart?.(m, kind);
     });
-    card.addEventListener('dragend', () => card.classList.remove('dragging'));
+    card.addEventListener('dragend', () => {
+      card.classList.remove('dragging');
+      this.o.onDragEnd?.();
+    });
     return card;
   }
 
