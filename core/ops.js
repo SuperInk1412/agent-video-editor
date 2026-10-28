@@ -7,6 +7,7 @@ import { assertSafeData, pathParts } from './json.js';
 import { clearCompiledTracks } from './tracks.js';
 import { normalizeCurve } from './curves.js';
 import { EXT_OP_KINDS, applyExtOp } from './ops-ext.js';
+import { LINK_OP_KINDS, applyLinkOp, normalizeLinks, pruneLinksForHost } from './links.js';
 
 export const OP_KINDS = [
   'addElement', 'updateElement', 'set', 'removeElement', 'moveElement',
@@ -17,6 +18,8 @@ export const OP_KINDS = [
   'addCamera', 'removeCamera', 'reorderCamera', 'activateCamera',
   'objectAdd', 'objectRemove', 'objectPatch', 'objectKey', 'objectUnkey',
   'replaceTimeline', 'restoreProject',
+  // property links (core/links.js)
+  ...LINK_OP_KINDS,
   // ops added by feature modules through core/ops-ext.js
   ...EXT_OP_KINDS,
 ];
@@ -550,6 +553,9 @@ export function applyOp(p, op) {
         srcIn: el.srcIn ?? 0,
         meta: el.meta || {},
       };
+      // Property links travel with the element on create (never auto-created).
+      const links = el.links === undefined ? [] : normalizeLinks(el.links, { strict: true });
+      if (links.length) full.links = links;
       if (full.type === 'video' || full.type === 'audio') {
         full.srcIn = Math.max(0, Number(el.srcIn) || 0);
       }
@@ -573,10 +579,16 @@ export function applyOp(p, op) {
       if (typeof patch === 'string') patch = { [patch]: op.value };
       if (!isObj(patch)) fail('updateElement needs patch object');
       if (Object.hasOwn(patch, 'id')) fail('element id is immutable');
+      let linksPatch = null;
+      if (Object.hasOwn(patch, 'links')) {
+        linksPatch = normalizeLinks(patch.links, { strict: true });
+        patch = { ...patch, links: linksPatch };
+      }
       const next = deepMerge(el, patch);
       if (next.segment && !p.segments.some((s) => s.id === next.segment)) fail(`unknown segment ${next.segment}`);
       const srcChanged = Object.hasOwn(patch, 'src') && String(patch.src ?? '') !== String(el.src ?? '');
       Object.keys(next).forEach((k) => { el[k] = next[k]; });
+      if (linksPatch && !linksPatch.length) delete el.links;
       // A recorded source length belongs to the old file; drop it unless the
       // caller supplies a new one with the same patch.
       if (srcChanged && !Object.hasOwn(patch.meta || {}, 'sourceDuration') && el.meta) delete el.meta.sourceDuration;
@@ -599,6 +611,8 @@ export function applyOp(p, op) {
       const i = p.elements.findIndex((e) => e.id === id);
       if (i < 0) fail(`no element ${id}`);
       p.elements.splice(i, 1);
+      // A deleted host severs its links; children keep their local values.
+      pruneLinksForHost(p, id);
       return { changed: [id] };
     }
 
@@ -1018,6 +1032,7 @@ export function applyOp(p, op) {
       } else if (p.camera === cam) {
         p.camera = p.cameras.find((c) => c.id === p.activeCameraId) || p.cameras[0] || null;
       }
+      pruneLinksForHost(p, cam.id);
       return { changed: ['cameras', cam.id] };
     }
 
@@ -1078,6 +1093,7 @@ export function applyOp(p, op) {
       const i = scene?.objects?.findIndex((o) => o.id === op.id) ?? -1;
       if (i < 0) fail(`no object ${op.id}`);
       scene.objects.splice(i, 1);
+      pruneLinksForHost(p, op.id);
       return { changed: [op.id, 'scene'] };
     }
 
@@ -1137,6 +1153,12 @@ export function applyOp(p, op) {
       else delete tracks[path];
       return { changed: [obj.id] };
     }
+
+    case 'propLink':
+    case 'propLinkPatch':
+    case 'propUnlink':
+      // Property links live in core/links.js; the switch only dispatches.
+      return applyLinkOp(p, op, { fail });
 
     case 'batch': {
       const results = (op.ops || []).map((o) => applyOp(p, o));

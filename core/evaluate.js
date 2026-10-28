@@ -74,9 +74,17 @@ export function motionDelta(el, t, meta) {
 
 /**
  * Effective element state at time t.
- * Resolution order: defaults -> keyframes -> motion delta -> fades.
+ * Resolution order: defaults -> keyframes -> link overlay -> motion delta -> fades.
+ *
+ * `overlay` is optional and only used by callers that resolve property links
+ * (core/links.js::elementOverlay): the keys present replace the sampled local
+ * values BEFORE the motion preset / beat punch / fades, which is the property
+ * link order from PLAN-ui-round3 §3.2 (`本地值 → 属性父级叠加 → 运动/淡出`).
+ * Without an overlay this function behaves exactly as before, so the Blender
+ * mirror (`blender/vdm_build.py::eval_element`) keeps matching until the bake
+ * starts passing one.
  */
-export function evalElement(el, t, meta = {}) {
+export function evalElement(el, t, meta = {}, overlay = null) {
   const base = el.transform || {};
   const get = (path, fallback) => sampleTrack(el.keyframes, path, t, fallback);
   const out = {
@@ -93,6 +101,11 @@ export function evalElement(el, t, meta = {}) {
     size: Number(get('style.size', el.style?.size ?? 96)),
     color: get('style.color', el.style?.color ?? '#ffffff'),
   };
+  if (overlay && typeof overlay === 'object') {
+    for (const key of ['x', 'y', 'z', 'scale', 'rotation', 'opacity', 'size', 'glow']) {
+      if (typeof overlay[key] === 'number' && Number.isFinite(overlay[key])) out[key] = overlay[key];
+    }
+  }
   const d = motionDelta(el, t, meta);
   out.x += d.x;
   out.y += d.y;

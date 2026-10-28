@@ -4,6 +4,7 @@ import { normalizeWorld } from './world.js';
 import { OBJECT_TYPES } from './scene.js';
 import { assertSafeData, isRecord, pathParts } from './json.js';
 import { PROJECT_SCHEMA } from './version.js';
+import { linkIssues, normalizeLinks, projectLinkIssues } from './links.js';
 // A "project" is the single source of truth on disk: <project>/project.vdm.json
 
 export const SCHEMA = PROJECT_SCHEMA;
@@ -112,6 +113,18 @@ export function spatialNodeIssues(node, at = 'node') {
 export const isValidSpatialNode = (node) => spatialNodeIssues(node).length === 0;
 
 const clone = (o) => JSON.parse(JSON.stringify(o));
+
+/**
+ * Property links (core/links.js) are stored on the host and normalised on load:
+ * valid entries are kept, unusable ones dropped, an empty array removed. They
+ * are never created here — a project without links must load write-free.
+ */
+function normalizeHostLinks(host) {
+  if (!isRecord(host) || host.links === undefined) return;
+  const links = normalizeLinks(host.links);
+  if (links.length) host.links = links;
+  else delete host.links;
+}
 
 export function newId(prefix, taken) {
   const used = taken instanceof Set ? taken : new Set(taken || []);
@@ -249,12 +262,15 @@ export function normalizeProject(p) {
     e.keyframes ??= [];
     e.visible = e.visible !== false;
     e.name = e.name || (e.type === 'text' ? (e.style.text || 'text') : e.type);
+    normalizeHostLinks(e);
     return e;
   });
   elIds.clear();
   p.elements.forEach((e) => elIds.add(e.id));
 
   normalizeCameraStack(p);
+  for (const obj of Array.isArray(p.scene?.objects) ? p.scene.objects : []) normalizeHostLinks(obj);
+  for (const cam of Array.isArray(p.cameras) ? p.cameras : []) normalizeHostLinks(cam);
   p.world = normalizeWorld(p.world);
   return p;
 }
@@ -356,6 +372,7 @@ export function validateProject(p) {
       for (const name of Object.keys(DEFAULT_TRANSFORM)) if (e.transform[name] !== undefined) number(e.transform[name], `${at}.transform.${name}`);
     }
     if (e.node !== undefined) issues.push(...spatialNodeIssues(e.node, `${at}.node`));
+    if (e.links !== undefined) issues.push(...linkIssues(e.links, `${at}.links`));
     if (e.style?.size !== undefined) number(e.style.size, `${at}.style.size`, { min: 0 });
     if (e.segment && !segIds.has(e.segment)) push(`elements[${i}].segment`, `unknown segment ${e.segment}`);
     array(e.keyframes, `${at}.keyframes`, true).forEach((k, j) => {
@@ -382,6 +399,7 @@ export function validateProject(p) {
       vector(key.pos, `${loc}.pos`, 3);
       if (key.look != null) vector(key.look, `${loc}.look`, 3);
     });
+    if (c.links !== undefined) issues.push(...linkIssues(c.links, `${at}.links`));
     tracks(c.tracks, `${at}.tracks`);
   });
   const order = array(p.cameraOrder, 'cameraOrder', true);
@@ -407,10 +425,13 @@ export function validateProject(p) {
         number(obj.rot.roll, `${at}.rot.roll`);
       }
       if (obj.opacity !== undefined) number(obj.opacity, `${at}.opacity`, { min: 0, max: 1 });
+      if (obj.links !== undefined) issues.push(...linkIssues(obj.links, `${at}.links`));
       if (obj.geom !== undefined && record(obj.geom, `${at}.geom`)) for (const name of ['w', 'h', 'd']) number(obj.geom[name], `${at}.geom.${name}`, { min: 0, exclusive: true });
       tracks(obj.tracks, `${at}.tracks`);
     });
   }
+  // Cross-host link graph: known hosts/paths, matching units, no cycles/depth.
+  issues.push(...projectLinkIssues(p));
   return issues;
 }
 
