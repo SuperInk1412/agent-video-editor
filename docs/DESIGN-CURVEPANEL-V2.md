@@ -360,3 +360,19 @@ t_B = t_A + firstArrival(curve, y_B) · (t_C − t_A)     // 单调、毫秒取�
 | §6 y 轴 150ms 过渡 | 已做 | `_displayRange()`：只在换行时补间，拖键/拖柄即时跟随 |
 | §9 ▸ 展开面板（大预览 / R G B / 最近色） | 未做 | 现为系统取色 + 十六进制 |
 | §9 3D 文字颜色打帧 | 阻塞 | `objectKey` 的 `SCALAR_TRACKS` 不认 `style.color`，要扩轨道词表 |
+
+## 19. 怎么接着做（交接）
+
+按 §18 的未完成项挑，三条互不依赖，建议顺序：
+
+1. **属性面板颜色行的 `▸` 展开**（无阻塞）：`inspector.js::_color()` 现在只有系统取色 + 十六进制；
+   展开面板要加「大预览、R G B 三格数字框（复用 `_num`）、最近用色（会话级即可）」，
+   提交走现有的 `onChange`，不要新增 op。
+2. **3D 文字颜色打帧**（需用户授权）：`core/ops.js` 的 `SCALAR_TRACKS` 加 `style.color`，
+   同步 `blender/vdm_build.py` 的同名集合；改完跑 `npm run check:evaluate` 对拍。
+3. **三轴叠画 + 归一化**（等上游）：需要时间轴把「总行 → X/Y/Z 三轨 + 单位/step」作为 `tracks[]`
+   的元数据抛给面板（现在 `curvepanel.js` 只吃 `path/label/segments`）。
+
+改完任一条：更新 §18 状态 + §16 登记 sha，跑 `npm test`，UI 改动用
+`node scripts/dev.mjs --project <tmp项目> --capture=... --at=... --eval="..."` 截图核对，
+然后把临时项目从 `.tmp/` 删掉。
