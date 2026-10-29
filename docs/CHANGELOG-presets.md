@@ -51,3 +51,4 @@
 | 2026-10-29 | `0cff172` | **修复**：2D 平面遮挡不再靠排序——不透明平面写深度（先一遍只写深度、按透明度 discard），同平面按 `el.z` 沿法线错开 0.1 mm，排序改成「平面分组 + 组内 `el.z`」的一致全序，点选改按射线求最近平面 | 问题四：镜头 02 f146–f151 歌词被大底板盖住并来回闪 | `app/renderer/js/preview.js`、`app/renderer/js/spatial-layers.js`、`tests/spatial-layers.test.mjs` | `git revert 0cff172` |
 | 2026-10-29 | 见上条 | 实施记录：问题四 1–5 的实测（f142–f153 歌词像素从 0 变 1857–9850、点选 f150/f151 由 `s2_bg` 变回歌词、对拍 A–G 8/144 FAIL → 1/144 PASS、perf 59 fps 仍 PASS） | 交接与回退时有据可查 | `docs/FIX-LAYER-ORDER-EMPTY-CLICK.md`（状态 + 分工表 + 实施记录） | — |
 | 2026-10-29 | `396711c` | 修复方案问题五：空格播放用连续时间取样，切镜瞬间露出导出里没有的中间帧；数据诱因 `s1_w2` 已修（rev 304），编辑器按帧取样待 A 实施 | 用户发现 f46–52 播放时歌词瞬移到右上角，逐帧看不到 | `docs/FIX-LAYER-ORDER-EMPTY-CLICK.md`；数据 `projects/miku-swiss`（CLI 事务，可在编辑器撤销） | `git revert 396711c` |
+| 2026-10-29 | `3e88902` | 问题四独立验收：npm test 485/485、对拍 A–G PASS、cam_8 f142–158 歌词逐帧都在、播放 60 fps | A 的 `0cff172` 需要 B 验收 | `docs/FIX-LAYER-ORDER-EMPTY-CLICK.md` | — |
