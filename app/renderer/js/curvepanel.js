@@ -833,7 +833,7 @@ export class CurvePanel {
       this._drawThumb(cv, item.id, item.ready);
       b.append(cv, el('span', '', item.label));
       b.onclick = item.ready
-        ? () => this._applyPreset(item.id)
+        ? (ev) => this._applyPreset(item.id, ev)
         : () => this.toast?.(`「${item.label}」还没做`);
       grid.append(b);
     }
@@ -2175,9 +2175,13 @@ export class CurvePanel {
     this.canvas.style.cursor = this._hitKey(p.x, p.y) ? 'pointer' : 'default';
   }
 
-  _applyPreset(id) {
+  _applyPreset(id, ev = null) {
     const curve = presetCurve(id);
     if (!curve) return;
+    // Shift = only the property on screen; Alt = write the curve without
+    // retiming the inner keys (design §3 R1).
+    const onlyPath = ev?.shiftKey ? this._track()?.path : null;
+    const retime = !ev?.altKey;
     if (this._isPathMode()) {
       this._applyPathPreset(curve);
       return;
@@ -2188,6 +2192,7 @@ export class CurvePanel {
     const targets = [];
     let skippedColour = 0;
     for (const path of this._selectedPaths()) {
+      if (onlyPath && path !== onlyPath) continue;
       for (const pair of this._selectedPairs(path)) {
         if (this._numericSpan(pair)) targets.push(pair);
         else skippedColour += 1;
@@ -2207,7 +2212,7 @@ export class CurvePanel {
     this._syncHead();
     this._syncRailGroup();
     this.draw();
-    this._commit(curve, targets);
+    this._commit(curve, targets, { retime });
   }
 
   /**

@@ -345,7 +345,7 @@ t_B = t_A + firstArrival(curve, y_B) · (t_C − t_A)     // 单调、毫秒取�
 | §8 Tab 换行、←/→ 逐帧、↑/↓ 改值 | 已做 | `_cycleRow()` / `_nudgeSelected()` |
 | §8 右键：反转曲线、对齐到帧 | 已做 | `_contextMenu()` / `_invertSpan()` / `_snapSpans()` |
 | §9 颜色行可打帧（swatch + hex + ◆） | 已做 | `inspector.js` 的 `style.color` / `style.fill` 行 |
-| §3 Shift+预设只当前属性 / Alt+预设不重定时 | 未做 | 预设入口未读修饰键 |
+| §3 Shift+预设只当前属性 / Alt+预设不重定时 | 已做 | `_applyPreset(id, ev)` 读 `shiftKey` / `altKey`（飞行轨迹仍按原逻辑） |
 | §3 悬停预览（虚影 + 影响范围） | 未做 | — |
 | §8 Ctrl+C / Ctrl+V 复制曲线 | 未做 | — |
 | §8 存为我的预设（UI 入口 + 我的分组） | 未做 | 数据层 `meta.curvePresets` 已就绪 |
