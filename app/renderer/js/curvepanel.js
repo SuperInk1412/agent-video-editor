@@ -244,6 +244,17 @@ export class CurvePanel {
     e.stopImmediatePropagation();
   }
 
+  /**
+   * Hard limits a property obviously has (design §4 R1). Only values the panel
+   * is sure about are listed: opacity cannot leave 0..1, everything else is
+   * left alone rather than guessed.
+   */
+  _valueBounds(path) {
+    const name = String(path || '');
+    if (/(^|\.)opacity$/.test(name)) return [0, 1];
+    return null;
+  }
+
   /** Frame rate the panel snaps to (project meta, 24 default). */
   _fps() {
     const fps = Number(this.getProject?.()?.meta?.fps);
@@ -1523,17 +1534,38 @@ export class CurvePanel {
       const x1 = W - g.rightPad;
       if (x1 > x0) {
         const steps = Math.max(1, Math.round(x1 - x0));
-        ctx.beginPath();
-        let y = midY;
+        const plotted = [];
         for (let s = 0; s <= steps; s++) {
           const x = x0 + ((x1 - x0) * s) / steps;
           const value = sampleTrack(samples, path, g.tOf(x), null);
-          if (typeof value === 'number' && Number.isFinite(value)) y = g.yOf(value);
-          if (s === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+          const v = typeof value === 'number' && Number.isFinite(value) ? value : null;
+          plotted.push({ x, y: v == null ? midY : g.yOf(v), v });
         }
+        ctx.beginPath();
+        plotted.forEach((pt, i) => { if (i === 0) ctx.moveTo(pt.x, pt.y); else ctx.lineTo(pt.x, pt.y); });
         ctx.strokeStyle = C('--accent');
         ctx.lineWidth = 2.2;
         ctx.stroke();
+        // Bounce / elastic can push a value past what the property allows:
+        // paint those stretches red so the clipping is visible before render.
+        const bounds = this._valueBounds(path);
+        if (bounds) {
+          ctx.beginPath();
+          let pen = false;
+          for (let i = 0; i < plotted.length; i++) {
+            const pt = plotted[i];
+            const out = pt.v != null && (pt.v < bounds[0] - 1e-6 || pt.v > bounds[1] + 1e-6);
+            if (out) {
+              const prev = plotted[i - 1];
+              if (!pen) ctx.moveTo(prev ? prev.x : pt.x, prev ? prev.y : pt.y);
+              ctx.lineTo(pt.x, pt.y);
+              pen = true;
+            } else pen = false;
+          }
+          ctx.strokeStyle = token('--danger') || '#ff5c5c';
+          ctx.lineWidth = 2.6;
+          ctx.stroke();
+        }
       }
     }
 
@@ -2074,6 +2106,24 @@ export class CurvePanel {
     if (seg) this._commit(this.curve, [seg]);
   }
 
+  /** True when `curve` would push a bounded property outside its limits. */
+  _clipsRange(segments, curve) {
+    if (!curve) return false;
+    for (const seg of segments || []) {
+      const path = seg.path || this._track()?.path;
+      const bounds = this._valueBounds(path);
+      if (!bounds) continue;
+      const vA = keyValue(this._leftKey(path, seg.from));
+      const vC = keyValue(this._leftKey(path, seg.to));
+      if (vA == null || vC == null || Math.abs(vC - vA) <= 1e-9) continue;
+      for (let i = 0; i <= 40; i++) {
+        const v = vA + (vC - vA) * sampleCurve(curve, i / 40);
+        if (v < bounds[0] - 1e-6 || v > bounds[1] + 1e-6) return true;
+      }
+    }
+    return false;
+  }
+
   // ------------------------------------------------ live span retiming (§4/§7)
 
   /** Remember the spans a handle drag is about to retime (live preview + undo). */
@@ -2498,7 +2548,9 @@ export class CurvePanel {
     }
     if (!ops.length) return null;
     const detail = moved ? ` · ${moved} 个内键已移动` : '';
-    const done = `已应用到 ${paths.size} 条属性 · ${segments.length} 段${detail}`;
+    const clipped = this._clipsRange(segments, shape);
+    const done = `已应用到 ${paths.size} 条属性 · ${segments.length} 段${detail}`
+      + (clipped ? ' · 部分值超出范围，成片会截断' : '');
     const pending = this.onOp?.(ops.length === 1 ? ops[0] : { op: 'batch', ops });
     if (pending?.then) {
       pending.then((j) => {
