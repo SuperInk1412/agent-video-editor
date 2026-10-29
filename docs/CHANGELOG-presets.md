@@ -37,3 +37,4 @@
 | 2026-10-29 | `306fbe1` | 物体「面向镜头」改写 `rotation.x/y/z`：`facingRotation` 保自转、按整圈就近展开、首键补基础值，旧 `dir` op 翻译共用同一函数 | 界面不再写旧字段 | `app/renderer/js/main.js`、`core/rotation-ops.js`、`tests/rotation-ops.test.mjs` | `git revert 306fbe1` |
 | 2026-10-29 | `f0846c8` | 时间轴相机删掉「手动 roll°」行，画面内旋转用 `旋转 Z°`；模板注册表和「只看带键」分组表同步，属性页提示改为已并入 Z | 旧 roll 打开工程时并进 `rotation.z`，不再需要单独一行 | `app/renderer/js/timeline.js`、`app/renderer/js/inspector.js`、`core/templates.js`、`core/timeline-keys.js`、`tests/templates.test.mjs` | `git revert f0846c8` |
 | 2026-10-28 | `9986cbc` | 设计：变换栏统一（中心点→位置→旋转→缩放，一行三格可展开逐轴）、缩放和中心点逐轴打帧、位置保持整点路径 | 用户拍板 | `docs/DESIGN-TRANSFORM-UNIFY.md` §9 | `git revert 9986cbc` |
+| 2026-10-29 | `7498eca` | 修复方案：预览 2D 平面排序与 Blender 不一致（斜文字被身后底板盖住）、点空白取消选中报错和隐式改选 | 用户发现相机 9 看不到歌词、取消选中像玄学 | `docs/FIX-LAYER-ORDER-EMPTY-CLICK.md`（新） | `git revert 7498eca` |
