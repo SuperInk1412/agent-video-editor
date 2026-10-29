@@ -806,7 +806,12 @@ export function applyOp(p, op) {
       if (!Number.isFinite(t)) fail('keySet needs t');
       const old = (el.keyframes || []).find((k) => k.path === op.path && Math.abs(k.t - t) < 1e-4);
       const kf = { t, path: op.path, value: coerceValue(op.value), ease: op.ease || old?.ease || 'easeInOut' };
-      if (old?.curve) kf.curve = old.curve;
+      // Moving a key must not silently drop the curve that starts there: accept
+      // an explicit `curve` (null clears it), else inherit the one at this time.
+      if (op.curve !== undefined) {
+        const curve = normalizeCurve(op.curve);
+        if (curve) kf.curve = curve;
+      } else if (old?.curve) kf.curve = old.curve;
       el.keyframes = (el.keyframes || []).filter((k) => !(k.path === kf.path && Math.abs(k.t - t) < 1e-4));
       el.keyframes.push(kf);
       el.keyframes.sort((a, b) => a.t - b.t);
@@ -1011,6 +1016,12 @@ export function applyOp(p, op) {
       const key = { t, v: cameraTrackValue(path, op.v !== undefined ? op.v : op.value) };
       if (op.ease) key.ease = String(op.ease);
       else if (old?.ease) key.ease = old.ease;
+      // Value curves ride on the left key; re-setting or moving a key keeps it
+      // unless the caller passes an explicit curve (null clears).
+      if (op.curve !== undefined) {
+        const curve = normalizeCurve(op.curve);
+        if (curve) key.curve = curve;
+      } else if (old?.curve) key.curve = old.curve;
       tracks[path] = (tracks[path] || [])
         .filter((k) => Math.abs(k.t - t) > 1e-4)
         .concat(key)
@@ -1148,6 +1159,11 @@ export function applyOp(p, op) {
       const old = (obj.tracks?.[path] || []).find((k) => Math.abs(k.t - t) <= 1e-4);
       if (op.ease) key.ease = String(op.ease);
       else if (old?.ease) key.ease = old.ease;
+      // Same rule as cameraParamKey: the curve on this key survives a re-set.
+      if (op.curve !== undefined) {
+        const curve = normalizeCurve(op.curve);
+        if (curve) key.curve = curve;
+      } else if (old?.curve) key.curve = old.curve;
       if (VEC_TRACKS.has(path) || DIR_TRACKS.has(path)) {
         for (const h of ['out', 'in']) {
           if (Array.isArray(op[h]) && op[h].length === 3) key[h] = op[h].map(Number);

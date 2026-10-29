@@ -241,3 +241,68 @@ test('curves: keyCurve stores preset params and sampleTrack uses them', () => {
   const mid = sampleTrack(p.elements[0].keyframes, 'transform.opacity', 1, 0);
   close(mid, sampleCurve(presetCurve('bounce'), 0.5), 1e-9, 'sampleTrack follows the preset');
 });
+
+test('ops: a key move (remove + set) can carry the curve along', () => {
+  const p = fresh();
+  const { element } = applyOp(p, { op: 'addElement', element: { type: 'solid', start: 0, duration: 4 } });
+  const id = element.id;
+  const path = 'transform.opacity';
+  applyOp(p, { op: 'keySet', id, path, t: 0, value: 0 });
+  applyOp(p, { op: 'keySet', id, path, t: 2, value: 1 });
+  applyOp(p, { op: 'keyCurve', host: 'element', id, path, from: 0, to: 2, curve: presetCurve('easeIn') });
+  const at = (t) => p.elements[0].keyframes.find((k) => k.path === path && k.t === t);
+  const curve = at(0).curve;
+  // The move the panel emits: one batch, remove + set with the curve attached.
+  applyOp(p, { op: 'batch', ops: [
+    { op: 'keyRemove', id, path, t: 0 },
+    { op: 'keySet', id, path, t: 1, value: 0, curve },
+  ] });
+  assert.equal(at(0), undefined);
+  assert.equal(at(1).curve?.preset, 'easeIn', 'explicit curve survives the move');
+  // A set without a curve at a fresh time invents none…
+  applyOp(p, { op: 'keySet', id, path, t: 1.5, value: 0 });
+  assert.equal(at(1.5).curve, undefined);
+  // …and an explicit null clears the one that is there.
+  applyOp(p, { op: 'keySet', id, path, t: 1, value: 0, curve: null });
+  assert.equal(at(1).curve, undefined);
+});
+
+test('ops: objectKey keeps the curve of the key it re-sets', () => {
+  const p = fresh();
+  applyOp(p, { op: 'objectAdd', kind: 'cube' });
+  const id = p.scene.objects[0].id;
+  const path = 'pivot.x';
+  applyOp(p, { op: 'objectKey', id, path, t: 0, v: 0, ease: 'linear' });
+  applyOp(p, { op: 'objectKey', id, path, t: 2, v: 10 });
+  applyOp(p, { op: 'keyCurve', host: 'object', id, path, from: 0, to: 2, curve: presetCurve('easeOut') });
+  // objectKey replaces the track array, so always read it fresh.
+  const track = () => p.scene.objects[0].tracks[path];
+  assert.equal(track()[0].curve?.preset, 'easeOut');
+  // Re-setting the value at the same time (a value edit) must not eat the curve.
+  applyOp(p, { op: 'objectKey', id, path, t: 0, v: 4 });
+  assert.equal(track()[0].v, 4);
+  assert.equal(track()[0].curve?.preset, 'easeOut', 'curve survives a value edit');
+  // A move (unkey + key) carries it when the op passes it explicitly.
+  applyOp(p, { op: 'objectUnkey', id, path, t: 0 });
+  applyOp(p, { op: 'objectKey', id, path, t: 1, v: 4, curve: presetCurve('easeOut') });
+  assert.equal(track().find((k) => k.t === 1).curve?.preset, 'easeOut');
+  assert.equal(track().find((k) => k.t === 0), undefined);
+});
+
+test('ops: cameraParamKey keeps and accepts curves too', () => {
+  const p = fresh();
+  const id = applyOp(p, { op: 'addCamera' }).camera.id;
+  applyOp(p, { op: 'cameraParamKey', id, path: 'fov', t: 0, v: 40, ease: 'linear' });
+  applyOp(p, { op: 'cameraParamKey', id, path: 'fov', t: 2, v: 80 });
+  applyOp(p, { op: 'keyCurve', host: 'camera', id, path: 'fov', from: 0, to: 2, curve: presetCurve('easeInOut') });
+  const track = () => p.cameras[0].tracks.fov;
+  assert.equal(track()[0].curve?.preset, 'easeInOut');
+  applyOp(p, { op: 'cameraParamKey', id, path: 'fov', t: 0, v: 50 });
+  assert.equal(track()[0].v, 50);
+  assert.equal(track()[0].curve?.preset, 'easeInOut', 'curve survives a value edit');
+  applyOp(p, { op: 'cameraParamUnkey', id, path: 'fov', t: 0 });
+  applyOp(p, { op: 'cameraParamKey', id, path: 'fov', t: 1, v: 50, curve: presetCurve('easeInOut') });
+  assert.equal(track().find((k) => k.t === 1).curve?.preset, 'easeInOut');
+  applyOp(p, { op: 'cameraParamKey', id, path: 'fov', t: 1, v: 50, curve: null });
+  assert.equal(track().find((k) => k.t === 1).curve, undefined, 'explicit null clears');
+});
