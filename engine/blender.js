@@ -11,7 +11,7 @@ import { paths } from './storage.js';
 import { audioElements } from '../core/audio.js';
 import { elementLinkOverlayTable } from '../core/link-eval.js';
 import { encodeSequence, extractSequence, fileExists, hashOf, hashFile } from './media.js';
-import { is3D, writeShot } from './shot.js';
+import { buildShotV3, is3D, writeShot } from './shot.js';
 import { prepareObjectSequences } from './media-objects.js';
 import { jobFrames, prepareFeeds } from './camfeed-render.js';
 import { bakeElementPlacements } from './element-bake.js';
@@ -110,6 +110,38 @@ export async function prepareSequences(dir, project, { onLog, signal } = {}) {
   return out;
 }
 
+/**
+ * The frame IR of one job (`engine/shot.js::buildShotV3`), for a project that
+ * has no 3D shot of its own. The Python builder reads these numbers instead of
+ * evaluating the project itself (WP1.2, docs/DESIGN-BACKEND-V2.md §10.2).
+ *
+ * The range covers what `blender/vdm_render.py` will ask for: a still is the
+ * one frame it clamps to, a frame range is `[f0, f1]`. It asks for the frame
+ * number with Python's `round()`, whose halves go to the even number, while
+ * `jobFrames` rounds them up — a time landing exactly between two frames can
+ * therefore be one frame off, so one frame of slack is baked on each side.
+ * No city snapshot is needed: a job on this path has no 3D world to draw
+ * (`world.hash` stays null).
+ */
+function shotV3ForJob(project, job) {
+  const fps = Number(project.meta?.fps) || 24;
+  const duration = Number(project.meta?.duration) || 0;
+  let [f0, f1] = jobFrames(job, fps, duration);
+  if (job.mode === 'still') {
+    // vdm_render.py::still clamps the frame to the last one the project covers
+    const total = Math.max(1, Math.round(duration * fps));
+    const frame = Math.min(total, Math.max(1, Math.round(f0)));
+    f0 = frame;
+    f1 = frame;
+  }
+  return buildShotV3(project, {
+    fps,
+    from: (Math.max(1, f0 - 1) - 1) / fps,
+    to: (f1 + 1 - 1) / fps,
+    city: { hash: null },
+  });
+}
+
 /** Run one blender job. Returns {code, log, progress, seconds}. */
 export async function runJob(dir, job, { onProgress, onLog, signal } = {}) {
   signal?.throwIfAborted();
@@ -128,15 +160,21 @@ export async function runJob(dir, job, { onProgress, onLog, signal } = {}) {
     const fps = Number(seqProject.meta.fps) || 24;
     bakeElementPlacements(seqProject, jobFrames(job, fps, Number(seqProject.meta.duration) || 0), fps);
   }
-  await fs.writeFile(projFile, JSON.stringify(seqProject, null, 2));
   const payload = { ...job, project: projFile, root: p.root };
   delete payload.projectData;
   // 3D shot: bake city + per-frame camera once, let Blender consume the same package
   if (is3D(fed)) {
     // The prepared copy carries 3D video sequence paths and frame counts.
-    const { file } = await writeShot(dir, seqProject, { fps: job.project.meta.fps, signal });
+    const { file, shot } = await writeShot(dir, seqProject, { fps: job.project.meta.fps, signal });
     payload.shot = file;
+    // WP1.2: vdm_build.py draws the frame IR, so the 2D layer reads the same
+    // numbers the preview does. Added beside the legacy fields; nothing reads
+    // it unless the Python builder is on the v3 path.
+    seqProject.v3 = shot.v3;
+  } else {
+    seqProject.v3 = shotV3ForJob(seqProject, job);
   }
+  await fs.writeFile(projFile, JSON.stringify(seqProject, null, 2));
   await fs.writeFile(jobFile, JSON.stringify(payload, null, 2));
 
   const args = [

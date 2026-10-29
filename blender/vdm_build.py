@@ -2,15 +2,20 @@
 """
 VedioMaker -> Blender scene builder.
 
-Mirrors core/evaluate.js exactly:
-    transform = base -> keyframes -> motion delta (+ beat punch) -> fade
+Draws the **frame IR** (docs/DESIGN-BACKEND-V2.md §4): the shot package carries
+`v3`, the per-frame draw list core/ already evaluated, and this file only turns
+those numbers into Blender objects and keys (P2/P3 of §3). No curve, easing,
+motion preset, property link, parent chain or SpatialNode placement is sampled
+here; `core/frame-ir.js` is the only evaluator.
+
+    a plane's placement is its IR `world` matrix (pixels -> metres), plus
+    `depth.bias` and the frozen `drawOrder` along the plane normal
     y axis points DOWN in the project, UP in Blender (we negate it)
     world units == project pixels (orthographic camera, ortho_scale = width)
 
 Everything is built once, then a frame_change_pre handler updates each layer,
 so an animation render stays fast.
 """
-import bisect
 import bpy
 from mathutils import Matrix
 import json
@@ -42,6 +47,22 @@ def hex_rgba(h, alpha=1.0):
 
 def clamp(v, a=0.0, b=1.0):
     return a if v < a else b if v > b else v
+
+
+def rgb_rgba(rgb, alpha=1.0):
+    """A frame-IR `content.fill` (sRGB 0..1) as linear RGBA — `hex_rgba`'s rule."""
+    try:
+        values = [clamp(float(rgb[i])) for i in range(3)]
+    except (TypeError, ValueError, IndexError, KeyError):
+        return hex_rgba('#ffffff', alpha)
+    return (srgb_to_linear(values[0]), srgb_to_linear(values[1]), srgb_to_linear(values[2]), alpha)
+
+
+def color_rgba(value, alpha=1.0):
+    """A colour as either `#rrggbb` (project) or an sRGB 0..1 triple (the IR)."""
+    if isinstance(value, (list, tuple)) and len(value) >= 3:
+        return rgb_rgba(value, alpha)
+    return hex_rgba(value, alpha)
 
 
 def lerp(a, b, t):
@@ -512,6 +533,193 @@ def eval_element(el, t, meta):
     return st
 
 
+# ---------------------------------------------------------------- shot v3
+# The job's frame IR (engine/shot.js::buildShotV3, docs/DESIGN-BACKEND-V2.md
+# §4.4 / §10.2 WP1.2): every number a 2D element is drawn with — the plane's
+# world matrix, its size, opacity, content numbers, `depth.bias` and the frozen
+# `drawOrder` — has already been evaluated by core/. Nothing below samples a
+# value curve, an ease, a motion preset, a property link, a parent chain or a
+# SpatialNode placement of its own (P2 "evaluate once", P3 "the backend only
+# draws" of §3): this file only turns numbers into Blender objects and keys.
+#
+# The payload arrives beside the legacy fields: `project['v3']` for a 2D job
+# (engine/blender.js) and `shot['v3']` for a 3D one. Both have the same shape
+# (`{ items: [{ id, span, static, tracks }] }`, engine/element-bake.js packV3),
+# so one reader serves every path.
+#
+# Frames are 1-based render frames (§4.4): render frame `f` is IR frame `f - 1`,
+# and `scn.frame_current` is exactly that number — no time is sampled.
+
+V3_LEGACY_ENV = 'VDM_BUILD_LEGACY'  # temporary A/B switch while the v3 path is proven
+# Ordering tie-break along the plane normal, in metres per `drawOrder` step.
+# Coplanar layers need a distinct distance for EEVEE's blended sort; one z unit
+# of `depth.bias` is 1e-4 m (core/layers.js::LAYER_DEPTH_M), so a tenth of that
+# keeps `bias` dominant while still separating equal-depth layers.
+DEPTH_ORDER_M = 1e-5
+
+
+def _num(value, default=0.0):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if math.isfinite(number) else default
+
+
+def _deep(value):
+    """A JSON-shaped deep copy (the frame value starts from `record.static`)."""
+    if isinstance(value, dict):
+        return {key: _deep(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_deep(item) for item in value]
+    return value
+
+
+def _path_key(node, part):
+    """`"12"` indexes a list, everything else keys a dict (the JS reader's rule)."""
+    return int(part) if isinstance(node, list) and part.isdigit() else part
+
+
+def _path_get(node, key):
+    try:
+        return node[key]
+    except (IndexError, KeyError, TypeError):
+        return None
+
+
+def v3_set_path(target, path, value):
+    """Write `value` at a dotted path (engine/element-bake.js::setV3Path)."""
+    parts = str(path).split('.')
+    cur = target
+    for i in range(len(parts) - 1):
+        key = _path_key(cur, parts[i])
+        nxt = _path_get(cur, key)
+        if not isinstance(nxt, (dict, list)):
+            nxt = [] if parts[i + 1].isdigit() else {}
+            cur[key] = nxt
+        cur = nxt
+    key = _path_key(cur, parts[-1])
+    if isinstance(cur, list) and isinstance(key, int) and key >= len(cur):
+        cur.extend([None] * (key + 1 - len(cur)))
+    cur[key] = value
+    return target
+
+
+def v3_unpack(record, frame):
+    """One frame's value of a v3 record, or None when the frame is outside its span."""
+    try:
+        f = int(round(float(frame)))
+        first, last = record['span']
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not (first <= f <= last):
+        return None
+    out = _deep(record.get('static') or {})
+    for path, track in (record.get('tracks') or {}).items():
+        if not isinstance(track, dict):
+            continue
+        try:
+            index = f - int(track.get('f0'))
+        except (TypeError, ValueError):
+            continue
+        values = track.get('values') or []
+        if 0 <= index < len(values):
+            v3_set_path(out, path, values[index])
+    return out
+
+
+class ShotV3:
+    """The job's frame IR, read per frame: `item(id, frame)` -> draw item or None.
+
+    Records are kept per id (an element that leaves the picture and comes back
+    has one record per run), so a lookup is a handful of span checks.
+    """
+
+    def __init__(self, payload):
+        self.payload = payload if isinstance(payload, dict) else None
+        self.records = {}
+        self.spans = {}
+        for record in (self.payload or {}).get('items') or []:
+            ident = record.get('id') if isinstance(record, dict) else None
+            if not isinstance(ident, str):
+                continue
+            self.records.setdefault(ident, []).append(record)
+            span = record.get('span') or [0, 0]
+            try:
+                a, b = int(span[0]), int(span[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            cur = self.spans.get(ident)
+            self.spans[ident] = [min(cur[0], a), max(cur[1], b)] if cur else [a, b]
+
+    def __bool__(self):
+        return self.payload is not None
+
+    def first_frame(self, ident):
+        """First render frame `ident` draws in this job, or None when it never does."""
+        span = self.spans.get(ident)
+        return span[0] if span else None
+
+    def item(self, ident, frame):
+        for record in self.records.get(ident) or []:
+            value = v3_unpack(record, frame)
+            if value is not None:
+                return value
+        return None
+
+
+def load_shot_v3(project, opts=None):
+    """The v3 payload of this job: `project['v3']`, else the 3D shot's own copy."""
+    payload = project.get('v3') if isinstance(project, dict) else None
+    if isinstance(payload, dict):
+        return payload
+    shot_path = (opts or {}).get('shot')
+    if shot_path and os.path.exists(shot_path):
+        try:
+            with open(shot_path, 'r', encoding='utf-8') as handle:
+                shot = json.load(handle)
+        except (OSError, ValueError):
+            return None
+        payload = shot.get('v3') if isinstance(shot, dict) else None
+        if isinstance(payload, dict):
+            return payload
+    return None
+
+
+def v3_build_inputs(el, item):
+    """`(numbers, style)` of one IR item, in the shape the builders read.
+
+    Everything that can change per frame is IR data (`content.text`,
+    `content.fontSize`, `content.color`, the quad `size`, `content.fill`,
+    `content.uv`, `content.fit`, the text layout). Only the font *file* is
+    authored data: `style.font` / `style.fontPath`, which is not a number.
+    """
+    content = (item or {}).get('content') or {}
+    style = dict(el.get('style') or {})
+    for key in ('fit', 'font', 'align', 'lineHeight', 'letterSpacing', 'shadow',
+                'stroke', 'strokeWidth'):
+        if content.get(key) is not None:
+            style[key] = content[key]
+    if content.get('ellipse'):
+        style['shape'] = 'ellipse'
+    quad = (item or {}).get('size')
+    if isinstance(quad, (list, tuple)) and len(quad) >= 2:
+        style['w'] = quad[0]
+        style['h'] = quad[1]
+    state = {
+        'active': True,
+        'opacity': _num((item or {}).get('opacity'), 0.0),
+        'glow': _num(content.get('glow'), 0.0),
+        'text': content.get('text', ''),
+        'size': _num(content.get('fontSize'), 96.0),
+        'color': content.get('color') or '#ffffff',
+        'fill': content.get('fill'),
+        'uv': content.get('uv'),
+        'quad': quad,
+    }
+    return state, style
+
+
 # ---------------------------------------------------------------- scene bits
 
 def reset_scene():
@@ -611,7 +819,7 @@ def textured_material(name, image, opacity=1.0):
 def flat_material(name, color, opacity=1.0):
     mat, nt = new_material(name)
     em = nt.nodes.new('ShaderNodeEmission')
-    em.inputs['Color'].default_value = hex_rgba(color)
+    em.inputs['Color'].default_value = color_rgba(color)
     trans = nt.nodes.new('ShaderNodeBsdfTransparent')
     mix = nt.nodes.new('ShaderNodeMixShader')
     amul = nt.nodes.new('ShaderNodeValue')
@@ -1015,6 +1223,18 @@ class SceneBuilder:
         self.cache = os.path.join(self.root, '.vdm', 'cache')
         self.updaters = []
         self.el_index = 0
+        # The frame IR of this job: every number drawn below comes from here
+        # (WP1.2). `legacy` is the temporary A/B switch of the proof run.
+        self.v3 = ShotV3(load_shot_v3(project, opts))
+        self.legacy = os.environ.get(V3_LEGACY_ENV) == '1'
+        if not self.legacy and not self.v3:
+            raise RuntimeError(
+                'vdm_build: the job carries no shot v3 payload — re-run the render '
+                'through engine/blender.js (WP1.2 reads the frame IR, not the project)')
+        self.units_per_m = PX_PER_M
+        self.y_shift = 0.0
+        self.embed = False
+        self.layer_px = 0.002
 
     # -- assets ------------------------------------------------------------
     def resolve_src(self, src):
@@ -1107,11 +1327,15 @@ class SceneBuilder:
             obj.location.z = self.layer_px * z
             return obj, nodes, None
 
-        fit = style.get('fit', 'cover')
-        if img.size[0] and img.size[1]:
-            uv = (0, 0, 1, 1) if fit == 'stretch' else cover_uv(img.size[0], img.size[1], self.W, self.H)
-        else:
-            uv = (0, 0, 1, 1)
+        # `content.uv` is the IR's image-space rect (null until the project knows
+        # the media's intrinsic size); otherwise the IR's `mediaUVOf` rule applies.
+        uv = st0.get('uv')
+        if not (isinstance(uv, (list, tuple)) and len(uv) == 4):
+            fit = style.get('fit', 'cover')
+            if img.size[0] and img.size[1]:
+                uv = (0, 0, 1, 1) if fit == 'stretch' else cover_uv(img.size[0], img.size[1], self.W, self.H)
+            else:
+                uv = (0, 0, 1, 1)
         mesh = plane_mesh(f'{el["id"]}_mesh', self.W, self.H, uv)
         mat, nodes = textured_material(f'{el["id"]}_mat', img, st0['opacity'])
         if sequence:
@@ -1148,7 +1372,9 @@ class SceneBuilder:
         h = float(style.get('h') or self.H)
         kind = style.get('shape', 'rect')
         mesh = disc_mesh(f'{el["id"]}_mesh', w, h) if kind == 'ellipse' else plane_mesh(f'{el["id"]}_mesh', w, h)
-        mat, nodes = flat_material(f'{el["id"]}_mat', st0['color'] if el['type'] == 'text' else style.get('fill', '#ffffff'), st0['opacity'])
+        # the IR's `content.fill` (sRGB triple) wins; the project's hex is the fallback
+        fill = st0.get('fill') or style.get('fill', '#ffffff')
+        mat, nodes = flat_material(f'{el["id"]}_mat', st0['color'] if el['type'] == 'text' else fill, st0['opacity'])
         obj = self.add_object(mesh, mat, el['id'])
         obj.location.z = self.layer_px * z
         return obj, nodes
@@ -1163,8 +1389,16 @@ class SceneBuilder:
         nothing else of the scene is touched (unified space)."""
         if scene is None:
             scene = reset_scene()
-        # pixels between layers along the depth axis; in a perspective 3D scene
-        # EEVEE sorts blended objects by distance, so give the layers 0.1 mm
+        # Scene units. Embedded in a 3D scene the units are metres — the IR's own
+        # unit — so `world` is used as is. A standalone / overlay build is a
+        # pixel canvas (the ortho camera spans `width` units, the old screen rig
+        # was 100 px per metre), so `world` is scaled by PX_PER_M and the screen
+        # centre (half the picture height) becomes the origin.
+        self.embed = embed is not None
+        self.units_per_m = 1.0 if self.embed else PX_PER_M
+        self.y_shift = 0.0 if self.embed else -(self.H / 2.0)
+        # pixels between layers along the depth axis; only the legacy branch
+        # needs it — the v3 path reads `depth.bias` from the IR.
         self.layer_px = 0.01 if embed is not None else 0.002
         if embed is None:
             self._setup_scene(scene, overlay)
@@ -1204,7 +1438,8 @@ class SceneBuilder:
 
     def _build_elements(self, scene, overlay, embed):
         before = set(scene.objects)
-        # layer order: stable by z then start
+        # Stacking is the IR's job (`depth.bias` + `drawOrder`); this order only
+        # decides in which order the objects are created.
         elements = sorted(self.p.get('elements', []), key=lambda e: (e.get('z', 0), e.get('start', 0)))
 
         for idx, el in enumerate(elements):
@@ -1215,7 +1450,15 @@ class SceneBuilder:
                 continue
             style = el.get('style') or {}
             z = el.get('z', 0) + idx * 0.001
-            st0 = eval_element(el, el['start'], self.meta)
+            if self.legacy:
+                st0 = eval_element(el, el['start'], self.meta)
+            else:
+                # Only elements the IR draws inside this job get an object, and
+                # its first drawn frame has every number the build needs.
+                first = self.v3.first_frame(el.get('id'))
+                if first is None:
+                    continue
+                st0, style = v3_build_inputs(el, self.v3.item(el.get('id'), first))
             src_path = self.resolve_src(el.get('src'))
             tex = None
 
@@ -1255,7 +1498,137 @@ class SceneBuilder:
             build_compositor(scene, self.meta, os.path.join(self.cache, 'comp'))
         return scene
 
+    # -- per frame ---------------------------------------------------------
     def make_updater(self, el, obj, nodes, tex, z, style):
+        if self.legacy:
+            return self._legacy_update(el, obj, nodes, tex, z, style)
+        return self._v3_update(el, obj, nodes, tex, style)
+
+    def _make_shadow(self, el, obj):
+        """A black copy slightly offset behind the text."""
+        sh = bpy.data.objects.new(el['id'] + '_shadow', obj.data.copy())
+        sh.data.materials.clear()
+        smat, _ = flat_material(el['id'] + '_shmat', '#000000', 0.55)
+        sh.data.materials.append(smat)
+        bpy.context.scene.collection.objects.link(sh)
+        sh.hide_render = True
+        return sh
+
+    def item_matrix(self, item):
+        """Blender matrix of one IR item: `world`, `depth.bias` and `drawOrder`.
+
+        `world` (core/frame-ir.js) is column-major and maps quad-local project
+        pixels to world metres; the meshes here are built in project pixels, so
+        a pixel scene multiplies by PX_PER_M and the metres scene does not.
+        `depth.bias` is pushed along the plane normal — the same hair of
+        separation `itemModelMatrix()` gives the preview — and the frozen
+        `drawOrder` adds a tenth of it on top so EEVEE's blended sort follows
+        the IR's order for layers sitting on one plane.
+        """
+        world = item.get('world')
+        if not isinstance(world, (list, tuple)) or len(world) < 16:
+            return None
+        u = self.units_per_m
+        m = [_num(v) for v in world[:16]]
+        rows = [
+            [m[0] * u, m[4] * u, m[8] * u, m[12] * u],
+            [m[1] * u, m[5] * u, m[9] * u, m[13] * u + self.y_shift],
+            [m[2] * u, m[6] * u, m[10] * u, m[14] * u],
+            [0.0, 0.0, 0.0, 1.0],
+        ]
+        depth = item.get('depth') or {}
+        offset = (_num(depth.get('bias')) + DEPTH_ORDER_M * _num(item.get('drawOrder'))) * u
+        normal = [rows[0][2], rows[1][2], rows[2][2]]
+        length = math.sqrt(normal[0] ** 2 + normal[1] ** 2 + normal[2] ** 2)
+        normal = [v / length for v in normal] if length > 1e-12 else [0.0, 0.0, 1.0]
+        for axis in range(3):
+            rows[axis][3] += normal[axis] * offset
+        return Matrix(rows)
+
+    def _v3_update(self, el, obj, nodes, tex, style):
+        """Per-frame Blender keys from the frame IR numbers of this element."""
+        fps = self.fps
+        is_text = el['type'] == 'text'
+        shadow_obj = self._make_shadow(el, obj) if (bool(style.get('shadow')) and is_text) else None
+        identity = Matrix.Identity(4)
+
+        def hide():
+            obj.hide_render = True
+            if shadow_obj:
+                shadow_obj.hide_render = True
+
+        def update(t, frame):
+            item = self.v3.item(el['id'], frame)
+            if item is None:
+                # The IR does not draw this element on this frame: no curve, no
+                # time range and no fade test happens here any more.
+                hide()
+                return
+            content = item.get('content') or {}
+            matrix = self.item_matrix(item)
+            obj.hide_render = False
+            if matrix is not None:
+                # Relative to the screen rig without waiting for a depsgraph
+                # update (a just-built parent's matrix_world is still stale).
+                parent = obj.parent.matrix_basis if obj.parent else identity
+                obj.matrix_basis = parent.inverted() @ matrix
+            opacity = _num(item.get('opacity'), 0.0)
+            if is_text:
+                try:
+                    obj.data.body = '' if content.get('text') is None else str(content.get('text'))
+                    obj.data.size = _num(content.get('fontSize'), 96.0) * float(obj.get('vdm_em', 1.0))
+                    k = float(obj.get('vdm_center_per_size', 0.0))
+                    if k:
+                        obj.data.offset_x = -k * obj.data.size
+                    kv = float(obj.get('vdm_vcenter_per_size', 0.0))
+                    if kv:
+                        obj.data.offset_y = -kv * obj.data.size
+                except Exception:
+                    pass
+
+            if 'alpha' in nodes:
+                nodes['alpha'].default_value = opacity
+            if 'em' in nodes:
+                nodes['em'].inputs['Strength'].default_value = 1.0 + 6.0 * _num(content.get('glow'), 0.0)
+                if is_text:
+                    try:
+                        nodes['em'].inputs['Color'].default_value = hex_rgba(content.get('color') or '#ffffff')
+                    except Exception:
+                        pass
+
+            if el['type'] == 'camfeed' and tex is not None:
+                show_feed_frame(el, obj, tex, frame)
+
+            if tex is not None and tex.image and tex.image.source == 'SEQUENCE':
+                # Blender reads file number clamp(frame - frame_start + 1, 0, n) + offset;
+                # pin frame_start to the current frame so that is exactly the element's
+                # local frame (f_<local>.png), holding the last frame past the clip's end.
+                count = int(tex.get('vdm_frames', tex.image_user.frame_duration) or 1)
+                local = min(count - 1, max(0, int(round((t - el['start']) * fps))))
+                tex.image_user.frame_start = frame
+                tex.image_user.frame_offset = local - 1
+
+            if shadow_obj:
+                shadow_obj.hide_render = False
+                if matrix is not None:
+                    # the shadow rides the same plane, offset in its own pixels
+                    shadow_obj.matrix_basis = obj.matrix_basis @ Matrix.Translation((5.0, -5.0, -0.0004))
+                try:
+                    shadow_obj.data.body = str(content.get('text') or '')
+                    shadow_obj.data.size = obj.data.size
+                    k = float(obj.get('vdm_center_per_size', 0.0))
+                    if k:
+                        shadow_obj.data.offset_x = -k * shadow_obj.data.size
+                    kv = float(obj.get('vdm_vcenter_per_size', 0.0))
+                    if kv:
+                        shadow_obj.data.offset_y = -kv * shadow_obj.data.size
+                except Exception:
+                    pass
+
+        return update
+
+    # -- legacy (pre-WP1.2) evaluator, deleted once the v3 path is proven ----
+    def _legacy_update(self, el, obj, nodes, tex, z, style):
         fps = self.fps
         meta = self.meta
         is_text = el['type'] == 'text'
