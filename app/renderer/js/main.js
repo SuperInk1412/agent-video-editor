@@ -340,7 +340,10 @@ function setTime(t, { seekAudio = true } = {}) {
   S.time = pictureTime(asked);
   timeline?.setTime(S.time);
   updateTimecode();
-  updateSelectionInfo();
+  // The status chip carries the out-of-frame ratio, which needs a projection
+  // of the selection: refresh it when the user is looking, not every played
+  // frame (pause() flushes it).
+  if (!S.playing) updateSelectionInfo();
   if (seekAudio && S.playing) preview.setAudioTime(S.time);
   if (!S.playing) inspector.render(S.project, S.selection, S.time);
   if (S.followCam) syncViewControls();
@@ -382,6 +385,7 @@ function pause() {
   // Playback refreshes the property fields at ~11 Hz (timeline.js setTime
   // `live`); land on the exact value of the frame we stopped on.
   timeline?.flushValues();
+  updateSelectionInfo();
 }
 
 function togglePlay() { S.playing ? pause() : play(); }
