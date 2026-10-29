@@ -356,7 +356,11 @@ function select(sel = {}) {
   let segmentId;
   if (host.camera || host.objectId) segmentId = null;
   else {
-    segmentId = sel.segmentId ?? S.selection.segmentId;
+    // An explicit `segmentId: null` clears the segment head; a caller that does
+    // not mention the key at all keeps the current one (older call sites).
+    segmentId = Object.prototype.hasOwnProperty.call(sel, 'segmentId')
+      ? (sel.segmentId ?? null)
+      : S.selection.segmentId;
     if (host.elementId) {
       const el = S.project?.elements?.find((e) => e.id === host.elementId);
       if (el?.segment) segmentId = el.segment;
@@ -1003,10 +1007,53 @@ function selectedHostRefs() {
 }
 
 /**
+ * Drop the whole selection: the pool (2D elements / 3D objects / cameras /
+ * properties / keyframes), the legacy element / object / camera fields, the
+ * segment head and — through `select` — the timeline's property row. One entry
+ * point so every "click empty space" path clears exactly the same things.
+ */
+function clearSelection() {
+  select({ pool: emptySelection(), elementId: null, objectId: null, camera: false, segmentId: null });
+}
+
+/**
+ * One viewport pick (docs/FIX-LAYER-ORDER-EMPTY-CLICK.md §二): the topmost 2D
+ * element / 3D object under the cursor, or — on empty canvas — nothing at all.
+ * Ctrl/Cmd/Shift keeps whatever is selected; a plain click clears everything
+ * (`clearSelection`). There is deliberately no implicit fallback to "the
+ * segment under the playhead" or "the camera": a camera is picked by clicking
+ * the camera gizmo or its timeline row, a segment by clicking its bar.
+ *
+ * Module scope on purpose: `beginViewportMarquee` (the press-release path) and
+ * the two pointerdown / pointerup branches share this picking code, and the
+ * marquee used to call a `const selectAt` that only existed inside `boot()` —
+ * a ReferenceError, so a click on empty canvas did nothing at all.
+ */
+function selectAt(sx, sy, ev) {
+  const additive = additiveEvent(ev);
+  const id = preview.hitTest(sx, sy, S.time);
+  const obj = id ? null : preview.scene3d?.pickObject(S.project, S.time, sx, sy);
+  if (id || obj) {
+    const kind = id ? 'el' : 'ob';
+    const host = id || obj.id;
+    if (additive) {
+      // One element pool for 2D / 3D / cameras; picking a selected ref again
+      // removes it (pickSelection toggles inside the same pool).
+      const ref = kind === 'el' ? elementRef(host) : objectRef(host);
+      select({ pool: pickSelection(S.selection.pool, 'element', ref, true) });
+    } else if (kind === 'el') select({ elementId: host });
+    else select({ objectId: host });
+    return;
+  }
+  if (additive) return; // Ctrl-click on empty space keeps the current selection
+  clearSelection();
+}
+
+/**
  * Rubber-band selection over the stage. Only starts from empty canvas: a press
  * on an element/handle keeps its move gesture. Plain drag replaces the pool,
- * Ctrl/Cmd/Shift adds the box contents; a press without movement keeps the old
- * empty-click behaviour (segment / camera fallback or no change).
+ * Ctrl/Cmd/Shift adds the box contents; a press without movement goes through
+ * `selectAt`, i.e. a plain click on empty canvas clears the selection.
  */
 function beginViewportMarquee(ev, additive = additiveEvent(ev)) {
   const stage = $('#stage');
@@ -3147,28 +3194,6 @@ async function boot() {
   const snap3 = (v, e) => (e?.ctrlKey ? v.map((n) => Math.round(n * 2) / 2) : v);
   const camCenter = (cam, t) => cameraTransform(cam, t).center;
   const camWorldKey = (cam, key) => v3add(camCenter(cam, key.t), key.pos);
-  const selectAt = (sx, sy, ev) => {
-    const additive = !!(ev?.ctrlKey || ev?.metaKey || ev?.shiftKey);
-    const id = preview.hitTest(sx, sy, S.time);
-    const obj = id ? null : preview.scene3d?.pickObject(S.project, S.time, sx, sy);
-    if (id || obj) {
-      const kind = id ? 'el' : 'ob';
-      const host = id || obj.id;
-      if (additive) {
-        // One element pool for 2D / 3D / cameras; picking a selected ref again
-        // removes it (pickSelection toggles inside the same pool).
-        const ref = kind === 'el' ? elementRef(host) : objectRef(host);
-        select({ pool: pickSelection(S.selection.pool, 'element', ref, true) });
-      } else if (kind === 'el') select({ elementId: host });
-      else select({ objectId: host });
-      return;
-    }
-    if (additive) return; // Ctrl-click on empty space keeps the current pool
-    const seg = S.project.segments.find((s) => S.time >= s.start && S.time < s.start + s.duration);
-    if (seg) return select({ elementId: null, segmentId: seg.id });
-    if (S.project.camera) return select({ camera: true });
-    select({ elementId: null, segmentId: null });
-  };
 
   // ---- 2D element values / viewport drag ----
   const elPathBase = (el, path) => {
@@ -4051,7 +4076,7 @@ async function boot() {
   ]) {
     registerCommand({ id: `add.3d.${kind}`, title, group: '编辑', icon: ic, keywords: `new add ${kw}`, run: () => addSceneElement(kind) });
   }
-  registerCommand({ id: 'edit.deselect', title: '清除选中', group: '编辑', keywords: 'deselect clear selection', when: () => hasSelection() || '没有选中的对象', run: () => select({ elementId: null, segmentId: null }) });
+  registerCommand({ id: 'edit.deselect', title: '清除选中', group: '编辑', keywords: 'deselect clear selection', when: () => hasSelection() || '没有选中的对象', run: () => clearSelection() });
 
   // 视口
   registerCommand({
@@ -4164,7 +4189,7 @@ async function boot() {
       if (curvePanel?.isOpen()) { curvePanel.close(); e?.preventDefault(); return; }
       const menu = $('#ctxMenu');
       if (menu && !menu.hidden) { hideContextMenu(); return; }
-      if (gizmo?.objSel) { select({ elementId: null, segmentId: null }); return; }
+      if (gizmo?.objSel) { clearSelection(); return; }
       if (S.editMode && S.viewMode === 'move') { setViewMode('select'); return; }
       if (S.editMode) { setEditMode(false); return; }
       return false;
