@@ -36,3 +36,4 @@
 | 2026-10-28 | `ce12230` | 新建内容直接写三轴旋转（2D 建成节点、物体/相机写 `rotation`），旧写法的 op 自动翻译；打开 `ROTATION_MIGRATION` | 用户批准：新建即三轴，避免每次打开重复迁移 | `core/rotation-ops.js`（新）、`core/ops.js`、`core/scene.js`、`core/camera.js`、`engine/shot.js`、14 个测试 | `git revert ce12230`（开关和新建格式一起回退） |
 | 2026-10-29 | `306fbe1` | 物体「面向镜头」改写 `rotation.x/y/z`：`facingRotation` 保自转、按整圈就近展开、首键补基础值，旧 `dir` op 翻译共用同一函数 | 界面不再写旧字段 | `app/renderer/js/main.js`、`core/rotation-ops.js`、`tests/rotation-ops.test.mjs` | `git revert 306fbe1` |
 | 2026-10-29 | `f0846c8` | 时间轴相机删掉「手动 roll°」行，画面内旋转用 `旋转 Z°`；模板注册表和「只看带键」分组表同步，属性页提示改为已并入 Z | 旧 roll 打开工程时并进 `rotation.z`，不再需要单独一行 | `app/renderer/js/timeline.js`、`app/renderer/js/inspector.js`、`core/templates.js`、`core/timeline-keys.js`、`tests/templates.test.mjs` | `git revert f0846c8` |
+| 2026-10-28 | `9986cbc` | 设计：变换栏统一（中心点→位置→旋转→缩放，一行三格可展开逐轴）、缩放和中心点逐轴打帧、位置保持整点路径 | 用户拍板 | `docs/DESIGN-TRANSFORM-UNIFY.md` §9 | `git revert 9986cbc` |
