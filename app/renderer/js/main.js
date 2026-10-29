@@ -363,6 +363,9 @@ function select(sel = {}) {
     }
   }
   S.selection = { segmentId, ...host, pool };
+  // The F2 drawer edits the live pool, not a snapshot: a selection made while
+  // it is open retargets the panel in place (design §3).
+  if (curvePanel?.isOpen()) curvePanel.setSelection?.(pool);
   if (gizmo) {
     gizmo.objSel = S.selection.objectId || null;
     gizmo.objHover = null;
@@ -475,7 +478,8 @@ function jumpToLinkParent({ host, id, path } = {}) {
   if (host === 'cam') {
     if (source.startsWith('shake.')) timeline.sections.camShake = 'full';
     else if (source.startsWith('dof.')) timeline.sections.camDof = 'full';
-    else if (source.startsWith('pivot.') || source.startsWith('scale.') || source === 'opacity') timeline.sections.camPos = 'full';
+    else if (source.startsWith('pivot.') || source.startsWith('scale.')
+      || source.startsWith('rotation.') || source === 'opacity') timeline.sections.camPos = 'full';
     else timeline.sections.camMain = 'full';
   } else if (host === 'el' || host === 'ob') {
     timeline.sections.transform = 'full';
@@ -868,7 +872,30 @@ function openCurvePanel() {
   }
   if (index < 0 && host === 'camera') index = tracks.findIndex((t) => t.path === 'path');
   if (index < 0) index = 0;
+  // Design §6: opening the drawer stops playback and brings the edit range into
+  // view — the row, then the selected seconds, without touching the zoom.
+  if (S.playing) pause();
+  timeline.reveal({ kind: host, id });
+  if (selected?.length) revealTimeRange(selected.map((s) => s.t));
   curvePanel.open({ host, id, tracks, index, selected });
+}
+
+/**
+ * Scroll the timeline so `times` are visible, centring them when they fit.
+ * Zoom is untouched: only `scrollLeft` moves (design §6, F2 open).
+ */
+function revealTimeRange(times) {
+  const list = (times || []).map(Number).filter(Number.isFinite);
+  if (!timeline || !list.length) return;
+  const pps = Number(timeline.pps) || 60;
+  const view = timeline.scroll.clientWidth - (timeline._gutter?.() || 340) - 24;
+  if (!(view > 80)) return;
+  const x0 = Math.min(...list) * pps;
+  const x1 = Math.max(...list) * pps;
+  const left = timeline.scroll.scrollLeft;
+  if (x0 >= left && x1 <= left + view) return;
+  const room = view - (x1 - x0);
+  timeline.scroll.scrollLeft = Math.max(0, room > 0 ? x0 - room / 2 : x0 - 40);
 }
 
 function toggleCurvePanel() {
