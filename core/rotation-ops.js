@@ -103,17 +103,28 @@ function nodePatchFromTransform(meta, el, tr) {
   return node;
 }
 
+/**
+ * `[x, y, z]` that faces `dir` (in the host's own space) while keeping the
+ * self-rotation (roll) of `cur`, each axis shifted by whole turns to stay near
+ * `cur` so a key never spins the object around. Used by the old `dir` op
+ * translation and the object menu's "面向镜头".
+ */
+export function facingRotation(dir, cur) {
+  const base = normalizeRotation(cur);
+  const { roll } = dirRollFromRotation(base);
+  return rotationFromDirRoll(dir, roll).map((v, i) => r6(unwrap(v, base[i])));
+}
+
 /** Three axis keys for an object's old dir / roll key at t. */
 function objectAxisOps(obj, op) {
   const t = num(op.t);
   const cur = objectPose(obj, t).rotation || normalizeRotation(obj.rotation);
-  const { dir, roll } = dirRollFromRotation(cur);
   const v = op.v !== undefined ? op.v : op.value;
   const next = op.path === 'dir'
-    ? rotationFromDirRoll(v, roll)
-    : rotationFromDirRoll(dir, num(v));
+    ? facingRotation(v, cur)
+    : rotationFromDirRoll(dirRollFromRotation(cur).dir, num(v)).map((x, i) => r6(unwrap(x, cur[i])));
   const { value, ...rest } = op;
-  return ['x', 'y', 'z'].map((a, i) => ({ ...rest, path: `rotation.${a}`, v: r6(unwrap(next[i], cur[i])) }));
+  return ['x', 'y', 'z'].map((a, i) => ({ ...rest, path: `rotation.${a}`, v: next[i] }));
 }
 
 /** A link host whose 'roll' now lives in rotation.z (cameras keep their own roll). */

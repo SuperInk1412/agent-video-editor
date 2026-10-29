@@ -8,6 +8,8 @@ import { createProject, normalizeProject, validateProject } from '../core/schema
 import { ensureSpace } from '../core/space.js';
 import { frameOf } from '../core/spatial.js';
 import { objectPose } from '../core/scene.js';
+import { facingRotation } from '../core/rotation-ops.js';
+import { dirRollFromRotation } from '../core/rotation.js';
 import { elementWorldNode } from '../app/renderer/js/node-at.js';
 import { loadProject, saveProject } from '../engine/storage.js';
 
@@ -71,6 +73,31 @@ test('object dir / roll keys and roll links land on rotation', () => {
   const link = p.scene.objects.find((x) => x.id === 'ob_b').links[0];
   assert.equal(link.to, 'rotation.z');
   assert.equal(link.from.path, 'rotation.z');
+});
+
+test('facingRotation keeps the current self-rotation and unwraps near it', () => {
+  for (const cur of [[0, 0, 0], [10, 20, 350], [15, 200, 40]]) {
+    const next = facingRotation([1, 0, 0], cur);
+    const rr = dirRollFromRotation(next);
+    near(rr.dir, [1, 0, 0], 1e-6, `faces +X from ${cur}`);
+    near(rr.roll, dirRollFromRotation(cur).roll, 1e-6, 'roll kept');
+    next.forEach((v, i) => assert.ok(Math.abs(v - cur[i]) <= 180.000001,
+      `axis ${i} stays near ${cur[i]}: ${v}`));
+  }
+  // a nearly-full-turn key does not spin the object around
+  near(facingRotation([0, 0, 1], [0, 359, 0])[1], 360, 1e-6, 'no 359 -> 0 jump');
+});
+
+test('the old dir key translation is facingRotation at the key time', () => {
+  const p = fresh();
+  applyOp(p, { op: 'objectAdd', object: { id: 'ob_face', type: 'solid', rotation: [10, 20, 30] } });
+  const o = p.scene.objects.find((x) => x.id === 'ob_face');
+  applyOp(p, { op: 'objectKey', id: 'ob_face', path: 'dir', t: 1, v: [0, 1, 0] });
+  const expected = facingRotation([0, 1, 0], [10, 20, 30]);
+  ['x', 'y', 'z'].forEach((a, i) => {
+    near(o.tracks[`rotation.${a}`][0].v, expected[i], 1e-6, `rotation.${a}`);
+  });
+  near(objectPose(o, 1).basis.forward, [0, 1, 0], 1e-6, 'faces up');
 });
 
 test('a fresh project opens without a migration, every time', async () => {

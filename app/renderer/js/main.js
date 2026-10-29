@@ -24,6 +24,9 @@ import {
   objectLocalVectorWithLinks, objectWorldPoseWithLinks,
 } from '/core/link-eval.js';
 import { frameOf } from '/core/spatial.js';
+import { objectPose } from '/core/scene.js';
+import { objectPoseWithLinks, writeBackLocalValue } from '/core/links.js';
+import { facingRotation } from '/core/rotation-ops.js';
 import { rotationFromDirRoll } from '/core/rotation.js';
 import { defaultCamera } from '/core/space.js';
 import { newId } from '/core/schema.js';
@@ -2491,7 +2494,34 @@ async function boot() {
           const d = [cam.pos[0] - pose.worldPos[0], cam.pos[1] - pose.worldPos[1], cam.pos[2] - pose.worldPos[2]];
           const l = Math.hypot(d[0], d[1], d[2]) || 1;
           const local = objectLocalVectorWithLinks(S.project, o, at, d.map((v) => v / l));
-          op({ op: 'objectKey', id, path: 'dir', t: at, v: local });
+          // Three axis keys (docs/DESIGN-TRANSFORM-UNIFY.md §2): face `local`
+          // and keep the current roll, each axis unwrapped near the current
+          // angle. A first key also needs the base rotation, or the other axes
+          // snap to 0 before/after this key.
+          const linked = objectPoseWithLinks(S.project, o, at);
+          const cur = Array.isArray(linked.rotation)
+            ? linked.rotation
+            : rotationFromDirRoll(linked.dir, linked.roll);
+          const next = facingRotation(local, cur);
+          const ops = [];
+          if (!Array.isArray(o.rotation)) {
+            const base = objectPose(o, at);
+            ops.push({
+              op: 'objectPatch',
+              id,
+              patch: {
+                rotation: (Array.isArray(base.rotation)
+                  ? base.rotation
+                  : rotationFromDirRoll(base.dir, base.roll)).slice(),
+              },
+            });
+          }
+          ['x', 'y', 'z'].forEach((axis, i) => {
+            const back = writeBackLocalValue(S.project, { host: 'ob', id }, `rotation.${axis}`, at, next[i]);
+            const v = Number.isFinite(back) ? back : next[i];
+            ops.push({ op: 'objectKey', id, path: `rotation.${axis}`, t: at, v: Math.round(v * 1e6) / 1e6 });
+          });
+          op(...ops);
         },
       },
       {
