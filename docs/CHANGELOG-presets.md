@@ -42,3 +42,5 @@
 | 2026-10-29 | `853a085` | **修复**：点空白取消选中——`selectAt` 提到模块顶层（修 `ReferenceError`）；点空白一律清空（池/元素/物体/相机/段落/属性行），Ctrl/Shift 保持；`select()` 认显式 `segmentId: null`；「清除选中」和 Esc 共用 `clearSelection()` | 点空白没反应，偶尔改选段落/相机，取消选中像玄学 | `app/renderer/js/main.js` | `git revert 853a085` |
 | 2026-10-29 | 见上两条 | 实施记录：像素探针与 Electron 点选探针的数值、验证清单 | 交接与回退时有据可查 | `docs/FIX-LAYER-ORDER-EMPTY-CLICK.md`（状态 + 实施记录） | — |
 | 2026-10-29 | `d629748` | 修复方案问题三：播放卡顿（时间轴每帧重写静态行信息 + 根容器 CSS 变量，22→60 fps 的实测依据） | 用户反映播放越来越卡 | `docs/FIX-LAYER-ORDER-EMPTY-CLICK.md` | `git revert d629748` |
+| 2026-10-29 | `638e063` | 对拍用例 F：正对相机的卡片在底板前（新排序 PASS，旧排序 FAIL） | 防止斜平面排序回退 | `scripts/check-render-parity.mjs` | `git revert 638e063` |
+| 2026-10-29 | `ce5189f` | 播放帧率检查脚本 + 修复前基线（22 fps，p50 50 ms） | 问题三的验收工具 | `scripts/check-playback-perf.mjs`（新）、`docs/FIX-LAYER-ORDER-EMPTY-CLICK.md` | `git revert ce5189f` |
