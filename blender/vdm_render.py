@@ -56,7 +56,11 @@ def main():
 
     if mode == 'still':
         t = float(job.get('time') or 0)
-        frame = int(round(t * fps)) + 1
+        # The project end is a boundary, not a frame: a 5 s / 60 fps project
+        # renders frames 1..300, so `still 5` must render the last frame
+        # instead of frame 301 (which no clip covers).
+        total = max(1, int(round(float(project['meta'].get('duration') or 0) * fps)))
+        frame = min(total, max(1, int(round(t * fps)) + 1))
         scene.frame_set(frame)
         out = job['out']
         os.makedirs(os.path.dirname(out), exist_ok=True)

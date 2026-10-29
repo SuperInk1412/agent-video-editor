@@ -2701,6 +2701,41 @@ export class Timeline {
     return list.find((host) => String(host?.id ?? '') === key) || null;
   }
 
+  /**
+   * 图元 row: which mesh a solid draws. Not keyable (it is a content row like
+   * 几何 / 颜色); the preview and the Blender build both read `primitive`
+   * (preview3d.js::UNIT_CYLINDER, blender/vdm_city.py::_solid_mesh).
+   */
+  _primitiveRow(o) {
+    const row = el('div', 'tl-row tl-prop');
+    row.dataset.obj = o.id;
+    row.dataset.path = 'primitive';
+    const g = el('div', 'tl-gutter');
+    g.dataset.obj = o.id;
+    g.appendChild(el('span', 'tl-linkflag'));
+    g.appendChild(el('span', 'tl-plabel', '图元'));
+    const sel = document.createElement('select');
+    sel.className = 'tl-primselect';
+    for (const [value, label] of [['box', '立方体'], ['cylinder', '圆柱']]) {
+      const opt = document.createElement('option');
+      opt.value = value;
+      opt.textContent = label;
+      sel.appendChild(opt);
+    }
+    sel.value = o.primitive === 'cylinder' ? 'cylinder' : 'box';
+    sel.dataset.tip = '图元：立方体 / 圆柱（视口与成片用同一个）';
+    sel.addEventListener('focus', () => this.onPause?.());
+    sel.addEventListener('change', () => {
+      this.onOp?.({ op: 'objectPatch', id: o.id, patch: { primitive: sel.value } });
+    });
+    g.appendChild(sel);
+    g.appendChild(el('span', 'tl-keyspace'));
+    const lane = el('div', 'tl-track');
+    row.append(g, lane);
+    this._propRows.push({ objId: o.id, path: 'primitive', kind: 'select', input: sel, lane, row, sig: '' });
+    return row;
+  }
+
   _geomRow(o) {
     const row = el('div', 'tl-row tl-prop');
     row.dataset.obj = o.id;
@@ -2886,7 +2921,9 @@ export class Timeline {
       if (max != null) inp.max = String(max);
       if (percent) { inp.dataset.scale = '100'; inp.dataset.unit = '%'; }
       box.classList.add(`tl-xcell-${ax}`);
-      box.dataset.tip = `${label} ${ax.toUpperCase()}${unit ? ` (${unit})` : ''}`;
+      box.dataset.tip = readOnly
+        ? `${label} ${ax.toUpperCase()}（只读：由飞行路径算出，用视口里的路径点改）`
+        : `${label} ${ax.toUpperCase()}${unit ? ` (${unit})` : ''}`;
       if (readOnly) {
         inp.readOnly = true;
         inp.tabIndex = -1;
@@ -2925,7 +2962,9 @@ export class Timeline {
       if (max != null) inp.max = String(max);
       if (percent) { inp.dataset.scale = '100'; inp.dataset.unit = '%'; }
       box.classList.add('tl-xsub-cell');
-      box.dataset.tip = `${label} ${ax.toUpperCase()} 子行${unit ? ` (${unit})` : ''}`;
+      box.dataset.tip = readOnly
+        ? `${label} ${ax.toUpperCase()} 子行（只读：由飞行路径算出）`
+        : `${label} ${ax.toUpperCase()} 子行${unit ? ` (${unit})` : ''}`;
       if (readOnly) {
         inp.readOnly = true;
         inp.tabIndex = -1;
@@ -3022,6 +3061,9 @@ export class Timeline {
       : `展开 ${entry.label} 的 X/Y/Z 子行（逐轴打帧）`;
     for (const sub of entry.subRows) sub.row.hidden = !entry.expanded;
     this._paintXformEntry(entry);
+    // The lane's diamonds are rebuilt (merged <-> per-axis), so the pool's
+    // highlight has to be repainted on the new nodes.
+    this._paintPool();
     // The rows below moved: refresh whatever the new span makes visible.
     this._scheduleValueSync();
   }
@@ -3678,7 +3720,7 @@ export class Timeline {
 
   // ------------------------------------------------------------ selection / input
   _paintPool() {
-    this.inner.querySelectorAll('.poolsel').forEach((n) => n.classList.remove('poolsel', 'poolprimary'));
+    this.inner.querySelectorAll('.poolsel').forEach((n) => n.classList.remove('poolsel', 'poolprimary', 'poolpart'));
     const pool = this.pool;
     if (!pool.kind || !pool.ids.length) return;
     const ids = new Set(pool.ids);
@@ -3698,8 +3740,16 @@ export class Timeline {
       this.inner.querySelectorAll('.tl-camprop[data-cam][data-path]').forEach((n) => mark(n, propertyRef(cameraRef(n.dataset.cam), n.dataset.path)));
     } else if (pool.kind === 'keyframe') {
       this.inner.querySelectorAll('.tl-key').forEach((n) => {
-        const ref = keyframeRefOf(n);
-        if (ref) mark(n, ref);
+        // A merged diamond is one node for up to three refs: it reads as
+        // selected once every key it stands for is, and keeps its hollow shape
+        // (poolpart) while only some of them are.
+        const refs = this._keyNodeRefs(n);
+        if (!refs.length) return;
+        const inside = refs.filter((ref) => ids.has(ref));
+        if (!inside.length) return;
+        n.classList.add('poolsel');
+        if (inside.length < refs.length) n.classList.add('poolpart');
+        else if (refs.includes(primary)) n.classList.add('poolprimary');
       });
     }
   }
@@ -4052,14 +4102,16 @@ export class Timeline {
       }
       this.inner.querySelectorAll('.tl-key').forEach((node) => {
         if (!node.getClientRects().length) return; // hidden by the filter
-        const ref = keyframeRefOf(node);
-        if (!ref || seen.has(ref)) return;
         const r = node.getBoundingClientRect();
         const hit = r.right + tol >= band.left && r.left - tol <= band.right
           && r.bottom + tol >= band.top && r.top - tol <= band.bottom;
         if (!hit) return;
-        seen.add(ref);
-        refs.push(ref);
+        // A merged diamond contributes every axis keyed at its time.
+        for (const ref of this._keyNodeRefs(node)) {
+          if (seen.has(ref)) continue;
+          seen.add(ref);
+          refs.push(ref);
+        }
       });
       return refs;
     };
@@ -4259,20 +4311,94 @@ export class Timeline {
     };
   }
 
-  /** A tap on a diamond: pick its ref (additive toggles) and adopt its host. */
-  _selectKeyNode(node, ev) {
+  /**
+   * Refs a `.tl-key` node stands for: exactly one for a real diamond, one per
+   * keyed axis for a merged diamond on a collapsed transform row.
+   */
+  _keyNodeRefs(node) {
     const ref = keyframeRefOf(node);
-    if (!ref) return false;
-    this._pickPool('keyframe', ref, ev);
-    if (node.dataset.cam) {
-      this._selectPoolHost();
-    } else if (node.dataset.el) {
-      this.propSel = { elId: node.dataset.el, path: node.dataset.path };
-      this._selectPoolHost();
-    } else if (node.dataset.obj) {
-      this.propSel = { objId: node.dataset.obj, path: node.dataset.path };
-      this._selectPoolHost();
+    return ref ? [ref] : this._summaryRefs(node);
+  }
+
+  /**
+   * Refs behind a merged diamond (`.tl-key-sum`). A collapsed transform row
+   * draws one diamond per keyed time on the parent lane instead of one per axis
+   * (docs/DESIGN-TRANSFORM-UNIFY.md §9.1), so that diamond has no ref of its
+   * own: it stands for every axis that has a key at that time. The pool is
+   * homogeneous in *kind* and may hold several refs of one host, so a click
+   * takes them all — Delete, the curve panel and a drag then act on exactly the
+   * keys the expanded sub-rows would have given one by one.
+   */
+  _summaryRefs(node) {
+    if (!node?.classList?.contains('tl-key-sum')) return [];
+    const t = Number(node.dataset.t);
+    if (!Number.isFinite(t)) return [];
+    const entry = this._xformRows.find((x) => x.lane === node.parentElement);
+    const host = entry ? this._xformHost(entry) : null;
+    if (!host) return [];
+    const hostRef = entry.kind === 'cam' ? cameraRef(entry.id)
+      : entry.kind === 'ob' ? objectRef(entry.id)
+        : elementRef(entry.id);
+    const refs = [];
+    for (const ax of XF_AXES) {
+      const path = xfAxisPath(entry.kind, entry.rowKey, ax);
+      // Match the key's own (round-3) time, not "a key within tolerance": a
+      // zoomed-out row must not hand the pool a ref that does not exist.
+      const times = xfAxisKeyState(host, entry.kind, entry.rowKey, ax, t, this._tol()).times || [];
+      const at = times.find((x) => Math.abs(x - t) <= 1e-3);
+      if (at == null) continue;
+      refs.push(keyframeRef(hostRef, path, at));
     }
+    return refs;
+  }
+
+  /**
+   * One pick over a keyframe node's refs. A plain pick replaces the pool, an
+   * additive one toggles the whole set (all in -> all out) so a merged diamond
+   * behaves like the group of keys it shows.
+   */
+  _pickKeyRefs(refs, ev) {
+    const additive = !!(ev?.ctrlKey || ev?.metaKey || ev?.shiftKey);
+    if (refs.length === 1) {
+      this.pool = pickSelection(this.pool, 'keyframe', refs[0], additive);
+      return;
+    }
+    if (!additive) {
+      this.pool = normalizeSelection({ kind: 'keyframe', ids: refs, primary: refs[0] });
+      return;
+    }
+    const cur = normalizeSelection(this.pool);
+    const ids = cur.kind === 'keyframe' ? cur.ids : [];
+    const has = new Set(ids);
+    if (refs.every((ref) => has.has(ref))) {
+      // Every key of the group is selected: drop them together.
+      const left = ids.filter((ref) => !refs.includes(ref));
+      const primary = has.has(cur.primary) && left.includes(cur.primary)
+        ? cur.primary
+        : left[left.length - 1];
+      this.pool = left.length
+        ? normalizeSelection({ kind: 'keyframe', ids: left, primary })
+        : emptySelection();
+      return;
+    }
+    const next = [...new Set([...ids, ...refs])];
+    this.pool = normalizeSelection({
+      kind: 'keyframe', ids: next, primary: refs.find((ref) => !has.has(ref)) || next[0],
+    });
+  }
+
+  /** A tap on a diamond: pick its refs (additive toggles) and adopt its host. */
+  _selectKeyNode(node, ev) {
+    const refs = this._keyNodeRefs(node);
+    if (!refs.length) return false;
+    this._pickKeyRefs(refs, ev);
+    // Follow the pool's primary, so an additive pick that emptied the pool does
+    // not leave the previous key's property row highlighted.
+    const primary = splitRef(this.pool.primary || '');
+    if (primary?.type === 'el') this.propSel = { elId: primary.id, path: primary.path };
+    else if (primary?.type === 'ob') this.propSel = { objId: primary.id, path: primary.path };
+    else this.propSel = null;
+    this._selectPoolHost();
     this._paintSelection();
     return true;
   }
@@ -4282,17 +4408,19 @@ export class Timeline {
    * frames; a vertical drag keeps the old marquee gesture. An unselected
    * diamond is selected first (Ctrl/Shift still toggle), then its pool is
    * dragged: a multi-host pool keeps every key on its own host and track.
-   * Returns false when the press should fall back to the marquee.
+   * A merged diamond drags every axis keyed at its time. Returns false when the
+   * press should fall back to the marquee.
    */
   _dragKeys(ev, node, at) {
-    const ref = keyframeRefOf(node);
-    if (!ref) return false;
+    const refs = this._keyNodeRefs(node);
+    if (!refs.length) return false;
     // Only horizontal movement changes time; a mostly-vertical drag is still a
     // box-select, like it was before keyframe dragging existed.
     const dx = at.clientX - ev.clientX;
     const dy = at.clientY - ev.clientY;
     if (Math.abs(dx) <= Math.abs(dy)) return false;
-    if (!(this.pool?.kind === 'keyframe' && this.pool.ids.includes(ref))) {
+    const selected = this.pool?.kind === 'keyframe' && refs.some((ref) => this.pool.ids.includes(ref));
+    if (!selected) {
       this._selectKeyNode(node, ev);
     }
     if (this.pool?.kind !== 'keyframe' || !this.pool.ids.length) return false;
@@ -4315,13 +4443,13 @@ export class Timeline {
     const startX = ev.clientX;
     const wanted = new Set(list);
     const nodes = [];
-    const seen = new Set();
     this.inner.querySelectorAll('.tl-key').forEach((node) => {
-      const ref = keyframeRefOf(node);
-      if (!ref || !wanted.has(ref) || seen.has(ref)) return;
+      // A merged diamond previews through the first ref it shares with the
+      // pool; every axis at that time moves by the same delta anyway.
+      const ref = this._keyNodeRefs(node).find((r) => wanted.has(r));
+      if (!ref) return;
       const t = Number(node.dataset.t);
       if (!Number.isFinite(t)) return;
-      seen.add(ref);
       nodes.push({ ref, node, left: node.style.left });
     });
     for (const n of nodes) n.node.classList.add('dragging');
@@ -4471,9 +4599,12 @@ export class Timeline {
     }
     // A diamond is a click on release; a horizontal drag moves the keyframe
     // pool, any other drag still starts a marquee. The marquee may include
-    // element keys (`data-el`), not just camera/3D ones.
+    // element keys (`data-el`), not just camera/3D ones. A merged diamond on a
+    // collapsed transform row has no ref of its own but stands for every axis
+    // keyed at that time, so it is a key surface too — it must never fall
+    // through to the lane and clear the selection.
     const keyNode = target.closest?.('.tl-key');
-    if (keyNode && keyframeRefOf(keyNode)) {
+    if (keyNode && (keyframeRefOf(keyNode) || keyNode.classList.contains('tl-key-sum'))) {
       ev.preventDefault();
       this._deferGesture(ev, {
         slop: 3,

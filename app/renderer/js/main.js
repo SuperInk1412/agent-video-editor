@@ -204,7 +204,10 @@ let worldRequest = 0;
 function syncWorld(p) {
   if (!p.camera) return;
   const key = JSON.stringify({ world: p.world, cameras: p.cameras, camera: p.camera,
-    cameraOrder: p.cameraOrder, fps: p.meta.fps, duration: p.meta.duration });
+    cameraOrder: p.cameraOrder, fps: p.meta.fps, duration: p.meta.duration,
+    // A camera parented to a 3D object flies with that object's tracks, so the
+    // corridor clearing changes when the parent animates: refetch then too.
+    objects: p.scene?.objects || null });
   if (key === worldKey) return;
   const request = ++worldRequest;
   clearTimeout(worldTimer);
@@ -284,7 +287,7 @@ const projectFps = () => S.project?.meta.fps || 24;
 
 /**
  * The picture time of a wall-clock moment: the start of the frame containing
- * `t`, clamped to the project.
+ * `t`, clamped to the project's **last existing frame**.
  *
  * Two clocks (docs/FIX-LAYER-ORDER-EMPTY-CLICK.md §五): the wall clock only
  * runs the transport (end of the project / the followed shot, looping, audio);
@@ -293,11 +296,25 @@ const projectFps = () => S.project?.meta.fps || 24;
  * (Blender, engine/shot.js), so a mid-frame picture is a state that exists
  * nowhere in the video: miku-swiss f46–f52 drew a lyric at the top right for
  * the last 0.99 frame of a shot that no export ever shows.
+ *
+ * `duration` is the *end boundary*, not a frame: a 5 s / 60 fps project has 300
+ * frames (f0…f299, t = 0…4.9833). Parking the playhead on t = 5.0 put it on a
+ * frame the video does not contain — clips are half-open `[start, start+dur)`,
+ * so every object was invisible there (the "last frame loses everything" bug).
  */
 function pictureTime(t) {
   const dur = S.project?.meta.duration || 12;
-  const asked = Math.max(0, Math.min(dur, Number(t) || 0));
-  return Math.max(0, Math.min(dur, frameStart(asked, projectFps())));
+  const fps = projectFps();
+  const last = lastFrameTime(dur, fps);
+  const asked = Math.max(0, Math.min(last, Number(t) || 0));
+  return Math.max(0, Math.min(last, frameStart(asked, fps)));
+}
+
+/** Start of the last frame a project of `duration` seconds actually renders. */
+function lastFrameTime(duration, fps = projectFps()) {
+  const rate = Math.max(1, Math.round(Number(fps) || 24));
+  const frames = Math.max(1, Math.round((Number(duration) || 0) * rate));
+  return (frames - 1) / rate;
 }
 
 /**
@@ -323,6 +340,7 @@ function setTime(t, { seekAudio = true } = {}) {
   S.time = pictureTime(asked);
   timeline?.setTime(S.time);
   updateTimecode();
+  updateSelectionInfo();
   if (seekAudio && S.playing) preview.setAudioTime(S.time);
   if (!S.playing) inspector.render(S.project, S.selection, S.time);
   if (S.followCam) syncViewControls();
@@ -1312,6 +1330,51 @@ const SEL_TYPE = {
 const OBJ_TYPE = { solid: '3D 物体', empty: '空元素', image: '3D 图片', video: '3D 视频', text: '3D 文字' };
 
 /** Transport selection summary: type badge + name; 3D objects keep path / world position in the tip. */
+/**
+ * Share of a 3D object's projected bounding box that falls outside the picture
+ * at `t`, measured through the **shot** camera (the picture, not the editor
+ * view). 0 = fully inside, 1 = nothing of it on screen. Used for the status-bar
+ * hint: the safe-area overlay shows the frame, but nothing said the subject had
+ * slid out of it.
+ */
+function objectOutOfFrame(project, obj, t) {
+  const corners = gizmo?.objectCorners?.(obj, t);
+  const cam = evalCameraWorldWithLinks(project, t);
+  if (!corners?.length || !cam) return 0;
+  const f = v3norm(v3sub(cam.look, cam.pos));
+  let right = v3norm([-f[2], 0, f[0]]);
+  let up = [right[1] * f[2] - right[2] * f[1], right[2] * f[0] - right[0] * f[2], right[0] * f[1] - right[1] * f[0]];
+  const roll = ((Number(cam.roll) || 0) * Math.PI) / 180;
+  if (roll) {
+    const c = Math.cos(roll), s = Math.sin(roll);
+    const r2 = [right[0] * c + up[0] * s, right[1] * c + up[1] * s, right[2] * c + up[2] * s];
+    const u2 = [up[0] * c - right[0] * s, up[1] * c - right[1] * s, up[2] * c - right[2] * s];
+    right = r2;
+    up = u2;
+  }
+  const aspect = (Number(project.meta?.width) || 1920) / Math.max(1, Number(project.meta?.height) || 1080);
+  const th = Math.tan((Math.min(179, Math.max(1, Number(cam.fov) || 62)) * Math.PI) / 360);
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const p of corners) {
+    const v = v3sub(p, cam.pos);
+    const z = v[0] * f[0] + v[1] * f[1] + v[2] * f[2];
+    if (z <= 1e-3) return 1; // straddles the lens: treat as out
+    const nx = (v[0] * right[0] + v[1] * right[1] + v[2] * right[2]) / (z * th * aspect);
+    const ny = (v[0] * up[0] + v[1] * up[1] + v[2] * up[2]) / (z * th);
+    const sx = 0.5 + nx / 2;
+    const sy = 0.5 - ny / 2;
+    if (sx < minX) minX = sx;
+    if (sx > maxX) maxX = sx;
+    if (sy < minY) minY = sy;
+    if (sy > maxY) maxY = sy;
+  }
+  const w = maxX - minX, h = maxY - minY;
+  if (!(w > 1e-6) || !(h > 1e-6)) return 0;
+  const insideW = Math.max(0, Math.min(1, maxX) - Math.max(0, minX));
+  const insideH = Math.max(0, Math.min(1, maxY) - Math.max(0, minY));
+  return Math.max(0, Math.min(1, 1 - (insideW * insideH) / (w * h)));
+}
+
 function updateSelectionInfo() {
   const node = $('#selInfo');
   if (!node) return;
@@ -1334,7 +1397,15 @@ function updateSelectionInfo() {
     const world = pose.worldPos.map((v) => (Math.round(Number(v) * 100) / 100).toFixed(2)).join(', ');
     const kids = childrenOf(p, obj.id).length;
     const note = obj.parent?.id ? '\n手柄和轨迹按世界位置显示；时间轴属性仍是本地值' : '';
-    show(OBJ_TYPE[obj.type] || '3D', 'badge-object', obj.name || obj.id, `${path} · 世界 ${world}${kids ? ` · ${kids} 子级` : ''}${note}`);
+    // Subject slid out of the picture: the safe frame shows the boundary, but
+    // nothing told the user the thing they are editing is mostly off screen.
+    const out = objectOutOfFrame(p, obj, S.time);
+    const warn = out > 0.05 ? ` · 出画 ${Math.round(out * 100)}%` : '';
+    const warnTip = out > 0.05
+      ? `\n主体有 ${Math.round(out * 100)}% 在画面外（镜头视角的画面）；拖相机或改相机路径点重新取景`
+      : '';
+    show(OBJ_TYPE[obj.type] || '3D', 'badge-object', `${obj.name || obj.id}${warn}`,
+      `${path} · 世界 ${world}${kids ? ` · ${kids} 子级` : ''}${warnTip}${note}`);
     return;
   }
   const el = sel.elementId ? (p?.elements || []).find((e) => e.id === sel.elementId) : null;
@@ -1538,6 +1609,27 @@ function flyToFeed(id) {
   return true;
 }
 
+/**
+ * Free editor camera for entering 编辑视角: a little behind the shot camera and
+ * slightly above it, looking the same way. It used to copy the lens exactly, so
+ * the first look was indistinguishable from 镜头视角 and the shot frustum was
+ * drawn right on top of the eye. Following a camera (F5) still sits exactly on
+ * it — that path sets `S.editCam` itself.
+ */
+function editorCamFrom(shot) {
+  const look = shot.look.slice();
+  const fwd = v3norm(v3sub(look, shot.pos));
+  const dist = Math.max(1e-3, v3len(v3sub(look, shot.pos)));
+  const back = Math.min(12, Math.max(3, dist * 0.35));
+  const lift = Math.min(2.5, back * 0.25);
+  return {
+    pos: [shot.pos[0] - fwd[0] * back, shot.pos[1] - fwd[1] * back + lift, shot.pos[2] - fwd[2] * back],
+    look,
+    roll: 0,
+    fov: shot.fov,
+  };
+}
+
 function setEditMode(on) {
   if (on && !S.project?.camera) { toast('这个项目没有相机'); return; }
   S.followCam = null;
@@ -1545,7 +1637,7 @@ function setEditMode(on) {
   preview.editMode = S.editMode;
   if (S.editMode) {
     const c = evalCameraWorldWithLinks(S.project, S.time);
-    S.editCam = { pos: c.pos.slice(), look: c.look.slice(), roll: c.roll || 0, fov: c.fov };
+    S.editCam = editorCamFrom(c);
     preview.editCam = S.editCam;
   } else {
     S.editCam = null;

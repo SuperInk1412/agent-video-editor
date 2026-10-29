@@ -324,8 +324,12 @@ body.tl-parent-dragging, body.tl-parent-dragging * { cursor: crosshair !importan
 .tl-num input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 .tl-num input:focus { box-shadow: none; }
 .tl-num i:empty { display: none; }
-.tl-num.tl-ro { background: transparent; border-color: var(--border-subtle); }
-.tl-num.tl-ro input { color: var(--text-2); cursor: default; }
+/* Read-only values (a camera's flight XYZ): no field chrome at all, so a row
+   that cannot be typed into never looks like one that can. */
+.tl-num.tl-ro { background: transparent; border-color: transparent; }
+.tl-num.tl-ro input { color: var(--text-3); cursor: default; }
+.tl-num.tl-ro input:focus { outline: none; }
+.tl-num.tl-ro:hover { border-color: transparent; }
 .tl-num.dim { opacity: .55; }
 .tl-num.dim input { color: var(--text-3); }
 .tl-scalar { grid-column: 3; }
@@ -451,6 +455,10 @@ body.tl-parent-dragging, body.tl-parent-dragging * { cursor: crosshair !importan
 .blk.poolsel.poolprimary { background: var(--accent-bg-strong); border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), 0 0 10px var(--accent-bg); }
 .tl-key.poolsel { background: var(--edit); border-color: var(--surface-0); }
 .tl-key.poolsel.poolprimary { box-shadow: 0 0 0 1px var(--edit-border); }
+/* A merged diamond (collapsed transform row) stands for every axis keyed at its
+   time: hollow + edit border while only some of them are selected; a filled one
+   means the whole group is (timeline.js::_summaryRefs). */
+.tl-key.poolsel.poolpart { background: transparent; border-color: var(--edit); }
 /* A diamond being dragged horizontally: same size, grab cursor, above peers. */
 .tl-key.dragging { cursor: ew-resize; background: var(--keyframe); z-index: 6; }
 

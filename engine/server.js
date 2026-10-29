@@ -352,6 +352,11 @@ async function startOwnedServer({ root, port = 47100, open = false, onReady, imp
       if (pathname === '/api/world' && req.method === 'GET') {
         const snapshot = project;
         const key = hashOf({ world: snapshot.world, cameras: snapshot.cameras, cameraOrder: snapshot.cameraOrder,
+          // The corridor clearing depends on where the cameras fly, and a
+          // camera parented to a 3D object flies with that object's tracks —
+          // without `scene.objects` here, animating the parent left every open
+          // window on the old city while a fresh one baked the right one.
+          scene: snapshot.scene?.objects || null,
           fps: snapshot.meta.fps, duration: snapshot.meta.duration });
         if (!worldPromise || key !== worldKey) {
           worldKey = key;

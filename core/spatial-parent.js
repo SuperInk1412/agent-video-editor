@@ -440,7 +440,13 @@ export function applySpatialParentOp(project, op, api = {}) {
         ...(same && isRecord(prev.strength) ? prev.strength : {}),
         ...(isRecord(op.strength) ? op.strength : {}),
       });
-      const record = { id: pid, mode: 'world', inherit, bind: roundBind(resolved.bind) };
+      // A re-bind to the *same* parent keeps the zero frame it was bound with.
+      // The follow switches (跟随位置/旋转/缩放) and strength edits send this op
+      // at the playhead; re-binding there re-zeroed the child against the
+      // parent's current pose, so toggling a switch at t=2.5 rotated a parented
+      // camera's whole path 90° and the shot never came back.
+      const bind = same && isRecord(prev.bind) ? prev.bind : roundBind(resolved.bind);
+      const record = { id: pid, mode: 'world', inherit, bind };
       if (strength) record.strength = strength;
       if (same && isRecord(prev.strengthKeys)) record.strengthKeys = prev.strengthKeys;
       setChildSpatialParent(child.kind, child.host, record);
