@@ -70,6 +70,23 @@ export function frameWriteTime(t, fps, duration = 0) {
   return frameKeyTime(time, fps);
 }
 
+/**
+ * Start of the last frame a project of `duration` seconds actually renders.
+ *
+ * `duration` is the **end boundary, not a frame**: a 5 s / 60 fps project has
+ * 300 frames (f0 … f299, t = 0 … 4.9833…), and t = 5.0 is not one of them.
+ * Clips are half-open `[start, start + duration)` and every renderer samples
+ * `t = frame / fps`, so a playhead parked on the boundary shows a frame with no
+ * content (the "last frame loses everything" bug). `round(duration * fps)` is
+ * the frame count engine/shot.js bakes; a project shorter than half a frame
+ * still shows its single frame.
+ */
+export function lastFrameTime(duration, fps = 24) {
+  const rate = normalizeFps(fps);
+  const frames = Math.max(1, Math.round((Number(duration) || 0) * rate));
+  return (frames - 1) / rate;
+}
+
 const roundMillis = (v) => Math.round(v * 1000) / 1000;
 
 /**
