@@ -44,3 +44,5 @@
 | 2026-10-29 | `d629748` | 修复方案问题三：播放卡顿（时间轴每帧重写静态行信息 + 根容器 CSS 变量，22→60 fps 的实测依据） | 用户反映播放越来越卡 | `docs/FIX-LAYER-ORDER-EMPTY-CLICK.md` | `git revert d629748` |
 | 2026-10-29 | `638e063` | 对拍用例 F：正对相机的卡片在底板前（新排序 PASS，旧排序 FAIL） | 防止斜平面排序回退 | `scripts/check-render-parity.mjs` | `git revert 638e063` |
 | 2026-10-29 | `ce5189f` | 播放帧率检查脚本 + 修复前基线（22 fps，p50 50 ms） | 问题三的验收工具 | `scripts/check-playback-perf.mjs`（新）、`docs/FIX-LAYER-ORDER-EMPTY-CLICK.md` | `git revert ce5189f` |
+| 2026-10-29 | `0484387` | **修复**：播放卡顿——时间轴 `_syncProps` 拆成「每帧数值」和「只在变化时刷的静态信息」，播放中数值降到约 11 Hz（暂停/跳转立刻准确）；所有 DOM 写入先比较；帧高亮带改成自己写行内 transform/width，不再改 `.tl-rows` 的 CSS 变量；gizmo 缓存 `scale`（原来每帧读一次布局）并跳过空白帧 | 播放 22 fps、帧间隔 50 ms，越大的工程越卡 | `app/renderer/js/timeline.js`、`app/renderer/js/pathgizmo.js`、`app/renderer/js/main.js`、`app/renderer/css/timeline.css` | `git revert 0484387` |
+| 2026-10-29 | 见上条 | 实施记录：性能检查三次复测（59.7 / 60 / 59.7 fps，p50 16.7 ms）、展开属性行的最坏情况、Electron 探针 21 项 | 交接与回退时有据可查 | `docs/FIX-LAYER-ORDER-EMPTY-CLICK.md`（状态 + 分工表 + 实施记录） | — |

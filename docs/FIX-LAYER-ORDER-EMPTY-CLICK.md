@@ -1,8 +1,8 @@
 # 修复方案 · 2D 平面前后顺序 + 点空白取消选中 + 播放卡顿
 
-> 状态：**已实施**（2026-10-29，A 照着本方案做）。问题一 `25f54d2`、问题二 1/2 `853a085`；
-> 问题二 3「元素锁定」还需要另行批准。实施记录见文末。
-> **问题三（播放卡顿）2026-10-29 用户已批准**：修法 1–5 由 A 实施（`timeline.js`、`pathgizmo.js`），6 性能检查 B 已完成并记下基线。
+> 状态：**已实施**（2026-10-29，A 照着本方案做）。问题一 `25f54d2`、问题二 1/2 `853a085`、
+> 问题三 1–5 `0484387`；问题二 3「元素锁定」还需要另行批准。实施记录见文末。
+> 问题三的修法 1–5 由 A 实施（`timeline.js`、`pathgizmo.js`），修法 6 的性能检查 B 已完成并记下基线。
 > 每个问题一个提交，可单独回退。
 
 ---
@@ -197,7 +197,7 @@ JS 合计约 5 ms，其余 40 多 ms 是**浏览器每帧重排 / 重绘时间�
 | 问题一 对拍 | B ✅ `638e063` | `scripts/check-render-parity.mjs` 用例 F（正对相机的卡片在底板前 2 m）：新排序 2/144 PASS，换回旧排序 14/144 FAIL |
 | 问题二 1、2 | A ✅ `853a085` | `app/renderer/js/main.js` |
 | 问题二 3 锁定 | 待批准后定 | schema（`el.locked`）、`main.js` 点选/框选、时间轴开关 |
-| 问题三 1–5 播放卡顿 | A（建议，待批准） | `app/renderer/js/timeline.js`、`pathgizmo.js`、样式表 |
+| 问题三 1–5 播放卡顿 | A ✅ `0484387` | `app/renderer/js/timeline.js`、`pathgizmo.js`、`main.js`、`css/timeline.css` |
 | 问题三 6 性能检查 | B ✅（本提交） | `scripts/check-playback-perf.mjs`（新），基线见问题三 |
 
 问题一、二、三互不依赖，可以并行；各自一个提交，记入改动日志。问题三建议先由 B 加性能检查记下基线，A 改完再测一次对比。
@@ -241,10 +241,59 @@ JS 合计约 5 ms，其余 40 多 ms 是**浏览器每帧重排 / 重绘时间�
     拖框行为不变，`window.onerror` 为空。
 - 本次未做：问题二 3（元素「锁定」开关）——方案里写着要另行批准，未加 `el.locked`。
 
+### 问题三 1–5 `0484387`
+
+- `timeline.js`：`_syncProps` 拆成两半——
+  - `_syncValues`：只写随时间变的东西（数值框、◆ 的 on/has、关键帧菱形的 `.at`）；
+  - `_syncStatics`：行头名字、片段位置 / 宽度 / 名字 / 时长 / 提示、眼睛、颜色点、行选中、属性父级按钮。
+  编辑和 blur 仍走 `_syncProps()`（两半都刷），播放只走 `_syncValues`。
+- 播放降频：`setTime(t, { live })`。主循环每帧传 `live: true`，数值最多每 90 ms 刷一次
+  （`VALUE_SYNC_MS`）；播放头、帧高亮带、时间码照旧每帧更新。暂停 `pause()` 调 `timeline.flushValues()`
+  落到准确值；拖动播放头、跳转、截图都是非 live，立即刷新。
+- 只看看得见的行：`_visibleSpan()` 取 `scrollTop / clientHeight` 上下各留 120 px，`_visibleRows()`
+  **先一次性**把所有 `.tl-row` 的 `offsetTop` 量完再写数值（先写再量会每行触发一次重排），
+  折叠的分组（`offsetParent` 为空）和滚出视野的行跳过。滚动和展开逐轴子行时用 rAF 补刷一次
+  （`_scheduleValueSync`），所以滚回来不会是旧值。
+- 所有写入先比较：新增 `setText / setTip / setAttr / setStyle / setValue`（`setStyle` 把上次的值缓存在
+  节点上，因为 `#17d9ff` 读回来是 `rgb(23, 217, 255)`），`writeNumber`、`setClipWidth`、
+  `classList.toggle(name, force)` 本来就只在值变化时动 DOM。
+- 帧高亮带：`.tl-frame-band` 自己写行内 `transform` / `width`，`.tl-rows` 上不再有
+  `--tl-frame-left / --tl-frame-w`（改祖先的自定义属性会让整棵 2800 节点子树重算样式）。
+- `pathgizmo.js`：`scale` 改为缓存（`resize()` 清掉），不再每次读取都 `getBoundingClientRect()`
+  ——每帧的 `draw()` 排在时间轴弄脏布局之后，这一读就是一次整页重排。`visible` 为假且上一帧已经
+  清过画布时，`draw()` 直接返回。
+- `main.js`：主循环传 `{ live: true }`；`pause()` 里 `timeline.flushValues()`。
+
+实测（`node scripts/check-playback-perf.mjs`，miku-swiss 副本，138 元素 / 9 相机 / 4532 个 DOM 节点，
+窗口 1536×816，从 2 s 起播 3 s，连跑三次）：
+
+| 次 | 帧率 | 间隔 p50 | p95 | 每帧 JS：时间轴 / 预览 / gizmo |
+|---|---|---|---|---|
+| 修复前（B 的基线） | 22 fps | 50 ms | 50.1 ms | 3.5 / 2.3 / 23.6 ms |
+| 1 | 59.7 fps | 16.7 ms | 16.7 ms | 1.3 / 1.84 / 0 ms |
+| 2 | 60 fps | 16.7 ms | 16.8 ms | 1.22 / 2.16 / 0 ms |
+| 3 | 59.7 fps | 16.7 ms | 16.7 ms | 1.41 / 2.12 / 0 ms |
+
+判定由 **FAIL** 变 **PASS**（门槛 p50 ≤ 20 ms、p95 ≤ 34 ms）。另测最坏情况（选中一个节点元素、
+8 个元素展开属性行 + 一个相机属性页打开，6498 个 DOM 节点）：59.7 fps，p50 / p95 16.7 ms。
+
+功能没有退化，Electron 探针（临时脚本 `.scratch/probe-timeline-sync.mjs`，21 项全过）：
+
+- 帧高亮带：49 条带子的行内 transform / width 一致；`band.left` 与 DOM 一致（586 px）且与播放头重合；
+  宽度 8.14 px（326% 缩放下一帧的宽度）；
+- 数值：跳到 0 s / 3 s 立刻变成 −2 / +2 m，1.5 s 是中点（easeInOut 对称）；播放 0.7 s 后暂停，
+  数值框与暂停时刻的准确值一致（没有停在降频前的旧值）；90 ms 内的 live tick 不动，到点的那次会刷，
+  `flushValues()` 立即准确；
+- 行滚出视野时不刷（符合预期）；滚回来不用再 seek，rAF 补刷后就是当前播放头的值；
+- 改名字 / 改时长 / 切换显示后 `_syncStatics` 立刻反映（名字、片段宽度、眼睛图标都对）；
+- gizmo：`scale` 缓存生效（1.251 = DPR 1.25），预览模式下 `draw()` 走空白跳过；
+- `window.onerror` 为空。
+
 ### 验证
 
 - `npm test`：481 项全过。
 - `npm run check:preview`：PASS（朝向未变）。
 - `npm run blender:check`：PASS（Blender 5.0.1，渲一帧 4.3 s）。
-- `node scripts/check-render-parity.mjs`：PASS，144 格里 1 格不同（允许 4 格），A–E 现有用例没有退化。
+- `node scripts/check-render-parity.mjs`：PASS，144 格里 2 格不同（允许 4 格；B 的用例 F 已加进来）。
+- `node scripts/check-playback-perf.mjs`：**PASS**，22 fps / p50 50 ms → 59.7 fps / p50 16.7 ms（问题三）。
 
