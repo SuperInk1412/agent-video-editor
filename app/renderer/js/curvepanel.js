@@ -8,13 +8,20 @@
 // Bezier presets expose their two control points; the parameterised presets
 // (bounce / elastic / cyclic / step / elasticStep) expose the handles declared
 // by core/curves.js::curveHandles, and dragging one writes the mapped parameter
-// through moveCurveHandle. The value window follows curveRange so overshoot
-// handles (elastic magnitude, cyclic sharpness) stay reachable.
+// through moveCurveHandle.
+//
+// Scalar tracks draw the whole property track as one continuous line on a
+// real-value y axis (docs/DESIGN-CURVEPANEL-V2.md §2/§6): every pixel column
+// samples core/time.js::sampleTrack, which is the same evaluator the preview
+// uses, so keys sit exactly where the element will be. The camera flight track
+// keeps its progress 0..1 axis — its stored curves are progress shapes, not
+// values, and its view is unchanged by the scalar rework.
 import {
   sampleCurve, normalizeCurve, presetCurve, curveLabel, curveSegments, CURVE_GROUPS,
   curveHandles, moveCurveHandle, curveRange, curveParamsText,
 } from '/core/curves.js';
 import { retimePathSpan } from '/core/camera.js';
+import { sampleTrack } from '/core/time.js';
 import { cameraRef, elementRef, keyframeRef, objectRef } from '/core/selection.js';
 import { h, icon, token } from './ui.js';
 
@@ -26,6 +33,16 @@ const el = (tag, cls, html) => {
 };
 
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+
+/**
+ * Numeric value of one key. Element keyframes store `value`, scene object and
+ * camera channels store `v`; colours, text and vectors have no numeric value
+ * (they still draw, see the step band in draw()).
+ */
+const keyValue = (key) => {
+  const raw = key?.value !== undefined ? key.value : key?.v;
+  return typeof raw === 'number' && Number.isFinite(raw) ? raw : null;
+};
 
 // Canvas colors come from the design tokens (DESIGN.md §3); `alpha` tints one.
 const C = (name) => token(name);
@@ -283,8 +300,12 @@ export class CurvePanel {
     return span?.curve || null;
   }
 
-  /** All real curves the panel must show, plus a sensible fallback window. */
-  _curveWindow() {
+  /**
+   * Progress window for the camera flight view. Flight spans store progress
+   * curves (0..1 between keys), so this axis stays in curve space; every
+   * stored span's overshoot is included so its handles stay reachable.
+   */
+  _progressWindow() {
     if (!this._isPathMode() || !this.path?.spans?.length) return curveRange(this.curve);
     let min = Infinity;
     let max = -Infinity;
@@ -294,6 +315,54 @@ export class CurvePanel {
       max = Math.max(max, b);
     }
     return Number.isFinite(min) ? [min, max] : [-0.25, 1.25];
+  }
+
+  /**
+   * Real-value window for the whole displayed track (§2/§6): keys define the
+   * range, segments with a stored curve add their overshoot so bounce/elastic
+   * peaks stay on screen, and the final window keeps 8% headroom on each side
+   * so the line never touches the frame.
+   */
+  _valueWindow() {
+    const keys = this._trackKeys(this._track()?.path);
+    const values = [];
+    for (const key of keys) {
+      const v = keyValue(key);
+      if (v != null) values.push(v);
+    }
+    let min;
+    let max;
+    if (values.length >= 2 && Math.max(...values) > Math.min(...values)) {
+      min = Math.min(...values);
+      max = Math.max(...values);
+    } else {
+      // One key, equal values or a colour track: no span to scale to, so give
+      // the axis room to breathe around the value we do have.
+      const center = values[0] ?? 0;
+      const pad = Math.max(Math.abs(center) * 0.1, 1);
+      min = center - pad;
+      max = center + pad;
+    }
+    const span = Math.max(1e-9, max - min);
+    // A curve's progress range maps through the pair's value delta; a pair
+    // with no value span still gets a little room so its handle is grabbable.
+    let lo = min;
+    let hi = max;
+    for (let i = 0; i + 1 < keys.length; i++) {
+      const a = keyValue(keys[i]);
+      const b = keyValue(keys[i + 1]);
+      const curve = normalizeCurve(keys[i]?.curve);
+      if (a == null || b == null || !curve) continue;
+      const [p0, p1] = curveRange(curve);
+      const v0 = a + (b - a) * p0;
+      const v1 = a + (b - a) * p1;
+      const below = Math.max(0, min - Math.min(v0, v1));
+      const above = Math.max(0, Math.max(v0, v1) - max);
+      lo = Math.min(lo, min - Math.max(below, span * 0.06));
+      hi = Math.max(hi, max + Math.max(above, span * 0.06));
+    }
+    const room = Math.max(1e-9, hi - lo) * 0.08;
+    return [lo - room, hi + room];
   }
 
   close() {
@@ -568,7 +637,8 @@ export class CurvePanel {
    * Panel geometry follows the timeline exactly: same gutter, pps and
    * scrollLeft, so keyframe diamonds in the ruler and the curve share x.
    * Zoom the timeline (buttons / Ctrl+wheel) to edit a short segment.
-   * The value window comes from `curveRange` so overshoot handles stay visible.
+   * The y axis shows the track's real values; the camera flight view keeps the
+   * progress window its progress-space curves and handles live in.
    */
   _geo() {
     const L = this._layout();
@@ -580,18 +650,50 @@ export class CurvePanel {
     const plotRight = L.W - L.rightPad;
     const xOf = (t) => gutter + Number(t) * pps - scroll;
     const tOf = (x) => (x + scroll - gutter) / Math.max(1, pps);
-    const range = this._curveWindow();
+    const range = this._isPathMode() ? this._progressWindow() : this._valueWindow();
     const height = Math.max(1, L.bottom - L.top);
     const yOf = (v) => L.bottom - ((Number(v) - range[0]) / (range[1] - range[0])) * height;
     const vOf = (y) => range[0] + ((L.bottom - y) / height) * (range[1] - range[0]);
     return { ...L, gutter, pps, scroll, plotLeft, plotRight, range, xOf, tOf, yOf, vOf };
   }
 
+  /** Segment endpoints' real values, or null when they have no value span. */
+  _segValues(seg) {
+    const a = keyValue(seg?.a);
+    const b = keyValue(seg?.b);
+    return a != null && b != null && Math.abs(b - a) > 1e-9 ? { a, d: b - a } : null;
+  }
+
+  /**
+   * Visible window in progress units for one segment's handles. Handles store
+   * progress, the axis shows values, and the two are affine per segment
+   * (`value = a + d * v`), so the window flips when the segment descends —
+   * keep the sign or one pixel of drag would move the handle the wrong way.
+   * A segment with no value span keeps the old progress-space window.
+   */
+  _segProgressRange(g, seg) {
+    const s = this._segValues(seg);
+    if (s) return [(g.range[0] - s.a) / s.d, (g.range[1] - s.a) / s.d];
+    return this._progressWindow();
+  }
+
+  /**
+   * Screen y for one handle's progress. Map it through the segment's real
+   * values; without a value span fall back to progress scaled over the window
+   * height (the pre-value-axis placement, so zero-span segments still work).
+   */
+  _handleY(g, seg, v) {
+    const s = this._segValues(seg);
+    if (s) return g.yOf(s.a + s.d * Number(v));
+    const [p0, p1] = this._progressWindow();
+    return g.bottom - ((Number(v) - p0) / Math.max(1e-9, p1 - p0)) * (g.bottom - g.top);
+  }
+
   _handlePos(seg, g, handle) {
     if (!handle) return null;
     return {
       x: g.xOf(seg.from + handle.u * (seg.to - seg.from)),
-      y: g.yOf(handle.v),
+      y: this._handleY(g, seg, handle.v),
       u: handle.u,
       v: handle.v,
       handle,
@@ -602,7 +704,7 @@ export class CurvePanel {
     if (!handle?.origin) return null;
     return {
       x: g.xOf(seg.from + handle.origin[0] * (seg.to - seg.from)),
-      y: g.yOf(handle.origin[1]),
+      y: this._handleY(g, seg, handle.origin[1]),
     };
   }
 
@@ -611,6 +713,12 @@ export class CurvePanel {
     const pow = 10 ** Math.floor(Math.log10(raw));
     const mult = raw / pow <= 1 ? 1 : raw / pow <= 2 ? 2 : raw / pow <= 5 ? 5 : 10;
     return mult * pow;
+  }
+
+  /** Decimals needed to tell neighbouring ticks apart (values can be tiny). */
+  _tickDecimals(tick) {
+    const step = Math.abs(Number(tick)) || 1;
+    return clamp(-Math.floor(Math.log10(step) + 1e-9), 0, 6);
   }
 
   _handlePosSpan(g, span, handle) {
@@ -680,6 +788,19 @@ export class CurvePanel {
   }
 
   /**
+   * Keys in the shape core/time.js::sampleTrack reads. Element keyframes are
+   * already `{t, path, value}`; scene object / camera channels store `{t, v}`
+   * and are lifted once per draw rather than once per sampled pixel.
+   */
+  _sampleKeys(keys, path) {
+    return (keys || []).map((k) => (
+      k && k.path === path && k.value !== undefined
+        ? k
+        : { t: k.t, path, value: k.v, curve: k.curve, ease: k.ease }
+    ));
+  }
+
+  /**
    * Segments a preset can own on one track. Element/object curves are stored
    * on the left key and shape the segment to the next key, so a segment is
    * targeted when its left key is selected (path spans are handled separately).
@@ -737,12 +858,20 @@ export class CurvePanel {
     this.draw();
   }
 
-  /** Keyframe diamonds on the time axis: selected ones are bright + guided. */
+  /**
+   * Keyframe diamonds. Scalar tracks put each key on its real value so the
+   * diamond sits on the drawn curve; the flight view keeps them on the bottom
+   * axis because its y axis is progress, not the key's value.
+   */
   _drawKeys(ctx, g, keys, path) {
     const { W } = g;
+    const pathMode = this._isPathMode();
+    const midY = (g.top + g.bottom) / 2;
     for (const key of keys) {
       const x = g.xOf(key.t);
       if (x < g.plotLeft - 8 || x > W - g.rightPad + 8) continue;
+      const value = pathMode ? null : keyValue(key);
+      const y = pathMode ? g.bottom : value != null ? g.yOf(value) : midY;
       const on = this._isSelectedKey(key.t, path);
       if (on) {
         ctx.setLineDash([3, 4]);
@@ -752,7 +881,7 @@ export class CurvePanel {
       }
       const r = on ? 4.5 : 2.8;
       ctx.save();
-      ctx.translate(x, g.bottom);
+      ctx.translate(x, y);
       ctx.rotate(Math.PI / 4);
       ctx.fillStyle = on ? C('--edit') : alpha(C('--text-2'), 0.5);
       ctx.fillRect(-r, -r, r * 2, r * 2);
@@ -879,10 +1008,13 @@ export class CurvePanel {
     ctx.fillStyle = C('--surface-0');
     ctx.fillRect(0, 0, W, H);
 
-    // value grid + labels (window depends on the curve's overshoot)
+    // y grid + labels. Scalar tracks print their real values (many decimals
+    // for tiny spans); the flight view keeps progress and marks 0 / 1 as the
+    // segment endpoints it actually interpolates between.
     ctx.font = canvasFont();
     const [vMin, vMax] = g.range;
     const tick = this._tickStep(vMax - vMin);
+    const decimals = this._tickDecimals(tick);
     for (let v = Math.ceil(vMin / tick) * tick; v <= vMax + 1e-9; v += tick) {
       const value = Math.abs(v) < 1e-9 ? 0 : v;
       const y = g.yOf(value);
@@ -890,18 +1022,21 @@ export class CurvePanel {
       ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(g.plotLeft, y + 0.5); ctx.lineTo(W - g.rightPad, y + 0.5); ctx.stroke();
       ctx.fillStyle = C('--text-3');
-      ctx.fillText(value.toFixed(tick < 1 ? 2 : 1), 8, y + 3);
+      ctx.fillText(value.toFixed(decimals), 8, y + 3);
     }
-    ctx.strokeStyle = C('--border-strong');
-    ctx.setLineDash([3, 4]);
-    for (const edge of [0, 1]) {
-      if (edge <= vMin || edge >= vMax) continue;
-      const y = g.yOf(edge);
-      ctx.beginPath(); ctx.moveTo(g.plotLeft, y + 0.5); ctx.lineTo(W - g.rightPad, y + 0.5); ctx.stroke();
+    if (this._isPathMode()) {
+      ctx.strokeStyle = C('--border-strong');
+      ctx.setLineDash([3, 4]);
+      for (const edge of [0, 1]) {
+        if (edge <= vMin || edge >= vMax) continue;
+        const y = g.yOf(edge);
+        ctx.beginPath(); ctx.moveTo(g.plotLeft, y + 0.5); ctx.lineTo(W - g.rightPad, y + 0.5); ctx.stroke();
+      }
+      ctx.setLineDash([]);
     }
-    ctx.setLineDash([]);
     ctx.fillStyle = C('--text-3');
-    ctx.fillText('进度', 8, 12);
+    const track = this._track();
+    ctx.fillText(this._isPathMode() ? '进度' : (track?.label || track?.path || ''), 8, 12);
 
     // time ticks (same time→x mapping as the timeline)
     const viewStart = g.tOf(g.plotLeft);
@@ -926,39 +1061,68 @@ export class CurvePanel {
       return;
     }
 
-    // segments (clipped to the visible time window)
-    (this._track()?.segments || []).forEach((seg, i) => {
-      const isActive = i === this.active;
-      const t0 = Math.max(seg.from, viewStart);
-      const t1 = Math.min(seg.to, viewEnd);
-      if (t1 <= t0) return;
-      const x0 = g.xOf(t0);
-      const x1 = g.xOf(t1);
-      const curve = isActive ? this.curve : normalizeCurve(seg.a?.curve);
-      if (isActive) {
-        ctx.fillStyle = alpha(C('--accent'), 0.05);
-        ctx.fillRect(x0, g.top, Math.max(1, x1 - x0), g.bottom - g.top);
+    // Selected anchors highlight their spans (§6); with no selection the
+    // active segment stays faintly marked because presets still target it.
+    const path = track?.path;
+    const anchors = this._selectedFor(path);
+    const bands = [];
+    for (let i = 0; i + 1 < anchors.length; i++) {
+      bands.push({ from: anchors[i], to: anchors[i + 1] });
+    }
+    if (!bands.length) {
+      const active = track?.segments[this.active];
+      if (active) bands.push({ from: active.from, to: active.to, faint: true });
+    }
+    for (const band of bands) {
+      const x0 = g.xOf(Math.max(band.from, viewStart));
+      const x1 = g.xOf(Math.min(band.to, viewEnd));
+      if (x1 - x0 < 1) continue;
+      ctx.fillStyle = alpha(C('--accent'), band.faint ? 0.035 : 0.07);
+      ctx.fillRect(x0, g.top, x1 - x0, g.bottom - g.top);
+      if (band.faint) continue;
+      ctx.strokeStyle = alpha(C('--accent'), 0.22);
+      ctx.lineWidth = 1;
+      for (const x of [x0, x1]) {
+        ctx.beginPath(); ctx.moveTo(x + 0.5, g.top); ctx.lineTo(x + 0.5, g.bottom); ctx.stroke();
       }
-      const span = Math.max(1e-6, seg.to - seg.from);
-      ctx.beginPath();
-      const steps = Math.max(40, Math.round(x1 - x0));
-      for (let s = 0; s <= steps; s++) {
-        const x = x0 + ((x1 - x0) * s) / steps;
-        const u = clamp((g.tOf(x) - seg.from) / span, 0, 1);
-        const y = g.yOf(sampleCurve(curve, u));
-        if (s === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-      }
-      ctx.strokeStyle = isActive ? C('--accent') : alpha(C('--accent'), 0.4);
-      ctx.lineWidth = isActive ? 2.2 : 1.4;
-      ctx.stroke();
-    });
+    }
 
-    // Every key of the active track sits on the time axis (one row), so click
-    // and marquee selection have a shared target in both panel modes.
-    this._drawKeys(ctx, g, this._activeKeys(), this._track()?.path);
+    // One continuous line for the whole track. Sampling the real evaluator per
+    // pixel column keeps curve + ease + hold-before-first/after-last identical
+    // to the preview (§2/§6), and the keys then sit exactly on the line.
+    const keys = this._trackKeys(path);
+    const midY = (g.top + g.bottom) / 2;
+    const numeric = keys.some((k) => keyValue(k) != null);
+    if (!numeric) {
+      // Colour / text tracks have no numeric axis in this slice; P3 replaces
+      // this placeholder with the real step band. Keep it quiet but visible.
+      ctx.fillStyle = alpha(C('--text-2'), 0.16);
+      ctx.fillRect(g.plotLeft, midY - 5, Math.max(1, W - g.rightPad - g.plotLeft), 10);
+    } else {
+      const samples = this._sampleKeys(keys, path);
+      const x0 = Math.max(0, g.plotLeft);
+      const x1 = W - g.rightPad;
+      if (x1 > x0) {
+        const steps = Math.max(1, Math.round(x1 - x0));
+        ctx.beginPath();
+        let y = midY;
+        for (let s = 0; s <= steps; s++) {
+          const x = x0 + ((x1 - x0) * s) / steps;
+          const value = sampleTrack(samples, path, g.tOf(x), null);
+          if (typeof value === 'number' && Number.isFinite(value)) y = g.yOf(value);
+          if (s === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.strokeStyle = C('--accent');
+        ctx.lineWidth = 2.2;
+        ctx.stroke();
+      }
+    }
+
+    // Every key of the active track, on its real value.
+    this._drawKeys(ctx, g, keys, path);
 
     // active handles with guides
-    const seg = this._track()?.segments[this.active];
+    const seg = track?.segments[this.active];
     if (seg && this.curve) {
       for (const handle of curveHandles(this.curve)) {
         const hp = this._handlePos(seg, g, handle);
@@ -1026,18 +1190,24 @@ export class CurvePanel {
     return best?.handle || null;
   }
 
-  /** Keyframe diamond under the pointer (they all sit on the bottom axis). */
+  /**
+   * Keyframe diamond under the pointer. Scalar diamonds sit on their value,
+   * so hit-test in both axes; the flight view keeps them on the bottom axis.
+   */
   _hitKey(x, y) {
     const g = this._geo();
-    if (y < g.bottom - 12 || y > g.bottom + 8) return null;
     const path = this._track()?.path;
     if (!path) return null;
+    const pathMode = this._isPathMode();
+    const midY = (g.top + g.bottom) / 2;
     let best = null;
     for (const key of this._activeKeys()) {
       const kx = g.xOf(key.t);
       if (kx < g.plotLeft - 8 || kx > g.plotRight + 8) continue;
-      const d = Math.abs(kx - x);
-      if (d <= 10 && (!best || d < best.d)) best = { t: key.t, path, d };
+      const value = pathMode ? null : keyValue(key);
+      const ky = pathMode ? g.bottom : value != null ? g.yOf(value) : midY;
+      const d = Math.hypot(kx - x, ky - y);
+      if (d <= 11 && (!best || d < best.d)) best = { t: key.t, path, d };
     }
     return best ? { path: best.path, t: best.t } : null;
   }
@@ -1191,6 +1361,7 @@ export class CurvePanel {
     if (e.button !== 0) return;
     e.preventDefault();
     const p = this._localPoint(e);
+    const g = this._geo();
     const hit = this._hitHandle(p.x, p.y);
     if (hit) {
       if (this._isPathMode()) {
@@ -1208,9 +1379,10 @@ export class CurvePanel {
           span,
           curve: span.curve,
           pointer: p,
-          range: this._geo().range,
+          range: g.range,
         };
       } else {
+        const seg = this._track()?.segments[this.active];
         this._spanBackup = null;
         this.drag = {
           mode: 'segment',
@@ -1218,7 +1390,9 @@ export class CurvePanel {
           seg: this.active,
           curve: this.curve,
           pointer: p,
-          range: this._geo().range,
+          // Progress window the handle is drawn in: one pixel of drag has to
+          // change `handle.v` the same amount the handle visually moves.
+          range: seg ? this._segProgressRange(g, seg) : g.range,
         };
       }
       this.canvas.style.cursor = 'grabbing';
@@ -1275,8 +1449,12 @@ export class CurvePanel {
     let v = handle.v + (-(p.y - drag.pointer.y) / plotH) * (drag.range[1] - drag.range[0]) * damping;
     if (handle.id === 'p1' || handle.id === 'p2') {
       v = clamp(v, -1, 2);
+    } else if (handle.allowOvershoot) {
+      // The window can run downwards (a segment whose value drops), so clamp
+      // against the sorted bounds rather than assuming range[0] < range[1].
+      v = clamp(v, Math.min(drag.range[0], drag.range[1]), Math.max(drag.range[0], drag.range[1]));
     } else {
-      v = handle.allowOvershoot ? clamp(v, drag.range[0], drag.range[1]) : clamp(v, 0, 1);
+      v = clamp(v, 0, 1);
     }
     this.curve = moveCurveHandle(drag.curve, handle.id, u, v);
     if (drag.mode === 'path') {
