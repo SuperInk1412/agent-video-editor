@@ -53,3 +53,4 @@
 | 2026-10-29 | `396711c` | 修复方案问题五：空格播放用连续时间取样，切镜瞬间露出导出里没有的中间帧；数据诱因 `s1_w2` 已修（rev 304），编辑器按帧取样待 A 实施 | 用户发现 f46–52 播放时歌词瞬移到右上角，逐帧看不到 | `docs/FIX-LAYER-ORDER-EMPTY-CLICK.md`；数据 `projects/miku-swiss`（CLI 事务，可在编辑器撤销） | `git revert 396711c` |
 | 2026-10-29 | `3e88902` | 问题四独立验收：npm test 485/485、对拍 A–G PASS、cam_8 f142–158 歌词逐帧都在、播放 60 fps | A 的 `0cff172` 需要 B 验收 | `docs/FIX-LAYER-ORDER-EMPTY-CLICK.md` | — |
 | 2026-10-29 | `b46626b` | 后端重构 V2 方案：帧 IR + 两个只画 IR 的后端、单一光栅渲染器、代码图层、源编译与三方合并、变更集与测量服务；R0–R5 共 27 个工作包，交 A 及子代理实施 | 用户要求把讨论结果写成可交付实施的方案；B 只负责计划 | `docs/DESIGN-BACKEND-V2.md`（新） | `git revert b46626b` |
+| 2026-10-29 | `1baabfb` | 后端重构 V2：用户批准 D1（帧 IR 为核心）、D2（画面效果只保留浏览器一份）、D3（编译后以源码为准）；R0 可开工 | 用户拍板 | `docs/DESIGN-BACKEND-V2.md` | `git revert 1baabfb` |
