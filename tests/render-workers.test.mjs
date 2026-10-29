@@ -245,6 +245,56 @@ test('render-workers: the sandbox cannot see Node or the network', { skip: elect
   assert.equal(typeof seen.rnd, 'number');
 });
 
+/** Tries to read a local file and to reach the network; reports what happened. */
+const SOURCE_ESCAPE = `
+export async function setup(ctx, vdm) {
+  const out = {};
+  const attempt = async (name, fn) => {
+    try { out[name] = 'READ ' + (await fn()); }
+    catch (e) { out[name] = 'blocked: ' + ((e && (e.name || e.message)) || 'error'); }
+  };
+  await attempt('fileFetch', async () => (await fetch('file:///C:/Windows/win.ini')).status);
+  await attempt('srcTraversal', async () => (await fetch('vdm-src://app/../../../../Windows/win.ini')).status);
+  await attempt('netFetch', async () => (await fetch('http://127.0.0.1:9/')).status);
+  await attempt('xhr', () => new Promise((resolve, reject) => {
+    const x = new XMLHttpRequest();
+    x.open('GET', 'http://127.0.0.1:9/', true);
+    x.onload = () => resolve(x.status);
+    x.onerror = () => reject(new Error('xhr-error'));
+    x.send();
+  }));
+  await attempt('ws', () => new Promise((resolve, reject) => {
+    const w = new WebSocket('ws://127.0.0.1:9/');
+    w.onopen = () => resolve('open');
+    w.onerror = () => reject(new Error('ws-error'));
+  }));
+  console.error('VDM_ESCAPE ' + JSON.stringify(out));
+}
+
+export function draw(ctx, vdm) {
+  ctx.fillStyle = '#0000ff';
+  ctx.fillRect(0, 0, vdm.size[0], vdm.size[1]);
+}
+`;
+
+test('render-workers: the sandbox cannot read a local file or reach the network', { skip: electronSkip }, async (t) => {
+  const root = await tmpProject();
+  await writeSource(root, 'escape', SOURCE_ESCAPE);
+  const pool = await createRenderPool({ root, timeoutMs: 20000 });
+  t.after(async () => { await pool.close(); await fs.rm(root, { recursive: true, force: true }); });
+
+  await pool.render({ sourceId: 'escape', frame: 0, fps: 30, size: [16, 16], seed: 1 });
+  const logged = pool.console.map((entry) => entry.text || '').join(String.fromCharCode(10));
+  const line = logged.split(String.fromCharCode(10)).find((l) => l.includes('VDM_ESCAPE '));
+  assert.ok(line, `no escape report in the page console: ${logged.slice(0, 500)}`);
+  const seen = JSON.parse(line.slice(line.indexOf('VDM_ESCAPE ') + 'VDM_ESCAPE '.length));
+  for (const key of ['fileFetch', 'srcTraversal', 'netFetch', 'xhr', 'ws']) {
+    assert.ok(seen[key], `no result for ${key}`);
+    assert.ok(!String(seen[key]).startsWith('READ'), `${key} reached the resource: ${seen[key]}`);
+    assert.ok(!String(seen[key]).startsWith('open'), `${key} opened: ${seen[key]}`);
+  }
+});
+
 test('render-workers: a runaway frame is killed and the pool keeps working', { skip: electronSkip }, async (t) => {
   const root = await tmpProject();
   await writeSource(root, 'hang', SOURCE_HANG);
