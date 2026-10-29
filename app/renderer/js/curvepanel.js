@@ -21,7 +21,10 @@ import {
   curveHandles, moveCurveHandle, curveRange, curveParamsText,
 } from '/core/curves.js';
 import { retimePathSpan } from '/core/camera.js';
-import { spanCurveOps, curveFromEase, spanProgress, retimeSpanTimes } from '/core/curve-spans.js';
+import {
+  spanCurveOps, curveFromEase, spanProgress, retimeSpanTimes, invertCurve,
+} from '/core/curve-spans.js';
+import { snapKeyframeTimes } from '/core/keyframe-edit.js';
 import { sampleTrack } from '/core/time.js';
 import { cameraRef, elementRef, keyframeRef, objectRef, splitRef } from '/core/selection.js';
 import { h, icon, token } from './ui.js';
@@ -162,6 +165,7 @@ export class CurvePanel {
     // Double-click a colour key: the colour itself is edited in the inspector,
     // so the panel's job is to bring the playhead there (design §5 R1).
     this.canvas.addEventListener('dblclick', (e) => this._dblClick(e));
+    this.canvas.addEventListener('contextmenu', (e) => this._contextMenu(e));
     // Capture phase: the panel edits keys, so Esc must reach it before the
     // window-level shortcut that closes the drawer (design §8, Esc three steps).
     window.addEventListener('keydown', (e) => this._onKey(e), true);
@@ -2021,6 +2025,126 @@ export class CurvePanel {
       this._syncRailGroup();
       this.draw();
     }
+  }
+
+  /**
+   * Right-click on a span: the two whole-segment actions (§8 R1). The menu is
+   * built with inline styles so the panel does not have to touch the shared
+   * stylesheets while another workstream edits them.
+   */
+  _contextMenu(e) {
+    if (!this.isOpen() || this._isPathMode()) return;
+    const p = this._localPoint(e);
+    const span = this._spanAt(p.x, p.y);
+    if (!span) return;
+    e.preventDefault();
+    e.stopPropagation();
+    this._closeMenu();
+    const rect = this.root.getBoundingClientRect();
+    const menu = document.createElement('div');
+    Object.assign(menu.style, {
+      position: 'absolute',
+      zIndex: '40',
+      minWidth: '132px',
+      padding: '4px',
+      left: `${Math.max(4, Math.min(e.clientX - rect.left, rect.width - 150))}px`,
+      top: `${Math.max(4, e.clientY - rect.top)}px`,
+      background: token('--surface-2') || '#1b1f27',
+      border: `1px solid ${token('--border-strong') || '#2c333f'}`,
+      borderRadius: '8px',
+      boxShadow: '0 8px 24px rgba(0,0,0,.35)',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '2px',
+    });
+    const item = (label, run) => {
+      const button = document.createElement('button');
+      button.textContent = label;
+      Object.assign(button.style, {
+        all: 'unset',
+        cursor: 'pointer',
+        padding: '6px 10px',
+        borderRadius: '6px',
+        fontSize: '12px',
+        color: token('--text-1') || '#e6e9ef',
+      });
+      button.addEventListener('pointerenter', () => { button.style.background = token('--surface-3') || '#232936'; });
+      button.addEventListener('pointerleave', () => { button.style.background = 'transparent'; });
+      button.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        this._closeMenu();
+        run();
+      });
+      menu.appendChild(button);
+    };
+    item('反转曲线', () => this._invertSpan(span));
+    item('对齐到帧', () => this._snapSpans());
+    this.root.appendChild(menu);
+    this._menu = menu;
+    const close = (ev) => {
+      if (menu.contains(ev.target)) return;
+      this._closeMenu();
+      window.removeEventListener('pointerdown', close, true);
+    };
+    window.addEventListener('pointerdown', close, true);
+  }
+
+  _closeMenu() {
+    this._menu?.remove();
+    this._menu = null;
+  }
+
+  /** Edit span under a point (x decides the time, y must be inside the plot). */
+  _spanAt(x, y) {
+    const g = this._geo();
+    if (y < g.top - 4 || y > g.bottom + 4) return null;
+    const t = g.tOf(x);
+    return this._editSpans().find((span) => t >= span.from - 1e-4 && t <= span.to + 1e-4) || null;
+  }
+
+  /** Mirror a span's curve left↔right (缓入 ↔ 缓出); presets have no mirror. */
+  _invertSpan(span) {
+    const info = this._spanCurve(span);
+    const mirrored = invertCurve(info?.curve);
+    if (!mirrored) {
+      this.toast?.('这条曲线没有镜像（弹跳/周期类）', 'warn');
+      return;
+    }
+    this.curve = mirrored;
+    this._syncHead();
+    this._syncRailGroup();
+    this.draw();
+    this._commit(mirrored, this._editSpans());
+  }
+
+  /** Move every off-grid inner key of the edit spans onto whole frames. */
+  _snapSpans() {
+    const fps = this._fps();
+    const ops = [];
+    let moved = 0;
+    for (const span of this._editSpans()) {
+      const keys = this._trackKeys(span.path);
+      const inner = keys.filter((k) => Number(k.t) > span.from + 1e-4 && Number(k.t) < span.to - 1e-4);
+      if (!inner.length) continue;
+      const snapped = snapKeyframeTimes(inner.map((k) => Number(k.t)), {
+        fps, from: span.from, to: span.to,
+      });
+      if (!snapped) {
+        this.toast?.('这一段放不下整帧的关键帧', 'warn');
+        return;
+      }
+      inner.forEach((key, i) => {
+        if (Math.abs(snapped.times[i] - Number(key.t)) <= 1e-4) return;
+        ops.push(...this._keyMoveOps(span.path, key, snapped.times[i]));
+        moved += 1;
+      });
+    }
+    if (!ops.length) {
+      this.toast?.('内键已经在整帧上', 'info');
+      return;
+    }
+    this.onOp?.(ops.length === 1 ? ops[0] : { op: 'batch', ops });
+    this.toast?.(`已对齐 ${moved} 个内键到整帧`, 'info');
   }
 
   /**
