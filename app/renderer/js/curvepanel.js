@@ -150,12 +150,15 @@ export class CurvePanel {
     body.append(this.canvasWrap, this.rail);
 
     const foot = el('div', 'cp-foot');
-    foot.innerHTML = '<span>拖动圆点调整曲线 / 参数</span><span class="cp-sep">|</span>'
-      + '<span>拖动框选关键帧（Ctrl/Shift 加选）</span><span class="cp-sep">|</span>'
-      + '<span>点段切换编辑段</span><span class="cp-sep">|</span>'
-      + '<span>预设作用于选中段</span><span class="cp-sep">|</span>'
-      + '<span>时间轴缩放同步（Ctrl+滚轮 / 缩放按钮）</span><span class="cp-sep">|</span>'
-      + '<span><b>F2</b> / <b>Esc</b> 关闭</span>';
+    // The footer is the only place these gestures are documented, so it names
+    // every one the panel actually understands (design §8).
+    foot.innerHTML = '<span>拖圆点调曲线 · Alt 不重定时</span><span class="cp-sep">|</span>'
+      + '<span>拖键改时间/值（Alt 自由）</span><span class="cp-sep">|</span>'
+      + '<span>框选替换池子（Ctrl/Shift 加减）</span><span class="cp-sep">|</span>'
+      + '<span><b>Tab</b> 换行 · <b>←→</b> 逐帧 · <b>↑↓</b> 改值</span><span class="cp-sep">|</span>'
+      + '<span><b>Ctrl+C/V</b> 复制曲线</span><span class="cp-sep">|</span>'
+      + '<span>右键：存预设 / 反转 / 对齐帧</span><span class="cp-sep">|</span>'
+      + '<span>点空白不换选 · <b>Esc</b> 取消→清池→关闭</span>';
     this.root.append(head, body, foot);
     this.host.appendChild(this.root);
 
