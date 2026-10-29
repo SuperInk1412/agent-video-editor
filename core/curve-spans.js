@@ -246,7 +246,7 @@ export function spanCurveOps({
     .filter((tr) => tr && tr.path && Array.isArray(tr.keys))
     .map((tr) => ({ path: String(tr.path), keys: tr.keys, inner: innerKeys(tr.keys, t0, t1) }))
     // Camera flights retime through arc length (retimePathSpan), not values.
-    .filter((tr) => tr.inner.length && !(host === 'camera' && tr.path === 'path'));
+    .filter((tr) => !(host === 'camera' && tr.path === 'path'));
   if (!list.length) return null;
 
   // Anchors and per-key progress per track; a non-numeric span is skipped.

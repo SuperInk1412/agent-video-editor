@@ -249,3 +249,18 @@ test('curve-spans: spanCurveOps on a camera param carries ease and curve', () =>
     host: 'camera', id: 'cam_1', path: 'path', keys, from: 0, to: 2, curve: presetCurve('linear'),
   }), null);
 });
+
+test('curve-spans: a span with adjacent anchors still gets its curve', () => {
+  const keys = [
+    { t: 0, path: 'transform.opacity', value: 0 },
+    { t: 1, path: 'transform.opacity', value: 1 },
+  ];
+  const res = spanCurveOps({
+    host: 'element', id: 'el_1', path: 'transform.opacity', keys,
+    from: 0, to: 1, curve: presetCurve('easeInOut'),
+  });
+  assert.ok(res, 'two adjacent selected keys are the commonest case');
+  assert.deepEqual(res.ops.map((o) => o.op), ['keyCurve']);
+  assert.deepEqual([res.ops[0].from, res.ops[0].to], [0, 1]);
+  assert.equal(res.moved, 0);
+});
