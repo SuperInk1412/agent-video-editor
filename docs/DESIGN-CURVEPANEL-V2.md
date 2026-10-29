@@ -299,3 +299,25 @@ t_B = t_A + firstArrival(curve, y_B) · (t_C − t_A)     // 单调、毫秒取�
 | P1 | `c64064c` | `core/keyframe-edit.js::snapKeyframeTimes`（对齐到帧，保持严格递增，放不下就拒绝） |
 | P1 | `062c152` | `meta.curvePresets` + `normalizeCustomPresets`（我的预设，最多 40 条） |
 | P2 | （进行中） | 真实数值轴 + 整轨连续曲线 |
+
+## 17. P2 实现约定（开工后补充，2026-10-28）
+
+空隙分析（`curvepanel.js` 1491 行逐行核对）发现几处设计稿没写死的接缝，按以下方式落地：
+
+- **搬键的 op**：不新增 `keyMove`。一次搬键 = `keyRemove`/`objectUnkey`/`cameraParamUnkey` + 对应的
+  `keySet`/`objectKey`/`cameraParamKey`，后者带 `curve`（`bbd328f` 已支持显式透传，`null` 清除）；
+  搬键 + 写曲线的一次合并由 `core/curve-spans.js::spanCurveOps()` 生成，多轴传 `tracks[]`。
+  整段套预设 / 拖锚点 / 对齐到帧都走它，一个 `batch` = 一次撤销。
+- **快捷键优先级**：Tab、←/→、↑/↓、Esc 已被全局命令占用（`main.js` 的 `toggleEdit`、逐帧步进、
+  关面板）。面板在**捕获阶段**监听 keydown，命中且焦点不在输入框/下拉时 `stopPropagation`；
+  面板关闭时不拦截，全局行为不变。
+- **Esc 三段式**：拖动中 → 取消拖动并恢复；否则池子非空 → 清空池子（可 Ctrl+Z 撤回）；
+  池子已空 → 关面板（交给原有的关闭逻辑）。
+- **选区不是快照**：面板开着时时间轴改选，`main.js` 的 `select()` 回调把新池子推给
+  `curvePanel.setSelection()`；池子变化后重算段与手柄，不重开面板、不改缩放。
+- **行元数据**：`curveTracksFor()` 顺带带上 `unit` / `step` / `min` / `max` / `rowOrder`
+  （常量表取，**不抓 DOM**），因为 `timeline.js` 正在改行结构。
+- **无 `curve` 的段**：手柄形状用 `core/curve-spans.js::curveFromEase(ease)` 拟合（16 点最小二乘，
+  线性/缓入/缓出精确，`outExpo` 误差约 0.08），不再假装 `easeInOut`；一拖就写真实 `curve`。
+- **内键空心**：帧率从 `timeline` 取；`|t* fps − round(t* fps)| > 1e-3` 视为不在整帧上。
+- **y 轴过渡**：缓存上一段区间，切换行时 150ms 逐帧插值（只影响显示）。
