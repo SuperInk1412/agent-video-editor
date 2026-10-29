@@ -1,8 +1,21 @@
 // Shot baking: one JSON package shared by the WebGL viewport and Blender.
 //   { fps, frames, world, city, camera:[{f,t,pos,look,roll,fov}], fx, cameraCfg }
+//
+// Since WP1.1 (docs/DESIGN-BACKEND-V2.md §10.2) the package also carries `v3`:
+// the frame IR of the whole shot compressed to `{ static, tracks }` records.
+// It is added *beside* the legacy fields — vdm_build.py still reads the old
+// ones (deleting them is WP1.2), so every existing render is unchanged.
+//
+// `v3` is what makes a backend that only reads numbers possible (P2): no
+// curves, easing, links, motion presets or parent chains are left for Python,
+// every frame's draw list is already in the package. Frames are 1-based render
+// frames (`f = round(t·fps) + 1`, §4.4); `frameFromShotV3(v3, f)` rebuilds the
+// IR frame the preview would build at `core/frame-ir.js` frame `f - 1`.
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { bakeCameraTrack, cameraLayers, cameraTransform } from '../core/camera.js';
+import { FRAME_IR_VERSION, buildFrameIR } from '../core/frame-ir.js';
+import { QUANTIZE, packV3, packV3Runs, unpackV3 } from './element-bake.js';
 import {
   cameraParamResolver, evalCameraWorldWithLinks, linksEvalOptions, objectWorldPoseWithLinks,
 } from '../core/link-eval.js';
@@ -194,6 +207,142 @@ export function isCutSequence(project) {
   return true;
 }
 
+/** Push one frame's entity under its id (a Map of frame entries). */
+const pushFrame = (map, id, f, value) => {
+  let list = map.get(id);
+  if (!list) { list = []; map.set(id, list); }
+  list.push({ i: f, f, value });
+};
+
+/**
+ * The v3 payload (WP1.1): one pass over the frame IR of `[f0, f1]`, compressed
+ * into `{ static, tracks }` records (engine/element-bake.js packV3).
+ *
+ *   * one record per 2D element (`items`) — the draw list, not the project:
+ *     presence, `world`, `size`, `opacity`, `depth`, `content` and the frozen
+ *     `drawOrder` are all in here, evaluated once by core/;
+ *   * one record per 3D object (`objects`) and per camera layer
+ *     (`cameraLayers`), plus the main eye (`camera`) and the frame constants
+ *     (`size` / `world` / `screenFx` / `rev` / `irVersion`).
+ *
+ * `static` is written once per record; a field only gets a track when its value
+ * really changes (a matrix that only translates writes 3 index tracks, not 451
+ * copies). Matrix leaves are quantised — `world` to 1e-6, the tolerance §4.4
+ * grants the frozen IR matrix; the plane and camera pose to 1e-9 — every other
+ * number is exact.
+ */
+export function buildShotV3(project, { fps = null, from = 0, to = null, city = null } = {}) {
+  const frameRate = fps || project.meta?.fps || 24;
+  const end = to ?? project.meta.duration;
+  // 1-based render frames, `f = IR frame + 1` (§4.4). The last baked frame sits
+  // one past the (exclusive) render end on purpose: it carries the hidden state
+  // at the boundary, exactly like the legacy camera / object bakes (e82f7d1).
+  const f0 = Math.round(from * frameRate) + 1;
+  const f1 = Math.max(f0, Math.round(end * frameRate) + 1);
+  const citySnapshot = city || worldSnapshot(project);
+  const itemFrames = new Map();
+  const layerFrames = new Map();
+  const objectFrames = new Map();
+  const cameraFrames = [];
+  let head = null;
+  for (let f = f0; f <= f1; f++) {
+    // The IR is already in `drawOrder`; nothing here re-decides anything.
+    const ir = buildFrameIR(project, f - 1, { fps: frameRate, city: citySnapshot });
+    if (!head) head = ir;
+    cameraFrames.push({ i: f, f, value: ir.camera });
+    for (const it of ir.items) pushFrame(itemFrames, it.id, f, it);
+    for (const l of ir.cameraLayers) pushFrame(layerFrames, l.id, f, l);
+    for (const o of ir.objects3d) pushFrame(objectFrames, o.id, f, o);
+  }
+  // Array positions of the entities whose IR order is static (items carry a
+  // per-frame `drawOrder` instead).
+  const layerOrder = new Map(cameraLayers(project).map((c, i) => [c.id, i]));
+  const objectOrder = new Map((project.scene?.objects || []).map((o, i) => [o.id, i]));
+  const pack = (map, { quantize = null, orderOf = null } = {}) => {
+    const out = [];
+    for (const [id, entries] of map) {
+      for (const rec of packV3Runs(id, entries, { quantize })) {
+        out.push(orderOf ? { id, order: orderOf.get(id) ?? 0, ...rec } : rec);
+      }
+    }
+    out.sort((a, b) => (a.span[0] - b.span[0])
+      || ((a.order ?? 0) - (b.order ?? 0))
+      || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    return out;
+  };
+  return {
+    version: RENDER_PLAN_VERSION,
+    irVersion: FRAME_IR_VERSION,
+    rev: Number(project.rev) || 0,
+    fps: frameRate,
+    from,
+    to: end,
+    f0,
+    f1,
+    frames: f1 - f0 + 1,
+    size: head.size,
+    world: head.world,
+    screenFx: head.screenFx,
+    camera: {
+      span: [f0, f1],
+      ...packV3(f0, cameraFrames.map((e) => e.value), { quantize: QUANTIZE.camera }),
+    },
+    cameraLayers: pack(layerFrames, {
+      quantize: QUANTIZE.camera,
+      orderOf: layerOrder,
+    }),
+    items: pack(itemFrames, { quantize: QUANTIZE.element }),
+    objects: pack(objectFrames, { quantize: QUANTIZE.element, orderOf: objectOrder }),
+  };
+}
+
+/** Items of one frame in draw order, from a v3 payload (empty outside the range). */
+export function shotV3FrameItems(v3, frame) {
+  const f = Math.round(Number(frame));
+  const items = [];
+  for (const rec of v3.items) {
+    const it = unpackV3(rec, f);
+    if (it) items.push(it);
+  }
+  return items.sort((a, b) => a.drawOrder - b.drawOrder);
+}
+
+/**
+ * Rebuild the frame IR that `buildFrameIR(project, frame - 1)` would have
+ * built, from a v3 payload alone — the reader side of `buildShotV3`, and the
+ * contract WP1.2's Blender path implements. `frame` is a 1-based render frame,
+ * the same base as the pack's `f0` / `tracks.f0` / `span`.
+ */
+export function frameFromShotV3(v3, frame) {
+  const f = Math.round(Number(frame));
+  const layers = [];
+  const objects3d = [];
+  for (const rec of v3.cameraLayers) {
+    const v = unpackV3(rec, f);
+    if (v) layers.push({ order: rec.order ?? 0, value: v });
+  }
+  for (const rec of v3.objects) {
+    const v = unpackV3(rec, f);
+    if (v) objects3d.push({ order: rec.order ?? 0, value: v });
+  }
+  layers.sort((a, b) => a.order - b.order);
+  objects3d.sort((a, b) => a.order - b.order);
+  return {
+    version: v3.irVersion,
+    rev: v3.rev,
+    frame: f - 1,
+    t: (f - 1) / v3.fps,
+    fps: v3.fps,
+    size: v3.size,
+    camera: unpackV3(v3.camera, f),
+    cameraLayers: layers.map((l) => l.value),
+    items: shotV3FrameItems(v3, f),
+    objects3d: objects3d.map((o) => o.value),
+    screenFx: v3.screenFx,
+    world: v3.world,
+  };
+}
+
 export function buildShot(project, { from = 0, to = null, fps = null } = {}) {
   compileProject(project);
   const frameRate = fps || project.meta.fps || 24;
@@ -235,6 +384,9 @@ export function buildShot(project, { from = 0, to = null, fps = null } = {}) {
       dof: cam.dof || { enabled: false },
       motionBlur: cam.motionBlur || { enabled: true, shutter: 0.5 },
     },
+    // v3 reads the same project once more through the IR; the legacy fields
+    // above are untouched so vdm_build.py keeps rendering exactly as before.
+    v3: buildShotV3(project, { fps: frameRate, from, to: end, city }),
   };
 }
 
@@ -245,7 +397,7 @@ export async function writeShot(dir, project, opts = {}) {
   // Blender overlay/sequence paths are derived data; hash the authored elements
   // only (the links themselves still invalidate the cache).
   const elements = (project.elements || []).map(({ _linkOverlay, _sequenceDir, ...el }) => el);
-  const key = hashOf({ version: 2, meta: project.meta, elements,
+  const key = hashOf({ version: RENDER_PLAN_VERSION, meta: project.meta, elements,
     cameras: project.cameras, camera: project.camera,
     cameraOrder: project.cameraOrder, scene: project.scene, world: project.world, options });
   const file = path.join(p.cache, `shot-${key}.json`);
