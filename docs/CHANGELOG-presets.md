@@ -55,3 +55,5 @@
 | 2026-10-29 | `b46626b` | 后端重构 V2 方案：帧 IR + 两个只画 IR 的后端、单一光栅渲染器、代码图层、源编译与三方合并、变更集与测量服务；R0–R5 共 27 个工作包，交 A 及子代理实施 | 用户要求把讨论结果写成可交付实施的方案；B 只负责计划 | `docs/DESIGN-BACKEND-V2.md`（新） | `git revert b46626b` |
 | 2026-10-29 | `1baabfb` | 后端重构 V2：用户批准 D1（帧 IR 为核心）、D2（画面效果只保留浏览器一份）、D3（编译后以源码为准）；R0 可开工 | 用户拍板 | `docs/DESIGN-BACKEND-V2.md` | `git revert 1baabfb` |
 | 2026-10-29 | `ed0c9f6` | 后端重构 V2：用户批准 D4（锁定随 WP2.2/2.5 做）、D5（Manim 可选依赖）、D6（文字几何 WP1.3 进 R1 必做）、D7（实施顺序）；估时相应调整 | 用户拍板 | `docs/DESIGN-BACKEND-V2.md` | `git revert ed0c9f6` |
+| 2026-10-29 | `6a3bf78` | WP0.0a **修复**（问题五）：播放用两个时钟——墙钟只跑传输（结尾/循环/音频），画面、播放头、时间码只取 `frameStart`；`setTime` 取整到帧，跟随镜头的结尾判据改成「停在含结尾的那一帧」；17 处写项目时间改用 `frameWriteTime`（7/30 原来被存成 0.233 = 第 6 帧）；AI 截图也落在帧上 | 空格播放会露出导出里没有的中间状态（miku-swiss f46–52 歌词播放时瞬移到右上角） | `app/renderer/js/main.js`、`app/renderer/js/ai.js` | `git revert 6a3bf78` |
+| 2026-10-29 | `1d40497` | WP0.0b 多选删除：Delete 一次删完选中的元素 / 相机 / 3D 物体（一个 batch、一步撤销），规则收在 `core/selection.js::deletableElementRefs`（属性行、关键帧行不穿透到宿主；失效引用被过滤） | 原来只删池里的主对象，多选和跨类型选择按 Delete 没反应 | `app/renderer/js/main.js`、`core/selection.js`、`tests/selection.test.mjs`、`docs/DESIGN.md` | `git revert 1d40497` |
