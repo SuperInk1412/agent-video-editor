@@ -126,7 +126,10 @@
   - **开关仍关**：新建路径还在写旧格式（`createProject` 的相机、`addElement` 的 2D、`objectAdd` 的 `rot`、`normalizeCamera` 默认 `roll: 0`），开关一开每次打开都会重新迁移、重复提示和备份，撤销历史测试失败 12 条。先让新建路径直接写 `rotation`，再开。
   - **新建即三轴（用户批准）+ 开关打开**：`core/rotation-ops.js`（新）。新 2D 元素直接建成空间节点（`rotation`，`transform.*` 关键帧换成 `pivot.*`/`scale.*`/`rotation.z`）；带 `dir/roll` 的节点、静态朝向的 3D 物体、相机（去掉 0 值 `roll`、补 `rotation`）都直接写三轴。旧写法的 op 自动翻译：`keySet/keyRemove/keyCurve/set/updateElement` 的 `transform.*` 与 `roll`、物体 `objectKey dir/roll`、`propLink` 的 `roll`。相机非零手动 roll 仍在运行时叠加，打开时并进 `rotation`。`engine/shot.js` 只对非零旋转偏移的相机走世界烘焙。
   - 验收：`npm test` 446/446（新增 4 条，含"新项目反复打开都没有迁移"）；按新语义改了 14 个旧测试（测旧 2D 行为的改为手写旧格式数据，测通用关键帧的改用非空间路径）；`check:evaluate` 121 样本全等、`check:preview`、`check-camfeed` 3/3、`check-render-parity` 1/144（已知自发光黄）均 PASS；编辑器里新加文字 = 节点 + 三格旋转、无迁移提示。
-  - **待 A（用户转告）**：界面里还写旧字段的两处可以换成新写法（现在靠 op 翻译仍能用）：右键「面向镜头」写物体 `dir` 键 → 改写 `rotation.x/y/z`；时间轴相机「手动 roll°」行 → 去掉，用旋转 Z。
+- 2026-10-29 · 第 2 步 2c（A 收尾）· A · `306fbe1` + `f0846c8` · 界面最后两处旧字段换成三轴：
+  - 物体右键「面向镜头」不再写 `dir` 键，直接写 `rotation.x/y/z`。`facingRotation(dir, cur)` 保留当前自转、按整圈就近展开，第一次写键时补 `rotation` 基础值；有属性链接时先经 `writeBackLocalValue` 写回本地值。旧 `dir` op 的翻译改用同一个函数，两条路结果相同。
+  - 时间轴相机去掉「手动 roll°」行，画面内旋转用 `旋转 Z°`；模板注册表和「只看带键」分组表同步删掉这一行，相机属性页提示改成「旧手动 roll 已并入 Z」。`roll` 数据仍参与求值（迁移折不进 Z 的旧项目），只是没有单独的编辑行。
+  - 验收：`npm test` 448/448 PASS（新增 2 条：`facingRotation` 保自转 / 就近展开、旧 `dir` 键与它逐轴相同）；Electron 探针里右键「面向镜头」后只有 `rotation.x/y/z` 三个键、朝向与物体→机位方向一致（x=11.733°、y=0、z=30 即原自转），相机页只有 `旋转 X°/Y°/Z° + FOV / 看向 / 侧倾 / 最大侧倾`、没有「手动 roll」，截图确认。
 - 2026-10-28 · 第 2 步 2b（A）· `79309d8` · 三轴旋转界面：
   - 时间轴：2D 节点 / 3D 物体 / 相机各三行 `旋转 X°/Y°/Z°`，每行独立输入、菱形和属性链接；第一次给只有 `dir/roll` 的宿主写键时先补全 `rotation` 基础值，避免跳帧。
   - 属性面板：2D 节点 / 3D 物体 / 相机都是 X/Y/Z 三格（`↳` 链接 `rotation.x/y/z`）；2D 节点球和 3D 物体球拖动后写回三个角（`rotationFromDirRoll` 保留当前自转）。

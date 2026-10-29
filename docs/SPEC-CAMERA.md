@@ -23,7 +23,8 @@ mesh、还要处理 shader 转换），不适合作为这一步的基础。
 | `look` | 可选 | 关键点里的显式目标点（拍楼、拍霓虹招牌时用） |
 | `bankGain` | 0–4 | 转弯自动侧倾的增益（无人机/战斗机手感） |
 | `maxRoll` | 0–60° | 侧倾上限 |
-| `roll` | -60–60° | 手动荷兰角 |
+| `rotation` | `[x,y,z]`° | 相机自身坐标里的三轴偏移：X 俯仰 · Y 转身 · Z 画面旋转（Z 就是旧的手动 roll） |
+| `roll` | -60–60° | 旧手动荷兰角；打开工程时并入 `rotation.z`，时间轴不再单独列出这一行 |
 | `shake.amp` | 0–5 m | 抖动幅度 |
 | `shake.freq` | 0.1–8 Hz | 抖动频率 |
 | `shake.octaves` | 1–4 | 噪声层数（越多越"手持"） |
@@ -52,8 +53,9 @@ Blender 侧这一档用 **Cycles** 渲 `FISHEYE_EQUIDISTANT`（EEVEE 不支持�
 master scene 用 VSE scene strip 逐层 `ALPHA_OVER`，画面变换/透明度写进 strip 关键帧；
 单相机且画面变换为默认值时走直接场景路径，保留项目原有合成器。
 
-C-b 逐帧参数：`视场角 FOV`、`看向前方`、`转弯侧倾`、`最大侧倾`、`手动 roll`、抖动幅度/
+C-b 逐帧参数：`视场角 FOV`、`看向前方`、`转弯侧倾`、`最大侧倾`、`旋转 X°/Y°/Z°`、抖动幅度/
 频率/随速增强、`景深开/关`、`光圈 f` 都可以在各自属性行上打关键帧（`cameraParamKey`）。
+旧的 `手动 roll` 打开工程时并进 `rotation.z`，不再单独成行（`roll` 通道仍接受旧数据）。
 `随机种子`、`运动模糊开/关`、`快门角` 是整段设置（标“整段”，没有 `◆`）：快门是 Blender
 场景级参数，seed 逐帧会让手持噪波跳。`evalCamera()` 逐帧采样这些通道，`bakeCameraTrack()`
 把 `fov / roll / dof / focus` 写进 shot；Blender 的 `_build_camera` 在每帧 apply 时同步
@@ -66,9 +68,10 @@ path 关键点 → 弧长表（整条轨迹）
           → 有 span 曲线：时间 → 曲线进度 → 弧长 → 贝塞尔位置
           → 无 span：Catmull-Rom 位置（旧 ease/speed）
           → 切线 → look = pos + normalize(tangent)·lookAhead（或显式 look）
-          → 曲率 → roll = clamp(-yawRate·bankGain, ±maxRoll) + 手动 roll
+          → 曲率 → roll = clamp(-yawRate·bankGain, ±maxRoll) + 旧手动 roll
           → shake：3D value noise × (amp + 速度项)，叠加到 pos 与 look
           → fov：默认值 / 关键点覆盖
+          → rotation 偏移（相机自身坐标；Z 与旧手动 roll 同号）
 ```
 
 - 侧倾的 `yawRate` 用**最短角差**（跨 ±180° 不会突然翻符号）；路径首尾 ±0.25s
