@@ -16,6 +16,14 @@
 // What stays here is what is genuinely a renderer concern: resolving content
 // into GPU resources (text rasters, media textures, camera-feed targets),
 // texture resolution choices (`_textZoom`, `_textTexture`) and the post chain.
+//
+// Code layers (`raster` items, WP3.3) are the one kind whose picture is not
+// resolved here: the pixels come from the single rasteriser on the Node side
+// (`engine/render-workers/pool.js`, §5) through `GET /api/raster`, and this file
+// only fetches, uploads and caches them. The request is asynchronous, so a
+// raster item draws nothing until its PNG has arrived, the next frame is
+// prefetched while playing, and a late (> 300 ms) or failed frame falls back to
+// the last frame of the same channel that did arrive.
 import { evalElement } from '/core/evaluate.js';
 import { elementOverlay } from '/core/links.js';
 import { cameraParamResolver, evalCameraWorldWithLinks } from '/core/link-eval.js';
@@ -29,6 +37,22 @@ import {
   layerOriginDistance, layerRayDepth, orderLayers,
 } from './spatial-layers.js';
 import { buildFrameIR, itemModelMatrix, mediaUVOf, IRCache, PIXEL_M } from '/core/frame-ir.js';
+
+/** How long a raster frame may be outstanding before the preview shows the last one (§WP3.3). */
+const RASTER_BUDGET_MS = 300;
+/** Live raster textures kept uploaded. Evicted oldest first; never a picture source of truth. */
+const RASTER_MAX_TEXTURES = 24;
+/** …and a byte budget, so a 1920x1080 layer cannot pin hundreds of MB of VRAM. */
+const RASTER_MAX_BYTES = 64 * 1024 * 1024;
+/** Raster requests in flight at once (the current frame plus next-frame prefetch). */
+const RASTER_MAX_INFLIGHT = 2;
+
+/** JSON with sorted keys, so one parameter set is one request key. */
+function stableParams(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value === undefined ? null : value);
+  if (Array.isArray(value)) return `[${value.map(stableParams).join(',')}]`;
+  return `{${Object.keys(value).sort().map((k) => `${JSON.stringify(k)}:${stableParams(value[k])}`).join(',')}}`;
+}
 
 
 const VERT = `#version 300 es
@@ -328,6 +352,19 @@ export class Preview {
     // build per frame, shared by render() and hitTest().
     this._irCache = new IRCache();
     this._ir = null;
+    // Code layers (§5/§6, WP3.3): one texture per (source, frame, size, params,
+    // seed), the last completed frame per channel as the late/failed fallback,
+    // and the requests still in flight. `rasterEndpoint` is the one door to the
+    // rasteriser; a probe can point it elsewhere to exercise the failure path.
+    this.rasterEndpoint = '/api/raster';
+    this.rasterTextures = new Map();   // request key -> { tex, w, h, channel, used }
+    this.rasterLast = new Map();       // channel -> request key of its last completed frame
+    this.rasterPending = new Map();    // request key -> { startedAt, channel, url }
+    this.rasterFailed = new Set();     // request keys that will not be asked again
+    this.rasterRequests = 0;
+    this._rasterTick = 0;              // LRU stamp for the texture map
+    this._rasterGen = 0;               // bumped when a new revision lands
+    this._hasCodeLayers = false;
     this.sceneFBO = null;
     this.layerFBO = null;
     this.bloomFBO = [null, null];
@@ -385,6 +422,11 @@ export class Preview {
     this._ir = null;
     clearCompiledTracks();
     compileProject(p);
+    // A source may have been edited, and the request key does not hash the
+    // source files (the pool does), so a new revision drops every raster
+    // texture: a stale picture is worse than one frame that has to reload.
+    this._hasCodeLayers = (p.elements || []).some((element) => element.type === 'code');
+    this._clearRasterState();
     const live = new Map(p.elements.map((element) => [element.id, element]));
     for (const [id, asset] of this.assets) if (!live.has(id) || !['image', 'video'].includes(live.get(id).type)) {
       this._releaseAsset(asset); this.assets.delete(id);
@@ -884,6 +926,190 @@ export class Preview {
     });
   }
 
+  // ---------------------------------------------------------------- code layers
+  //
+  // A `raster` item is "one frame of one code source": the IR carries the
+  // request (source, params of THIS frame, seed, raster size, live|bake), and
+  // this renderer only turns the answer into a texture. Nothing here evaluates
+  // user code — the rasteriser on the Node side is the single implementation
+  // (§5, P4).
+
+  /** Request key of one raster frame: the same pixels are the same key. */
+  _rasterKey(item, frame) {
+    const c = item.content || {};
+    const size = c.size || item.size || [0, 0];
+    return `${c.source?.id || ''}|${frame}|${size[0]}x${size[1]}|${Number(c.seed) || 0}|${stableParams(c.params || {})}`;
+  }
+
+  /** One channel = (source, raster size, seed, params): its last frame is the fallback. */
+  _rasterChannel(item) {
+    const c = item.content || {};
+    const size = c.size || item.size || [0, 0];
+    return `${c.source?.id || ''}|${size[0]}x${size[1]}|${Number(c.seed) || 0}|${stableParams(c.params || {})}`;
+  }
+
+  /** The URL the rasteriser answers for this item (§WP3.3 route contract). */
+  _rasterUrl(item, frame) {
+    const c = item.content || {};
+    const size = c.size || item.size || [0, 0];
+    const query = new URLSearchParams({
+      source: String(c.source?.id || ''),
+      frame: String(frame),
+      w: String(size[0]),
+      h: String(size[1]),
+      params: stableParams(c.params || {}),
+      seed: String(Number(c.seed) || 0),
+    });
+    if (c.mode === 'bake') query.set('mode', 'bake');
+    return `${this.rasterEndpoint}?${query.toString()}`;
+  }
+
+  /**
+   * Ask for one raster frame, at most once per key. `prefetch` requests stay
+   * under RASTER_MAX_INFLIGHT so a 30 fps timeline cannot flood the pool.
+   * A finished request uploads its PNG as one texture (bitmap closed right
+   * after the upload, so nothing leaks per frame).
+   */
+  _requestRaster(item, frame, { prefetch = false } = {}) {
+    const source = item.content?.source?.id;
+    if (!source) return null; // nothing to ask for: the layer draws nothing
+    const key = this._rasterKey(item, frame);
+    if (this.rasterTextures.has(key) || this.rasterPending.has(key) || this.rasterFailed.has(key)) return null;
+    if (prefetch) {
+      if (this.rasterPending.size >= RASTER_MAX_INFLIGHT) return null;
+    }
+    const entry = { startedAt: performance.now(), channel: this._rasterChannel(item), url: this._rasterUrl(item, frame), gen: this._rasterGen };
+    this.rasterPending.set(key, entry);
+    this.rasterRequests += 1;
+    fetch(entry.url, { cache: 'no-store' })
+      .then((response) => {
+        if (!response.ok) throw new Error(`raster ${response.status}`);
+        return response.blob();
+      })
+      .then((blob) => createImageBitmap(blob))
+      .then((bitmap) => {
+        // A revision may have landed while this was in flight: the pixels
+        // belong to the old source, so they are dropped, not drawn.
+        if (entry.gen !== this._rasterGen) {
+          if (typeof bitmap.close === 'function') bitmap.close();
+          return;
+        }
+        this.rasterPending.delete(key);
+        this._uploadRaster(key, entry, bitmap);
+      })
+      .catch(() => {
+        this.rasterPending.delete(key);
+        // Not retried: a frame that failed falls back to the last good one, and
+        // repeating it every render would hammer a broken route.
+        this.rasterFailed.add(key);
+      });
+    return null;
+  }
+
+  /** Upload one arrived PNG frame and make it the channel's fallback. */
+  _uploadRaster(key, entry, bitmap) {
+    const gl = this.gl;
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bitmap);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    const record = { tex, w: bitmap.width, h: bitmap.height, channel: entry.channel, used: ++this._rasterTick };
+    if (typeof bitmap.close === 'function') bitmap.close();
+    this.rasterTextures.set(key, record);
+    this.rasterLast.set(entry.channel, key);
+    this._trimRasterTextures();
+    return record;
+  }
+
+  /** Oldest textures go first (count and bytes); a channel's fallback frame is never evicted. */
+  _trimRasterTextures() {
+    let bytes = 0;
+    for (const record of this.rasterTextures.values()) bytes += (record.w || 0) * (record.h || 0) * 4;
+    if (this.rasterTextures.size <= RASTER_MAX_TEXTURES && bytes <= RASTER_MAX_BYTES) return;
+    const keep = new Set(this.rasterLast.values());
+    for (const [key, record] of this.rasterTextures) {
+      if (this.rasterTextures.size <= RASTER_MAX_TEXTURES && bytes <= RASTER_MAX_BYTES) break;
+      if (keep.has(key)) continue;
+      bytes -= (record.w || 0) * (record.h || 0) * 4;
+      this.gl.deleteTexture(record.tex);
+      this.rasterTextures.delete(key);
+    }
+  }
+
+  /**
+   * The texture this raster item draws now, or null when it has nothing honest
+   * to show: its own frame before the PNG arrived, and no earlier frame of the
+   * same channel to stand in. A pending request older than RASTER_BUDGET_MS is
+   * treated as late, which is when the previous frame takes over.
+   */
+  _rasterFor(item, frame, { request = true } = {}) {
+    const key = this._rasterKey(item, frame);
+    const ready = this.rasterTextures.get(key);
+    if (ready) {
+      ready.used = ++this._rasterTick;
+      return ready;
+    }
+    if (request) this._requestRaster(item, frame);
+    const pending = this.rasterPending.get(key);
+    const late = !pending || performance.now() - pending.startedAt > RASTER_BUDGET_MS;
+    if (!late) return null;
+    const fallback = this.rasterTextures.get(this.rasterLast.get(this._rasterChannel(item)));
+    return fallback ? { ...fallback, stale: true } : null;
+  }
+
+  /**
+   * During playback, ask one frame ahead: a raster is rendered on the Node side
+   * (~tens of ms) and waiting for it inside the frame would stall the timeline.
+   * Building the next IR here is cheap and hands the same object to the next
+   * render through the IR cache.
+   */
+  _prefetchRasters() {
+    if (!this.playing || !this._hasCodeLayers || !this._ir) return;
+    if (this.rasterPending.size >= RASTER_MAX_INFLIGHT) return;
+    const p = this.project;
+    const fps = Number(p.meta?.fps) || 24;
+    const next = buildFrameIR(p, Number(this._ir.frame) + 1, {
+      fps,
+      camera: 'live',
+      edit: (this.editMode && this.editCam) ? { cam: this.editCam, mode: true } : null,
+      soloCameras: this.soloCameras,
+      cache: this._irCache,
+      city: this.scene3d?.city || null,
+    });
+    for (const item of next.items) {
+      if (item.kind !== 'raster') continue;
+      if (this.rasterPending.size >= RASTER_MAX_INFLIGHT) break;
+      this._requestRaster(item, next.frame, { prefetch: true });
+    }
+  }
+
+  /** Drop every raster texture / request (a new revision, or a teardown). */
+  _clearRasterState() {
+    const gl = this.gl;
+    this._rasterGen += 1; // responses still in flight belong to the old files
+    for (const record of this.rasterTextures.values()) if (record.tex) gl.deleteTexture(record.tex);
+    this.rasterTextures.clear();
+    this.rasterLast.clear();
+    this.rasterPending.clear();
+    this.rasterFailed.clear();
+  }
+
+  /** Diagnostics for probes: how much raster state is live right now. */
+  rasterStats() {
+    return {
+      textures: this.rasterTextures.size,
+      pending: this.rasterPending.size,
+      failed: this.rasterFailed.size,
+      requests: this.rasterRequests,
+      channels: this.rasterLast.size,
+      last: [...this.rasterLast.entries()],
+    };
+  }
+
   /**
    * Draw list for time t, straight from the frame IR (WP0.2).
    *
@@ -895,7 +1121,7 @@ export class Preview {
    * / opacity state), `w`/`h` in canvas pixels and `model` (the item's world
    * quad, core/frame-ir.js::itemModelMatrix).
    */
-  computeLayers(t) {
+  computeLayers(t, { request = true } = {}) {
     const p = this.project;
     if (!p) return [];
     const ir = this._frameIR(t);
@@ -989,6 +1215,20 @@ export class Preview {
         layer.quad = [item.size[0], item.size[1]];
         layer.w = item.size[0] * S;
         layer.h = item.size[1] * S;
+      } else if (item.kind === 'raster') {
+        // A code layer (§6.1). The pixels are not here yet — the request is
+        // asynchronous, so this item contributes nothing this frame instead of
+        // drawing the wrong frame. Once the PNG is in, it is one texture that
+        // fills the quad (the IR's `content.size` only says how sharp it is).
+        const got = this._rasterFor(item, ir.frame, { request });
+        if (!got) continue;
+        layer.kind = 'tex';
+        layer.tex = got.tex;
+        layer.uv = [0, 0, 1, 1];
+        layer.quad = [item.size[0], item.size[1]];
+        layer.w = item.size[0] * S;
+        layer.h = item.size[1] * S;
+        layer.raster = { stale: !!got.stale, frame: ir.frame };
       } else if (item.kind === 'solid' || item.kind === 'shape') {
         layer.kind = 'shape';
         layer.color = [...c.fill, item.opacity];
@@ -1075,6 +1315,8 @@ export class Preview {
     this.layers = layers;
     this.layersAt = t;
     this._worldMode = is3d;
+    // Next frame's code-layer raster, one frame ahead (no-op without code layers).
+    this._prefetchRasters();
     if (is3d) {
       // 2D elements are flat planes in the world: Scene3D calls back after its
       // own objects with the camera's view-projection, so they are drawn in the
@@ -1370,7 +1612,9 @@ export class Preview {
 
   /** canvas-space hit test -> topmost element id (the same rule as the picture) */
   hitTest(cx, cy, t) {
-    const layers = (this.layers && this.layersAt === t) ? this.layers : this.computeLayers(t);
+    // Picking never asks the rasteriser for new frames (that would spend the
+    // budget on a hover), it only places the items that already have pixels.
+    const layers = (this.layers && this.layersAt === t) ? this.layers : this.computeLayers(t, { request: false });
     if (this._worldMode && this.scene3d?.lastVP) {
       const camPos = this.scene3d.lastCam?.pos || [0, (Number(this.project?.meta?.height) || 1080) / 200, 20];
       const ray = this.scene3d.ray(cx, cy);

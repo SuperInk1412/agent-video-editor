@@ -32,6 +32,10 @@
 //   `depth.write` says whether an opaque fragment owns the depth buffer.
 // * `items` are already in `drawOrder`; `drawOrder` only decides translucent
 //   stacking (the picture itself is decided by depth since 问题四).
+// * A `raster` item (a code layer, §6, WP3.3) carries no pixels: `content`
+//   holds exactly the request the RenderWorkerPool needs for this frame
+//   (`source`, `params`, `seed`, `size`, `mode`) and the raster fills the quad
+//   (uv [0,0,1,1]). Every consumer fetches it from the one rasteriser (P4).
 import { clamp } from './time.js';
 import { evalElement, motionDelta, parseColor } from './evaluate.js';
 import { elementOverlay } from './links.js';
@@ -46,9 +50,10 @@ import { normalizeFeed } from './camfeed.js';
 import { basisFromDir } from './scene.js';
 import { mediaSpec, textSpec, videoFrame } from './objects-media.js';
 import { LAYER_DEPTH_M, nodePlaneModel, orderLayers, planeOfFrame } from './layers.js';
+import { codeLayerPlan } from './code-layer.js';
 
 /** Bump when the shape of a FrameIR changes (frozen key, §4 / §12). */
-export const FRAME_IR_VERSION = 2;
+export const FRAME_IR_VERSION = 3;
 
 /** One project pixel in metres (unified space, docs/DESIGN-UNIFIED-SPACE.md). */
 export const PIXEL_M = 0.01;
@@ -430,6 +435,25 @@ export function buildFrameIR(project, frame, opts = {}) {
       // uv is in image space; the preview's target texture is bottom-up, which
       // is the backend's business (wdm: it flips v when it binds).
       content = { feed: normalizeFeed(el.feed), uv: [0, 0, 1, 1] };
+      quad = [size[0], size[1]];
+    } else if (el.type === 'code') {
+      // A code layer is one raster of the render pool (§5 / §6.1, WP3.3). Its
+      // parameters are evaluated here with the same function the pool is fed
+      // from, per frame, so no consumer evaluates them again (P2). `mode` is the
+      // element's `cache` policy: `live` lets the consumer render on demand,
+      // `bake` only reads already-cached frames.
+      kind = 'raster';
+      const plan = codeLayerPlan(project, el, t, { fps });
+      content = {
+        source: { id: plan.sourceId, runtime: plan.runtime },
+        params: plan.params,
+        seed: plan.seed,
+        // Raster resolution in pixels (`code.size`, the project size when
+        // unset). The quad below stays the full project frame like image /
+        // video, so a 960x540 layer is scaled up onto it.
+        size: plan.size,
+        mode: plan.cache,
+      };
       quad = [size[0], size[1]];
     } else if (el.type === 'solid' || el.type === 'shape') {
       kind = el.type;

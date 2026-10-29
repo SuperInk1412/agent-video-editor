@@ -175,7 +175,7 @@ export class IRCache { constructor(); invalidate(changedIds); }            // �
 miku-swiss（138 元素、8 相机）：`buildFrameIR` 单帧 ≤ 3 ms（播放时 IRCache 命中后 ≤ 1 ms）。
 超出预算不得合入，以 `check-playback-perf` 和 WP0.3 的微基准为准。
 
-### 4.4 冻结记录（WP0.1 交付 + 评审修订，2026-10-29 —— 本节以下全部**冻结**，`FRAME_IR_VERSION = 2`）
+### 4.4 冻结记录（WP0.1 交付 + 评审修订，2026-10-29 —— 本节以下全部**冻结**，`FRAME_IR_VERSION = 2`；v3 见本节末尾）
 
 交付：`core/frame-ir.js`（`buildFrameIR` / `buildRangeIR` / `IRCache` / `elementPixelMatrix` /
 `itemModelMatrix` / `mediaUVOf` / `cameraWorld16`）、`core/layers.js`（原 `app/renderer/js/spatial-layers.js`
@@ -191,6 +191,7 @@ miku-swiss（138 元素、8 相机）：`buildFrameIR` 单帧 ≤ 3 ms（播放�
 | 四边形局部坐标 | lx, ly ∈ [-0.5, 0.5]，图片**上边**在 ly = +0.5，采样 `uv = (lx+0.5, 0.5-ly)`；`itemModelMatrix(item, size)` 是唯一的「IR → 顶点矩阵」转换 | 后端不再各自决定翻转；文字/图形/图片同一约定 |
 | `size` | 项目像素；`null` = 内容自己排版（**只有 text**，WP1.3 之前测量在消费方） | 文字几何统一是 WP1.3；在那之前 IR 不假装会量字 |
 | `content.uv` | **图片空间**（0,0 = 内容自己的左上）；`null` = 素材固有尺寸不在工程里，后端用 `mediaUVOf(fit, iw, ih, size)`（唯一实现）。`stretch` 用整张图，其余（含 `contain`）按 **cover** 裁——2D 元素是全幅平面，没有黑边。相机投屏的目标纹理是自下而上，翻转是后端的事 | 工程不存素材尺寸；避免第三个 coverUV 实现；WP4.1 编译时写入固有尺寸后再带 uv |
+| `content`（v3 新增 `raster` 项） | `code` 元素产出一个 `kind: "raster"` 的 item，`content = { source: { id, runtime }, params（**这一帧**求好的值，来自 `core/code-layer.js::codeLayerPlan`）, seed, size（光栅像素尺寸 = `code.size`，缺省项目尺寸）, mode: "live" \| "bake"（= `code.cache`） }`。四边形 `size` 仍是整幅项目画布（与 image / video 同义），光栅铺满四边形（uv 全幅，故不带 `uv`）。`drawOrder` / `plane` / `src` / `z` / `opacity` / `blend` / `crop` / `effects` / `source` / `content.glow` 与普通 2D 项完全相同 | 光栅只有一份实现（渲染池，§5）；IR 只带请求、不带像素；参数在 core 一次算完，消费方不再求值（P2） |
 | `depth` | `{ write, cut, bias }`；`write = 有 node/父级 && opacity ≥ 0.5`（原 `preview.js::DEPTH_ALPHA`），`cut` 是深度专用遍的 `u_aCut`（同一个 0.5），`bias = LAYER_DEPTH_M·el.z` 米，沿法线。写深度的后端必须画两遍：先 `cut`  discard 的深度遍，再 `u_aCut = 0` 的颜色遍，否则文字框会在背后挖洞 | 问题四的规则原样搬进来；两遍配方不能靠后端猜 |
 | `drawOrder` | `items` 已按它排好，它是**主眼**（`opts.camera` / `opts.edit`）的混合顺序。投屏源相机各画各的图时，后端用 `core/layers.js::orderLayers` 就着 `plane` 重排——排序规则仍然只有一处 | 一帧只有一个主眼；多眼是投屏的内部需要 |
 | 顺序的稳定性 | 同平面同 `el.z` 时按元素在 `project.elements` 里的下标（`src`）决胜：打乱输入数组，结果不变 | 验收项「drawOrder 是全序（打乱输入后结果相同）」 |
@@ -247,6 +248,20 @@ WP0.3 `cfa151c`——全部合入 master，§4 冻结。**R1、R2、WP3.1 可以
 
 **给后续 WP 的两条约定**：WP0.2 的预览适配层只准调用 `itemModelMatrix` / `core/layers.js`，不准自己
 推导翻转或层序；WP1.1 的 v3 shot 包按本节字段写 `static` / `tracks`，静态字段用 `items[]` 的原名。
+
+**v3 变更（WP3.3，2026-10-29）**：`FRAME_IR_VERSION = 3`，**只新增一种 item，没有改任何已有字段的语义**
+（`tests/fixtures/frame-ir-golden.json` 重新生成后，demo 工程 0–576 帧除 `version` 外逐字段不变）：
+
+1. `code` 元素产出一个 `kind: "raster"` 的 item（字段见上表新增行）。参数由 `core/code-layer.js::codeLayerPlan`
+   逐帧求好——manifest 默认值、`code.params.*` 关键帧、`propLink`（add / mul）都算完，消费方只把
+   `content.source / params / seed / size / mode` 转发给渲染池，不再求值（P2）。`mode` 是**消费策略**而不是画面数据：
+   `live` 允许按需渲染，`bake` 只读 `.vdm/cache/raster/`。
+2. 像素只有一个来源：`engine/render-workers/pool.js`（§5，P4）。预览**不在渲染进程里跑用户代码**，
+   而是 `GET /api/raster?source=<id>&frame=<n>&w=<px>&h=<px>&params=<urlencoded json>&seed=<n>[&mode=bake]`
+   取一帧 PNG（`image/png` + `Cache-Control: no-store`，命中缓存直接回缓存帧，错误走既有 JSON 错误格式与状态码）。
+   预览侧：同一 `(source, frame, size, params, seed)` 只请求一次，成功前该项不画，播放时预取下一帧（最多 2 个在途），
+   `> 300 ms` 或请求失败退到同通道最近一次成功的帧，纹理按该键复用并按上限淘汰（不每帧新建、不漏显存）。
+3. Blender 侧见 WP3.4（`raster` 项按图像序列平面处理，复用视频平面路径）；本轮 `blender/*` 未改。
 
 ---
 

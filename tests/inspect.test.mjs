@@ -30,7 +30,7 @@ import {
   INSPECT_VERSION, SAMPLE_GRID, coverage, cutEdges, diff, estimateTextBox,
   frameAt, openProject, pxAt, stackAt,
 } from '../application/inspect-service.js';
-import { buildFrameIR } from '../core/frame-ir.js';
+import { buildFrameIR, FRAME_IR_VERSION } from '../core/frame-ir.js';
 import { orderLayers } from '../core/layers.js';
 import { callTool } from '../mcp/tools.js';
 
@@ -112,7 +112,7 @@ test('inspect stackAt: far-to-near order is orderLayers, with per-item depth', (
   const project = sceneProject();
   const report = stackAt(project, 1.2);
   assert.equal(report.version, INSPECT_VERSION);
-  assert.equal(report.ir, 2);
+  assert.equal(report.ir, FRAME_IR_VERSION);
   assert.equal(report.rule, 'core/layers.js::orderLayers');
   assert.equal(report.frame, 36); // t = frame / fps, rounded (P5)
   assert.equal(report.t, 1.2);

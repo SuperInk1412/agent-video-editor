@@ -35,13 +35,19 @@ const run = (cmd, args, opts = {}) => new Promise((resolve, reject) => {
   p.on('close', (code) => resolve({ code, out, err }));
 });
 
-/** Project file + media only: a copied .vdm would point at the source's runtime. */
+/**
+ * Project file + media only: a copied .vdm would point at the source's runtime.
+ * `sources/` comes along when the project has code layers (§6.1): those sketch
+ * files are the picture's source of truth, and the render pool reads the disk
+ * copy under `sources/<id>/`.
+ */
 async function copyProject() {
   await fs.rm(WORK, { recursive: true, force: true });
   const dst = path.join(WORK, 'project');
   await fs.mkdir(dst, { recursive: true });
   await fs.copyFile(path.join(SOURCE, 'project.vdm.json'), path.join(dst, 'project.vdm.json'));
   await fs.cp(path.join(SOURCE, 'media'), path.join(dst, 'media'), { recursive: true }).catch(() => {});
+  await fs.cp(path.join(SOURCE, 'sources'), path.join(dst, 'sources'), { recursive: true }).catch(() => {});
   return dst;
 }
 

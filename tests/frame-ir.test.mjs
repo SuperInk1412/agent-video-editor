@@ -35,6 +35,9 @@ import {
 } from '../core/frame-ir.js';
 import { orderLayers } from '../core/layers.js';
 import { compileProject } from '../core/tracks.js';
+import { codeParamsAt } from '../core/code-layer.js';
+import { createProject, normalizeProject } from '../core/schema.js';
+import { applyOp } from '../core/ops.js';
 
 const root = path.resolve(import.meta.dirname, '..');
 const readJson = (rel) => JSON.parse(fs.readFileSync(path.join(root, rel), 'utf8'));
@@ -99,7 +102,7 @@ test('frame IR: version, JSON shape and frame/time convention', () => {
   const p = demo();
   const ir = buildFrameIR(p, 24);
   assert.equal(ir.version, FRAME_IR_VERSION);
-  assert.equal(FRAME_IR_VERSION, 2);
+  assert.equal(FRAME_IR_VERSION, 3);
   assert.equal(ir.frame, 24);
   assert.equal(ir.fps, 24);
   assert.equal(ir.t, 1); // t = frame / fps (P5: whole frames only)
@@ -347,6 +350,98 @@ test('frame IR: media uv is one exported rule (stretch keeps the whole picture)'
   p.elements.push({ id: 'el_img', type: 'image', start: 0, duration: 4, z: 5, src: 'media/a.jpg', style: { fit: 'stretch' } });
   const item = buildFrameIR(p, 30).items.find((it) => it.id === 'el_img');
   assert.deepEqual(item.content.uv, [0, 0, 1, 1], 'stretch is not cropped by the IR either');
+});
+
+/**
+ * A project with one registered p5 source, one tilted 3D code layer and one
+ * link driver: the raster item has to carry the per-frame parameters the pool
+ * is fed from (keyframes AND property links), not the element's base values.
+ */
+function codeProject() {
+  const p = normalizeProject(createProject({ title: 'code-ir', duration: 4 }));
+  applyOp(p, {
+    op: 'sourceAdd',
+    id: 'src_rain',
+    manifest: {
+      runtime: 'p5', entry: 'sketch.js', deterministic: true,
+      params: [
+        { id: 'density', type: 'number', default: 0.2, keyable: 'frame' },
+        { id: 'gain', type: 'number', default: 0, keyable: 'frame' },
+      ],
+    },
+    files: { 'sketch.js': 'export function draw(ctx, vdm) { ctx.fillRect(0, 0, vdm.size[0], vdm.size[1]); }\n' },
+  });
+  const driver = applyOp(p, {
+    op: 'addElement',
+    element: { id: 'el_driver', type: 'solid', start: 0, duration: 4, z: 1, style: { w: 100, h: 100, fill: '#fff' } },
+  }).element;
+  applyOp(p, {
+    op: 'addElement',
+    element: {
+      id: 'el_rain', type: 'code', start: 0, duration: 4, z: 2,
+      node: { pivot: [0.4, 1.1, 0], rotation: [12, 28, 6], scale: [1, 1, 1] },
+      code: { source: 'src_rain', params: { density: 0.6 }, seed: 7, size: [960, 540], cache: 'live' },
+    },
+  });
+  // one keyed parameter (interpolates) and one property-linked parameter
+  applyOp(p, { op: 'keySet', id: 'el_rain', path: 'code.params.density', t: 0, value: 0.2 });
+  applyOp(p, { op: 'keySet', id: 'el_rain', path: 'code.params.density', t: 2, value: 0.8 });
+  applyOp(p, { op: 'keySet', id: driver.id, path: 'transform.opacity', t: 0, value: 1 });
+  applyOp(p, { op: 'keySet', id: driver.id, path: 'transform.opacity', t: 2, value: 0.5 });
+  applyOp(p, {
+    op: 'propLink', id: 'el_rain', to: 'code.params.gain',
+    from: { host: 'el', id: driver.id, path: 'opacity' }, t: 0, combine: 'add',
+  });
+  compileProject(p);
+  return { p, el: p.elements.find((e) => e.id === 'el_rain') };
+}
+
+test('frame IR: a code element becomes one raster item carrying this frame\'s parameters', () => {
+  const { p, el } = codeProject();
+  // frame 24 = t 1 s: density is halfway between its two keys
+  const ir = buildFrameIR(p, 24);
+  const item = ir.items.find((it) => it.id === 'el_rain');
+  assert.ok(item, 'the code layer is in the draw list');
+  assert.equal(item.kind, 'raster');
+  // the request the pool gets, straight from core/code-layer.js::codeLayerPlan
+  assert.deepEqual(item.content.source, { id: 'src_rain', runtime: 'p5' });
+  assert.equal(item.content.seed, 7);
+  assert.deepEqual(item.content.size, [960, 540], 'content.size is the raster resolution');
+  assert.equal(item.content.mode, 'live');
+  assert.equal(item.content.uv, undefined, 'a raster fills its quad: no uv rect to invent');
+  // the quad itself is the full project frame, like image / video
+  assert.deepEqual(item.size, [1920, 1080]);
+  // params are the evaluated ones, keyframes and links included
+  assert.deepEqual(item.content.params, codeParamsAt(p, el, 1));
+  assert.ok(Math.abs(item.content.params.density - 0.5) < 1e-9, `density ${item.content.params.density}`);
+  // the driver eases 1 -> 0.5 over its two keys, so at its midpoint the link
+  // contributes -0.25 onto the parameter's base value of 0
+  assert.ok(Math.abs(item.content.params.gain + 0.25) < 1e-9, `linked gain ${item.content.params.gain}`);
+  assert.deepEqual(item.content.params, { density: 0.5, gain: -0.25 });
+
+  // every other field is the same shape a normal 2D item has
+  assert.ok(Array.isArray(item.world) && item.world.length === 16);
+  assert.ok(Math.abs(item.world[0] - elementPixelMatrix(p, el, 1)[0]) < 1e-12, 'world is the shared pixel matrix');
+  assert.equal(item.depth.write, true, 'a node plane at opacity 1 owns its pixels');
+  assert.equal(ir.items[item.drawOrder], item, 'drawOrder indexes the list');
+  assert.equal(new Set(ir.items.map((it) => it.drawOrder)).size, ir.items.length);
+  assert.equal(item.crop.length, 4);
+  assert.equal(item.blend, 'normal');
+  // "bake" is carried through, not decided by the consumer
+  const baked = codeProject();
+  baked.el.code.cache = 'bake';
+  const bakedItem = buildFrameIR(baked.p, 24).items.find((it) => it.id === 'el_rain');
+  assert.equal(bakedItem.content.mode, 'bake');
+  // an unregistered source still yields the item: the runtime is unknown, the
+  // stored values and this frame's keyframes still evaluate (the consumer just
+  // cannot fetch a raster and shows nothing)
+  const orphan = codeProject();
+  orphan.el.code.source = 'src_gone';
+  const orphanItem = buildFrameIR(orphan.p, 24).items.find((it) => it.id === 'el_rain');
+  assert.deepEqual(orphanItem.content.source, { id: 'src_gone', runtime: null });
+  assert.equal(orphanItem.content.params.density, 0.5);
+  // a project without code elements is untouched by the raster path
+  assert.ok(demo().elements.every((e) => e.type !== 'code'));
 });
 
 test('frame IR: a backend can re-order raw items for its own eye', () => {
