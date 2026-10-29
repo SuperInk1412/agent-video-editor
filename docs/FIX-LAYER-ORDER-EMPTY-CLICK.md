@@ -1,7 +1,7 @@
 # 修复方案 · 2D 平面前后顺序 + 点空白取消选中
 
-> 状态：**待用户批准**（2026-10-29，B 写）。批准后建议由 A 实施（涉及的 `preview.js`、
-> `spatial-layers.js`、`main.js` 都是 A 的界面代码，A 正在频繁修改，避免冲突）。
+> 状态：**已实施**（2026-10-29，A 照着本方案做）。问题一 `25f54d2`、问题二 1/2 `853a085`；
+> 问题二 3「元素锁定」还需要另行批准。实施记录见文末。
 > 每个问题一个提交，可单独回退。
 
 ---
@@ -110,9 +110,56 @@ Blender 里每块 2D 平面是真实的物体，EEVEE 按**物体原点到相机
 
 | 项 | 负责 | 文件 |
 |---|---|---|
-| 问题一 排序 | A（建议） | `app/renderer/js/spatial-layers.js`、单测 |
-| 问题一 对拍 | B | `scripts/check-render-parity.mjs` 加本例（斜文字在底板前） |
-| 问题二 1、2 | A（建议） | `app/renderer/js/main.js` |
+| 问题一 排序 | A ✅ `25f54d2` | `app/renderer/js/spatial-layers.js`、单测 |
+| 问题一 对拍 | B（待做） | `scripts/check-render-parity.mjs` 加本例（斜文字在底板前） |
+| 问题二 1、2 | A ✅ `853a085` | `app/renderer/js/main.js` |
 | 问题二 3 锁定 | 待批准后定 | schema（`el.locked`）、`main.js` 点选/框选、时间轴开关 |
 
 问题一、问题二互不依赖，可以并行；各自一个提交，记入改动日志。
+
+---
+
+## 实施记录（A，2026-10-29）
+
+### 问题一 `25f54d2`
+
+- `spatial-layers.js`：新增 `layerOriginDistance`（相机 → `L.plane.p`，也就是元素原点的世界帧位置）；
+  `compareLayerPlanes` 先用 `sameLayerPlane` 判「同一平面」（仍按 `el.z`），不同平面按原点距离远的先画，
+  原点距离完全相等（< `PLANE_EPS`）时退回原数组顺序。`layerPlaneDistance` 现在**只**用来判同一平面。
+- `preview.js` 只改了两处注释：`_drawLayers` 与 `hitTest` 仍然共用 `orderLayers`，画和点选一起生效。
+- 单测（`tests/spatial-layers.test.mjs`，10 条全过）：新增本例（底板平面 25.2 m / 歌词平面 26.3 m，
+  原点 29.8 m / 27.2 m → 底板先画）、同一平面四个机位都按 `el.z`、不同法线同一原点按源顺序；
+  原有平面顺序测试全部保留。
+- 预览像素探针（miku-swiss，t = 3 s，Electron 里读 canvas 像素）：
+
+| 画面 | 最亮 RGB 和 | 歌词色像素 | 中心点选 |
+|---|---|---|---|
+| 相机 9 · 旧代码 | 345 | **0** | `s2_bg` |
+| 相机 9 · 新代码 | 732 | **1286** | `s2_w2` |
+| 镜头 02 · 新代码 | 732 | 14846 | `s2_w2`（未变） |
+
+点选也跟着画面走了（旧代码中心点中底板，新代码点中歌词），即「点到的就是看到的」。
+
+- `scripts/check-render-parity.mjs` 现有 A–E 用例通过（B 仍要加「斜文字在底板前」这一例）。
+
+### 问题二 1、2 `853a085`
+
+- `selectAt` 移到模块顶层，`beginViewportMarquee` 和两个 `pointerdown`／`pointerup` 分支共用；
+  点空白 = `clearSelection()`（池、元素、物体、相机、段落、属性行全清），Ctrl/Cmd/Shift + 点空白保持原选择。
+  去掉「改选段落 / 相机」的隐式回退。「清除选中」命令和 Esc 的取消选中也改用 `clearSelection()`。
+- `select()` 认显式 `segmentId: null`（原来 `??` 会保留旧段落头），时间轴空白处 `clear()` 发来的
+  「清空」payload 现在与视口一致。
+- Electron 探针（临时脚本 `.scratch/probe-empty-click.mjs`，不随仓库提交；合成 PointerEvent
+  走真事件处理器，18 项检查）：
+  - 旧代码：空白单击不生效，6 次 `ReferenceError: selectAt is not defined`；段落头点了也不清。
+  - 新代码：预览 / 编辑模式单击空白都清空（段落头、相机都不会被改选），Ctrl/Shift 保持，元素点选和
+    拖框行为不变，`window.onerror` 为空。
+- 本次未做：问题二 3（元素「锁定」开关）——方案里写着要另行批准，未加 `el.locked`。
+
+### 验证
+
+- `npm test`：481 项全过。
+- `npm run check:preview`：PASS（朝向未变）。
+- `npm run blender:check`：PASS（Blender 5.0.1，渲一帧 4.3 s）。
+- `node scripts/check-render-parity.mjs`：PASS，144 格里 1 格不同（允许 4 格），A–E 现有用例没有退化。
+
