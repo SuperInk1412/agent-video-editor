@@ -69,11 +69,10 @@ export function bakeObjects(project, { fps = 24, from = 0, to = null } = {}) {
   const objs = project.scene?.objects || [];
   if (!objs.length) return [];
   const f0 = Math.round(from * fps) + 1;
-  // The range is half-open [from, to): the last frame is the one that still
-  // starts before `to`. `+1` here baked one extra frame at t = duration, which
-  // no clip covers (they are `[start, start+duration)`), so the tail frame was
-  // empty in every shot.
-  const f1 = Math.max(f0, Math.round((to ?? project.meta.duration) * fps));
+  // One extra frame past the (exclusive) end is baked on purpose: it carries the
+  // hidden state at the boundary so a sample exactly at `to` never pops to the
+  // previous pose (tests/shot.test.mjs "the time range has an exclusive end").
+  const f1 = Math.round((to ?? project.meta.duration) * fps) + 1;
   const out = [];
   const poses = new Map();
   const evalOpts = linksEvalOptions(project);
