@@ -201,3 +201,27 @@ export function poolFromSelection(sel) {
   if (sel?.elementId) return selectOne('element', elementRef(sel.elementId));
   return emptySelection();
 }
+
+/** Does the host a ref names still resolve in `project`? */
+export function hostExists(project, split) {
+  if (!split || split.path != null || split.t != null) return false;
+  return !!keyframeHost(project, split);
+}
+
+/**
+ * Element refs (`el:` / `ob:` / `cam:`) the Delete key may remove right now:
+ * the element pool (or, without one, the legacy single-selection fields) minus
+ * refs that no longer resolve to a host, so a stale pool cannot fail the batch.
+ * Property and keyframe pools are not element pools: Delete must never walk
+ * from a property row to the element behind it.
+ */
+export function deletableElementRefs(project, sel) {
+  const pool = poolFromSelection(sel);
+  if (pool.kind !== 'element') return [];
+  const out = [];
+  for (const ref of pool.ids) {
+    if (!hostExists(project, splitRef(ref))) continue;
+    if (!out.includes(ref)) out.push(ref);
+  }
+  return out;
+}

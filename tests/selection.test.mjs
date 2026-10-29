@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   emptySelection, normalizeSelection, selectOne, addSelection, toggleSelection, pickSelection,
   hasRef, splitRef, cameraRef, objectRef, elementRef, propertyRef, keyframeRef,
-  keyframeExists, keyframeDeleteOps, legacyFields,
+  keyframeExists, keyframeDeleteOps, legacyFields, deletableElementRefs,
 } from '../core/selection.js';
 import { applyOp } from '../core/ops.js';
 
@@ -220,4 +220,47 @@ test('keyframe refs delete exactly those keys through one batch', () => {
   assert.equal(p.scene.objects[0].tracks['pivot.y'], undefined);
   assert.deepEqual(p.scene.objects[0].tracks['pivot.z'].map((k) => k.t), [3]);
   assert.deepEqual(p.elements[0].keyframes.map((k) => k.t), [0.5]);
+});
+
+// ------------------------------------------------------------ the Delete key
+// Delete removes hosts, never refs that only point at a host (a property row or
+// a keyframe dot must not take the element / camera with it).
+
+test('deletable refs are the existing hosts of the element pool', () => {
+  const project = {
+    elements: [{ id: 'el_1' }, { id: 'el_2' }],
+    scene: { objects: [{ id: 'ob_1' }] },
+    cameras: [{ id: 'cam_1' }],
+    camera: { id: 'cam_1' },
+  };
+  const sel = {
+    pool: { kind: 'element', ids: ['el:el_1', 'ob:ob_1', 'cam:cam_1', 'el:gone'], primary: 'el:el_1' },
+    elementId: 'el_1',
+  };
+  assert.deepEqual(deletableElementRefs(project, sel), ['el:el_1', 'ob:ob_1', 'cam:cam_1']);
+});
+
+test('a property or keyframe pool never falls back to the host element', () => {
+  const project = { elements: [{ id: 'el_1' }], scene: { objects: [] }, cameras: [], camera: null };
+  const property = { pool: { kind: 'property', ids: ['el:el_1:x'], primary: 'el:el_1:x' }, elementId: 'el_1' };
+  assert.deepEqual(deletableElementRefs(project, property), []);
+  const keys = { pool: { kind: 'keyframe', ids: ['el:el_1:x:0'], primary: 'el:el_1:x:0' }, elementId: 'el_1' };
+  assert.deepEqual(deletableElementRefs(project, keys), []);
+  // the bare legacy field is still a host selection
+  assert.deepEqual(deletableElementRefs(project, { elementId: 'el_1' }), ['el:el_1']);
+});
+
+test('deletable refs skip stale hosts and keep the pool order', () => {
+  const project = { elements: [{ id: 'el_1' }], scene: { objects: [{ id: 'ob_1' }] }, cameras: [], camera: null };
+  assert.deepEqual(deletableElementRefs(project, { elementId: 'gone' }), []);
+  assert.deepEqual(deletableElementRefs(project, { objectId: 'ob_1' }), ['ob:ob_1']);
+  const sel = {
+    pool: {
+      kind: 'element',
+      ids: ['ob:ob_1', 'el:gone', 'el:el_1', 'ob:ob_1'],
+      primary: 'el:el_1',
+    },
+  };
+  assert.deepEqual(deletableElementRefs(project, sel), ['ob:ob_1', 'el:el_1']);
+  assert.deepEqual(deletableElementRefs(project, { pool: emptySelection() }), []);
 });

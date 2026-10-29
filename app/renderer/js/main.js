@@ -35,7 +35,7 @@ import { clearCompiledTracks } from '/core/tracks.js';
 import { elementNodeAt } from './node-at.js';
 import {
   emptySelection, normalizeSelection, selectOne, pickSelection, legacyFields, cameraRef, objectRef, elementRef, splitRef,
-  keyframeExists, keyframeDeleteOps,
+  keyframeExists, keyframeDeleteOps, deletableElementRefs,
 } from '/core/selection.js';
 
 const $ = (s) => document.querySelector(s);
@@ -4075,12 +4075,64 @@ async function boot() {
     when: () => (readClipboard() ? true : '剪贴板里没有复制的元素'),
     run: (e) => { e?.preventDefault(); pasteClipboard(); },
   });
+
+  /**
+   * Everything Delete may remove right now: host refs of the element pool
+   * (`el:` / `ob:` / `cam:`), or the legacy single-selection fields. The pool
+   * owns the rule (core/selection.js) so a property / keyframe pool can never
+   * fall back to the element behind it.
+   */
+  const deletableRefs = () => deletableElementRefs(S.project, S.selection);
+
+  /**
+   * Remove every picked element in ONE batch (one save, one Ctrl+Z step).
+   * `el:` -> removeElement, `cam:` -> removeCamera, `ob:` -> objectRemove.
+   * A lone 3D object keeps the parent-aware dialog; once several refs are in
+   * play, children of a deleted parent are unparented at the playhead (the
+   * dialog's "keep in place" policy) so nothing dangles.
+   */
+  const deleteRefs = (refs) => {
+    const splits = refs.map(splitRef).filter(Boolean);
+    if (splits.length === 1 && splits[0].type === 'ob') {
+      const obj = (S.project?.scene?.objects || []).find((o) => o.id === splits[0].id);
+      if (obj) requestObjectDelete(obj);
+      return;
+    }
+    const at = writeTime();
+    const ops = [];
+    let cams = 0;
+    for (const s of splits) {
+      if (s.type === 'el') ops.push({ op: 'removeElement', id: s.id });
+      else if (s.type === 'cam') { ops.push({ op: 'removeCamera', id: s.id }); cams += 1; }
+    }
+    const obs = splits.filter((s) => s.type === 'ob').map((s) => s.id);
+    for (const id of obs) {
+      for (const kid of childrenOf(S.project, id)) ops.push({ op: 'objectUnparent', id: kid, t: at });
+    }
+    for (const id of obs) ops.push({ op: 'objectRemove', id });
+    if (!ops.length) return;
+    select({});
+    op(ops.length === 1 ? ops[0] : { op: 'batch', ops }).then((j) => {
+      if (!j) return;
+      // Silent for a single clip (it visibly leaves the timeline); multi and
+      // camera deletes say what happened and how to take it back.
+      if (refs.length > 1) toast(`已删除 ${refs.length} 个元素 · Ctrl+Z 可撤销`, 'success');
+      else if (cams) toast('已删除相机 · Ctrl+Z 可撤销', 'success');
+    });
+  };
   registerCommand({
-    id: 'edit.delete', title: '删除选中', sheetTitle: '删除选中（关键帧选区优先）', group: '编辑', keys: 'Delete / Backspace',
+    id: 'edit.delete', title: '删除选中', sheetTitle: '删除选中（关键帧优先；多选一次删完）', group: '编辑', keys: 'Delete / Backspace',
     icon: 'trash', keywords: 'delete remove',
     match: (e) => e.key === 'Delete' || e.key === 'Backspace',
-    when: () => ((S.selection.pool?.kind === 'keyframe' && S.selection.pool.ids.length) || S.selection.elementId || S.selection.objectId
-      ? true : '先选中要删除的元素或关键帧'),
+    keyBlocked: 'toast',
+    when: () => {
+      const pool = S.selection.pool;
+      if (pool?.kind === 'keyframe') return pool.ids.length ? true : '先选中要删除的关键帧或元素';
+      // A property row is a pointer into the host, not the host itself:
+      // deleting it must never remove the element it belongs to.
+      if (pool?.kind === 'property') return '选中的是属性行——Delete 只删元素、相机或关键帧';
+      return deletableRefs().length ? true : '先选中要删除的元素或关键帧';
+    },
     run: (e) => {
       const pool = S.selection.pool;
       // A keyframe pool wins over the host the key belongs to: Delete removes
@@ -4094,17 +4146,10 @@ async function boot() {
         }
         return;
       }
-      // v1 deletes only the primary host of the pool: one element / object at a
-      // time, never a cross-type batch, even when cam / ob / el are mixed.
-      const primary = S.selection.pool?.kind === 'element' ? splitRef(S.selection.pool.primary) : null;
-      const elementId = primary?.type === 'el' ? primary.id : (primary ? null : S.selection.elementId);
-      const objectId = primary?.type === 'ob' ? primary.id : (primary ? null : S.selection.objectId);
-      if (elementId) { e?.preventDefault(); op({ op: 'removeElement', id: elementId }); S.selection.elementId = null; }
-      else if (objectId) {
-        e?.preventDefault();
-        const obj = (S.project?.scene?.objects || []).find((o) => o.id === objectId);
-        if (obj) requestObjectDelete(obj);
-      }
+      const refs = deletableRefs();
+      if (!refs.length) return;
+      e?.preventDefault();
+      deleteRefs(refs);
     },
   });
   registerCommand({
