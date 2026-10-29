@@ -1,4 +1,10 @@
-import { EDIT_SCHEMA, OP_SCHEMA } from '../core/contracts.js';
+// The op contract, the request preconditions and the changeset schema all come
+// from core/contracts.js — this file never restates an op field
+// (docs/DESIGN-BACKEND-V2.md §8.4). `node scripts/gen-contracts.mjs --check`
+// keeps the generated docs/JSON in step with the same module.
+import {
+  ACTOR_ID, CHANGESET_APPLY_SCHEMA, EDIT_BASELINE, EDIT_SCHEMA, OP_SCHEMA,
+} from '../core/contracts.js';
 import { validateContract } from '../application/validate-contract.js';
 import { errorData, fault } from '../application/errors.js';
 import { assertSafeData } from '../core/json.js';
@@ -15,7 +21,7 @@ const number = { type: 'number' };
 const point = { type: 'array', items: number, minItems: 2, maxItems: 2 };
 const schema = (properties = {}, required = []) => ({ type: 'object', properties, required, additionalProperties: false });
 const pagination = { offset: integer, limit: { type: 'integer', minimum: 1, maximum: 500 } };
-const editOptions = { expectedRev: integer, requestId: { ...string, maxLength: 200 }, dryRun: { type: 'boolean' } };
+const editOptions = EDIT_BASELINE;
 const tool = (name, description, inputSchema, method, readOnly = true, transform = (v) => v) => ({
   name, description, inputSchema, outputSchema: { type: 'object' },
   annotations: { readOnlyHint: readOnly, destructiveHint: !readOnly, idempotentHint: readOnly, openWorldHint: false }, method, transform,
@@ -42,20 +48,12 @@ const changeSetTool = (name, description, inputSchema, changeset, readOnly = tru
   annotations: { readOnlyHint: readOnly, destructiveHint: !readOnly, idempotentHint: readOnly, openWorldHint: false },
   changeset,
 });
-const actorSchema = { type: 'string', minLength: 1, maxLength: 200 };
-/** `apply` takes a stored proposal (id) or a new one (ops, same shape as an edit). */
-const changeSetApplySchema = {
-  type: 'object', additionalProperties: false, $defs: EDIT_SCHEMA.$defs,
-  properties: {
-    id: string,
-    ops: { type: 'array', minItems: 1, maxItems: 1000, items: { $ref: '#/$defs/op' } },
-    actorId: actorSchema,
-    intent: { type: 'string', maxLength: 512 },
-    expectedRev: integer,
-    requestId: { ...string, maxLength: 200 },
-    dryRun: { type: 'boolean' },
-  },
-};
+// `apply` takes a stored proposal (id) or a new one (ops, same shape as an
+// edit). The whole schema — including the embedded op `$defs` — is derived in
+// core/contracts.js::CHANGESET_APPLY_SCHEMA, so it cannot drift from
+// `vdm_project_apply_ops`.
+const actorSchema = ACTOR_ID;
+const changeSetApplySchema = CHANGESET_APPLY_SCHEMA;
 
 export const TOOLS = [
   tool('vdm_capabilities', 'Read supported project models, edit operations, render limits and installed Blender availability.', schema(), 'capabilities'),

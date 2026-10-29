@@ -163,7 +163,7 @@ function activeCamera(p, create = false) {
 }
 
 /** Camera transform channels addressed by the timeline keyframes. */
-const CAMERA_TRACK_DIMS = {
+export const CAMERA_TRACK_DIMS = {
   center: 3, scale: 3, picturePivot: 2, pictureOffset: 2, opacity: 1,
   fov: 1, lookAhead: 1, bankGain: 1, maxRoll: 1, roll: 1,
   'shake.amp': 1, 'shake.freq': 1, 'shake.speedGain': 1,

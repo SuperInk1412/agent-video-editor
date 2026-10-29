@@ -24,6 +24,12 @@ node /absolute/path/agent-video-editor/mcp/server.js --project /absolute/path/pr
 项目必须已存在；可先使用 `vdm init` 创建。MCP 进程退出不关闭项目运行时或取消已提交渲染，
 运行时可由 `vdm engine stop --project <dir>` 显式停止。
 
+**契约单一来源（WP2.3）**：`vdm_project_apply_ops` 与 `vdm_changeset_apply` 的 `inputSchema`
+（含 `$defs.op`）、`expectedRev` / `requestId` / `dryRun`、`actorId` 全部来自 `core/contracts.js`，
+`mcp/tools.js` 不再手写任何 op 字段。写给 agent 的版式见 `docs/AGENT-PROTOCOL.md`（由
+`node scripts/gen-contracts.mjs` 生成，勿手改），人读字段表见 `docs/CONTRACTS.md`，机读快照见
+`mcp/contracts.generated.json`；`node scripts/gen-contracts.mjs --check` 在生成物与契约不一致时非零退出。
+
 ## 编辑闭环
 
 1. `vdm_capabilities {}`：确认模型与 Blender 可用性。
