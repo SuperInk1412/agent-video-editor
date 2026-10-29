@@ -41,3 +41,4 @@
 | 2026-10-29 | `25f54d2` | **修复**：预览 2D 平面排序改成和 Blender 一致——同一平面按 `el.z`，不同平面按「相机→元素原点」距离（新增 `layerOriginDistance`），点选与绘制共用同一顺序 | 相机 9 里斜放的歌词被身后底板盖住（斜平面的无限延伸离相机更近，成片却对） | `app/renderer/js/spatial-layers.js`、`app/renderer/js/preview.js`（注释）、`tests/spatial-layers.test.mjs` | `git revert 25f54d2` |
 | 2026-10-29 | `853a085` | **修复**：点空白取消选中——`selectAt` 提到模块顶层（修 `ReferenceError`）；点空白一律清空（池/元素/物体/相机/段落/属性行），Ctrl/Shift 保持；`select()` 认显式 `segmentId: null`；「清除选中」和 Esc 共用 `clearSelection()` | 点空白没反应，偶尔改选段落/相机，取消选中像玄学 | `app/renderer/js/main.js` | `git revert 853a085` |
 | 2026-10-29 | 见上两条 | 实施记录：像素探针与 Electron 点选探针的数值、验证清单 | 交接与回退时有据可查 | `docs/FIX-LAYER-ORDER-EMPTY-CLICK.md`（状态 + 实施记录） | — |
+| 2026-10-29 | `d629748` | 修复方案问题三：播放卡顿（时间轴每帧重写静态行信息 + 根容器 CSS 变量，22→60 fps 的实测依据） | 用户反映播放越来越卡 | `docs/FIX-LAYER-ORDER-EMPTY-CLICK.md` | `git revert d629748` |
