@@ -330,6 +330,10 @@ function p5Driver({ size, container }) {
           // no-loop policy win over whatever the sketch asked for.
           instance = new p5((pp) => {
             try {
+              // The sketch function only receives the p5 instance, so the
+              // frame's numbers ride on it: `p.vdm` is available from setup()
+              // onwards and is replaced before every redraw (§6.2).
+              pp.vdm = vdm;
               pp.pixelDensity(1);
               pp.noLoop();
               pp.loop = () => {}; // §6.2: loop() is a no-op in the sandbox
@@ -369,6 +373,11 @@ function p5Driver({ size, container }) {
       }
     },
     render(vdm) {
+      // The sketch function only receives the p5 instance, so this is the one
+      // channel for the frame's numbers: `p.vdm.frame`, `p.vdm.param('…')`,
+      // `p.vdm.random(…)`. Set before every redraw so `p.draw()` sees the
+      // frame that is being rendered (§6.2).
+      instance.vdm = vdm;
       instance.redraw();
       return canvas;
     },

@@ -317,6 +317,41 @@ test('render-workers: a runaway frame is killed and the pool keeps working', { s
   assert.ok(ok.hash, 'the pool renders again after killing a runaway frame');
 });
 
+/** p5 instance mode: reads the frame's numbers through `p.vdm` (§6.2). */
+const SOURCE_P5 = `
+export default function sketch(p) {
+  p.setup = () => { p.createCanvas(p.vdm.size[0], p.vdm.size[1]); p.noLoop(); };
+  p.draw = () => {
+    const vdm = p.vdm;
+    const g = Math.round(255 * (vdm.param('density') || 0));
+    p.background(g, 0, 0);
+    console.error('VDM_P5 ' + JSON.stringify({ frame: vdm.frame, param: vdm.param('density'), fps: vdm.fps }));
+  };
+}
+`;
+
+test('render-workers: a p5 sketch reads vdm.frame and vdm.param()', { skip: electronSkip }, async (t) => {
+  const root = await tmpProject();
+  await writeSource(root, 'p5probe', SOURCE_P5, {
+    runtime: 'p5',
+    libs: { p5: '1.9.4' },
+    params: [{ id: 'density', type: 'number', default: 0.25 }],
+  });
+  const pool = await createRenderPool({ root, timeoutMs: 30000 });
+  t.after(async () => { await pool.close(); await fs.rm(root, { recursive: true, force: true }); });
+
+  await pool.render({ sourceId: 'p5probe', frame: 7, fps: 24, size: [32, 32], seed: 2, params: { density: 0.5 } });
+  const logged = pool.console.map((entry) => entry.text || '').join(String.fromCharCode(10));
+  // p5 draws once while loading (frame 0) and again for the frame we ask for:
+  // the last report is the one that belongs to this render.
+  const line = logged.split(String.fromCharCode(10)).filter((l) => l.includes('VDM_P5 ')).pop();
+  assert.ok(line, `p5 sketch could not report the frame: ${logged.slice(0, 500)}`);
+  const seen = JSON.parse(line.slice(line.indexOf('VDM_P5 ') + 'VDM_P5 '.length));
+  assert.equal(seen.frame, 7, 'p.vdm.frame is the frame being rendered');
+  assert.equal(seen.param, 0.5, 'p.vdm.param() sees the evaluated parameter');
+  assert.equal(seen.fps, 24);
+});
+
 test('render-workers: a frame range writes files and reuses the cache', { skip: electronSkip }, async (t) => {
   const root = await tmpProject();
   await writeSource(root, 'framey', SOURCE_FRAME);
