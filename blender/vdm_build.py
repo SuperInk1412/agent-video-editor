@@ -69,470 +69,6 @@ def lerp(a, b, t):
     return a + (b - a) * t
 
 
-BEZIER_SOLVE_STEPS = 40
-
-
-def _bezier_axis(a, b, s):
-    inv = 1.0 - s
-    # Preserve JS's multiplication order for bit-identical curve evaluation.
-    return 3.0 * inv * inv * s * a + 3.0 * inv * s * s * b + s * s * s
-
-
-# ---------------------------------------------------------------- value curves
-# Mirrors core/curves.js. Formulas are ports of the reference easings in
-# 参考程序/alight-curve-editor (see tests/fixtures/am-curve-samples.json); keep
-# the two implementations in sync.
-
-AM_PI = 3.14159
-
-PRESET_PARAM_SPECS = {
-    'bounce': {
-        'firstStepLength': (0.01, 1.0, 0.3),
-        'bounciness': (0.0, 1.0, 0.8),
-    },
-    'elastic': {
-        'stepLength': (0.01, 1.0, 0.25),
-        'attack': (0.0, 10.0, 1.0),
-        'decay': (0.0, 1.0, 0.5),
-        'magnitude': (0.0, 1.0, 1.0),
-    },
-    'cyclic': {
-        'stepLength': (0.001, 1.0, 0.2857143),
-        'sharpness': (0.0, 1.0, 0.0),
-        'skew': (0.0, 1.0, 0.5),
-        'decay': (0.0, 1.0, 0.0),
-    },
-    'step': {
-        'stepLength': (0.01, 1.0, 0.25),
-        'smoothing': (0.0, 1.0, 0.0),
-    },
-    'elasticStep': {
-        'stepLength': (0.01, 1.0, 0.2),
-        'magnitude': (0.0, 1.0, 0.5),
-    },
-}
-
-PRESET_TYPES = {
-    'bounce': 'bounce',
-    'elastic': 'elastic',
-    'cyclic': 'cyclic',
-    'step': 'step',
-    'elasticStep': 'elasticStep',
-}
-
-
-def _curve_mix(a, b, t):
-    return a * (1.0 - t) + b * t
-
-
-def _round_param(v):
-    # JS Math.round rounds halves up; Python's round() is banker's rounding.
-    return math.floor(v * 1000000.0 + 0.5) / 1000000.0
-
-
-def _preset_params(kind, raw):
-    spec = PRESET_PARAM_SPECS.get(kind)
-    if not spec:
-        return None
-    src = raw if isinstance(raw, dict) else {}
-    out = {}
-    for key, (lo, hi, default) in spec.items():
-        try:
-            value = float(src.get(key, default))
-        except (TypeError, ValueError):
-            value = default
-        if not math.isfinite(value):
-            value = default
-        out[key] = _round_param(clamp(value, lo, hi))
-    return out
-
-
-def _bounce_sample(p, u):
-    first = p['firstStepLength']
-    bounce = p['bounciness']
-    if first <= 0.0:
-        return 1.0
-    start = 0.0
-    length = first
-    amplitude = 1.0
-    probe = u + first / 2.0
-    for _ in range(512):
-        end = start + length
-        if probe <= end:
-            if start + length / 3.0 > first / 2.0 + 1.0 or (length < 0.1 and end > first / 2.0 + 1.0):
-                return 1.0
-            x = abs(((probe - start) / length - 0.5) * 2.0)
-            return x * x * amplitude + (1.0 - amplitude)
-        length *= bounce
-        amplitude *= bounce
-        if amplitude < 0.005:
-            return 1.0
-        start = end
-    return 1.0
-
-
-def _elastic_basic(p, x):
-    length = max(p['stepLength'], 0.01)
-    cos = math.cos((AM_PI * x) / length)
-    falloff = 1.0 - max(x, 0.005)
-    return cos * abs(falloff ** (p['decay'] * p['decay'] * 15.0 + 1.0))
-
-
-def _elastic_sample(p, u):
-    length = max(p['stepLength'], 0.01)
-
-    def ease(x):
-        return 1.0 - _elastic_basic(p, x) * p['magnitude']
-
-    if u >= length:
-        return ease(u)
-    ramp = (1.0 - math.cos((AM_PI * u) / length)) / 2.0
-    return _curve_mix(ramp * ease(length), ease(u), (u / length) ** 3)
-
-
-def _cyclic_sample(p, u):
-    length = max(p['stepLength'], 0.001)
-
-    def pct(x):
-        return (((x % length) + length) % length) / length
-
-    def cos_interp(x):
-        return 1.0 - ((math.cos((x / length) * AM_PI * 2.0) + 1.0) / 2.0)
-
-    def saw_interp(x):
-        return 1.0 - abs(pct(x) - 0.5) * 2.0
-
-    def skew_interp(x):
-        q = pct(x)
-        f = 0.5
-        if q < p['skew']:
-            f = (0.5 * q) / p['skew']
-        elif q > p['skew']:
-            f = 0.5 + ((q - p['skew']) / (1.0 - p['skew'])) / 2.0
-        return (x - q * length) + length * f
-
-    warped = skew_interp(u)
-    value = _curve_mix(cos_interp(warped), saw_interp(warped), p['sharpness'])
-    base = u - (u % length)
-    if length / 4.0 + base > 1.0:
-        value = 0.0
-    elif length / 2.0 + base < 1.0 and base + (length * 3.0) / 4.0 > 1.0 and pct(u) > p['skew']:
-        value = 1.0
-    return value * (1.0 - u * p['decay']) + u * p['decay']
-
-
-def _step_sample(p, u):
-    length = max(p['stepLength'], 0.001)
-    ramp_start = length - p['smoothing'] * length
-    rest = u % length
-    if ramp_start == length:
-        raw = 1.0 if rest >= length else 0.0
-    else:
-        raw = clamp((rest - ramp_start) / (length - ramp_start))
-    smooth = raw * raw * (3.0 - 2.0 * raw)
-    return (u - rest) + smooth * length
-
-
-def _elastic_step_sample(p, u):
-    length = max(p['stepLength'], 0.001)
-    if u < length:
-        return 0.0
-    inner = {
-        'stepLength': 0.5 - 0.45 * p['magnitude'],
-        'decay': 1.0 - p['magnitude'] * 0.5,
-        'magnitude': (1.0 - p['magnitude']) * 0.5 + 0.5,
-    }
-    rest = u % length
-    value = _elastic_sample(inner, rest / length)
-    return (u - rest) + length * (value - 1.0)
-
-
-def sample_preset(kind, params, u):
-    """Progress for a preset kind and its parameter bag; endpoints are pinned."""
-    p = _preset_params(kind, params)
-    target = clamp(u)
-    if not p:
-        return target
-    if target <= 0.0:
-        return 0.0
-    if target >= 1.0:
-        return 1.0
-    if kind == 'bounce':
-        return _bounce_sample(p, target)
-    if kind == 'elastic':
-        return _elastic_sample(p, target)
-    if kind == 'cyclic':
-        return _cyclic_sample(p, target)
-    if kind == 'step':
-        return _step_sample(p, target)
-    if kind == 'elasticStep':
-        return _elastic_step_sample(p, target)
-    return target
-
-
-def sample_curve(curve, u):
-    """Progress for a per-segment value curve (mirrors core/curves.js)."""
-    if not isinstance(curve, dict):
-        return clamp(u)
-    kind = curve.get('type')
-    if not kind and curve.get('preset'):
-        kind = PRESET_TYPES.get(curve.get('preset'))
-    if kind and kind != 'bezier':
-        raw = curve.get('params')
-        return sample_preset(kind, raw if isinstance(raw, dict) else curve, u)
-    p1 = curve.get('p1') or (0.0, 0.0)
-    p2 = curve.get('p2') or (1.0, 1.0)
-    try:
-        x1 = clamp(float(p1[0]))
-        y1 = float(p1[1])
-        x2 = clamp(float(p2[0]))
-        y2 = float(p2[1])
-    except (TypeError, ValueError, IndexError):
-        return clamp(u)
-    if not (math.isfinite(y1) and math.isfinite(y2)):
-        return clamp(u)
-    target = clamp(u)
-    if target <= 0.0:
-        return 0.0
-    if target >= 1.0:
-        return 1.0
-    lo, hi = 0.0, 1.0
-    for _ in range(BEZIER_SOLVE_STEPS):
-        s = (lo + hi) / 2.0
-        if _bezier_axis(x1, x2, s) < target:
-            lo = s
-        else:
-            hi = s
-    return _bezier_axis(y1, y2, (lo + hi) / 2.0)
-
-
-def ease(name, p):
-    p = clamp(p)
-    if name == 'linear':
-        return p
-    if name == 'easeIn':
-        return p * p
-    if name == 'easeOut':
-        return 1 - (1 - p) ** 2
-    if name == 'smooth':
-        return p * p * (3 - 2 * p)
-    if name == 'outExpo':
-        return 1 if p >= 1 else 1 - 2 ** (-10 * p)
-    if name == 'inOutCubic':
-        return 4 * p ** 3 if p < 0.5 else 1 - (-2 * p + 2) ** 3 / 2
-    if name == 'outBack':
-        c1, c3 = 1.70158, 2.70158
-        return 1 + c3 * (p - 1) ** 3 + c1 * (p - 1) ** 2
-    # easeInOut (default)
-    return 2 * p * p if p < 0.5 else 1 - (-2 * p + 2) ** 2 / 2
-
-
-def sample_track(keys, path, t, base):
-    if not keys:
-        return base
-    track = sorted([k for k in keys if k.get('path') == path], key=lambda k: k['t'])
-    if not track:
-        return base
-    if t <= track[0]['t']:
-        return track[0]['value']
-    if t >= track[-1]['t']:
-        return track[-1]['value']
-    for i in range(len(track) - 1):
-        a, b = track[i], track[i + 1]
-        if a['t'] <= t < b['t']:
-            p = (t - a['t']) / max(1e-6, b['t'] - a['t'])
-            if isinstance(a['value'], (int, float)) and isinstance(b['value'], (int, float)):
-                progress = sample_curve(a['curve'], p) if a.get('curve') else ease(a.get('ease', 'easeInOut'), p)
-                return lerp(a['value'], b['value'], progress)
-            return a['value']
-    return base
-
-
-def kick(beats, t, dur=0.14):
-    """Exponential pulse after the last beat <= t (mirrors core/time.js::kick)."""
-    i = bisect.bisect_right(beats, t) - 1
-    if i < 0:
-        return 0.0
-    dt = t - beats[i]
-    if dt > dur * 5:
-        return 0.0
-    return math.exp(-dt / dur)
-
-
-def motion_progress(el, t):
-    """motion.span = [t0, t1] pins the preset to an absolute range (kept across splits)."""
-    span = (el.get('motion') or {}).get('span')
-    if isinstance(span, (list, tuple)) and len(span) == 2:
-        try:
-            a, b = float(span[0]), float(span[1])
-        except (TypeError, ValueError):
-            a = b = 0.0
-        if b > a:
-            return clamp((t - a) / (b - a))
-    return clamp((t - el['start']) / max(1e-6, el['duration']))
-
-
-def punch_mul(el, t, meta):
-    punch = float(el.get('punch') or 0)
-    beats = meta.get('beats') or []
-    if punch <= 0 or not beats:
-        return 1.0
-    return 1 + punch * 0.05 * kick(beats, t, 0.12)
-
-
-def motion_delta(el, t, meta):
-    m = el.get('motion') or {}
-    amt = float(m.get('amount') or 0)
-    d = {'x': 0.0, 'y': 0.0, 'scale': punch_mul(el, t, meta), 'rotation': 0.0}
-    if not amt:
-        return d
-    p = motion_progress(el, t)
-    q = 0.35 * ease('easeInOut', p) + 0.65 * p
-    w, h = meta['width'], meta['height']
-    typ = m.get('type', 'none')
-    if typ == 'in':
-        d['scale'] *= 1 + amt * q
-    elif typ == 'out':
-        d['scale'] *= 1 + amt * (1 - q)
-    elif typ == 'left':
-        d['x'] = -amt * w * (q - 0.5); d['scale'] *= 1.02
-    elif typ == 'right':
-        d['x'] = amt * w * (q - 0.5); d['scale'] *= 1.02
-    elif typ == 'up':
-        d['y'] = amt * h * (q - 0.5); d['scale'] *= 1.02
-    elif typ == 'down':
-        d['y'] = -amt * h * (q - 0.5); d['scale'] *= 1.02
-    elif typ == 'drift':
-        d['x'] = amt * w * (q - 0.5); d['y'] = -amt * h * 0.25 * (q - 0.5)
-    elif typ == 'shake':
-        s = amt * 0.5
-        d['x'] = s * 14 * (math.sin(t * 37) + math.sin(t * 23.3) * 0.6)
-        d['y'] = s * 14 * math.sin(t * 29.1)
-        d['rotation'] = s * 0.7 * math.sin(t * 17.7)
-    return d
-
-
-def element_link_overlay(el, t):
-    """Effective values of the linked 2D channels at t, sampled by JS.
-
-    The engine attaches `el['_linkOverlay'] = {fps, values}` (core/link-eval.js)
-    so Blender never re-implements the property-link graph: it just overrides its
-    locally sampled fields before the motion preset / fades, exactly like
-    core/evaluate.js::evalElement's overlay order.
-    """
-    table = el.get('_linkOverlay')
-    if not isinstance(table, dict):
-        return None
-    values = table.get('values')
-    if not isinstance(values, list) or not values:
-        return None
-    try:
-        fps = float(table.get('fps') or 24)
-        idx = int(round(float(t) * fps))
-    except (TypeError, ValueError):
-        return None
-    idx = max(0, min(len(values) - 1, idx))
-    value = values[idx]
-    return value if isinstance(value, dict) else None
-
-
-def baked_world(el, t, meta):
-    """Baked plane matrix (engine/element-bake.js `_world`) at t, or None."""
-    bake = el.get('_world')
-    if not bake:
-        return None
-    frames = bake.get('frames') or []
-    if not frames:
-        return None
-    fps = float(meta.get('fps') or 24)
-    i = int(round(t * fps)) + 1 - int(bake.get('f0', 1))
-    return frames[max(0, min(len(frames) - 1, i))]
-
-
-def eval_element(el, t, meta):
-    tr = el.get('transform') or {}
-    kf = el.get('keyframes') or []
-
-    def g(path, default):
-        return sample_track(kf, path, t, default)
-
-    node = el.get('node')
-    if isinstance(node, dict):
-        # Migrated 2D element: the SpatialNode is the transform source. The 2D
-        # builder can represent flat planes only; for a tilted node we keep the
-        # pivot/scale/roll and leave the full 3D placement to the node renderer.
-        pivot = [
-            float(g('pivot.x', (node.get('pivot') or [0, 0, 0])[0]) or 0),
-            float(g('pivot.y', (node.get('pivot') or [0, 0, 0])[1]) or 0),
-            float(g('pivot.z', (node.get('pivot') or [0, 0, 0])[2]) or 0),
-        ]
-        position = [float(v or 0) for v in (node.get('position') or [0, 0, 0])[:3]]
-        while len(position) < 3:
-            position.append(0.0)
-        direction = [float(v or 0) for v in (node.get('dir') or [0, 0, 1])[:3]]
-        while len(direction) < 3:
-            direction.append(0.0)
-        flat = abs(direction[0]) < 1e-4 and abs(direction[1]) < 1e-4 and abs(direction[2]) > 0.999
-        fz = 1.0 if direction[2] >= 0 else -1.0
-        if flat:
-            # basisFromDir([0,0,fz]) = right [-fz,0,0], up [0,1,0], forward [0,0,fz]
-            wx = pivot[0] - fz * position[0]
-            wy = pivot[1] + position[1]
-            wz = pivot[2] + fz * position[2]
-        else:
-            wx, wy, wz = pivot
-        height = float(meta.get('height') or 1080)
-        st = {
-            'x': wx * PX_PER_M,
-            'y': (height / 2.0) - wy * PX_PER_M,
-            'z': wz,
-            'scale': float(g('scale.x', (node.get('scale') or [1, 1, 1])[0]) or 0),
-            'rotation': float(g('roll', node.get('roll', 0)) or 0),
-            'opacity': float(g('transform.opacity', tr.get('opacity', 1)) or 0),
-            'glow': float(g('fx.glow', (el.get('fx') or {}).get('glow', 0)) or 0),
-            'text': g('style.text', (el.get('style') or {}).get('text', '')),
-            'size': float(g('style.size', (el.get('style') or {}).get('size', 96)) or 0),
-            'color': g('style.color', (el.get('style') or {}).get('color', '#ffffff')),
-        }
-    else:
-        st = {
-            'x': float(g('transform.x', tr.get('x', 0)) or 0),
-            'y': float(g('transform.y', tr.get('y', 0)) or 0),
-            'z': float(g('transform.z', tr.get('z', 0)) or 0),
-            'scale': float(g('transform.scale', tr.get('scale', 1)) or 0),
-            'rotation': float(g('transform.rotation', tr.get('rotation', 0)) or 0),
-            'opacity': float(g('transform.opacity', tr.get('opacity', 1)) or 0),
-            'glow': float(g('fx.glow', (el.get('fx') or {}).get('glow', 0)) or 0),
-            'text': g('style.text', (el.get('style') or {}).get('text', '')),
-            'size': float(g('style.size', (el.get('style') or {}).get('size', 96)) or 0),
-            'color': g('style.color', (el.get('style') or {}).get('color', '#ffffff')),
-        }
-    overlay = element_link_overlay(el, t)
-    if overlay:
-        for key in ('x', 'y', 'z', 'scale', 'rotation', 'opacity', 'size', 'glow'):
-            if key in overlay:
-                try:
-                    st[key] = float(overlay[key])
-                except (TypeError, ValueError):
-                    pass
-    md = motion_delta(el, t, meta)
-    st['x'] += md['x']
-    st['y'] += md['y']
-    st['scale'] *= md['scale']
-    st['rotation'] += md['rotation']
-
-    fin = float(el.get('fadeIn') or 0)
-    fout = float(el.get('fadeOut') or 0)
-    fade = 1.0
-    if fin > 0:
-        fade *= clamp((t - el['start']) / fin)
-    if fout > 0:
-        fade *= clamp((el['start'] + el['duration'] - t) / fout)
-    st['opacity'] = clamp(st['opacity'] * fade)
-    st['active'] = el['start'] - 1e-6 <= t < el['start'] + el['duration'] - 1e-6
-    return st
-
-
 # ---------------------------------------------------------------- shot v3
 # The job's frame IR (engine/shot.js::buildShotV3, docs/DESIGN-BACKEND-V2.md
 # §4.4 / §10.2 WP1.2): every number a 2D element is drawn with — the plane's
@@ -550,7 +86,6 @@ def eval_element(el, t, meta):
 # Frames are 1-based render frames (§4.4): render frame `f` is IR frame `f - 1`,
 # and `scn.frame_current` is exactly that number — no time is sampled.
 
-V3_LEGACY_ENV = 'VDM_BUILD_LEGACY'  # temporary A/B switch while the v3 path is proven
 # Ordering tie-break along the plane normal, in metres per `drawOrder` step.
 # Coplanar layers need a distinct distance for EEVEE's blended sort; one z unit
 # of `depth.bias` is 1e-4 m (core/layers.js::LAYER_DEPTH_M), so a tenth of that
@@ -1224,17 +759,16 @@ class SceneBuilder:
         self.updaters = []
         self.el_index = 0
         # The frame IR of this job: every number drawn below comes from here
-        # (WP1.2). `legacy` is the temporary A/B switch of the proof run.
+        # (WP1.2). Without it there is nothing to draw — the Python evaluator
+        # that used to read the project is gone on purpose.
         self.v3 = ShotV3(load_shot_v3(project, opts))
-        self.legacy = os.environ.get(V3_LEGACY_ENV) == '1'
-        if not self.legacy and not self.v3:
+        if not self.v3:
             raise RuntimeError(
-                'vdm_build: the job carries no shot v3 payload — re-run the render '
-                'through engine/blender.js (WP1.2 reads the frame IR, not the project)')
+                'vdm_build: the job carries no shot v3 payload — render through '
+                'engine/blender.js (WP1.2 draws the frame IR, not the project)')
         self.units_per_m = PX_PER_M
         self.y_shift = 0.0
         self.embed = False
-        self.layer_px = 0.002
 
     # -- assets ------------------------------------------------------------
     def resolve_src(self, src):
@@ -1266,7 +800,7 @@ class SceneBuilder:
         bpy.context.scene.collection.objects.link(obj)
         return obj
 
-    def build_text(self, el, style, st0, z):
+    def build_text(self, el, style, st0):
         font_path = resolve_font(style)
         cu = bpy.data.curves.new(f'{el["id"]}_txt', 'FONT')
         cu.body = str(st0['text'] or ' ')
@@ -1285,7 +819,6 @@ class SceneBuilder:
                 pass
         mat, nodes = flat_material(f'{el["id"]}_mat', st0['color'], st0['opacity'])
         obj = self.add_object(cu, mat, el['id'])
-        obj.location.z = self.layer_px * z
         obj.scale = (1, 1, 1)
         obj['vdm_em'] = em
         # Preview semantics (preview.js text layers): the text box is centred on
@@ -1312,7 +845,7 @@ class SceneBuilder:
             pass
         return obj, nodes
 
-    def build_media(self, el, style, st0, z, src_path, sequence=None):
+    def build_media(self, el, style, st0, src_path, sequence=None):
         if sequence:
             # Image.frame_duration is read-only (Blender 5.2+); the frame count
             # lives on the texture node's ImageUser, set below.
@@ -1324,7 +857,6 @@ class SceneBuilder:
             mat, nodes = flat_material(f'{el["id"]}_mat', '#ff00aa', st0['opacity'])
             mesh = plane_mesh(f'{el["id"]}_mesh', self.W, self.H)
             obj = self.add_object(mesh, mat, el['id'])
-            obj.location.z = self.layer_px * z
             return obj, nodes, None
 
         # `content.uv` is the IR's image-space rect (null until the project knows
@@ -1347,10 +879,9 @@ class SceneBuilder:
             iu.use_auto_refresh = True
             nodes['tex']['vdm_frames'] = int(sequence['count'])
         obj = self.add_object(mesh, mat, el['id'])
-        obj.location.z = self.layer_px * z
         return obj, nodes, nodes['tex']
 
-    def build_feed(self, el, style, st0, z):
+    def build_feed(self, el, style, st0):
         # Camera feed (engine/camfeed-render.js): a full-frame plane whose image
         # is swapped every frame for f_<frame - delay>.png of the source pass.
         img = bpy.data.images.new(f'{el["id"]}_feed', 4, 4, alpha=True)
@@ -1363,11 +894,10 @@ class SceneBuilder:
         mat, nodes = textured_material(f'{el["id"]}_mat', img, st0['opacity'])
         nodes['tex'].extension = 'EXTEND'
         obj = self.add_object(mesh, mat, el['id'])
-        obj.location.z = self.layer_px * z
         nodes['tex']['vdm_feed'] = 1
         return obj, nodes, nodes['tex']
 
-    def build_shape(self, el, style, st0, z):
+    def build_shape(self, el, style, st0):
         w = float(style.get('w') or self.W)
         h = float(style.get('h') or self.H)
         kind = style.get('shape', 'rect')
@@ -1376,7 +906,6 @@ class SceneBuilder:
         fill = st0.get('fill') or style.get('fill', '#ffffff')
         mat, nodes = flat_material(f'{el["id"]}_mat', st0['color'] if el['type'] == 'text' else fill, st0['opacity'])
         obj = self.add_object(mesh, mat, el['id'])
-        obj.location.z = self.layer_px * z
         return obj, nodes
 
     # -- main --------------------------------------------------------------
@@ -1397,9 +926,6 @@ class SceneBuilder:
         self.embed = embed is not None
         self.units_per_m = 1.0 if self.embed else PX_PER_M
         self.y_shift = 0.0 if self.embed else -(self.H / 2.0)
-        # pixels between layers along the depth axis; only the legacy branch
-        # needs it — the v3 path reads `depth.bias` from the IR.
-        self.layer_px = 0.01 if embed is not None else 0.002
         if embed is None:
             self._setup_scene(scene, overlay)
         return self._build_elements(scene, overlay, embed)
@@ -1439,35 +965,32 @@ class SceneBuilder:
     def _build_elements(self, scene, overlay, embed):
         before = set(scene.objects)
         # Stacking is the IR's job (`depth.bias` + `drawOrder`); this order only
-        # decides in which order the objects are created.
+        # decides in which order the objects are created. `sorted` keeps the
+        # creation sequence stable under a shuffled input.
         elements = sorted(self.p.get('elements', []), key=lambda e: (e.get('z', 0), e.get('start', 0)))
 
-        for idx, el in enumerate(elements):
+        for el in elements:
             if el.get('visible') is False:
                 continue
             # sound clips have no picture: they are mixed by ffmpeg, never drawn
             if el['type'] == 'audio':
                 continue
             style = el.get('style') or {}
-            z = el.get('z', 0) + idx * 0.001
-            if self.legacy:
-                st0 = eval_element(el, el['start'], self.meta)
-            else:
-                # Only elements the IR draws inside this job get an object, and
-                # its first drawn frame has every number the build needs.
-                first = self.v3.first_frame(el.get('id'))
-                if first is None:
-                    continue
-                st0, style = v3_build_inputs(el, self.v3.item(el.get('id'), first))
+            # Only elements the IR draws inside this job get an object, and its
+            # first drawn frame has every number the build needs.
+            first = self.v3.first_frame(el.get('id'))
+            if first is None:
+                continue
+            st0, style = v3_build_inputs(el, self.v3.item(el.get('id'), first))
             src_path = self.resolve_src(el.get('src'))
             tex = None
 
             if el['type'] == 'text':
-                obj, nodes = self.build_text(el, style, st0, z)
+                obj, nodes = self.build_text(el, style, st0)
             elif el['type'] == 'camfeed':
-                obj, nodes, tex = self.build_feed(el, style, st0, z)
+                obj, nodes, tex = self.build_feed(el, style, st0)
             elif el['type'] in ('solid', 'shape'):
-                obj, nodes = self.build_shape(el, style, st0, z)
+                obj, nodes = self.build_shape(el, style, st0)
             else:
                 seq = None
                 if el['type'] == 'video':
@@ -1476,10 +999,10 @@ class SceneBuilder:
                         files = sorted(f for f in os.listdir(seq_dir) if f.endswith('.png'))
                         if files:
                             seq = {'first': os.path.join(seq_dir, files[0]), 'count': len(files), 'dir': seq_dir}
-                obj, nodes, tex = self.build_media(el, style, st0, z, src_path, seq)
+                obj, nodes, tex = self.build_media(el, style, st0, src_path, seq)
 
             obj.hide_render = True
-            self.updaters.append(self.make_updater(el, obj, nodes, tex, z, style))
+            self.updaters.append(self.make_updater(el, obj, nodes, tex, style))
 
         if embed is not None:
             for ob in scene.objects:
@@ -1499,9 +1022,7 @@ class SceneBuilder:
         return scene
 
     # -- per frame ---------------------------------------------------------
-    def make_updater(self, el, obj, nodes, tex, z, style):
-        if self.legacy:
-            return self._legacy_update(el, obj, nodes, tex, z, style)
+    def make_updater(self, el, obj, nodes, tex, style):
         return self._v3_update(el, obj, nodes, tex, style)
 
     def _make_shadow(self, el, obj):
@@ -1561,7 +1082,7 @@ class SceneBuilder:
             item = self.v3.item(el['id'], frame)
             if item is None:
                 # The IR does not draw this element on this frame: no curve, no
-                # time range and no fade test happens here any more.
+                # time range, no fade and no link test happens here.
                 hide()
                 return
             content = item.get('content') or {}
@@ -1626,114 +1147,6 @@ class SceneBuilder:
                     pass
 
         return update
-
-    # -- legacy (pre-WP1.2) evaluator, deleted once the v3 path is proven ----
-    def _legacy_update(self, el, obj, nodes, tex, z, style):
-        fps = self.fps
-        meta = self.meta
-        is_text = el['type'] == 'text'
-        glow_max = 1.0 + 6.0 * float((el.get('fx') or {}).get('glow', 0) or 0)
-        shadow = bool(style.get('shadow')) and is_text
-        shadow_obj = None
-        if shadow:
-            # a black copy slightly offset behind the text
-            sh = bpy.data.objects.new(el['id'] + '_shadow', obj.data.copy())
-            sh.location = (obj.location.x + 5, obj.location.y - 5, obj.location.z - 0.0004)
-            sh.data.materials.clear()
-            smat, _ = flat_material(el['id'] + '_shmat', '#000000', 0.55)
-            sh.data.materials.append(smat)
-            bpy.context.scene.collection.objects.link(sh)
-            sh.hide_render = True
-            shadow_obj = sh
-
-        def update(t, frame):
-            st = eval_element(el, t, meta)
-            if not st['active']:
-                obj.hide_render = True
-                if shadow_obj:
-                    shadow_obj.hide_render = True
-                return
-            obj.hide_render = False
-            obj.location.x = st['x']
-            obj.location.y = -st['y']
-            # layer offset + the element's own depth (metres -> pixel units)
-            obj.location.z = self.layer_px * z + st['z'] * PX_PER_M
-            obj.rotation_euler = (0, 0, math.radians(st['rotation']))
-            s = st['scale']
-            if is_text:
-                obj.scale = (s, s, 1)
-                try:
-                    obj.data.body = str(st['text']) if st['text'] is not None else ''
-                    obj.data.size = float(st['size']) * float(obj.get('vdm_em', 1.0))
-                    k = float(obj.get('vdm_center_per_size', 0.0))
-                    if k:
-                        obj.data.offset_x = -k * obj.data.size
-                    kv = float(obj.get('vdm_vcenter_per_size', 0.0))
-                    if kv:
-                        obj.data.offset_y = -kv * obj.data.size
-                except Exception:
-                    pass
-            else:
-                obj.scale = (s, s, 1)
-
-            if 'alpha' in nodes:
-                nodes['alpha'].default_value = st['opacity']
-            if 'em' in nodes:
-                nodes['em'].inputs['Strength'].default_value = glow_max
-                if is_text:
-                    try:
-                        nodes['em'].inputs['Color'].default_value = hex_rgba(st['color'])
-                    except Exception:
-                        pass
-
-            if el['type'] == 'camfeed' and tex is not None:
-                show_feed_frame(el, obj, tex, frame)
-
-            # Node placement / spatial parent: the world matrix baked in JS
-            # (engine/element-bake.js) replaces the screen-rig placement.
-            wm = baked_world(el, t, meta)
-            if wm:
-                M = Matrix([[wm[c * 4 + r] for c in range(4)] for r in range(4)])
-                # layer order on one plane: a hair along the normal, as the rig does
-                M = M @ Matrix.Translation((0.0, 0.0, self.layer_px * z))
-                # relative to the screen rig without waiting for a depsgraph
-                # update (matrix_world of a just-built parent is still stale)
-                P = obj.parent.matrix_basis if obj.parent else Matrix.Identity(4)
-                obj.matrix_basis = P.inverted() @ M
-
-            if tex is not None and tex.image and tex.image.source == 'SEQUENCE':
-                # Blender reads file number clamp(frame - frame_start + 1, 0, n) + offset;
-                # pin frame_start to the current frame so that is exactly the element's
-                # local frame (f_<local>.png), holding the last frame past the clip's end.
-                count = int(tex.get('vdm_frames', tex.image_user.frame_duration) or 1)
-                local = min(count - 1, max(0, int(round((t - el['start']) * fps))))
-                tex.image_user.frame_start = frame
-                tex.image_user.frame_offset = local - 1
-
-            if shadow_obj:
-                shadow_obj.hide_render = False
-                shadow_obj.location.x = st['x'] + 5
-                shadow_obj.location.y = -st['y'] - 5
-                shadow_obj.rotation_euler = (0, 0, math.radians(st['rotation']))
-                shadow_obj.scale = (s, s, 1)
-                try:
-                    shadow_obj.data.body = str(st['text'] or '')
-                    shadow_obj.data.size = float(st['size']) * float(obj.get('vdm_em', 1.0))
-                    k = float(obj.get('vdm_center_per_size', 0.0))
-                    if k:
-                        shadow_obj.data.offset_x = -k * shadow_obj.data.size
-                    kv = float(obj.get('vdm_vcenter_per_size', 0.0))
-                    if kv:
-                        shadow_obj.data.offset_y = -kv * shadow_obj.data.size
-                except Exception:
-                    pass
-
-            if wm and shadow_obj:
-                # the shadow rides the baked plane, offset in its own pixels
-                shadow_obj.matrix_basis = obj.matrix_basis @ Matrix.Translation((5.0, -5.0, -0.0004))
-
-        return update
-
 
 def build_scene(project, opts):
     return SceneBuilder(project, opts).build()
