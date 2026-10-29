@@ -178,19 +178,152 @@ export class CurvePanel {
    */
   _onKey(e) {
     if (!this.isOpen() || !this.openState) return;
-    if (this._isTypingTarget(e.target) || e.key !== 'Escape') return;
-    e.preventDefault();
-    // Main's shortcut table uses a capture listener on the same window target,
-    // where stopPropagation() is not enough: only the immediate variant keeps
-    // Esc from also closing the drawer in the same keystroke.
-    e.stopImmediatePropagation();
-    e.stopPropagation();
-    if (this.drag || this.marquee) { this._cancelGesture(); return; }
-    if (this.selected.length) {
-      this.onSelect?.({ kind: 'keyframe', ids: [] });
+    if (this._isTypingTarget(e.target)) return;
+    // Editing keys only: Escape (three steps), Tab (next row), arrows (nudge).
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      // Main's shortcut table uses a capture listener on the same window
+      // target, where stopPropagation() is not enough: only the immediate
+      // variant keeps Esc from also closing the drawer in the same keystroke.
+      e.stopImmediatePropagation();
+      e.stopPropagation();
+      if (this.drag || this.marquee) { this._cancelGesture(); return; }
+      if (this.selected.length) {
+        this.onSelect?.({ kind: 'keyframe', ids: [] });
+        return;
+      }
+      this.close();
       return;
     }
-    this.close();
+    if (e.key === 'Tab') {
+      if (!this._cycleRow(e.shiftKey ? -1 : 1)) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      return;
+    }
+    const step = e.shiftKey ? 10 : 1;
+    const isArrow = e.key === 'ArrowLeft' || e.key === 'ArrowRight'
+      || e.key === 'ArrowUp' || e.key === 'ArrowDown';
+    if (!isArrow) return;
+    const moved = e.key === 'ArrowLeft' || e.key === 'ArrowRight'
+      ? this._nudgeSelected(e.key === 'ArrowLeft' ? -step : step, 0)
+      : this._nudgeSelected(0, e.key === 'ArrowUp' ? this._valueStep() * step : -this._valueStep() * step);
+    if (!moved) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  }
+
+  /** Frame rate the panel snaps to (project meta, 24 default). */
+  _fps() {
+    const fps = Number(this.getProject?.()?.meta?.fps);
+    return Number.isFinite(fps) && fps > 0 ? fps : 24;
+  }
+
+  /** Arrow-key value step: a hundredth of the track's own range. */
+  _valueStep() {
+    const track = this._track();
+    const keys = this._trackKeys(track?.path);
+    const values = keys.map((k) => keyValue(k)).filter((v) => v != null);
+    if (!values.length) return 0;
+    const span = Math.max(...values) - Math.min(...values);
+    const step = Math.max(1e-4, (span || Math.abs(values[0]) || 1) / 100);
+    return Math.round(step * 1e4) / 1e4;
+  }
+
+  /** Keep a nudged value inside the range the property obviously has. */
+  _clampValue(path, value) {
+    let v = Number(value);
+    if (!Number.isFinite(v)) return v;
+    if (/(^|\.)opacity$/.test(String(path))) v = clamp(v, 0, 1);
+    return Math.round(v * 1000) / 1000;
+  }
+
+  /**
+   * Ops that move one key (and optionally change its value) while keeping its
+   * ease, curve and — for scene objects — its bezier handles. A move is
+   * unkey + key in one batch: there is no server-side "move" op (§17).
+   */
+  _keyMoveOps(path, key, t, value) {
+    const st = this.openState;
+    if (!st || !key) return [];
+    const from = Math.round(Number(key.t) * 1000) / 1000;
+    const to = Math.round(Number(t) * 1000) / 1000;
+    const changedTime = Math.abs(to - from) > 1e-4;
+    if (!changedTime && value === undefined) return [];
+    if (st.host === 'element') {
+      const next = { op: 'keySet', id: st.id, path, t: to, value: value === undefined ? key.value : value };
+      if (key.ease != null) next.ease = key.ease;
+      next.curve = key.curve ?? null;
+      return [{ op: 'keyRemove', id: st.id, path, t: from }, next];
+    }
+    const unkey = st.host === 'object' ? 'objectUnkey' : 'cameraParamUnkey';
+    const setOp = st.host === 'object' ? 'objectKey' : 'cameraParamKey';
+    const next = { op: setOp, id: st.id, path, t: to, v: value === undefined ? key.v : value };
+    if (key.ease != null) next.ease = key.ease;
+    next.curve = key.curve ?? null;
+    for (const h of ['out', 'in', 'speed']) if (key[h] != null) next[h] = key[h];
+    return [{ op: unkey, id: st.id, path, t: from }, next];
+  }
+
+  /**
+   * Arrows: ←/→ move every selected key by whole frames (Shift = 10), ↑/↓ step
+   * its value. Keys that would land on a neighbour are skipped, not stacked.
+   */
+  _nudgeSelected(deltaFrames, deltaValue) {
+    const path = this._track()?.path;
+    if (!path) return false;
+    const keys = this._trackKeys(path);
+    const selected = this._selectedFor(path);
+    if (!selected.length) return false;
+    const fps = this._fps();
+    const ops = [];
+    for (const t of selected) {
+      const key = keys.find((k) => Math.abs(Number(k.t) - t) <= 1e-4);
+      if (!key) continue;
+      let nextT = Number(key.t);
+      if (deltaFrames) {
+        const frame = Math.max(0, Math.round(Number(key.t) * fps) + deltaFrames);
+        nextT = frame / fps;
+      }
+      let value;
+      if (deltaValue) {
+        const v = keyValue(key);
+        if (v == null) continue;
+        value = this._clampValue(path, v + deltaValue);
+      }
+      if (Math.abs(nextT - Number(key.t)) > 1e-4
+        && keys.some((k) => k !== key && Math.abs(Number(k.t) - nextT) <= 1e-4)) continue;
+      ops.push(...this._keyMoveOps(path, key, nextT, value));
+    }
+    if (!ops.length) return false;
+    this.onOp?.(ops.length === 1 ? ops[0] : { op: 'batch', ops });
+    return true;
+  }
+
+  /** Tab: step through the property rows the drawer knows about (wraps). */
+  _cycleRow(dir) {
+    const st = this.openState;
+    const tracks = st?.tracks || [];
+    if (tracks.length < 2) return false;
+    const index = (st.index + (dir > 0 ? 1 : tracks.length - 1)) % tracks.length;
+    this.open({ ...st, index }, { reveal: false });
+    this._jumpPlayhead();
+    return true;
+  }
+
+  /**
+   * Put the playhead on the first selected key of the displayed track when it
+   * is outside that track's selected range (design §6). No extra scrolling.
+   */
+  _jumpPlayhead() {
+    const tl = this.getTimeline();
+    const track = this._track();
+    if (!tl || !track || typeof tl.setTime !== 'function') return;
+    const sel = this._selectedFor(track.path);
+    if (!sel.length) return;
+    const t = Number(tl.time) || 0;
+    if (t >= sel[0] - 1e-4 && t <= sel[sel.length - 1] + 1e-4) return;
+    tl.setTime(sel[0]);
   }
 
   /** Abandon the gesture under the pointer and put the panel back. */
@@ -246,7 +379,10 @@ export class CurvePanel {
     this._buildRail();
     this._buildPathSelect();
     this._syncHead();
-    if (reveal) this._reveal();
+    if (reveal) {
+      this._reveal();
+      this._jumpPlayhead();
+    }
     this.draw();
   }
 
@@ -1027,11 +1163,20 @@ export class CurvePanel {
         ctx.setLineDash([]);
       }
       const r = on ? 4.5 : 2.8;
+      // A retimed inner key rarely lands on a whole frame: draw it hollow so
+      // "align to frames" has something to fix (design §6 R1).
+      const offGrid = Math.abs(Number(key.t) * this._fps() - Math.round(Number(key.t) * this._fps())) > 1e-3;
       ctx.save();
       ctx.translate(x, y);
       ctx.rotate(Math.PI / 4);
-      ctx.fillStyle = on ? C('--edit') : alpha(C('--text-2'), 0.5);
-      ctx.fillRect(-r, -r, r * 2, r * 2);
+      if (!on && offGrid) {
+        ctx.strokeStyle = alpha(C('--text-2'), 0.75);
+        ctx.lineWidth = 1.2;
+        ctx.strokeRect(-r, -r, r * 2, r * 2);
+      } else {
+        ctx.fillStyle = on ? C('--edit') : alpha(C('--text-2'), 0.5);
+        ctx.fillRect(-r, -r, r * 2, r * 2);
+      }
       ctx.restore();
     }
   }
@@ -1505,12 +1650,17 @@ export class CurvePanel {
     if (!path) { this.draw(); return; }
     const x0 = Math.min(m.x0, m.x1) - 2;
     const x1 = Math.max(m.x0, m.x1) + 2;
-    const hits = this._activeKeys()
-      .filter((k) => {
-        const x = g.xOf(k.t);
-        return x >= x0 && x <= x1 && x >= g.plotLeft - 8 && x <= g.plotRight + 8;
-      })
-      .map((k) => ({ path, t: k.t }));
+    // The band is a time range, so it takes keys of every property track in
+    // the pool, not only the row that happens to be drawn (design §8).
+    const hits = [];
+    const paths = this.openState?.tracks?.map((t) => t.path) || [path];
+    for (const trackPath of paths) {
+      for (const key of this._trackKeys(trackPath)) {
+        const x = g.xOf(key.t);
+        if (x < x0 || x > x1 || x < g.plotLeft - 8 || x > g.plotRight + 8) continue;
+        hits.push({ path: trackPath, t: key.t });
+      }
+    }
     if (!additive) {
       this._setSelection(hits);
       return;
@@ -1574,8 +1724,11 @@ export class CurvePanel {
     }
     const key = this._hitKey(p.x, p.y);
     if (key) {
-      this._startPress(e, { tap: () => this._pickKey(key, e) });
-      return;
+      const obj = this._activeKeys().find((k) => Math.abs(Number(k.t) - key.t) <= 1e-4);
+      if (obj) {
+        this._startKeyPress(e, obj);
+        return;
+      }
     }
     this._startPress(e, {
       tap: () => {
@@ -1586,8 +1739,101 @@ export class CurvePanel {
     });
   }
 
-  /** Tap on a segment switches the edited segment; the pool is left alone. */
-  _switchSegmentAt(p) {
+  /**
+   * Press on a key: a tap selects it, a drag moves it in time (whole frames,
+   * Alt = free) and, on numeric tracks, in value (§8). Dragging an unselected
+   * key selects it first so the gesture never edits something not highlighted.
+   * The live move mutates the key object; the ops are built from the original
+   * state on release and sent as one batch.
+   */
+  _startKeyPress(ev, key) {
+    const path = key.path;
+    const start = { x: ev.clientX, y: ev.clientY };
+    const startLocal = this._localPoint(ev);
+    const g = this._geo();
+    const fps = this._fps();
+    const originT = Number(key.t);
+    const originV = keyValue(key);
+    const plotH = Math.max(1, g.bottom - g.top);
+    const valueSpan = g.range[1] - g.range[0];
+    let moved = false;
+    const same = (e) => !e || e.pointerId == null || e.pointerId === ev.pointerId;
+    const isEl = this.openState?.host === 'element';
+    const writeValue = (v) => { if (isEl) key.value = v; else key.v = v; };
+    const restore = () => {
+      key.t = originT;
+      if (originV != null) writeValue(originV);
+    };
+    const cleanup = () => {
+      window.removeEventListener('pointermove', update);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', cancel);
+      window.removeEventListener('keydown', keyCancel, true);
+      try { this.canvas.releasePointerCapture?.(ev.pointerId); } catch { /* synthetic */ }
+    };
+    const update = (e) => {
+      if (!same(e)) return;
+      if (!moved && Math.hypot(e.clientX - start.x, e.clientY - start.y) <= 3) return;
+      if (!moved) {
+        moved = true;
+        if (!this._isSelectedKey(key.t, path)) this._setSelection([{ path, t: key.t }]);
+        try { this.canvas.setPointerCapture?.(ev.pointerId); } catch { /* synthetic */ }
+        this.canvas.style.cursor = 'grabbing';
+      }
+      const p = this._localPoint(e);
+      restore();
+      let t = originT + (p.x - startLocal.x) / Math.max(1, g.pps);
+      t = Math.max(0, t);
+      if (!e.altKey) t = Math.round(t * fps) / fps;
+      t = Math.round(t * 1000) / 1000;
+      const others = this._trackKeys(path).filter((k) => k !== key);
+      if (others.some((k) => Math.abs(Number(k.t) - t) <= 1e-4)) t = originT;
+      key.t = t;
+      if (originV != null) {
+        const dv = (-(p.y - startLocal.y) / plotH) * valueSpan;
+        writeValue(this._clampValue(path, originV + dv));
+      }
+      this.onLivePreview?.();
+      this._syncHead();
+      this.draw();
+    };
+    const up = (e) => {
+      if (!same(e)) return;
+      cleanup();
+      this.canvas.style.cursor = '';
+      if (!moved) { this._pickKey(key, ev); return; }
+      const movedT = Number(key.t);
+      const movedV = keyValue(key);
+      const newValue = originV != null && movedV != null && Math.abs(movedV - originV) > 1e-9
+        ? movedV : undefined;
+      restore();
+      const ops = this._keyMoveOps(path, key, movedT, newValue);
+      if (ops.length) this.onOp?.(ops.length === 1 ? ops[0] : { op: 'batch', ops });
+      this.onLivePreview?.();
+      this._syncHead();
+      this.draw();
+    };
+    const cancel = () => {
+      cleanup();
+      this.canvas.style.cursor = '';
+      restore();
+      this.onLivePreview?.();
+      this.draw();
+    };
+    const keyCancel = (e) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      cancel();
+    };
+    window.addEventListener('pointermove', update);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', cancel);
+    window.addEventListener('keydown', keyCancel, true);
+    try { this.canvas.setPointerCapture?.(ev.pointerId); } catch { /* synthetic */ }
+  }
+
+  /** Tap on a segment switches the edited segment; the pool is left alone. */  _switchSegmentAt(p) {
     const g = this._geo();
     const t = g.tOf(p.x);
     const segs = this._track()?.segments || [];
