@@ -69,9 +69,10 @@
 .tl-inner, .tl-row, .tl-sect, .tl-gutter { user-select: none; }
 .tl-inner :is(input, textarea, select) { user-select: text; }
 .tl-track, .tl-sect, .tl-gutter, .tl-key { touch-action: none; }
-/* The current-frame band: one element per track, positioned from these two
-   variables by timeline.js _syncFrameBand (no per-band JS on pointermove). */
-.tl-rows { position: relative; --tl-frame-left: 0px; --tl-frame-w: 0px; }
+/* The current-frame band: one element per track, moved by timeline.js
+   _syncFrameBand with an inline transform / width (no custom properties on the
+   ancestor — a write there restyles every row in the timeline). */
+.tl-rows { position: relative; }
 .tl-rows .tl-elhead > .tl-gutter,
 .tl-rows .tl-camhead > .tl-gutter,
 .tl-rows .tl-objhead > .tl-gutter { cursor: grab; user-select: none; }
@@ -165,10 +166,9 @@ body.tl-gutter-resizing, body.tl-gutter-resizing * { cursor: col-resize !importa
 /* ---------------- playhead + split ---------------- */
 /* Current-frame band: the first child of every .tl-track. Above the track's own
    (often opaque) background, below the blocks and keyframe diamonds that come
-   after it; --tl-frame-w is 0 when the frame is too thin to draw. */
+   after it; timeline.js sets the width to 0 when the frame is too thin to draw. */
 .tl-frame-band {
-  position: absolute; top: 0; bottom: -1px; left: 0;
-  width: var(--tl-frame-w, 0px); transform: translateX(var(--tl-frame-left, 0px));
+  position: absolute; top: 0; bottom: -1px; left: 0; width: 0; transform: none;
   background: var(--playhead-band); pointer-events: none;
 }
 /* Clips the playhead at the name column: spans the track area below the toolbar

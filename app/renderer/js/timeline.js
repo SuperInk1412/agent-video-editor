@@ -70,6 +70,13 @@ const zoomToSlider = (z) => Math.round(((Math.log(z) - Math.log(ZOOM_MIN)) / (Ma
 const sliderToZoom = (v) => Math.exp(Math.log(ZOOM_MIN) + (Number(v) / ZOOM_STEPS) * (Math.log(ZOOM_MAX) - Math.log(ZOOM_MIN)));
 // Clips narrower than this hide their right-side meta ("7 关键点", "2.00s").
 const CLIP_META_MIN = 90;
+// Playback: how often the property fields may be rewritten while the playhead
+// runs (~11 Hz). The playhead, the frame band and the timecode still follow
+// every frame; a pause or a seek flushes the last skipped tick immediately.
+const VALUE_SYNC_MS = 90;
+// Rows this far outside the visible part of the scroller still refresh, so a
+// row scrolled just off screen is not stale when it comes back.
+const ROW_SYNC_PAD = 120;
 
 // Link target path -> the row `data-path` this timeline draws for it. Used by
 // revealProperty() after a "转到父级" jump. `transform.*` is the legacy 2D row
@@ -153,6 +160,11 @@ export class Timeline {
     this.propSel = null;
     this._scrollTo = null;
     this._frameBand = null; // cached { frame, left, width, atEnd } for the playhead
+    this._frameBands = []; // one band element per track (moved by _syncFrameBand)
+    this._bandLeft = NaN;
+    this._bandW = NaN;
+    this._lastValues = 0; // wall clock of the last property-field refresh
+    this._valueSyncRaf = 0;
     this._pending = new Map();
     this._editTimes = new Map();
     this._propRows = [];
@@ -293,6 +305,9 @@ export class Timeline {
     this.scroll.addEventListener('scroll', () => {
       this._syncHScroll();
       this._syncPlayhead();
+      // Rows that just scrolled into view were skipped while they were off
+      // screen; bring their fields up to date before the next paint.
+      this._scheduleValueSync();
       this.onViewChange?.();
     });
     this.scroll.addEventListener('wheel', (e) => {
@@ -746,7 +761,13 @@ export class Timeline {
     return host;
   }
 
-  setTime(t) {
+  /**
+   * One time tick. `live` marks a playback frame (the editor's rAF loop): the
+   * playhead, the frame band and the timecode follow every frame, but the
+   * property fields are refreshed at most every VALUE_SYNC_MS. Every other
+   * caller (seek, scrub, edit, capture) syncs immediately.
+   */
+  setTime(t, { live = false } = {}) {
     this.time = t;
     const dur = this.project?.meta.duration || 12;
     if (this.timeLabel) this.timeLabel.textContent = `${t.toFixed(2)} / ${dur.toFixed(2)}s`;
@@ -756,8 +777,14 @@ export class Timeline {
     }
     this._syncPlayhead();
     this._syncFrameBand();
-    this._syncProps(true);
+    if (live) this._syncValuesSoon();
+    else this._syncValues();
     this.onTimeChange?.();
+  }
+
+  /** Refresh the property fields now (pause, an edit, a capture at time t). */
+  flushValues() {
+    this._syncValues();
   }
 
   fit() {
@@ -855,8 +882,10 @@ export class Timeline {
   /**
    * The frame under the playhead is drawn once per track (rows create stacking
    * contexts and selected rows paint opaque backgrounds, so a single band
-   * behind the rows would not show). Its geometry is two CSS variables on
-   * `.tl-rows`, written only here — never per-band on pointermove.
+   * behind the rows would not show). Each band moves itself with a transform
+   * and its width; the geometry used to live in two custom properties on
+   * `.tl-rows`, and every write to an ancestor's custom property restyles the
+   * whole 2800-node subtree — once per frame, at 22 fps.
    */
   _syncFrameBand() {
     if (!this.rowsWrap) return;
@@ -867,8 +896,19 @@ export class Timeline {
       duration: this.project?.meta.duration || 0,
     });
     this._frameBand = band;
-    this.rowsWrap.style.setProperty('--tl-frame-left', `${band.left}px`);
-    this.rowsWrap.style.setProperty('--tl-frame-w', `${band.width}px`);
+    if (band.left === this._bandLeft && band.width === this._bandW) return;
+    this._bandLeft = band.left;
+    this._bandW = band.width;
+    for (const b of this._frameBands) {
+      if (b.__left !== band.left) {
+        b.__left = band.left;
+        b.style.transform = `translateX(${band.left}px)`;
+      }
+      if (b.__width !== band.width) {
+        b.__width = band.width;
+        b.style.width = `${band.width}px`;
+      }
+    }
   }
 
   /** Keep the custom track inset over the scrollable (non-gutter) part. */
@@ -1041,9 +1081,20 @@ export class Timeline {
     // One frame band per track, created before _applyFilter so filtered rows
     // keep their band. First child of the track: above its background, below
     // the blocks and keyframe diamonds added after it.
+    this._frameBands = [];
+    const bandLeft = Number.isFinite(this._bandLeft) ? this._bandLeft : 0;
+    const bandW = Number.isFinite(this._bandW) ? this._bandW : 0;
     for (const track of this.rowsWrap.querySelectorAll('.tl-track')) {
-      track.prepend(el('div', 'tl-frame-band'));
+      const band = el('div', 'tl-frame-band');
+      band.style.transform = `translateX(${bandLeft}px)`;
+      band.style.width = `${bandW}px`;
+      band.__left = bandLeft;
+      band.__width = bandW;
+      this._frameBands.push(band);
+      track.prepend(band);
     }
+    this._bandLeft = bandLeft;
+    this._bandW = bandW;
     this._syncFrameBand();
 
     this._applyFilter();
@@ -1814,7 +1865,7 @@ export class Timeline {
     row.append(g, lane);
     // One row state per camera: several cameras may be open, and each row must
     // read/write its own camera (this.project.camera is only the active one).
-    const posRow = { camId: cam.id, inputs, kf, lane, sig: '', keys: [] };
+    const posRow = { camId: cam.id, inputs, kf, lane, row, sig: '', keys: [] };
     this._camPosRows.push(posRow);
     this._refreshCamLane(posRow, cam);
     return row;
@@ -2630,9 +2681,9 @@ export class Timeline {
     const host = this._linkHost(rec.kind, rec.hostId);
     const links = host ? rec.paths.map((path) => linkOf(host, path)).filter(Boolean) : [];
     rec.node.classList.toggle('on', links.length > 0);
-    rec.node.dataset.tip = links.length
+    setTip(rec.node, links.length
       ? `属性父级：${links.map((link) => linkSourceLabel(this.project, link)).join('；')}`
-      : '属性父级：点击选择父级属性（右键也可）';
+      : '属性父级：点击选择父级属性（右键也可）');
   }
 
   /** Repaint every link button from the live project (called by _syncProps). */
@@ -2971,6 +3022,8 @@ export class Timeline {
       : `展开 ${entry.label} 的 X/Y/Z 子行（逐轴打帧）`;
     for (const sub of entry.subRows) sub.row.hidden = !entry.expanded;
     this._paintXformEntry(entry);
+    // The rows below moved: refresh whatever the new span makes visible.
+    this._scheduleValueSync();
   }
 
   _toggleXformKey(entry, shift) {
@@ -3020,16 +3073,16 @@ export class Timeline {
       sub.kf.disabled = disabled;
       sub.kf.classList.toggle('off', disabled);
       if (disabled) {
-        sub.kf.textContent = '◇';
-        sub.kf.dataset.tip = entry.noKey
+        setText(sub.kf, '◇');
+        setTip(sub.kf, entry.noKey
           ? '2D 位置暂不逐轴打帧：屏幕运动写在中心点（运动路径 §5 待做）'
           : entry.point
             ? '位置整点打键：点父行 ◆；子行只改数值'
-            : '整向量轨道：逐轴键要等字段迁移；先在父行 ◆ 打整组';
+            : '整向量轨道：逐轴键要等字段迁移；先在父行 ◆ 打整组');
       } else {
         const ast = xfAxisKeyState(host, entry.kind, entry.rowKey, sub.ax, t, tol);
         paintKf(sub.kf, ast, { axis: sub.ax, label: entry.label });
-        sub.kf.dataset.tip = sub.kf.dataset.tip || '给这个轴单独打帧 / 删帧（Shift+点击删除）';
+        if (!sub.kf.dataset.tip) setTip(sub.kf, '给这个轴单独打帧 / 删帧（Shift+点击删除）');
       }
     }
     this._refreshXformLane(entry, host, st);
@@ -3086,8 +3139,13 @@ export class Timeline {
     return { t, node: d };
   }
 
-  _syncXformRows() {
-    for (const entry of this._xformRows) this._paintXformEntry(entry);
+  _syncXformRows(shown = () => true) {
+    for (const entry of this._xformRows) {
+      // The sub-rows sit right below the parent, so one test on the parent
+      // covers the block — unless only one of them is inside the viewport.
+      if (!shown(entry.row) && !entry.subRows.some((sub) => shown(sub.row))) continue;
+      this._paintXformEntry(entry);
+    }
   }
 
   // ------------------------------------------------------------ values / keys
@@ -3181,12 +3239,75 @@ export class Timeline {
     for (const k of pr.keys || []) k.node.classList.toggle('at', Math.abs(k.t - this.time) < 1e-3);
   }
 
-  _syncProps(force = false) {
+  /**
+   * Full refresh: the per-frame values plus everything that only changes when
+   * the project, the zoom or the selection does. Edits and the controls' blur
+   * handlers call this; a playback tick calls _syncValues only.
+   */
+  _syncProps() {
+    this._syncValues();
+    this._syncStatics();
+  }
+
+  /** A live playback tick: rewrite the fields at most every VALUE_SYNC_MS. */
+  _syncValuesSoon() {
+    if (performance.now() - this._lastValues >= VALUE_SYNC_MS) this._syncValues();
+  }
+
+  /**
+   * Refresh the fields once on the next frame: used when rows may have scrolled
+   * or unfolded into view (their values were skipped while they were hidden).
+   */
+  _scheduleValueSync() {
+    if (this._valueSyncRaf) return;
+    this._valueSyncRaf = requestAnimationFrame(() => {
+      this._valueSyncRaf = 0;
+      this._syncValues();
+    });
+  }
+
+  /** Visible span of the scroller in row coordinates, padded by ROW_SYNC_PAD. */
+  _visibleSpan() {
+    const s = this.scroll;
+    // A hidden timeline has no box to measure (and no paint to save): sync all.
+    if (!s || !s.clientHeight) return null;
+    const top = s.scrollTop - ROW_SYNC_PAD;
+    return [top, top + s.clientHeight + ROW_SYNC_PAD * 2];
+  }
+
+  /**
+   * The rows inside the visible span, measured in one pass *before* any field
+   * is written: an offsetTop read after a write would force a reflow per row.
+   * Collapsed groups (their rows carry `hidden`) and rows scrolled away are
+   * left out; they are brought up to date when they come back, because the
+   * next sync measures again. Returns null when there is nothing to filter.
+   */
+  _visibleRows([top, bottom]) {
+    const out = new Set();
+    for (const row of this.rowsWrap.querySelectorAll('.tl-row')) {
+      if (row.offsetParent === null) continue;
+      const y = row.offsetTop;
+      if (y + row.offsetHeight > top && y < bottom) out.add(row);
+    }
+    return out;
+  }
+
+  /**
+   * Per-frame part: the numbers and the ◆ state, the only things the playhead
+   * changes. Names, clips, tips and the eyes are in _syncStatics — rewriting
+   * them every frame is what used to force a full timeline reflow per frame.
+   */
+  _syncValues() {
+    this._lastValues = performance.now();
     const t = this.time;
-    // Never write into the field the user is typing in (force included): that
-    // is what used to swallow the "." right after "0" on every re-render.
+    const span = this._visibleSpan();
+    const vis = span ? this._visibleRows(span) : null;
+    const shown = (row) => !vis || !row || vis.has(row);
+    // Never write into the field the user is typing in: writeNumber skips the
+    // focused input (that is what used to swallow the "." right after "0").
     const set = (inp, v) => writeNumber(inp, v);
     for (const pr of this._propRows) {
+      if (!shown(pr.row)) continue;
       const o = this._obj(pr.objId);
       if (!o) continue;
       const pose = objectPoseWithLinks(this.project, o, t);
@@ -3195,8 +3316,8 @@ export class Timeline {
         ['w', 'h', 'd'].forEach((ax, i) => set(pr.inputs[i], Number(g[ax]) || 2));
       } else if (pr.kind === 'color') {
         const color = String(o.style?.color || o.style?.fill || '#17d9ff');
-        if (pr.color && document.activeElement !== pr.color) pr.color.value = /^#[0-9a-f]{6}$/i.test(color) ? color : '#17d9ff';
-        if (pr.hex && document.activeElement !== pr.hex) pr.hex.value = color;
+        if (pr.color && document.activeElement !== pr.color) setValue(pr.color, /^#[0-9a-f]{6}$/i.test(color) ? color : '#17d9ff');
+        if (pr.hex && document.activeElement !== pr.hex) setValue(pr.hex, color);
       } else if (pr.kind === 'opacity') {
         set(pr.inputs[0], pose.opacity);
       } else if (pr.kind === 'rotation') {
@@ -3213,11 +3334,12 @@ export class Timeline {
         const has = track.length > 0 || sub;
         pr.kf.classList.toggle('on', at);
         pr.kf.classList.toggle('has', !at && has);
-        pr.kf.dataset.tip = at ? '删除这一帧' : has ? `在当前时间打帧（已有 ${track.length} 帧）` : '在当前时间打帧';
+        setTip(pr.kf, at ? '删除这一帧' : has ? `在当前时间打帧（已有 ${track.length} 帧）` : '在当前时间打帧');
       }
       if (pr.kind !== 'geom' && pr.kind !== 'color') this._refreshLane(pr, o);
     }
     for (const pr of this._elPropRows) {
+      if (!shown(pr.row)) continue;
       const e = this._element(pr.elId);
       if (!e) continue;
       set(pr.input, this._elEffective(e, pr.path, t));
@@ -3226,10 +3348,11 @@ export class Timeline {
       const has = keys.length > 0;
       pr.kf.classList.toggle('on', at);
       pr.kf.classList.toggle('has', !at && has);
-      pr.kf.dataset.tip = at ? '删除这一帧' : has ? `在当前时间打帧（已有 ${keys.length} 帧）` : '在当前时间打帧';
+      setTip(pr.kf, at ? '删除这一帧' : has ? `在当前时间打帧（已有 ${keys.length} 帧）` : '在当前时间打帧');
       this._refreshElLane(pr, e);
     }
     for (const posRow of this._camPosRows) {
+      if (!shown(posRow.row)) continue;
       const cam = this._camById(posRow.camId);
       if (!cam) continue;
       const pos = pathPos(cam, t);
@@ -3238,10 +3361,11 @@ export class Timeline {
       const has = (cam.path || []).length > 0;
       posRow.kf.classList.toggle('on', at);
       posRow.kf.classList.toggle('has', !at && has);
-      posRow.kf.dataset.tip = at ? '删除这一帧' : has ? `在当前时间打点（已有 ${(cam.path || []).length} 帧）` : '在当前时间打点';
+      setTip(posRow.kf, at ? '删除这一帧' : has ? `在当前时间打点（已有 ${(cam.path || []).length} 帧）` : '在当前时间打点');
       this._refreshCamLane(posRow, cam);
     }
     for (const pr of this._camPropRows) {
+      if (!shown(pr.row)) continue;
       const cam = this._camById(pr.camId);
       if (!cam) continue;
       let values;
@@ -3261,7 +3385,7 @@ export class Timeline {
         values = pr.dims === 1 ? [value] : (value || []);
       }
       if (pr.kind === 'select') {
-        if (pr.sel && document.activeElement !== pr.sel) pr.sel.value = String(values[0]);
+        if (pr.sel && document.activeElement !== pr.sel) setValue(pr.sel, String(values[0]));
       } else {
         pr.inputs.forEach((inp, i) => set(inp, values[i]));
       }
@@ -3271,17 +3395,25 @@ export class Timeline {
         const has = track.length > 0;
         pr.kf.classList.toggle('on', at);
         pr.kf.classList.toggle('has', !at && has);
-        pr.kf.dataset.tip = at ? '删除这一帧' : has ? `在当前时间打帧（已有 ${track.length} 帧）` : '在当前时间打帧';
+        setTip(pr.kf, at ? '删除这一帧' : has ? `在当前时间打帧（已有 ${track.length} 帧）` : '在当前时间打帧');
       }
       this._refreshCamPropLane(pr, cam);
     }
-    this._syncXformRows();
+    this._syncXformRows(shown);
+  }
+
+  /**
+   * Static part: names, clip geometry and labels, tips, the eye / colour dots,
+   * row selection and the link buttons. They change on an edit, a zoom, a
+   * scroll or an expand — never because the playhead moved.
+   */
+  _syncStatics() {
     for (const [id, h] of this._objHeads) {
       const o = this._obj(id);
       if (!o) continue;
-      if (document.activeElement !== h.name && !h.name.querySelector('input')) h.name.textContent = o.name || o.id;
+      if (document.activeElement !== h.name && !h.name.querySelector('input')) setText(h.name, o.name || o.id);
       setEye(h.eye, o.visible !== false, '显示', '隐藏');
-      h.dot.style.background = o.style?.color || token('--accent');
+      setStyle(h.dot, 'background', o.style?.color || token('--accent'));
       h.row.classList.toggle('sel', id === this.objectId);
       const start = Number(o.start) || 0;
       const dur = Number(o.duration) || 0;
@@ -3289,15 +3421,15 @@ export class Timeline {
       if (h.block.style.left !== left) h.block.style.left = left;
       setClipWidth(h.block, Math.max(4, dur * this.pps));
       const nameEl = h.block.querySelector('.blk-name');
-      if (nameEl) nameEl.textContent = o.name || o.id;
+      if (nameEl) setText(nameEl, o.name || o.id);
       const metaEl = h.block.querySelector('.blk-meta');
-      if (metaEl) metaEl.textContent = `${dur.toFixed(2)}s`;
-      h.block.dataset.tip = `${o.name || o.id} · ${dur.toFixed(2)}s`;
+      if (metaEl) setText(metaEl, `${dur.toFixed(2)}s`);
+      setTip(h.block, `${o.name || o.id} · ${dur.toFixed(2)}s`);
     }
     for (const [id, h] of this._elHeads) {
       const e = this._element(id);
       if (!e) continue;
-      if (document.activeElement !== h.name) h.name.textContent = e.name || e.id;
+      if (document.activeElement !== h.name) setText(h.name, e.name || e.id);
       setEye(h.eye, e.visible !== false, '显示', '隐藏');
       h.row.classList.toggle('sel', id === this.elementId);
       const left = `${(Number(e.start) || 0) * this.pps}px`;
@@ -3305,9 +3437,9 @@ export class Timeline {
       setClipWidth(h.block, Math.max(4, (Number(e.duration) || 0) * this.pps));
       const nameEl = h.block.querySelector('.blk-name');
       const label = elementClipLabel(e);
-      if (nameEl) nameEl.textContent = label;
+      if (nameEl) setText(nameEl, label);
       setClipLoopMark(h.block, isLooping(e));
-      h.block.dataset.tip = elementClipTip(e, label);
+      setTip(h.block, elementClipTip(e, label));
     }
     this._paintLinks();
   }
@@ -4619,9 +4751,46 @@ function setEye(btn, visible, showTip, hideTip) {
     btn.replaceChildren(icon(want, 'ic-sm'));
   }
   const tip = visible ? hideTip : showTip;
-  btn.dataset.tip = tip;
-  btn.setAttribute('aria-label', tip);
-  btn.setAttribute('aria-pressed', String(!visible));
+  setTip(btn, tip);
+  setAttr(btn, 'aria-label', tip);
+  setAttr(btn, 'aria-pressed', String(!visible));
+}
+
+// ------------------------------------------------------------ cheap DOM writes
+// Every row used to be rewritten in full on every frame. These helpers read
+// first and only touch the DOM when the value really changed: an unchanged
+// textContent still replaces the text node and forces the browser to re-lay
+// out the row, which is exactly what cost ~40 ms per played frame.
+function setText(node, text) {
+  if (node && node.textContent !== text) node.textContent = text;
+}
+
+function setTip(node, tip) {
+  if (!node) return;
+  const next = tip ?? '';
+  if (node.dataset.tip !== next) node.dataset.tip = next;
+}
+
+function setAttr(node, name, value) {
+  if (node && node.getAttribute(name) !== value) node.setAttribute(name, value);
+}
+
+/**
+ * Inline style, written only when the value changes. The last value is cached
+ * on the node because the browser normalises what it reads back ("#17d9ff"
+ * comes back as "rgb(23, 217, 255)"), so comparing node.style.* never matches.
+ */
+function setStyle(node, prop, value) {
+  if (!node) return;
+  const cache = node.__vdmStyle || (node.__vdmStyle = {});
+  if (cache[prop] === value) return;
+  cache[prop] = value;
+  node.style[prop] = value;
+}
+
+/** Value of a form control (input / select), written only when it changed. */
+function setValue(node, value) {
+  if (node && node.value !== value) node.value = value;
 }
 
 function eyeButton(visible, showTip, hideTip) {
@@ -4651,18 +4820,18 @@ function paintKf(btn, st, { point = false, noKey = false, axis = null, label = '
   btn.classList.toggle('on', !off && !!st.at);
   btn.classList.toggle('has', !off && !st.at && !!st.has);
   btn.classList.toggle('part', !off && !!st.partial);
-  btn.textContent = st.at ? '◆' : '◇';
+  setText(btn, st.at ? '◆' : '◇');
   if (off) {
-    btn.dataset.tip = '2D 位置暂不逐轴打帧：屏幕运动写在中心点（运动路径 §5 待做）';
+    setTip(btn, '2D 位置暂不逐轴打帧：屏幕运动写在中心点（运动路径 §5 待做）');
     return;
   }
   const what = axis ? `${label} ${axis.toUpperCase()}` : label;
   const where = point ? '轨迹点' : '关键帧';
-  btn.dataset.tip = st.at
+  setTip(btn, st.at
     ? `${what}：删除当前帧${where}（Shift+点击也可）`
     : st.has
       ? `${what}：在当前时间打${where}（已有 ${(st.times || []).length} 个）`
-      : `${what}：在当前时间打${where}`;
+      : `${what}：在当前时间打${where}`);
 }
 
 function clipHandles() {

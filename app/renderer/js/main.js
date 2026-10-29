@@ -320,6 +320,9 @@ function pause() {
   preview.playing = false;
   preview.pauseAudio();
   setPlayButton(false);
+  // Playback refreshes the property fields at ~11 Hz (timeline.js setTime
+  // `live`); land on the exact value of the frame we stopped on.
+  timeline?.flushValues();
 }
 
 function togglePlay() { S.playing ? pause() : play(); }
@@ -4329,7 +4332,7 @@ async function boot() {
         } else { setTime(limit); pause(); }
       } else {
         S.time = t;
-        timeline.setTime(t);
+        timeline.setTime(t, { live: true });
         updateTimecode(t);
       }
     }

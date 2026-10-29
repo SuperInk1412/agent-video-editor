@@ -28,6 +28,10 @@ export class PathGizmo {
     this.axisHover = null;
     this.rotHover = null;
     this.hover = null;
+    // device px per CSS px, resolved lazily by the `scale` getter (see there)
+    this._scale = 0;
+    // the canvas already holds nothing (a draw with visible false cleared it)
+    this._blank = false;
   }
 
   resize() {
@@ -35,6 +39,9 @@ export class PathGizmo {
     if (!stage) return;
     this.canvas.width = stage.width;
     this.canvas.height = stage.height;
+    // The CSS box may not be laid out yet, so do not measure here: drop the
+    // cached ratio and let the next draw resolve it.
+    this._scale = 0;
   }
 
   /**
@@ -46,9 +53,19 @@ export class PathGizmo {
     return objectWorldPoseWithLinks(this.opts.project(), obj, time);
   }
 
+  /**
+   * Device pixels per CSS pixel. Cached: the getter used to call
+   * getBoundingClientRect() on every access, and the per-frame draw came after
+   * the timeline had dirtied the layout, so that read forced a full reflow of
+   * the editor each frame. resize() (stage size, window resize, splitter
+   * drags, all through fitStage) drops the cache.
+   */
   get scale() {
-    const r = this.canvas.getBoundingClientRect();
-    return this.canvas.width / Math.max(1, r.width);
+    if (!this._scale) {
+      const r = this.canvas.getBoundingClientRect();
+      this._scale = this.canvas.width / Math.max(1, r.width);
+    }
+    return this._scale;
   }
 
   clear() {
@@ -271,10 +288,15 @@ export class PathGizmo {
   }
 
   draw() {
-    this.clear();
-    const ctx = this.ctx;
     const project = this.opts.project();
-    if (!project || this.opts.visible?.() === false) return;
+    const visible = !!project && this.opts.visible?.() !== false;
+    // Nothing to draw and the last draw already wiped the canvas: skip it, and
+    // with it one more layout read from clear() -> scale.
+    if (!visible && this._blank) return;
+    this.clear();
+    this._blank = !visible;
+    if (!visible) return;
+    const ctx = this.ctx;
     const time = this.opts.time();
     this._sceneObjects(ctx, project, time);
     // Following a camera is a shot view: keep object handles, but the camera
