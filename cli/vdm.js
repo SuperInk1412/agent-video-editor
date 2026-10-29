@@ -17,6 +17,10 @@ import { migrateProject, orthoScreen, evaluateMigratedObject } from '../core/mig
 import { objectPose } from '../core/scene.js';
 import { applyLegacy } from '../core/legacy.js';
 import { evalCamera, normalizeCamera } from '../core/camera.js';
+import {
+  coverage as inspectCoverage, cutEdges as inspectCutEdges, diff as inspectDiff,
+  openProject as openInspectProject, pxAt as inspectPxAt, stackAt as inspectStackAt,
+} from '../application/inspect-service.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..');
@@ -566,6 +570,175 @@ async function cmdEval(root, argv, flags) {
   console.log(JSON.stringify(st, null, 2));
 }
 
+// ---------------------------------------------------------------- inspect
+
+/** `--point 960,540` (project pixels) or `none` to skip the pixel test. */
+function inspectPoint(value) {
+  if (value === 'none' || value === 'off') return null;
+  if (value == null) return undefined;
+  const [x, y] = String(value).split(',').map(Number);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error('--point expects x,y in project pixels');
+  return [x, y];
+}
+
+/** `--frames 142:158` (inclusive); a single frame is allowed. */
+function inspectFrames(value) {
+  if (value == null) return null;
+  const [a, b] = String(value).split(':');
+  const f0 = Math.max(0, Math.round(num(a)));
+  const f1 = b == null ? f0 : Math.max(f0, Math.round(num(b)));
+  return [f0, f1];
+}
+
+/** A project directory or a project JSON file, for `inspect diff`. */
+async function inspectSide(value) {
+  const abs = path.resolve(String(value));
+  const stat = await fsp.stat(abs);
+  if (stat.isDirectory()) return openInspectProject(abs);
+  return JSON.parse(await fsp.readFile(abs, 'utf8'));
+}
+
+const short = (v) => {
+  const text = typeof v === 'string' ? v : JSON.stringify(v);
+  return text != null && text.length > 34 ? `${text.slice(0, 31)}…` : text;
+};
+
+function printStack(report) {
+  const head = `stack  f${report.frame} · ${report.t.toFixed(3)}s · ${report.camera.id || report.camera.mode} · fps ${report.fps}`;
+  console.log(`${C.b(head)}   ${C.dim(`projection ${report.projection} · order ${report.rule}`)}`);
+  if (report.point) {
+    console.log(C.dim(`  point ${report.point[0]},${report.point[1]}${report.pointInsideFrame ? '' : '  (outside the frame)'}`));
+  }
+  console.log(C.dim('  #   id            kind    z     dist   planeD  rayD    bias    covers'));
+  for (const row of report.order) {
+    const bias = row.depth ? row.depth.bias : 0;
+    console.log(`  ${String(row.drawOrder).padEnd(3)} ${String(row.id).padEnd(13)} ${String(row.kind).padEnd(7)} ${String(row.z).padStart(4)}  ${String(row.distance).padStart(7)} ${String(row.planeDistance).padStart(7)} ${String(row.rayDepth ?? '-').padStart(7)} ${String(bias).padStart(7)} ${row.coversPoint == null ? '-' : (row.coversPoint ? 'yes' : 'no')}`);
+  }
+  if (report.point) {
+    console.log(`  ${C.gr('hit')} ${report.hit ?? '(empty)'}   ${C.ye('front')} ${report.front ?? '(empty)'}   ${C.dim('drawTop')} ${report.drawTop ?? '(empty)'}   ${report.sortAgrees ? C.gr('draw order agrees with depth') : C.re('draw order disagrees with depth')}`);
+    console.log(C.dim(`  covering: ${report.covering.join(' -> ') || '(none)'}`));
+  }
+}
+
+function printCoverage(report) {
+  const range = report.f0 === report.f1 ? `f${report.f0}` : `f${report.f0}-${report.f1}`;
+  console.log(`${C.b(`coverage  ${range} · ${report.camera.id || report.camera.requested} · fps ${report.fps}`)}   ${C.dim(`point ${report.point?.join(',') || '-'}${report.focus ? ` · focus ${report.focus}` : ''}`)}`);
+  if (report.focus) {
+    console.log(C.dim('  frame  present onScreen/samples unoccluded  occluders'));
+    for (const row of report.framesDetail) {
+      const f = row.focus;
+      console.log(`  f${String(row.frame).padEnd(6)} ${String(f.present).padEnd(7)} ${String(f.onScreen).padStart(5)}/${String(f.samples).padEnd(11)} ${String(f.unoccluded).padStart(5)}     ${f.occluders.join(',')}`);
+    }
+    const s = report.focusSummary;
+    console.log(`  ${C.dim('summary')} present ${s.framesPresent}/${report.frameCount} · on screen ${s.framesOnScreen} · unoccluded ${s.framesUnoccluded}`
+      + `${s.absentFrames.length ? C.ye(` · absent ${s.absentFrames.join(',')}`) : ''}`
+      + `${s.hiddenFrames.length ? C.re(` · fully hidden ${s.hiddenFrames.join(',')}`) : ''}`);
+  } else {
+    console.log(C.dim('  frame  covering  hit'));
+    for (const row of report.framesDetail) console.log(`  f${String(row.frame).padEnd(6)} ${row.covering.join(',') || '-'}   -> ${row.hit ?? '(none)'}`);
+  }
+}
+
+function printCutEdges(report) {
+  console.log(`${C.b(`cut edges  ${report.fps} fps · ${report.maxGapFrames} frame window`)}   ${C.dim(`${report.scanned.cameras} cameras · ${report.scanned.cuts} cuts after t=0 · ${report.scanned.elements} elements / ${report.scanned.edges} edges`)}`);
+  console.log(C.dim(`  cuts: ${report.cuts.map((c) => `${c.camera}@f${c.frame}`).join(' ')}`));
+  if (!report.edges.length) {
+    console.log(`  ${C.gr('ok')} every element edge is 0 or >= ${report.maxGapFrames} frame(s) from a cut`);
+  } else {
+    for (const e of report.edges) {
+      console.log(`  ${C.ye(e.id)} ${C.dim(e.type)} ${e.edge} f${e.frame} (${e.time}s) vs ${e.camera} f${e.cutFrame}  delta ${e.deltaFrames > 0 ? '+' : ''}${e.deltaFrames}f  overlap ${e.overlapFrames}f`);
+    }
+    console.log(`  ${report.total} edge(s)${report.truncated ? ' (truncated)' : ''}`);
+  }
+  if (report.spans.total != null) {
+    console.log(C.dim(`  spans: ${report.spans.total} element/cut crossings (normal for plates and audio)`));
+    for (const s of report.spans.items) console.log(C.dim(`    ${s.id} ${s.type} ${s.start}-${s.end}s crosses ${s.camera}@f${s.cutFrame}`));
+  }
+}
+
+function printPixel(report) {
+  console.log(`${C.b(`pixel  f${report.frame} · ${report.t.toFixed(3)}s · ${report.camera.id || report.camera.mode} · ${report.pixel.x},${report.pixel.y}`)}   ${C.dim(`inside ${report.insideFrame} · ${report.projection}`)}`);
+  if (!report.covering.length) console.log(C.dim('  nothing covers this pixel'));
+  for (const c of report.covering.slice().sort((a, b) => b.rayDepth - a.rayDepth)) {
+    console.log(`  ${String(c.id).padEnd(13)} ${String(c.kind).padEnd(7)} z${String(c.z).padStart(4)}  depth ${String(c.rayDepth).padStart(7)}  ${c.writesDepth ? 'owns depth' : 'blend only'}  ${C.dim(`local ${c.local.join(',')} · ${c.sizeSource}`)}`);
+  }
+  if (report.covering.length) console.log(`  ${C.gr('front')} ${report.front}   ${C.dim('hit')} ${report.hit}   ${report.sortAgrees ? C.gr('draw order agrees') : C.re('draw order disagrees')}`);
+  console.log(C.dim('  geometry only — no pixel is read (no WebGL in Node):'));
+  for (const line of report.limitations.slice(0, 2)) console.log(C.dim(`    · ${line}`));
+}
+
+function printDiff(report) {
+  const head = `diff  rev ${report.before.rev} -> ${report.after.rev}   ${report.equal ? C.gr('identical') : C.ye(`${report.total} change(s), ${report.added.length} added, ${report.removed.length} removed`)}`;
+  console.log(`${C.b(head)}`);
+  if (!report.changed.length && !report.added.length && !report.removed.length) return;
+  for (const entry of report.changed) {
+    console.log(`  ${String(entry.kind).padEnd(8)} ${String(entry.id ?? '-').padEnd(12)} ${entry.path.padEnd(34)} ${C.dim(entry.change)}  ${C.ye(short(entry.before))} -> ${C.gr(short(entry.after))}`);
+  }
+  for (const entry of report.added) console.log(`  ${String(entry.kind).padEnd(8)} ${String(entry.id).padEnd(12)} ${C.gr('added')}`);
+  for (const entry of report.removed) console.log(`  ${String(entry.kind).padEnd(8)} ${String(entry.id).padEnd(12)} ${C.re('removed')}`);
+  if (report.truncated) console.log(C.dim(`  ... ${report.total} changes total`));
+}
+
+async function cmdInspect(root, argv, flags) {
+  const sub = argv[0] || 'stack';
+  if (sub === 'diff') {
+    if (flags.before == null && flags.after == null) throw new Error('inspect diff needs --before <dir|file> and/or --after <dir|file>');
+    const before = flags.before != null ? await inspectSide(flags.before) : await openInspectProject(root);
+    const after = flags.after != null ? await inspectSide(flags.after) : await openInspectProject(root);
+    const report = inspectDiff(before, after, { limit: num(flags.limit, 2000) });
+    if (flags.json) { console.log(JSON.stringify(report, null, 2)); return; }
+    printDiff(report);
+    return;
+  }
+  const project = await openInspectProject(root);
+  if (sub === 'stack') {
+    if (flags.at == null && flags.frame == null) throw new Error('inspect stack needs --at <seconds> or --frame <n>');
+    const report = inspectStackAt(project, num(flags.at, 0), {
+      frame: flags.frame != null ? num(flags.frame) : undefined,
+      camera: flags.camera,
+      point: inspectPoint(flags.point),
+    });
+    if (flags.json) { console.log(JSON.stringify(report, null, 2)); return; }
+    printStack(report);
+    return;
+  }
+  if (sub === 'coverage') {
+    const frames = inspectFrames(flags.frames);
+    if (!frames) throw new Error('inspect coverage needs --frames f0:f1');
+    const report = inspectCoverage(project, {
+      f0: frames[0], f1: frames[1], camera: flags.camera, focus: flags.focus,
+      point: inspectPoint(flags.point), grid: flags.grid != null ? num(flags.grid) : undefined,
+    });
+    if (flags.json) { console.log(JSON.stringify(report, null, 2)); return; }
+    printCoverage(report);
+    return;
+  }
+  if (sub === 'cut-edges' || sub === 'cutEdges' || sub === 'cuts') {
+    const report = inspectCutEdges(project, {
+      maxGapFrames: flags['max-gap'] != null ? num(flags['max-gap']) : undefined,
+      includeSpans: !!flags.spans,
+      limit: flags.limit != null ? num(flags.limit) : undefined,
+    });
+    if (flags.json) { console.log(JSON.stringify(report, null, 2)); return; }
+    printCutEdges(report);
+    return;
+  }
+  if (sub === 'pixel' || sub === 'px') {
+    if (flags.frame == null && flags.at == null) throw new Error('inspect pixel needs --frame <n> or --at <seconds>');
+    const point = flags.point != null ? inspectPoint(flags.point) : (flags.x != null && flags.y != null ? [num(flags.x), num(flags.y)] : null);
+    if (!Array.isArray(point)) throw new Error('inspect pixel needs --point x,y (project pixels) or --x/--y');
+    const report = inspectPxAt(project, {
+      frame: flags.frame != null ? num(flags.frame) : undefined,
+      time: flags.at != null ? num(flags.at) : undefined,
+      camera: flags.camera, x: point[0], y: point[1],
+    });
+    if (flags.json) { console.log(JSON.stringify(report, null, 2)); return; }
+    printPixel(report);
+    return;
+  }
+  throw new Error(`unknown inspect subcommand ${sub}`);
+}
+
 function usage() {
   console.log(`${C.b('vdm')} — VedioMaker CLI
 
@@ -651,6 +824,7 @@ async function main() {
     case 'cam': return cmdCam(root, rest, flags);
     case 'world': return cmdWorld(root, rest, flags);
     case 'scene': return cmdScene(root, rest, flags);
+    case 'inspect': return cmdInspect(root, rest, flags);
     default:
       console.error(C.re(`unknown command: ${cmd}`));
       usage();
