@@ -298,7 +298,10 @@ t_B = t_A + firstArrival(curve, y_B) · (t_C − t_A)     // 单调、毫秒取�
 | P1 | `bbd328f` | `keySet` / `objectKey` / `cameraParamKey` 接受显式 `curve`（null 清除），搬键不再丢曲线 |
 | P1 | `c64064c` | `core/keyframe-edit.js::snapKeyframeTimes`（对齐到帧，保持严格递增，放不下就拒绝） |
 | P1 | `062c152` | `meta.curvePresets` + `normalizeCustomPresets`（我的预设，最多 40 条） |
-| P2 | （进行中） | 真实数值轴 + 整轨连续曲线 |
+| P1 | `cb940b0` | `spanCurveOps()`：一次生成「搬内键 + 每个子段写曲线」的 op（多轴合并、Alt 不重定时、越界以内键值为锚） |
+| P1 | `896812b` · `de6927f` | 相邻两键的段也能套曲线；op 经 `applyOp` 端到端验证 |
+| P2 | `15e5eb1` | 真实数值轴 + 整轨连续曲线（逐像素用 `sampleTrack`）；手柄进度↔真实值双向映射 |
+| P2 | `f0f253d` | F2 打开时暂停播放、把选中时间段滚进视野；`select()` 实时推给面板（`setSelection`） |
 
 ## 17. P2 实现约定（开工后补充，2026-10-28）
 
