@@ -63,6 +63,10 @@ node /absolute/path/agent-video-editor/mcp/server.js --project /absolute/path/pr
 | `vdm_render_submit` | 固定项目与素材快照后排队 |
 | `vdm_job_list` / `get` / `cancel` | 任务生命周期 |
 | `vdm_artifact_read` | 产物信息与最多 8 MiB 的 PNG |
+| `vdm_inspect_stack` | 一帧的 2D 层序（远→近）、每层深度/平面，以及某像素谁拥有 |
+| `vdm_inspect_coverage` | 逐帧覆盖：谁盖住这个像素；`focus` 给某元素的在屏/未遮挡采样 |
+| `vdm_inspect_cut_edges` | 元素边界与镜头切点差不到 N 帧的地方（播放露出、导出不画的中间态） |
+| `vdm_inspect_diff` | 两份工程/修订的变更报告 `changed[{id,kind,path,before,after}]` |
 
 `job_get` 状态：queued / preparing / rendering / encoding / cancelling / succeeded /
 failed / cancelled / interrupted。`cancel` 表示请求取消，终态 cancelled 才表示工作进程已经退出。
