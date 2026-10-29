@@ -59,6 +59,29 @@ vdm plan --style neon --brief $'第一句\n第二句' --seed 7
 brief 的每一行对应一个分镜（每段至少 1.2s）；媒体池里的图片和视频按种子洗牌后轮流使用，
 用完一轮才会重复。
 
+## 测量（inspect）
+
+```bash
+vdm inspect stack --at 5.0 [--point 960,540] [--camera live|cam_8] [--project dir] [--json]
+vdm inspect coverage --frames 142:158 [--focus s2_w2] [--camera cam_8] [--json]
+vdm inspect cut-edges [--max-gap 1] [--include-spans] [--json]
+vdm inspect pixel --frame 150 --point 960,540 [--json]
+vdm inspect diff --before dirA --after dirB [--json]
+```
+
+- 全部复用帧 IR（`core/frame-ir.js`，`FRAME_IR_VERSION = 2`）与同一条层序规则
+  （`core/layers.js::orderLayers`），所以数字和预览/成片一致（docs/DESIGN-BACKEND-V2.md WP2.1）。
+- `stack`：一帧里 2D 平面从远到近的顺序、每个 item 的 `z / depth / plane / 相机距离 / 射线深度`，
+  以及某个像素谁真的拥有（`hit`）——问题一的「谁挡谁」用这一条。
+- `coverage`：逐帧「谁盖住了这个像素」，`--focus` 再按 7×7 采样统计该元素在屏/未被遮挡的帧
+  （问题四的 cam_8 f142–158 用这一条）。
+- `cut-edges`：元素时间边界与镜头切点差不到 `--max-gap` 帧的地方（问题五的 `s1_w2` 0.99 帧尾巴）；
+  数据修好后 `total = 0`。
+- `pixel`：**几何**版像素查询（纯 Node 没有 WebGL，读不到颜色）：列出落在该像素的 item、谁写深度、
+  谁在最前，并把局限写在输出的 `limitations` 里。
+- `diff`：两个工程/修订的 `changed[{id,kind,path,before,after}]`（§8.3 变更报告）。
+- MCP 同名工具：`vdm_inspect_stack` / `coverage` / `cut_edges` / `diff`。
+
 ## 渲染
 
 ```bash
