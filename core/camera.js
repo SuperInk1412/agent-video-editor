@@ -3,6 +3,7 @@
 import { clamp, speedWarp } from './time.js';
 import { normalizeTracks, sampleAxes, sampleChannel, sampleVec3 } from './scene.js';
 import { normalizeCurve, sampleCurve } from './curves.js';
+import { firstArrival } from './curve-spans.js';
 import { normalizeRotation } from './rotation.js';
 
 export const DEFAULT_CAMERA = {
@@ -317,30 +318,6 @@ function spanPosition(cam, span, t) {
   // at the start of the span (the approved symmetric-clamp rule).
   const arc = q > 1 ? a1 + (q - 1) * (a1 - a0) : q < 0 ? a0 : a0 + q * (a1 - a0);
   return pathPointAtArc(cam, clamp(arc, a0, table.total));
-}
-
-/** First u in [0,1] where the curve reaches `fraction` (for retiming). */
-function firstArrival(curve, fraction) {
-  if (!curve || !Number.isFinite(fraction)) return null;
-  if (fraction <= 0) return 0;
-  if (fraction >= 1) return 1;
-  const steps = 512;
-  let prevU = 0;
-  for (let i = 1; i <= steps; i++) {
-    const u = i / steps;
-    if (sampleCurve(curve, u) >= fraction) {
-      let lo = prevU;
-      let hi = u;
-      for (let k = 0; k < 24; k++) {
-        const mid = (lo + hi) / 2;
-        if (sampleCurve(curve, mid) >= fraction) hi = mid;
-        else lo = mid;
-      }
-      return hi;
-    }
-    prevU = u;
-  }
-  return null;
 }
 
 /**
