@@ -1,0 +1,36 @@
+{
+  "format": "vdm.vendor/1",
+  "note": "固定版本的第三方运行时。只登记这里列出的文件；沙箱的 vdm-src://vendor/ 只服务这些路径。",
+  "updated": "2026-10-29",
+  "libs": {
+    "p5": {
+      "version": "1.9.4",
+      "runtime": "p5",
+      "license": "LGPL-2.1",
+      "licenseFile": "vendor/p5/LICENSE",
+      "source": "https://unpkg.com/p5@1.9.4/lib/p5.min.js",
+      "upstream": "https://github.com/processing/p5.js/releases/tag/v1.9.4",
+      "files": [
+        "p5.min.js",
+        "LICENSE"
+      ],
+      "sizes": {
+        "p5.min.js": 1034532,
+        "LICENSE": 24480
+      },
+      "sha256": {
+        "p5.min.js": "00a532c56e785c68d7c7bb6f9a084e2c856b71527f22c3260aff4a2f582d80c9",
+        "LICENSE": "eb2f25f8f165d5f20682c1ce7e99ce69144ecfd80fbed8c17dfd327ecd8b6cb6"
+      },
+      "why": "§6.1 runtime: p5（instance 模式，逐帧 redraw）"
+    },
+    "three": {
+      "version": null,
+      "runtime": "three",
+      "status": "deferred-to-WP5.1",
+      "license": null,
+      "files": [],
+      "why": "§6.1 runtime: three 由 WP5.1 一并落地（驱动 + 固定版本 + 许可证）。这里先占位，避免 cache 键在补上时静默变化。"
+    }
+  }
+}

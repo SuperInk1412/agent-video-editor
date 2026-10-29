@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<!-- Must be identical to CSP in engine/render-workers/protocol.js (a test asserts it). -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src vdm-src:; style-src 'unsafe-inline' vdm-src:; img-src vdm-src: data: blob:; font-src vdm-src: data:; media-src vdm-src:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; worker-src 'none'">
+<title>VDM render worker</title>
+</head>
+<body>
+<div id="host"></div>
+<script type="module" src="harness.js"></script>
+</body>
+</html>
