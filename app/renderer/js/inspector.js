@@ -876,7 +876,13 @@ export class Inspector {
         this._field({ label: '内容', type: 'textarea', value: el.style.text, onChange: (v) => set('style.text', { style: { text: v } }) }),
         this._field({ label: '字体', type: 'select', value: el.style.font, options: FONTS, onChange: (v) => set('style.font', { style: { font: v } }) }),
         this._field({ label: '字号', unit: 'px', value: round(kv('style.size', el.style.size), 1), step: 1, kf: true, path: 'style.size', onChange: edit('style.size', (v) => ({ style: { size: v } })) }),
-        this._field({ label: '颜色', type: 'color', value: el.style.color, onChange: (v) => set('style.color', { style: { color: v } }) }),
+        // 颜色是可打帧属性：值跟着播放头走，◆ 在该帧写入一个步进颜色键
+        // （design §9；颜色关键帧保持跳变）。
+        this._field({
+          label: '颜色', type: 'color', value: kv('style.color', el.style.color),
+          kf: true, path: kp('style.color'),
+          onChange: edit('style.color', (v) => ({ style: { color: v } })),
+        }),
         this._field({
           label: '对齐', type: 'select', value: el.style.align, options: [{ value: 'center', label: '居中' }, { value: 'left', label: '左' }, { value: 'right', label: '右' }],
           onChange: (v) => set('style.align', { style: { align: v } }),
@@ -930,7 +936,11 @@ export class Inspector {
           label: '类型', type: 'select', value: el.style.shape, options: [{ value: 'rect', label: '矩形' }, { value: 'ellipse', label: '椭圆' }],
           onChange: (v) => set('style.shape', { style: { shape: v } }),
         }),
-        this._field({ label: '填充', type: 'color', value: el.style.fill, onChange: (v) => set('style.fill', { style: { fill: v } }) }),
+        this._field({
+          label: '填充', type: 'color', value: kv('style.fill', el.style.fill),
+          kf: true, path: kp('style.fill'),
+          onChange: edit('style.fill', (v) => ({ style: { fill: v } })),
+        }),
         this._vec({
           label: '尺寸',
           items: [

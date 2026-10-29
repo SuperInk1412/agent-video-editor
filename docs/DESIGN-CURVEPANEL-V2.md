@@ -324,3 +324,33 @@ t_B = t_A + firstArrival(curve, y_B) · (t_C − t_A)     // 单调、毫秒取�
   线性/缓入/缓出精确，`outExpo` 误差约 0.08），不再假装 `easeInOut`；一拖就写真实 `curve`。
 - **内键空心**：帧率从 `timeline` 取；`|t* fps − round(t* fps)| > 1e-3` 视为不在整帧上。
 - **y 轴过渡**：缓存上一段区间，切换行时 150ms 逐帧插值（只影响显示）。
+
+## 18. 落地情况（2026-10-29 收口，P2 主体 + P3 面板/属性面板）
+
+| 设计条目 | 状态 | 位置 |
+|---|---|---|
+| §2 标量轨真实数值、整轨连续 | 已做 | `_valueWindow()` / `draw()` 逐像素 `sampleTrack` |
+| §2 颜色阶跃色带（R2） | 已做 | `draw()` 的颜色分支：分段色带 + 跳变线，无刻度、无手柄 |
+| §3 段 = 相邻选中键（含内键） | 已做 | `_selectedPairs()` |
+| §3 预设池级 + toast 计数 + 颜色组跳过 | 已做 | `_applyPreset()` / `_commit()` |
+| §3 选区实时同步（不是快照） | 已做 | `setSelection(pool)` + `main.js::select()` |
+| §4 内键重定时、越界以时间为锚 | 已做（core 侧） | `spanCurveOps()`；越界时面板侧只统计不画红 |
+| §6 F2 暂停 + 滚入视野 + 播放头跳转 | 已做 | `main.js::openCurvePanel` / `revealTimeRange`；`_jumpPlayhead()` |
+| §6 内键非整帧画空心 | 已做 | `_drawKeys()` |
+| §7 手柄出现条件 = 段被选中、无 curve 用 ease 拟合 | 已做 | `_editSpans()` / `_spanCurve()` / `curveFromEase()` |
+| §7 池级同步、实时重定时、Alt 不重定时、Esc 恢复 | 已做 | `_applyLiveSpans()` / `_restoreLiveSpans()` / `_cancelGesture()` |
+| §8 键拖动（整帧 / Alt 自由 / 竖直改值 / 未选中先选中） | 已做 | `_startKeyPress()` |
+| §8 框选替换整个池子（跨属性） | 已做 | `_applyMarquee()` |
+| §8 点空白不改选区、Esc 三段式 | 已做 | `_down()` / `_onKey()`（`stopImmediatePropagation`） |
+| §8 Tab 换行、←/→ 逐帧、↑/↓ 改值 | 已做 | `_cycleRow()` / `_nudgeSelected()` |
+| §8 右键：反转曲线、对齐到帧 | 已做 | `_contextMenu()` / `_invertSpan()` / `_snapSpans()` |
+| §9 颜色行可打帧（swatch + hex + ◆） | 已做 | `inspector.js` 的 `style.color` / `style.fill` 行 |
+| §3 Shift+预设只当前属性 / Alt+预设不重定时 | 未做 | 预设入口未读修饰键 |
+| §3 悬停预览（虚影 + 影响范围） | 未做 | — |
+| §8 Ctrl+C / Ctrl+V 复制曲线 | 未做 | — |
+| §8 存为我的预设（UI 入口 + 我的分组） | 未做 | 数据层 `meta.curvePresets` 已就绪 |
+| §4 越界红色 + toast 提醒 | 未做 | 需要把 `curveRange` 映射到值域 |
+| §6 归一化开关 + 三轴叠画（多轴行） | 未做 | 依赖时间轴统一变换栏的行元数据 |
+| §6 y 轴 150ms 过渡 | 未做 | — |
+| §9 ▸ 展开面板（大预览 / R G B / 最近色） | 未做 | 现为系统取色 + 十六进制 |
+| §9 3D 文字颜色打帧 | 阻塞 | `objectKey` 的 `SCALAR_TRACKS` 不认 `style.color`，要扩轨道词表 |
