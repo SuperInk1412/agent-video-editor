@@ -1,5 +1,6 @@
 // AI panel: talk to the DSH-TUI agent, stream its run, interrupt it (docs/DESIGN.md §1.4).
 import { h, icon } from './ui.js';
+import { frameStart } from './timeline-math.js';
 
 const EXAMPLES = [
   '把标题改成「锈梦」，字号加大，加一点辉光',
@@ -124,10 +125,16 @@ export class AgentPanel {
     const time = this.opts.getTime();
     const frames = [];
     if (this.chipFrames.classList.contains('on')) {
-      const seg = this.opts.getProject().segments.find((s) => s.id === sel.segmentId);
-      const times = seg
+      const project = this.opts.getProject();
+      const seg = project.segments.find((s) => s.id === sel.segmentId);
+      const fps = project.meta?.fps || 24;
+      // Frames only: the model must not be shown a state between two frames.
+      // The preview samples whole frames (main.js::pictureTime, §五), so the
+      // snapshot and its label both move to the frame start.
+      const times = (seg
         ? [seg.start + seg.duration * 0.15, seg.start + seg.duration * 0.5, seg.start + seg.duration * 0.85]
-        : [Math.max(0, time - 1), time, time + 1];
+        : [Math.max(0, time - 1), time, time + 1]
+      ).map((t) => frameStart(t, fps));
       for (const t of times) {
         try { frames.push({ dataUrl: this.opts.captureAt(t), label: `t${t.toFixed(2)}` }); } catch { /* ignore */ }
       }

@@ -13,7 +13,7 @@ import { AssetsPanel, MEDIA_MIME } from './assets.js';
 import { Outliner } from './outliner.js';
 import { showMenu, hideMenu, initTooltips, icon, prefs } from './ui.js';
 import { initLayout, markTab, Timecode, StatusBar, LogDrawer } from './shell.js';
-import { frameStep } from './timeline-math.js';
+import { frameStep, frameStart, frameWriteTime } from './timeline-math.js';
 import { initCommands, register as registerCommand, dispatch as dispatchCommand, runCommand, openPalette, openShortcuts } from './commands.js';
 import { pathPos, cameraTransform, cameraRange } from '/core/camera.js';
 import { feedPlan, hiddenFeeds, normalizeFeed } from '/core/camfeed.js';
@@ -279,13 +279,48 @@ function applyProject(p, source) {
 }
 
 // ---------------------------------------------------------------- time
+/** Project frame rate (meta.fps, 24 before a project is loaded). */
+const projectFps = () => S.project?.meta.fps || 24;
+
+/**
+ * The picture time of a wall-clock moment: the start of the frame containing
+ * `t`, clamped to the project.
+ *
+ * Two clocks (docs/FIX-LAYER-ORDER-EMPTY-CLICK.md §五): the wall clock only
+ * runs the transport (end of the project / the followed shot, looping, audio);
+ * the picture — `S.time`, the playhead, the timecode and `preview.render` —
+ * only ever sits on a frame boundary. An export renders `t = frame / fps`
+ * (Blender, engine/shot.js), so a mid-frame picture is a state that exists
+ * nowhere in the video: miku-swiss f46–f52 drew a lyric at the top right for
+ * the last 0.99 frame of a shot that no export ever shows.
+ */
+function pictureTime(t) {
+  const dur = S.project?.meta.duration || 12;
+  const asked = Math.max(0, Math.min(dur, Number(t) || 0));
+  return Math.max(0, Math.min(dur, frameStart(asked, projectFps())));
+}
+
+/**
+ * Time to store for an edit made at the playhead. `S.time` is a frame start
+ * (a float such as 0.23333…), and the project keeps times at 3 decimals: a
+ * plain round would push 7/30 down to 0.233 (frame 6) and 23/24 to 0.958
+ * (frame 22), putting the key / split one frame before the playhead.
+ * frameWriteTime rounds the millisecond up, so the value stays inside its
+ * frame and agrees with the inspector's ◆ (inspector.js::_keyTime).
+ */
+function writeTime(t = S.time) {
+  return frameWriteTime(t, projectFps(), S.project?.meta.duration || 0);
+}
+
 function setTime(t, { seekAudio = true } = {}) {
   const dur = S.project?.meta.duration || 12;
-  const next = Math.max(0, Math.min(dur, t));
+  const asked = Math.max(0, Math.min(dur, Number(t) || 0));
   // A follow only owns the camera's shot. Seeking outside its range ends the
   // follow but keeps the eye on the near boundary frame (not on a stale pose).
-  detachFollowForSeek(next);
-  S.time = next;
+  // The test is on the asked-for time: the snapped picture can sit up to one
+  // frame before the shot's first frame, and that frame still belongs to it.
+  detachFollowForSeek(asked);
+  S.time = pictureTime(asked);
   timeline?.setTime(S.time);
   updateTimecode();
   if (seekAudio && S.playing) preview.setAudioTime(S.time);
@@ -298,7 +333,10 @@ function play() {
   const follow = S.followCam ? cameraById(S.followCam) : null;
   if (follow) {
     const range = cameraRange(S.project, follow);
-    if (S.time < range.start - 1e-6 || S.time >= range.end - 1e-6) {
+    // The end test is frame-precise: playback stops on the frame that contains
+    // the clip's end (`pictureTime(range.end)`), so that frame *is* the end —
+    // with a raw `< end` test Space after the auto-pause would look dead.
+    if (S.time < range.start - 1e-6 || S.time >= pictureTime(range.end) - 1e-9) {
       if (range.end - range.start <= 1e-6) {
         toast('这个镜头没有可播放的时间段', 'warn');
         return;
@@ -306,7 +344,10 @@ function play() {
       // At the auto-pause point Space is the natural "watch it again".
       setTime(range.start);
     }
-  } else if (S.time >= S.project.meta.duration - 0.02) S.time = 0;
+    // "At the end" is the last frame the transport can sit on: the end marker
+    // itself when the duration is on the frame grid, otherwise the frame that
+    // contains it (space must not look dead there).
+  } else if (S.time >= pictureTime(S.project.meta.duration || 12) - 1e-9) S.time = 0;
   S.playing = true;
   S.playWall = performance.now();
   S.playFrom = S.time;
@@ -1436,7 +1477,10 @@ function followCamera(id, { selectHost = false } = {}) {
   }
   S.followCam = cam.id;
   const range = cameraRange(S.project, cam);
-  if (S.time < range.start - 1e-6 || S.time >= range.end - 1e-6) {
+  // Frame-precise like play(): the frame containing the clip's end belongs to
+  // the shot, so entering a follow there starts the shot over instead of
+  // parking on its last frame.
+  if (S.time < range.start - 1e-6 || S.time >= pictureTime(range.end) - 1e-9) {
     setTime(range.start);
     if (S.playing) {
       S.playFrom = S.time;
@@ -2448,7 +2492,7 @@ async function boot() {
       if (confirm(`删除 ${name}?`)) op({ op: 'objectRemove', id: o.id });
       return;
     }
-    const at = Math.round(S.time * 1000) / 1000;
+    const at = writeTime();
     const opener = document.activeElement;
     const modal = document.createElement('div');
     modal.className = 'modal';
@@ -2559,7 +2603,7 @@ async function boot() {
     const o = (S.project.scene?.objects || []).find((ob) => ob.id === id);
     if (!o) return;
     const kidsCount = childrenOf(S.project, id).length;
-    const at = Math.round(S.time * 1000) / 1000;
+    const at = writeTime();
     const pose = objectWorldPoseWithLinks(S.project, o, S.time);
     const cam = (S.editMode && S.editCam) ? S.editCam : evalCameraWorldWithLinks(S.project, S.time);
     showContextMenu(x, y, [
@@ -2651,7 +2695,7 @@ async function boot() {
       toast('没有选中相机', 'warn');
       return null;
     }
-    const at = Math.round(S.time * 1000) / 1000;
+    const at = writeTime();
     const range = cameraRange(S.project, cam);
     const can = at > range.start + 0.02 && at < range.end - 0.02;
     if (!can) {
@@ -2679,7 +2723,7 @@ async function boot() {
       const camId = selectedCameraId();
       if (camId) return splitCameraAtPlayhead(camId);
     }
-    const at = Math.round(S.time * 1000) / 1000;
+    const at = writeTime();
     const selected = onlyIds ? onlyIds.filter(Boolean) : selected2D();
     const crosses = (e) => at > e.start + 0.02 && at < e.start + e.duration - 0.02;
     if (selected.length) {
@@ -2741,7 +2785,7 @@ async function boot() {
   const clipMenu = (id, x, y) => {
     const el = S.project?.elements?.find((e) => e.id === id);
     if (!el) return;
-    const at = Math.round(S.time * 1000) / 1000;
+    const at = writeTime();
     const can = at > el.start + 0.02 && at < el.start + el.duration - 0.02;
     const isMedia = el.type === 'video' || el.type === 'audio';
     const feedSource = el.type === 'camfeed' ? normalizeFeed(el.feed).camera : '';
@@ -2821,7 +2865,7 @@ async function boot() {
       { label: '跟随此相机', icon: 'camera', kbd: 'F5', run: () => { followCamera(id, { selectHost: true }); } },
       { label: '创建投屏元素', icon: 'film', run: () => { createCamfeed(); } },
       (() => {
-        const at = Math.round(S.time * 1000) / 1000;
+        const at = writeTime();
         const range = cameraRange(S.project, cam);
         const can = at > range.start + 0.02 && at < range.end - 0.02;
         return {
@@ -2841,7 +2885,18 @@ async function boot() {
   };
 
   timeline = new Timeline($('#timeline'), {
-    onSeek: (t) => { setTime(t); if (S.playing) { S.playFrom = t; S.playWall = performance.now(); preview.setAudioTime(t); } },
+    // A scrub while playing keeps the transport running from the frame it
+    // lands on; S.time is the snapped picture time, so the wall clock has to
+    // restart there too (restarting from a raw `t` would make the next tick
+    // jump between two frames).
+    onSeek: (t) => {
+      setTime(t);
+      if (S.playing) {
+        S.playFrom = S.time;
+        S.playWall = performance.now();
+        preview.setAudioTime(S.time);
+      }
+    },
     onSelect: (sel) => select(sel),
     onOp: (o) => op(o),
     onPause: () => pause(),
@@ -3107,7 +3162,7 @@ async function boot() {
       view = { pos: dc.path[0].pos.slice(), look: dc.path[0].look.slice(), fov: dc.fov, roll: 0 };
     }
     const rnd = (v) => Math.round(v * 100) / 100;
-    const at = Math.round(S.time * 1000) / 1000;
+    const at = writeTime();
     const cam = {
       name: `相机 ${(S.project.cameras?.length || 0) + 1}`,
       fov: view.fov ?? 62,
@@ -3185,7 +3240,7 @@ async function boot() {
   // Write a value straight into the in-memory track so the viewport previews a
   // drag before the op lands (the op rewrites the same key on pointerup).
   const setLiveKey = (obj, path, v) => {
-    const t = Math.round(S.time * 1000) / 1000;
+    const t = writeTime();
     const tracks = obj.tracks || (obj.tracks = {});
     const list = tracks[path] || (tracks[path] = []);
     const k = list.find((x) => Math.abs(x.t - t) < 1e-3);
@@ -3247,7 +3302,7 @@ async function boot() {
       label: '在当前时间打点',
       run: () => {
         const pos = pathPos(S.project.camera, S.time).map((v) => Math.round(v * 100) / 100);
-        op({ op: 'cameraKey', t: S.time, pos });
+        op({ op: 'cameraKey', t: writeTime(), pos });
       },
     },
     { sep: true },
@@ -3259,7 +3314,7 @@ async function boot() {
       label: '在当前时间打点',
       run: () => {
         const pos = pathPos(S.project.camera, S.time).map((v) => Math.round(v * 100) / 100);
-        op({ op: 'cameraKey', t: S.time, pos });
+        op({ op: 'cameraKey', t: writeTime(), pos });
       },
     },
     {
@@ -3574,7 +3629,7 @@ async function boot() {
       const d = [w[0] - drag.hit[0], w[1] - drag.hit[1], w[2] - drag.hit[2]];
       const nx = drag.elX + d[0] * 100;
       const ny = drag.elY - d[1] * 100;
-      const t = Math.round(S.time * 1000) / 1000;
+      const t = writeTime();
       setElLive(el, 'transform.x', t, nx);
       setElLive(el, 'transform.y', t, ny);
       drag.x = nx; drag.y = ny; drag.moved = true;
@@ -3592,7 +3647,7 @@ async function boot() {
       if (!drag.created && Math.abs(cx - drag.x) + Math.abs(cy - drag.y) < 4) return;
       if (!drag.created) {
         const cam = S.project.camera;
-        const t = Math.round(S.time * 1000) / 1000;
+        const t = writeTime();
         let key = cam.path.find((k) => Math.abs(k.t - t) < 1e-3);
         if (!key) {
           key = { t, pos: pathPos(cam, t).slice(), look: null, fov: null, ease: 'easeInOut', out: null, in: null };
@@ -3748,7 +3803,7 @@ async function boot() {
       if (d.moved && d.pivot) {
         op({
           op: 'objectKey', id: d.id, path: 'pivot',
-          t: Math.round(S.time * 1000) / 1000, v: d.pivot,
+          t: writeTime(), v: d.pivot,
         });
       } else if (d.wasSelected && !e?.ctrlKey && !e?.metaKey && !e?.shiftKey) {
         const obj = (S.project.scene?.objects || []).find((o) => o.id === d.id);
@@ -3762,7 +3817,7 @@ async function boot() {
       gizmo.draw();
     } else if (d.kind === 'objrot') {
       if (d.moved && d.next) {
-        const t = Math.round(S.time * 1000) / 1000;
+        const t = writeTime();
         if (d.keyed) {
           op({ op: 'objectKey', id: d.id, path: `rotation.${d.axis}`, t, v: d.next['xyz'.indexOf(d.axis)] });
         } else {
@@ -3775,13 +3830,13 @@ async function boot() {
       if (d.moved && d.pivot) {
         op({
           op: 'objectKey', id: d.id, path: 'pivot',
-          t: Math.round(S.time * 1000) / 1000, v: d.pivot,
+          t: writeTime(), v: d.pivot,
         });
       }
       gizmo.draw();
     } else if (d.kind === 'element') {
       if (d.moved) {
-        const t = Math.round(S.time * 1000) / 1000;
+        const t = writeTime();
         const rx = Math.round(d.x * 100) / 100;
         const ry = Math.round(d.y * 100) / 100;
         const patch = {};
@@ -4313,14 +4368,20 @@ async function boot() {
     const dt = Math.min(0.1, Math.max(0, (now - last) / 1000));
     last = now;
     if (S.playing) {
-      const t = S.playFrom + (now - S.playWall) / 1000;
+      // Two clocks (docs/FIX-LAYER-ORDER-EMPTY-CLICK.md §五). `clock` is the
+      // wall clock since the play anchor: it alone decides whether the project
+      // (or the followed shot) ended and when to wrap, and it is what the audio
+      // runs on. Everything the eye sees is `pictureTime(clock)` — the frame
+      // under the wall clock, so playback shows exactly the frames an export
+      // renders instead of inventing a state between two of them.
+      const clock = S.playFrom + (now - S.playWall) / 1000;
       const projectEnd = S.project?.meta.duration || 12;
       // Following a camera stops with its clip, even when loop is on: the
       // point of the follow is to watch that camera's shot, not the project.
       const cam = S.followCam ? cameraById(S.followCam) : null;
       const followEnd = cam ? Math.min(projectEnd, cameraRange(S.project, cam).end) : null;
       const limit = followEnd ?? projectEnd;
-      if (t >= limit) {
+      if (clock >= limit) {
         if (S.loop && !cam) {
           // wrap to 0 and keep playing
           S.playFrom = 0;
@@ -4331,9 +4392,9 @@ async function boot() {
           preview.playAudio(0);
         } else { setTime(limit); pause(); }
       } else {
-        S.time = t;
-        timeline.setTime(t, { live: true });
-        updateTimecode(t);
+        S.time = pictureTime(clock);
+        timeline.setTime(S.time, { live: true });
+        updateTimecode(S.time);
       }
     }
     if (S.project && (S.playing || S.editMode || now - lastDraw > 100)) {
