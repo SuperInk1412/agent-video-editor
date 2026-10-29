@@ -1,45 +1,35 @@
 // Realtime preview: WebGL2 compositor that mirrors blender/vdm_build.py.
 // Layers -> scene FBO -> bloom chain -> composite (CA, grain, scanlines, vignette, grade).
 //
-// 2D layers have two placement paths (PLAN-ui-round3 §2.5, task S2):
+// The draw list is the frame IR (docs/DESIGN-BACKEND-V2.md §4, WP0.2): every
+// 2D layer arrives as one world quad (`items[].world` + `size`), so placement,
+// visibility, blend order and the depth flag are all decided in core/, not here.
+// The two placement paths the renderer used to carry are gone:
 //
-// - legacy (`el.node` absent): the original screen path. `u_px2w` + `u_z` lift
-//   the canvas-space quad onto the fixed camera-facing plane at `transform.z`,
-//   exactly as before this branch (the 907b9ec picture must not change).
-// - node (`el.node` present): `core/spatial.js::elementNode` / `frameOf` give
-//   the layer a world position + basis (`dir`/`roll`) + scale. A full 4x4 quad
-//   matrix replaces the placement, so the texture can face any direction and
-//   still be depth-tested against the 3D scene.
+// - a node / parented element's `world` is `core/frame-ir.js::elementPixelMatrix`;
+// - a legacy screen-space element's `world` is the same-shaped matrix derived
+//   from its screen placement (`screenPixelMatrix`), with the local +y axis
+//   flipped so both kinds sample `uv = (lx + 0.5, 0.5 - ly)`;
+// - both are drawn through the 4x4 branch of VERT (`u_world > 1.5`), so the
+//   picture cannot depend on which shape a layer started life as.
 //
-// Why a new vertex branch instead of reusing preview3d.js::planeProg: that
-// program bakes scene-object lighting/fog/srgb and uploads sRGB textures, while
-// 2D layers share the compositor's straight-alpha/glow path and canvas-space
-// text rasters. Reusing FRAG_TEX / FRAG_SHAPE keeps solid/shape/ellipse/radius
-// drawing identical; only the vertex placement differs.
-import { evalElement, motionDelta } from '/core/evaluate.js';
+// What stays here is what is genuinely a renderer concern: resolving content
+// into GPU resources (text rasters, media textures, camera-feed targets),
+// texture resolution choices (`_textZoom`, `_textTexture`) and the post chain.
+import { evalElement } from '/core/evaluate.js';
 import { elementOverlay } from '/core/links.js';
-import { cameraParamResolver, elementWorldNodeWithLinks, evalCameraWorldWithLinks, linksEvalOptions } from '/core/link-eval.js';
+import { cameraParamResolver, evalCameraWorldWithLinks } from '/core/link-eval.js';
 import { clamp } from '/core/time.js';
 import { cameraTransform, cameraLayers } from '/core/camera.js';
 import { audioElements, audioVolume } from '/core/audio.js';
-import { elementWorldParent } from '/core/spatial-parent.js';
-import { frameOf } from '/core/spatial.js';
-import { basisFromDir } from '/core/scene.js';
 import { Scene3D } from './preview3d.js';
 import { feedPlan, hiddenFeeds, normalizeFeed } from '/core/camfeed.js';
 import { clearCompiledTracks, compileProject } from '/core/tracks.js';
 import {
-  LAYER_DEPTH_M, layerOriginDistance, layerRayDepth, mul4, nodePlaneMatrix, orderLayers,
-  planeOfFrame, transformPlane,
+  layerOriginDistance, layerRayDepth, orderLayers,
 } from './spatial-layers.js';
+import { buildFrameIR, itemModelMatrix, mediaUVOf, IRCache, PIXEL_M } from '/core/frame-ir.js';
 
-const IDENTITY4 = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
-
-// A 2D plane fragment at least this opaque owns its pixel
-// (docs/FIX-LAYER-ORDER-EMPTY-CLICK.md §四 1). The depth-only pass discards
-// below it; the colour pass that follows keeps u_aCut 0 so text and shape edges
-// stay anti-aliased instead of turning into a hard rim.
-const DEPTH_ALPHA = 0.5;
 
 const VERT = `#version 300 es
 in vec2 a_pos;
@@ -310,21 +300,13 @@ const M3 = {
   },
 };
 
+/** Length of one column of an IR world matrix (metres per project pixel). */
+const colLen = (m, i) => Math.hypot(m[i], m[i + 1], m[i + 2]);
+
 function hexRgb(c) {
   const s = String(c || '#000').replace('#', '');
   const h = s.length === 3 ? s.split('').map((x) => x + x).join('') : s;
   return [parseInt(h.slice(0, 2), 16) / 255, parseInt(h.slice(2, 4), 16) / 255, parseInt(h.slice(4, 6), 16) / 255];
-}
-
-function coverUV(iw, ih, fw, fh) {
-  if (!iw || !ih) return [0, 0, 1, 1];
-  const ia = iw / ih, fa = fw / fh;
-  if (ia > fa) {
-    const f = fa / ia;
-    return [(1 - f) / 2, 0, 1 - (1 - f) / 2, 1];
-  }
-  const f = ia / fa;
-  return [0, (1 - f) / 2, 1, 1 - (1 - f) / 2];
 }
 
 const BLEND = {
@@ -342,6 +324,10 @@ export class Preview {
     this.project = null;
     this.assets = new Map(); // id -> {kind, img/video, tex, key}
     this.textCache = new Map();
+    // Frame IR for the current revision (core/frame-ir.js::IRCache): one
+    // build per frame, shared by render() and hitTest().
+    this._irCache = new IRCache();
+    this._ir = null;
     this.sceneFBO = null;
     this.layerFBO = null;
     this.bloomFBO = [null, null];
@@ -393,6 +379,10 @@ export class Preview {
   setProject(p) {
     const changedAudio = this.project?.meta?.audio?.src !== p.meta.audio?.src;
     this.project = p;
+    // A new revision invalidates every cached frame (core/frame-ir.js::IRCache
+    // serves only the revision it was built at).
+    this._irCache = new IRCache();
+    this._ir = null;
     clearCompiledTracks();
     compileProject(p);
     const live = new Map(p.elements.map((element) => [element.id, element]));
@@ -875,148 +865,164 @@ export class Preview {
   }
 
   /**
-   * Compute the draw list for time t (also used for hit testing).
+   * The frame IR this time draws (docs/DESIGN-BACKEND-V2.md §4). One build per
+   * frame and revision: `render()` and `hitTest()` share it, and a revision the
+   * cache has already seen costs one Map lookup. `setProject` hands in a fresh
+   * cache, so an edit never draws a stale frame.
+   */
+  _frameIR(t) {
+    const p = this.project;
+    const fps = Number(p.meta?.fps) || 24;
+    const frame = Math.round((Number(t) || 0) * fps);
+    return buildFrameIR(p, frame, {
+      fps,
+      camera: 'live',
+      edit: (this.editMode && this.editCam) ? { cam: this.editCam, mode: true } : null,
+      soloCameras: this.soloCameras,
+      cache: this._irCache,
+      city: this.scene3d?.city || null,
+    });
+  }
+
+  /**
+   * Draw list for time t, straight from the frame IR (WP0.2).
    *
-   * Every layer keeps the legacy screen data (`M`, `w`, `h`, `uv`, `blend`) so
-   * the old path and the selection overlay stay untouched. An element whose
-   * `el.node` exists additionally carries the world plane (`node.frame`) that
-   * the node placement path draws and picks with; `el.z` stays the 2D layer
-   * order and never moves into `node.pivot.z` (PLAN §2.5).
+   * The renderer no longer decides what is visible, where a quad sits, which
+   * pixel it owns or what its content is — it only resolves content into GPU
+   * resources (a text raster, the media texture, a camera-feed target) and
+   * hands each item to `_drawLayers`. Layer objects keep the shape the rest of
+   * the renderer reads: `el` (the project element), `st` (the IR's sampled text
+   * / opacity state), `w`/`h` in canvas pixels and `model` (the item's world
+   * quad, core/frame-ir.js::itemModelMatrix).
    */
   computeLayers(t) {
     const p = this.project;
-    const nodeOpts = linksEvalOptions(p);
-    const gl = this.gl;
+    if (!p) return [];
+    const ir = this._frameIR(t);
+    this._ir = ir;
     const W = this.canvas.width, H = this.canvas.height;
-    const S = W / (p.meta.width || 1920);
-    const cx = W / 2, cy = H / 2;
-    const cyW = (Number(p.meta?.height) || 1080) / 200;
+    const meta = p.meta || {};
+    const S = W / (Number(meta.width) || 1920);
+    const cyW = (Number(meta.height) || 1080) / 200;
+    const els = new Map((p.elements || []).map((e) => [e.id, e]));
+    // Feed sources on screen now also film the text: rasterise for the closest
+    // view. A texture-resolution decision (not picture data), hence it stays
+    // here; every judgement about *what* is drawn comes from the IR.
+    const feedCams = this.scene3d?.city ? this._liveFeedCameras(p, t) : [];
     const out = [];
-    // the camera this frame is seen through (text is rasterised for its close-ups)
-    const cam = this.scene3d.city ? (this.editMode && this.editCam ? this.editCam : evalCameraWorldWithLinks(p, t)) : null;
-    // Feed sources on screen now also film the text: rasterise for the closest view.
-    const feedCams = cam ? this._liveFeedCameras(p, t) : [];
-    const zoomFor = (el, st, nodeFrame) => feedCams.reduce(
-      (z, c) => Math.max(z, this._textZoom(el, st, c, nodeFrame)), this._textZoom(el, st, cam, nodeFrame));
-    for (const el of p.elements) {
-      if (el.visible === false) continue;
-      if (t < el.start - 1e-6 || t >= el.start + el.duration - 1e-6) continue;
-      const st = evalElement(el, t, p.meta, elementOverlay(p, el, t));
-      if (st.opacity <= 0.002) continue;
-      const rot = (st.rotation || 0) * Math.PI / 180;
-      // Unified space: el.node is the placement source of truth (core/spatial.js).
-      // A partial node falls back to the legacy derivation for missing fields,
-      // so it can never move an element by accident. node-at.js samples the
-      // migrated `pivot.* / scale.* / roll` keyframes on top of the base node
-      // (S4 convention, same reading as migrate-spatial.js::migratedNodeAt).
-      // A spatial parent (core/spatial-parent.js) carries the whole node chain,
-      // so a parented 2D layer also enters this world-plane path — including a
-      // legacy layer whose node is derived from its transform; an unparented
-      // legacy layer keeps the old screen path untouched.
-      const worldParent = !!elementWorldParent(el);
-      const nodeFrame = (el.node || worldParent) ? frameOf(elementWorldNodeWithLinks(p, el, t, nodeOpts)) : null;
-      const push = (L) => {
-        if (nodeFrame) L.node = { frame: nodeFrame };
-        out.push(L);
+    for (const item of ir.items) {
+      const el = els.get(item.id);
+      if (!el) continue;
+      const c = item.content || {};
+      // Length of the world columns = the plane's scale (metres per pixel).
+      const scale = [colLen(item.world, 0), colLen(item.world, 4)];
+      const layer = {
+        id: item.id,
+        item,
+        el,
+        z: item.z,
+        plane: item.plane,
+        src: item.src,
+        blend: item.blend,
+        opacity: item.opacity,
+        glow: Number(c.glow) || 0,
+        depth: item.depth,
+        uv: c.uv || [0, 0, 1, 1],
+        st: {
+          text: c.text,
+          size: c.fontSize,
+          opacity: item.opacity,
+          x: Number(item.plane.p[0]) * 100,
+          y: (cyW - Number(item.plane.p[1])) * 100,
+          z: Number(item.plane.p[2]),
+          scale: Math.max(scale[0], scale[1]) / PIXEL_M,
+          glow: Number(c.glow) || 0,
+        },
       };
-      if (el.type === 'text') {
-        const tt = this._textTexture(el, st, el.style, zoomFor(el, st, nodeFrame));
-        const w = tt.w / tt.zoom, h = tt.h / tt.zoom;
-        const M = M3.mul(
-          M3.mul(M3.mul(M3.T(cx + st.x * S, cy + st.y * S), M3.R(rot)), M3.S(st.scale, st.scale)),
-          M3.mul(M3.T(-w / 2, -h / 2), M3.S(w, h)),
-        );
-        push({ el, st, kind: 'tex', tex: tt.tex, uv: [0, 0, 1, 1], M, w, h, blend: el.style.blend });
-      } else if (el.type === 'image' || el.type === 'video') {
-        const a = this.assets.get(el.id);
+      if (item.kind === 'text') {
+        // Typesetting still happens here until WP1.3 moves glyph geometry into
+        // the IR (§4.4: text `size` is null and the consumer measures it).
+        const style = {
+          font: c.font,
+          weight: c.weight,
+          align: c.align,
+          lineHeight: c.lineHeight,
+          letterSpacing: c.letterSpacing,
+          shadow: c.shadow,
+          stroke: c.stroke,
+          strokeWidth: c.strokeWidth,
+        };
+        const zoom = this._textZoomFor(layer, feedCams, ir);
+        const tt = this._textTexture(el, { size: c.fontSize, text: c.text, color: c.color }, style, zoom);
+        layer.kind = 'tex';
+        layer.tex = tt.tex;
+        layer.quad = [tt.w / tt.zoom / S, tt.h / tt.zoom / S];
+        layer.w = tt.w / tt.zoom;
+        layer.h = tt.h / tt.zoom;
+      } else if (item.kind === 'image' || item.kind === 'video') {
+        const a = this.assets.get(item.id);
         if (!a || !a.ready || !a.tex) continue;
         let iw = 0, ih = 0;
         if (a.kind === 'image') { iw = a.img.naturalWidth; ih = a.img.naturalHeight; }
         else { iw = a.video.videoWidth; ih = a.video.videoHeight; }
-        const uv = el.style.fit === 'stretch' ? [0, 0, 1, 1] : coverUV(iw, ih, p.meta.width, p.meta.height);
-        const w = W, h = H;
-        const M = M3.mul(
-          M3.mul(M3.mul(M3.T(cx + st.x * S, cy + st.y * S), M3.R(rot)), M3.S(st.scale, st.scale)),
-          M3.mul(M3.T(-w / 2, -h / 2), M3.S(w, h)),
-        );
-        push({ el, st, kind: 'tex', tex: a.tex, uv, M, w, h, blend: el.style.blend, asset: a });
-      } else if (el.type === 'camfeed') {
-        // The texture is the source camera's target, bound per draw
-        // (_feedTexture): the source is only rendered later in the frame.
-        const feed = normalizeFeed(el.feed);
-        const w = W, h = H;
-        const M = M3.mul(
-          M3.mul(M3.mul(M3.T(cx + st.x * S, cy + st.y * S), M3.R(rot)), M3.S(st.scale, st.scale)),
-          M3.mul(M3.T(-w / 2, -h / 2), M3.S(w, h)),
-        );
-        // Targets are bottom-up: flip v.
-        push({ el, st, kind: 'tex', tex: null, feed, uv: [0, 1, 1, 0], M, w, h, blend: el.style.blend });
-      } else if (el.type === 'solid' || el.type === 'shape') {
-        const bw = (Number(el.style.w) || p.meta.width) * S;
-        const bh = (Number(el.style.h) || p.meta.height) * S;
-        const w = bw, h = bh;
-        const M = M3.mul(
-          M3.mul(M3.mul(M3.T(cx + st.x * S, cy + st.y * S), M3.R(rot)), M3.S(st.scale, st.scale)),
-          M3.mul(M3.T(-w / 2, -h / 2), M3.S(w, h)),
-        );
-        const col = hexRgb(el.style.fill || el.style.color || '#ffffff');
-        push({ el, st, kind: 'shape', M, w, h, color: [...col, st.opacity], radius: (Number(el.style.radius) || 0) * S, shape: el.style.shape === 'ellipse' ? 1 : 0, blend: el.style.blend });
+        layer.kind = 'tex';
+        layer.tex = a.tex;
+        layer.asset = a;
+        // The project has no intrinsic media size yet, so the IR leaves `uv`
+        // null: the loaded media supplies the size and the one exported rule
+        // (core/frame-ir.js::mediaUVOf) supplies the rect (WP4.1 writes the
+        // size into the element and the IR starts carrying it).
+        if (!c.uv) layer.uv = mediaUVOf(c.fit, iw, ih, [meta.width, meta.height]) || [0, 0, 1, 1];
+        layer.quad = [item.size[0], item.size[1]];
+        layer.w = item.size[0] * S;
+        layer.h = item.size[1] * S;
+      } else if (item.kind === 'camfeed') {
+        // The texture is the source camera's target, bound per draw by
+        // _drawLayers: the source is only rendered later in the frame, so a
+        // layer built here must not capture a texture yet (that is exactly why
+        // the delay-1 feed used to show nothing).
+        layer.feed = c.feed;
+        layer.kind = 'tex';
+        // The source target is bottom-up, so its image space is flipped: the IR
+        // carries uv in image space and this is where the texture lies.
+        layer.uv = [0, 1, 1, 0];
+        layer.quad = [item.size[0], item.size[1]];
+        layer.w = item.size[0] * S;
+        layer.h = item.size[1] * S;
+      } else if (item.kind === 'solid' || item.kind === 'shape') {
+        layer.kind = 'shape';
+        layer.color = [...c.fill, item.opacity];
+        layer.radius = (Number(c.radius) || 0) * S;
+        layer.shape = c.ellipse ? 1 : 0;
+        layer.quad = [item.size[0], item.size[1]];
+        layer.w = item.size[0] * S;
+        layer.h = item.size[1] * S;
+      } else {
+        continue;
       }
+      layer.model = itemModelMatrix(item, layer.quad);
+      out.push(layer);
     }
-    out.sort((a, b) => a.el.z - b.el.z);
-    // World plane of every layer for the shared draw / pick ordering (§2.5).
-    // Node layers use the SpatialNode frame; legacy layers keep the exact point
-    // + [0,0,1] normal the old _planeDist used, so the old picture keeps its
-    // order (a carried layer's raw normal is kept unscaled on purpose: the
-    // screen-locked pull-in must keep sorting those layers in front).
-    for (const L of out) {
-      L.plane = L.node
-        ? planeOfFrame(L.node.frame)
-        : { p: [(L.st.x || 0) / 100, cyW - (L.st.y || 0) / 100, L.st.z || 0], n: [0, 0, 1] };
-    }
-    // Node placement (world matrix) for node layers; legacy layers never get one.
-    for (const L of out) if (L.node) this._nodePlane(L, t, S, p.meta);
     return out;
   }
 
   /**
-   * World quad matrix of a node layer (task 5): the SpatialNode placement
-   * replaces `transform.x/y/z/rotation/scale`, while evalElement still owns
-   * opacity/fades/text content and motion/punch come from `motionDelta`.
-   * Motion is applied inside the plane — screen px along the plane's unrolled
-   * axes, extra roll around the normal, size multiplier — so nothing is added
-   * twice.
+   * Text raster scale: how much larger than the default framing the element
+   * appears through the frame's camera (and any camera feeding a screen), so a
+   * close-up stays sharp. Fed the IR's own numbers so it cannot drift from the
+   * picture; the level list and the "no world yet" shortcut are unchanged.
    */
-  _nodePlane(L, t, S, meta) {
-    const frame = L.node.frame;
-    const d = motionDelta(L.el, t, meta);
-    // Unrolled plane axes: the legacy screen path translates before rotating,
-    // so a node's own roll must not rotate its motion direction.
-    const base = basisFromDir(frame.basis[2], 0);
-    const dx = (Number(d.x) || 0) / 100; // project px -> metres
-    const dy = -(Number(d.y) || 0) / 100; // canvas y points down, world y up
-    const offset = [
-      -base.right[0] * dx + base.up[0] * dy,
-      -base.right[1] * dx + base.up[1] * dy,
-      -base.right[2] * dx + base.up[2] * dy,
-    ];
-    // Canvas pixels are sized for the default framing (100 px = 1 m at the
-    // screen plane), then the node scale expands the geometry.
-    const pxToM = 1 / (100 * S);
-    const width = L.w * pxToM * Math.abs(Number(frame.scale[0]) || 1);
-    const height = L.h * pxToM * Math.abs(Number(frame.scale[1]) || 1);
-    const plane = nodePlaneMatrix(frame, width, height, {
-      offset,
-      roll: d.rotation,
-      scale: d.scale,
-      // Same plane, layer order: `el.z` decides the stack, so the depth buffer
-      // must see a hair of separation or the layers z-fight (§四 2). Same rule
-      // and same amount Blender applies in vdm_build.py::make_updater.
-      depth: LAYER_DEPTH_M * (Number(L.el.z) || 0),
-    });
-    L.node.w = plane.w;
-    L.node.h = plane.h;
-    L.node.model = plane.model;
+  _textZoomFor(layer, feedCams, ir) {
+    if (!this.scene3d?.city) return 1; // the flat fallback never zoomed
+    const el = layer.el;
+    const st = layer.st;
+    // Every IR quad is described like a node plane, so one branch of _textZoom
+    // serves both kinds: `pos` is the plane origin, `scale` the quad scale.
+    const nodeFrame = { pos: layer.plane.p, scale: [st.scale, st.scale, 1] };
+    const cam = { pos: ir.camera.pos, look: ir.camera.look, fov: ir.camera.fov };
+    let zoom = this._textZoom(el, st, cam, nodeFrame);
+    for (const c of feedCams) zoom = Math.max(zoom, this._textZoom(el, st, c, nodeFrame));
+    return zoom;
   }
 
   render(t) {
@@ -1095,7 +1101,7 @@ export class Preview {
       const bg = hexRgb(p.meta.background || '#000000');
       gl.clearColor(bg[0], bg[1], bg[2], 1);
       gl.clear(gl.COLOR_BUFFER_BIT);
-      this._drawLayers(layers, W, H, null);
+      this._drawLayers(layers, W, H, this._flatWorld(W, H));
     }
 
     const fx = p.meta.fx || {};
@@ -1104,39 +1110,35 @@ export class Preview {
   }
 
   /**
-   * 2D element layers. `world` = {vp, camPos, meta} draws them as planes in the
-   * 3D space (depth-tested against the 3D objects, far to near; coplanar layers
-   * are separated by `LAYER_DEPTH_M * el.z`); null draws them flat on screen.
+   * 2D element layers, every one of them a world quad from the frame IR
+   * (WP0.2). `world` = {vp, camPos, meta} or {flat: true, vp, camPos, meta}
+   * when no 3D snapshot has arrived yet; both use the same vertex path, so the
+   * picture only depends on the IR.
    *
-   * Node layers (`layer.node.model`) use the world-plane branch, every other
-   * layer keeps the legacy screen path. `u_world` selects the branch in VERT:
-   * 0 = flat screen blit, 1 = legacy screen plane, 2 = node world plane.
+   * `item.depth.write` says whether an opaque fragment owns the depth buffer
+   * (问题四's rule, now carried by the IR): the depth-only pass discards below
+   * `item.depth.cut` so a glyph keeps its anti-aliased rim, then the colour
+   * pass blends at u_aCut 0. Legacy screen-space items never wrote depth and
+   * still don't, so their stacking behaviour is untouched.
    *
-   * Since 问题四 an opaque node plane also WRITES depth (a depth-only pass at
-   * DEPTH_ALPHA, then the blended colour pass): what covers what is decided by
-   * where the planes really are, so no ordering rule has to be right about a
-   * big backdrop versus an off-centre card. The order from `orderLayers` only
-   * decides how see-through layers blend — and still paints far to near, so a
-   * layer drawn "too late" finds its pixels already owned by the nearer plane.
+   * Blending order: the IR's `drawOrder` is the main eye's; a camera-feed source
+   * draws its own picture through its own eye, so the list is re-ordered here
+   * with the same rule (core/layers.js::orderLayers) and the eye's position.
    */
   _drawLayers(layers, W, H, world) {
     const gl = this.gl;
     let list = layers;
     if (world) {
-      const cyW = (Number(world.meta?.height) || 1080) / 200;
-      const S = W / (Number(world.meta?.width) || 1920);
-      // Blending order (spatial-layers.js::orderLayers): plane groups far to
-      // near, `el.z` inside one plane. Depth now owns the picture, so this is
-      // only about translucent stack — see the header.
       list = orderLayers(layers, world.camPos);
       for (const pr of [this.prog.tex, this.prog.shape]) {
         gl.useProgram(pr.program);
         gl.uniformMatrix4fv(pr.u.u_vp, false, world.vp);
-        gl.uniform4f(pr.u.u_px2w, W / 2, H / 2, S, cyW);
       }
-      gl.enable(gl.DEPTH_TEST);
-      gl.depthFunc(gl.LEQUAL);
-      gl.depthMask(false);
+      if (!world.flat) {
+        gl.enable(gl.DEPTH_TEST);
+        gl.depthFunc(gl.LEQUAL);
+        gl.depthMask(false);
+      }
     }
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
@@ -1147,42 +1149,30 @@ export class Preview {
         if (layer.feed && !this._feedTexture(layer.feed)) continue;
         const b = BLEND[layer.blend] || BLEND.normal;
         b(gl);
-        const nodeMode = !!world && !!layer.node?.model;
-        const mode = nodeMode ? 2 : (world ? 1 : 0);
+        const mode = world ? 2 : 0;
         // A see-through plane (transform.opacity below the cut) never owns a
         // pixel: writing depth there would cut a hole into the stack behind it
         // while still blending, so it stays sorting-only (方案 §四 风险).
-        const ownsDepth = nodeMode && (Number(layer.st.opacity) || 0) >= DEPTH_ALPHA;
+        const ownsDepth = !!world && !!layer.depth?.write;
         const pr = layer.kind === 'tex' ? this.prog.tex : this.prog.shape;
         if (layer.kind === 'tex') {
           gl.useProgram(pr.program);
-          gl.uniformMatrix3fv(pr.u.u_mat, false, layer.M);
           gl.uniform2f(pr.u.u_res, W, H);
           gl.uniform1f(pr.u.u_world, mode);
-          if (nodeMode) gl.uniformMatrix4fv(pr.u.u_model, false, layer.node.model);
-          else if (world) {
-            gl.uniform1f(pr.u.u_z, layer.st.z || 0);
-            gl.uniformMatrix4fv(pr.u.u_carry, false, layer.carry || IDENTITY4);
-          }
+          if (mode) gl.uniformMatrix4fv(pr.u.u_model, false, layer.model);
           gl.uniform4fv(pr.u.u_uv, new Float32Array(layer.uv));
-          gl.uniform1f(pr.u.u_opacity, layer.st.opacity);
-          gl.uniform1f(pr.u.u_glow, layer.st.glow || layer.el.fx?.glow || 0);
+          gl.uniform1f(pr.u.u_opacity, layer.opacity);
+          gl.uniform1f(pr.u.u_glow, layer.glow);
           gl.activeTexture(gl.TEXTURE0);
           gl.bindTexture(gl.TEXTURE_2D, layer.feed ? this._feedTexture(layer.feed) : layer.tex);
           gl.uniform1i(pr.u.u_tex, 0);
         } else {
           // Solid/shape keeps the existing SDF fragment shader (rect / rounded
-          // rect / ellipse) — only its quad placement is swapped, so a node
-          // element gets a real world orientation without a second shape path.
+          // rect / ellipse) — only its quad placement comes from the IR.
           gl.useProgram(pr.program);
-          gl.uniformMatrix3fv(pr.u.u_mat, false, layer.M);
           gl.uniform2f(pr.u.u_res, W, H);
           gl.uniform1f(pr.u.u_world, mode);
-          if (nodeMode) gl.uniformMatrix4fv(pr.u.u_model, false, layer.node.model);
-          else if (world) {
-            gl.uniform1f(pr.u.u_z, layer.st.z || 0);
-            gl.uniformMatrix4fv(pr.u.u_carry, false, layer.carry || IDENTITY4);
-          }
+          if (mode) gl.uniformMatrix4fv(pr.u.u_model, false, layer.model);
           gl.uniform4fv(pr.u.u_color, new Float32Array(layer.color));
           gl.uniform2f(pr.u.u_size, layer.w, layer.h);
           gl.uniform1f(pr.u.u_radius, layer.radius);
@@ -1194,7 +1184,7 @@ export class Preview {
           // keeps its anti-aliased rim instead of a one-bit edge.
           gl.colorMask(false, false, false, false);
           gl.depthMask(true);
-          gl.uniform1f(pr.u.u_aCut, DEPTH_ALPHA);
+          gl.uniform1f(pr.u.u_aCut, layer.depth.cut);
           gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
           gl.colorMask(true, true, true, true);
           gl.depthMask(false);
@@ -1212,7 +1202,32 @@ export class Preview {
       // hand the 3D renderer its state back (the fisheye clears depth per face)
       gl.depthMask(true);
       gl.disable(gl.BLEND);
+      if (!world.flat) gl.disable(gl.DEPTH_TEST);
     }
+  }
+
+  /**
+   * Screen-space view of the same IR quads while no 3D snapshot has arrived
+   * yet (the world request is debounced): the world -> canvas map the old
+   * screen path used, written as one projection matrix so there is still a
+   * single draw path.
+   */
+  _flatWorld(W, H) {
+    const meta = this.project?.meta || {};
+    const S = W / (Number(meta.width) || 1920);
+    const cyW = (Number(meta.height) || 1080) / 200;
+    const sx = 100 * S;
+    return {
+      flat: true,
+      meta,
+      camPos: this._ir?.camera?.pos || [0, cyW, 20],
+      vp: new Float32Array([
+        (2 * sx) / W, 0, 0, 0,
+        0, (2 * sx) / H, 0, 0,
+        0, 0, 0, 0,
+        0, -(cyW * 2 * sx) / H, 0, 1,
+      ]),
+    };
   }
 
   _postAndComposite(p, t, W, H, fx, bloom) {
@@ -1289,54 +1304,40 @@ export class Preview {
   }
 
   /**
-   * The four corners of a 2D layer in canvas pixels. In world mode they are
-   * projected through the last 3D view-projection, so picking follows a moved
-   * camera instead of the flat screen-space matrix. Node layers use their world
-   * quad matrix (which already carries a camera parent), legacy layers keep the
-   * canvas-space matrix + screen-plane conversion.
+   * The four corners of an IR quad in canvas pixels. `model` is the item's
+   * world quad; `rect` is a uv sub-rectangle (the tight text box). In world
+   * mode the corners go through the last 3D view-projection so picking follows
+   * a moved camera; with no 3D snapshot they go through the same world ->
+   * canvas map the flat draw uses.
    */
   _layerCorners(L, rect = [0, 0, 1, 1]) {
+    const m = L?.model;
+    if (!m) return null;
     const [u0, v0, u1, v1] = rect;
+    const W = this.canvas.width, H = this.canvas.height;
     const s3 = this.scene3d;
-    if (L.node?.model) {
-      // Node plane: uv rect -> local quad (a_pos - 0.5) -> world -> pixels. The
-      // v axis is flipped (world y is up, texture v = 0 is the picture top) so
-      // the corner order stays top-left, top-right, bottom-right, bottom-left.
-      if (!this._worldMode || !s3?.lastVP) return null;
-      const W = this.canvas.width, H = this.canvas.height;
-      const m = L.node.model;
+    const world = [];
+    for (const [u, v] of [[u0, v0], [u1, v0], [u1, v1], [u0, v1]]) {
+      const lx = u - 0.5, ly = 0.5 - v;
+      world.push([
+        m[0] * lx + m[4] * ly + m[12],
+        m[1] * lx + m[5] * ly + m[13],
+        m[2] * lx + m[6] * ly + m[14],
+      ]);
+    }
+    if (this._worldMode && s3?.lastVP) {
       const out = [];
-      for (const [u, v] of [[u0, v0], [u1, v0], [u1, v1], [u0, v1]]) {
-        const lx = u - 0.5, ly = 0.5 - v;
-        const w = [
-          m[0] * lx + m[4] * ly + m[12],
-          m[1] * lx + m[5] * ly + m[13],
-          m[2] * lx + m[6] * ly + m[14],
-        ];
+      for (const w of world) {
         const p = s3.projectPoint(w);
         if (!p) return null;
         out.push([p.x * W / Math.max(1, s3.lastW), p.y * H / Math.max(1, s3.lastH)]);
       }
       return out;
     }
-    const pts = [[u0, v0], [u1, v0], [u1, v1], [u0, v1]]
-      .map(([u, v]) => M3.apply(L.M, u, v));
-    if (!this._worldMode || !s3?.lastVP) return pts;
-    const W = this.canvas.width, H = this.canvas.height;
     const meta = this.project?.meta || {};
     const S = W / (Number(meta.width) || 1920);
     const cyW = (Number(meta.height) || 1080) / 200;
-    const z = Number(L.st?.z) || 0;
-    const out = [];
-    for (const [x, y] of pts) {
-      const qx = (x - W / 2) / S;
-      const qy = (y - H / 2) / S;
-      let w = [qx / 100, cyW - qy / 100, z];
-      const p = s3.projectPoint(w);
-      if (!p) return null;
-      out.push([p.x * W / Math.max(1, s3.lastW), p.y * H / Math.max(1, s3.lastH)]);
-    }
-    return out;
+    return world.map(([x, y]) => [W / 2 + x * 100 * S, H / 2 - (y - cyW) * 100 * S]);
   }
 
   /**
@@ -1367,13 +1368,11 @@ export class Preview {
     return 8;
   }
 
-  /** canvas-space hit test -> topmost element id */
+  /** canvas-space hit test -> topmost element id (the same rule as the picture) */
   hitTest(cx, cy, t) {
     const layers = (this.layers && this.layersAt === t) ? this.layers : this.computeLayers(t);
     if (this._worldMode && this.scene3d?.lastVP) {
-      const meta = this.project?.meta || {};
-      const cyW = (Number(meta.height) || 1080) / 200;
-      const camPos = this.scene3d.lastCam?.pos || [0, cyW, 20];
+      const camPos = this.scene3d.lastCam?.pos || [0, (Number(this.project?.meta?.height) || 1080) / 200, 20];
       const ray = this.scene3d.ray(cx, cy);
       // Nearest plane under the cursor, exactly like the depth-tested picture
       // (§四 4): the pixel's own distance decides, never the draw order, so
@@ -1387,18 +1386,18 @@ export class Preview {
         if (!poly || !pointInPoly(cx, cy, poly)) continue;
         const d = (ray && layerRayDepth(L, ray)) ?? layerOriginDistance(L, camPos);
         const tie = best && Math.abs(d - bestD) <= 1e-6;
-        if (d < bestD - 1e-6 || (tie && Number(L.el.z) > Number(best.el.z))) {
+        if (d < bestD - 1e-6 || (tie && Number(L.z) > Number(best.z))) {
           best = L;
           bestD = Math.min(d, bestD);
         }
       }
-      return best ? best.el.id : null;
+      return best ? best.id : null;
     }
+    // No 3D picture yet: the topmost quad under the cursor (no depth buffer).
     for (let i = layers.length - 1; i >= 0; i--) {
       const L = layers[i];
-      const inv = M3.invert(L.M);
-      const [u, v] = M3.apply(inv, cx, cy);
-      if (u >= 0 && u <= 1 && v >= 0 && v <= 1) return L.el.id;
+      const poly = this._layerCorners(L);
+      if (poly && pointInPoly(cx, cy, poly)) return L.id;
     }
     return null;
   }
