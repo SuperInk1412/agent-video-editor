@@ -8,10 +8,14 @@
 //   C  a 3D box whose pivot.x is linked to the same element
 //   D  the camera FOV linked to an element's roll
 //   E  three-axis rotation: a tilted 2D node card, a keyed 3D box, a camera pan offset
+//   F  2D plane order (docs/FIX-LAYER-ORDER-EMPTY-CLICK.md §一): a card facing the
+//      camera 2 m in front of a large backdrop. Its plane is farther from the
+//      camera than the backdrop's plane, its origin nearer — ordering by plane
+//      distance draws the backdrop over the card; Blender (EEVEE origin order) does not.
 // The preview frame and a Blender still are classified on a 16×9 grid of
 // colour classes; the check fails when more than a few edge cells differ.
 //
-//   node scripts/check-render-parity.mjs [--keep] [--only=A,B,C,D]
+//   node scripts/check-render-parity.mjs [--keep] [--only=A,B,C,D,E,F]
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -21,6 +25,7 @@ import { applyOps } from '../core/ops.js';
 import { ensureSpace } from '../core/space.js';
 import { saveProject, loadProject } from '../engine/storage.js';
 import { renderStill } from '../engine/blender.js';
+import { rotationFromDirRoll } from '../core/rotation.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..');
@@ -30,7 +35,7 @@ const T = 0.5;
 const GRID = [16, 9];
 const ALLOWED = 4; // edge cells may land on either side of an anti-aliased border
 
-const only = (process.argv.find((a) => a.startsWith('--only=')) || '--only=A,B,C,D,E').slice(7).split(',');
+const only = (process.argv.find((a) => a.startsWith('--only=')) || '--only=A,B,C,D,E,F').slice(7).split(',');
 
 const run = (cmd, args, opts = {}) => new Promise((resolve, reject) => {
   const p = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, ...opts });
@@ -93,6 +98,19 @@ async function build() {
       { op: 'objectKey', id: 'ob_turn', path: 'rotation.z', t: 0, v: 0 },
       { op: 'objectKey', id: 'ob_turn', path: 'rotation.z', t: 1, v: 90 },
       { op: 'cameraPatch', id: cam, patch: { rotation: [0, 3, 0] } },
+    );
+  }
+  if (only.includes('F')) {
+    // top-right corner is empty in A–E; the default camera sits at [0, 5.4, 20]
+    const card = [10.6, 12, -2];
+    const toCam = [0 - card[0], 5.4 - card[1], 20 - card[2]];
+    ops.push(
+      { op: 'addElement', element: { id: 'el_backdrop', type: 'solid', start: 0, duration: 2, z: 5,
+        node: { pivot: [10.6, 12, -4], position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+        style: { w: 2000, h: 1100, fill: '#ffffff' } } },
+      { op: 'addElement', element: { id: 'el_facing', type: 'solid', start: 0, duration: 2, z: 6,
+        node: { pivot: card, position: [0, 0, 0], rotation: rotationFromDirRoll(toCam, 0), scale: [1, 1, 1] },
+        style: { w: 1000, h: 650, fill: '#20e020' } } },
     );
   }
   // Move / turn the source after every bind: linked children must follow.
