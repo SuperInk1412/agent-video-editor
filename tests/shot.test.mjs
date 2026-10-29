@@ -57,6 +57,26 @@ test('hidden 3D objects do not appear in the render package', () => {
   assert.equal(baked[0].frames.at(-1).opacity, 0, 'the time range has an exclusive end');
 });
 
+test('worldSnapshot: a parented camera carries its parent animation into the city', () => {
+  // The corridor clearing follows where the cameras fly. A camera parented to a
+  // 3D object flies with that object's tracks, so the parent's animation is part
+  // of the city's input — this is what the /api/world cache key has to include.
+  const p = project();
+  const ob = applyOp(p, {
+    op: 'objectAdd',
+    object: { type: 'empty', start: 0, duration: 1, pivot: [0, 10, 0] },
+  }).changed[0];
+  applyOp(p, { op: 'objectKey', id: ob, path: 'rotation.y', t: 0, v: 0, ease: 'linear' });
+  applyOp(p, { op: 'objectKey', id: ob, path: 'rotation.y', t: 1, v: 90 });
+  applyOp(p, { op: 'spatialParent', id: 'cam_top', parent: ob, t: 0 });
+  const animated = worldSnapshot(p).hash;
+
+  // Flatten the animation: same project, same rev, different flight corridor.
+  applyOp(p, { op: 'objectKey', id: ob, path: 'rotation.y', t: 1, v: 0 });
+  const still = worldSnapshot(p).hash;
+  assert.notEqual(animated, still, 'the city bake follows the parented camera');
+});
+
 test('viewport, full render and partial render share one full-shot city', () => {
   const p = project();
   p.meta.fps = 12;
