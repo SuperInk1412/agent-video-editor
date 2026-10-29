@@ -33,3 +33,4 @@
 | 2026-10-28 | `b6c6217` | 去掉"仅投屏"（出画只看相机栈）；贴屏改为按镜头切段挂到镜头相机，HUD 机位项目先还原 | 用户拍板：投屏不该决定出画、不自动搭全屏拍屏 | `core/camfeed.js`、`core/screen-lock-migrate.js`、`engine/*`、`preview.js`、测试、文档 | `git revert b6c6217` |
 | 2026-10-28 | `4edc742` | 打开时把所有旧朝向迁到三轴旋转（开关 `ROTATION_MIGRATION`，默认关） | 用户拍板：所有元素统一 X/Y/Z 三轴 | `core/rotation-migrate.js`（新）、`core/schema.js`、`core/scene.js`、`engine/storage.js`、测试 | `git revert 4edc742` |
 | 2026-10-28 | `dbbc8b2` | 相机旧手动 roll 在 2b 后的旋转偏移上精确合并；记 2c 验收与开关暂不开的原因 | 2b 后相机可能同时带 roll 和 rotation | `core/rotation-migrate.js`、测试、`docs/DESIGN-TRANSFORM-UNIFY.md` | `git revert dbbc8b2` |
+| 2026-10-28 | `ce12230` | 新建内容直接写三轴旋转（2D 建成节点、物体/相机写 `rotation`），旧写法的 op 自动翻译；打开 `ROTATION_MIGRATION` | 用户批准：新建即三轴，避免每次打开重复迁移 | `core/rotation-ops.js`（新）、`core/ops.js`、`core/scene.js`、`core/camera.js`、`engine/shot.js`、14 个测试 | `git revert ce12230`（开关和新建格式一起回退） |
