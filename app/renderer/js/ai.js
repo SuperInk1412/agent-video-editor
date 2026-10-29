@@ -1,4 +1,12 @@
-// AI panel: talk to the DSH-TUI agent, stream its run, interrupt it (docs/DESIGN.md §1.4).
+// AI panel: talk to the agent, stream its run, interrupt it (docs/DESIGN.md §1.4).
+//
+// WP2.4 only touches the data layer. The engine's tool loop
+// (docs/DESIGN-BACKEND-V2.md §8.4) streams `loop` / `plan` / `tool` /
+// `changeset` / `still` / `measure` / `report` events on top of the old
+// `agent` / `proposal` / `exit` ones; this file now keeps that state
+// (`this.plan`, `this.changesets`, `this.report`, `this.stills`, …) and
+// sends the request `scope` the loop enforces. Rendering those as a review
+// panel / timeline markers is WP2.5 — nothing below adds a widget.
 import { h, icon } from './ui.js';
 import { frameStart } from './timeline-math.js';
 
@@ -17,6 +25,16 @@ export class AgentPanel {
     this.log = [];
     this.current = null;
     this._stick = true; // auto-scroll while the user is at the bottom
+    // --- WP2.4 data layer: what the loop produced (WP2.5 draws it) ---
+    this.plan = null;          // latest plan from the loop
+    this.pendingPlan = null;   // plan waiting for the user's approval
+    this.changesets = new Map(); // id -> { id, status, changed, rev, … }
+    this.report = null;        // §8.3 report of the last finished run
+    this.reportPath = null;
+    this.stills = [];
+    this.measurements = [];
+    this.rejections = [];
+    this.contract = null;
     this._render();
   }
 
@@ -142,6 +160,15 @@ export class AgentPanel {
     this.log = [];
     this.current = null;
     this._stick = true;
+    this.plan = null;
+    this.pendingPlan = null;
+    this.changesets.clear();
+    this.report = null;
+    this.reportPath = null;
+    this.stills = [];
+    this.measurements = [];
+    this.rejections = [];
+    this.contract = null;
     this._renderLog();
     this._push({ kind: 'task', text: task });
     try {
@@ -154,6 +181,10 @@ export class AgentPanel {
             segmentId: this.chipSeg.classList.contains('on') ? sel.segmentId : null,
             elementIds: this.chipSel.classList.contains('on') ? [sel.elementId].filter(Boolean) : [],
           },
+          // The loop refuses writes outside this scope (§8.1). A selection
+          // narrows it to one element; otherwise the whole project is in
+          // range (creation allowed), which is what the task box implies.
+          scope: this._scopeFor(sel),
           frames,
           time,
         }),
@@ -169,6 +200,57 @@ export class AgentPanel {
     }
   }
 
+  /**
+   * Scope of the request, from the two context chips. Elements are ids; paths
+   * are property-path whitelists (`style.size`, `style.*`, `*`). WP2.5 will
+   * add the UI that lets a user tighten this; for now a selection means "only
+   * this element", everything else means "the project".
+   */
+  _scopeFor(sel) {
+    const picked = this.chipSel?.classList.contains('on') && sel?.elementId;
+    if (picked) {
+      return {
+        elements: [sel.elementId],
+        paths: ['*'],
+        create: false,
+        source: 'ui:selection',
+      };
+    }
+    const bySegment = this.chipSeg?.classList.contains('on') && sel?.segmentId;
+    return {
+      elements: ['*'],
+      paths: ['*'],
+      create: !bySegment,
+      source: bySegment ? 'ui:segment' : 'ui:project',
+    };
+  }
+
+  /** WP2.5's review panel calls this; the data layer is ready, the UI is not. */
+  approvePlan(planId = this.pendingPlan?.id || null) {
+    if (!planId) return Promise.resolve(false);
+    this.pendingPlan = null;
+    return fetch('/api/agent/approve', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ planId }),
+    }).then((r) => r.ok).catch(() => false);
+  }
+
+  /** Everything WP2.5 needs to draw the review panel / report anchors. */
+  getData() {
+    return {
+      plan: this.plan,
+      pendingPlan: this.pendingPlan,
+      changesets: [...this.changesets.values()],
+      report: this.report,
+      reportPath: this.reportPath,
+      stills: [...this.stills],
+      measurements: [...this.measurements],
+      rejections: [...this.rejections],
+      contract: this.contract,
+    };
+  }
+
   async _stop() {
     await fetch('/api/agent/cancel', { method: 'POST' });
     this._push({ kind: 'system', text: '已打断' });
@@ -176,6 +258,67 @@ export class AgentPanel {
 
   handleEvent(ev) {
     if (ev.type === 'started') return;
+    // ---- WP2.4 tool loop: state only, the widgets are WP2.5 ----
+    if (ev.type === 'loop') {
+      this.plan = ev.plan ?? this.plan;
+      if (ev.phase === 'awaiting-approval') {
+        this.pendingPlan = ev.plan ?? this.pendingPlan;
+        this._push({ kind: 'step', text: '计划已提交，等待批准' });
+      } else if (ev.phase === 'approved') {
+        this.pendingPlan = null;
+        this._push({ kind: 'step', text: '计划已批准，继续执行' });
+      } else if (ev.phase === 'done') {
+        this.pendingPlan = null;
+      }
+      return;
+    }
+    if (ev.type === 'plan') {
+      this.plan = ev.plan;
+      this.pendingPlan = ev.plan?.needsApproval ? ev.plan : null;
+      this._push({ kind: 'step', text: `计划：${ev.plan?.intent || '(无说明)'} · ${ev.plan?.steps?.length ?? 0} 步 / ${ev.plan?.opsCount ?? 0} 个 op` });
+      return;
+    }
+    if (ev.type === 'tool') {
+      this._push({
+        kind: 'tool',
+        title: ev.name,
+        text: ev.ok ? (ev.summary || 'ok') : `${ev.error?.code || 'ERROR'}: ${ev.error?.message || ''}`,
+      });
+      if (!ev.ok) this.rejections.push({ tool: ev.name, ...(ev.error || {}) });
+      return;
+    }
+    if (ev.type === 'changeset') {
+      const record = ev.record || {};
+      if (record.id) this.changesets.set(record.id, { ...(this.changesets.get(record.id) || {}), ...record });
+      const n = (record.changed || []).length;
+      this._push({
+        kind: 'ops',
+        title: `变更集 ${record.id || ''} · ${record.status || ev.action || ''}`,
+        text: `${n} 处改动${record.rev ? ` · rev ${record.rev}` : ''}`,
+      });
+      return;
+    }
+    if (ev.type === 'still') {
+      this.stills.push(ev.still);
+      this._push({ kind: 'tool', title: '出图', text: `${ev.still?.path} · ${ev.still?.width}×${ev.still?.height}` });
+      return;
+    }
+    if (ev.type === 'measure') {
+      this.measurements.push(ev.measurement);
+      this._push({ kind: 'tool', title: `测量 ${ev.measurement?.what || ''}`, text: ev.measurement?.summary || '' });
+      return;
+    }
+    if (ev.type === 'report') {
+      this.report = ev.report;
+      this.reportPath = ev.report?.path ?? null;
+      this.contract = ev.report?.contract ?? this.contract;
+      const v = ev.report?.verificationSummary || {};
+      this._push({
+        kind: 'meta',
+        text: `报告：已验证 ${v.verified || 0} · 未验证 ${v.unverified || 0} · 没做 ${v.skipped || 0}${this.reportPath ? ` · ${this.reportPath}` : ''}`,
+      });
+      return;
+    }
     if (ev.type === 'proposal') {
       if (ev.error) this._push({ kind: 'error', text: `提议应用失败: ${ev.error}` });
       else if (ev.applied) {
@@ -185,6 +328,9 @@ export class AgentPanel {
           title: nOps != null ? `应用 ${nOps} 个操作` : '已应用改动',
           text: `已应用 ${ev.applied.changed.length} 处修改 · rev ${ev.applied.rev}${ev.applied.note ? ' · ' + ev.applied.note : ''}`,
         });
+        if (ev.changeset?.id) {
+          this.changesets.set(ev.changeset.id, { ...(this.changesets.get(ev.changeset.id) || {}), ...ev.changeset, status: ev.changeset.status || 'applied' });
+        }
       } else this._push({ kind: 'meta', text: '收到改动提议' });
       return;
     }
