@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   innerKeys, spanProgress, firstArrival, retimeSpanTimes, invertCurve, sameCurveShape,
+  spanCurveOps, curveFromEase,
 } from '../core/curve-spans.js';
 import { presetCurve, sampleCurve } from '../core/curves.js';
 import { normalizeCamera, pathArcTable, retimePathSpan } from '../core/camera.js';
@@ -117,4 +118,134 @@ test('curve-spans: invertCurve mirrors a bezier and refuses dynamic presets', ()
   // the mirrored curve really is the time-reversed shape
   const u = 0.3;
   close(sampleCurve(mirrored, u), 1 - sampleCurve(easeIn, 1 - u), 2e-3, 'mirror identity');
+});
+
+test('curve-spans: spanCurveOps writes one curve per sub-segment and moves the inner key', () => {
+  const keys = [
+    { t: 0, path: 'transform.opacity', value: 0 },
+    { t: 1, path: 'transform.opacity', value: 0.25 },
+    { t: 2, path: 'transform.opacity', value: 1 },
+  ];
+  const res = spanCurveOps({
+    host: 'element', id: 'el_1', trackPath: null, path: 'transform.opacity', keys,
+    from: 0, to: 2, curve: presetCurve('linear'),
+  });
+  assert.ok(res, 'linear span is editable');
+  // linear: 0.25 is reached at 0.5s, so the key moves from 1s to 0.5s
+  const move = res.ops.find((o) => o.op === 'keySet');
+  assert.equal(move.t, 0.5);
+  assert.equal(move.value, 0.25);
+  assert.ok(res.ops.some((o) => o.op === 'keyRemove' && o.t === 1));
+  const [a, b] = res.ops.filter((o) => o.op === 'keyCurve');
+  assert.deepEqual([a.from, a.to], [0, 0.5]);
+  assert.deepEqual([b.from, b.to], [0.5, 2]);
+  assert.equal(res.moved, 1);
+});
+
+test('curve-spans: spanCurveOps can write curves without retiming (Alt)', () => {
+  const keys = [
+    { t: 0, path: 'transform.opacity', value: 0 },
+    { t: 1, path: 'transform.opacity', value: 0.25 },
+    { t: 2, path: 'transform.opacity', value: 1 },
+  ];
+  const res = spanCurveOps({
+    host: 'element', id: 'el_1', path: 'transform.opacity', keys,
+    from: 0, to: 2, curve: presetCurve('easeIn'), retime: false,
+  });
+  assert.equal(res.moved, 0);
+  assert.equal(res.ops.filter((o) => o.op === 'keySet').length, 0);
+  assert.deepEqual(res.ops.map((o) => [o.from, o.to]), [[0, 1], [1, 2]]);
+});
+
+test('curve-spans: an out-of-range inner value stays put and lands on the curve', () => {
+  const keys = [
+    { t: 0, path: 'transform.opacity', value: 0 },
+    { t: 0.5, path: 'transform.opacity', value: 1.4 },
+    { t: 2, path: 'transform.opacity', value: 1 },
+  ];
+  const res = spanCurveOps({
+    host: 'element', id: 'el_1', path: 'transform.opacity', keys,
+    from: 0, to: 2, curve: presetCurve('linear'),
+  });
+  assert.equal(res.pinned, 1);
+  const set = res.ops.find((o) => o.op === 'keySet');
+  assert.equal(set.t, 0.5, 'time is the anchor when the value is out of range');
+  close(set.value, 0.25, 1e-6, 'value snaps onto the curve at its own time');
+});
+
+test('curve-spans: object spans carry their handles and refuse colour tracks', () => {
+  const keys = [
+    { t: 0, path: 'pivot.x', v: 0, ease: 'linear', out: [1, 0, 0], in: [-1, 0, 0] },
+    { t: 1, path: 'pivot.x', v: 4, ease: 'linear', out: [0, 0, 1], in: [0, 0, -1] },
+    { t: 2, path: 'pivot.x', v: 8, ease: 'linear' },
+  ];
+  const res = spanCurveOps({
+    host: 'object', id: 'ob_1', path: 'pivot.x', keys,
+    from: 0, to: 2, curve: presetCurve('easeIn'),
+  });
+  const set = res.ops.find((o) => o.op === 'objectKey');
+  assert.equal(set.v, 4);
+  assert.ok(set.t > 1, 'easeIn reaches the middle later than linear');
+  assert.deepEqual(set.out, [0, 0, 1], 'bezier handles survive the move');
+  assert.deepEqual(set.in, [0, 0, -1]);
+  assert.ok(res.ops.some((o) => o.op === 'objectUnkey' && o.t === 1));
+  // colours have no progress: nothing is editable
+  const colour = spanCurveOps({
+    host: 'element', id: 'el_1', path: 'style.color',
+    keys: [{ t: 0, path: 'style.color', value: '#000000' }, { t: 2, path: 'style.color', value: '#ffffff' }],
+    from: 0, to: 2, curve: presetCurve('linear'),
+  });
+  assert.equal(colour, null, 'colour spans are skipped, never written');
+});
+
+test('curve-spans: axes sharing a timestamp land on one time', () => {
+  const axes = ['rotation.x', 'rotation.y'].map((path) => ({
+    path,
+    keys: [
+      { t: 0, path, value: 0 },
+      { t: 1, path, value: 0.2 },
+      { t: 2, path, value: 1 },
+    ],
+  }));
+  const res = spanCurveOps({
+    host: 'element', id: 'el_1', tracks: axes, from: 0, to: 2, curve: presetCurve('linear'),
+  });
+  const times = [...new Set(res.times.map((r) => r.newT))];
+  assert.deepEqual(times, [0.4], '0.2 and 0.2 merge to one arrival');
+  const sets = res.ops.filter((o) => o.op === 'keySet');
+  assert.deepEqual(sets.map((o) => o.t), [0.4, 0.4]);
+});
+
+test('curve-spans: curveFromEase fits the real ease instead of faking one', () => {
+  const linear = curveFromEase('linear');
+  for (const u of [0.2, 0.5, 0.8]) close(sampleCurve(linear, u), u, 2e-3, `linear u=${u}`);
+  const easeIn = curveFromEase('easeIn');
+  for (const u of [0.3, 0.6]) close(sampleCurve(easeIn, u), u * u, 2e-3, `easeIn u=${u}`);
+  // piecewise / exponential eases are approximations, not identities
+  const inout = curveFromEase('easeInOut');
+  close(sampleCurve(inout, 0.5), 0.5, 1e-3, 'symmetric midpoint');
+  assert.ok(Math.abs(sampleCurve(inout, 0.25) - 0.125) < 0.03, 'close but not exact');
+  const expo = curveFromEase('outExpo');
+  assert.ok(Math.abs(sampleCurve(expo, 0.5) - 0.96875) < 0.1, 'exponential ease is approximated');
+  assert.equal(curveFromEase('nope').type, 'bezier', 'unknown ease falls back to easeInOut');
+});
+
+test('curve-spans: spanCurveOps on a camera param carries ease and curve', () => {
+  const keys = [
+    { t: 0, path: 'fov', v: 40, ease: 'linear' },
+    { t: 1, path: 'fov', v: 50, ease: 'smooth', curve: presetCurve('bounce') },
+    { t: 2, path: 'fov', v: 60, ease: 'linear' },
+  ];
+  const res = spanCurveOps({
+    host: 'camera', id: 'cam_1', path: 'fov', keys,
+    from: 0, to: 2, curve: presetCurve('easeOut'),
+  });
+  const set = res.ops.find((o) => o.op === 'cameraParamKey');
+  assert.equal(set.ease, 'smooth', 'the inner key keeps its own ease');
+  assert.equal(set.curve.preset, 'bounce', 'and the curve that starts on it');
+  assert.ok(res.ops.some((o) => o.op === 'cameraParamUnkey' && o.t === 1));
+  // a camera flight path is not editable here (arc-length retiming lives in core/camera.js)
+  assert.equal(spanCurveOps({
+    host: 'camera', id: 'cam_1', path: 'path', keys, from: 0, to: 2, curve: presetCurve('linear'),
+  }), null);
 });
