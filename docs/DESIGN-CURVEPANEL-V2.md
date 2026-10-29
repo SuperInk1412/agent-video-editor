@@ -346,9 +346,9 @@ t_B = t_A + firstArrival(curve, y_B) · (t_C − t_A)     // 单调、毫秒取�
 | §8 右键：反转曲线、对齐到帧 | 已做 | `_contextMenu()` / `_invertSpan()` / `_snapSpans()` |
 | §9 颜色行可打帧（swatch + hex + ◆） | 已做 | `inspector.js` 的 `style.color` / `style.fill` 行 |
 | §3 Shift+预设只当前属性 / Alt+预设不重定时 | 已做 | `_applyPreset(id, ev)` 读 `shiftKey` / `altKey`（飞行轨迹仍按原逻辑） |
-| §3 悬停预览（虚影 + 影响范围） | 未做 | — |
-| §8 Ctrl+C / Ctrl+V 复制曲线 | 未做 | — |
-| §8 存为我的预设（UI 入口 + 我的分组） | 未做 | 数据层 `meta.curvePresets` 已就绪 |
+| §3 悬停预览（虚影 + 影响范围） | 已做 | `_hoverPreset()` + `draw()` 的虚线鬼影，表头写「预览 … N 条属性 · M 段」 |
+| §8 Ctrl+C / Ctrl+V 复制曲线 | 已做 | `_onKey` 里的剪贴板（曲线，不含键值），粘贴=应用到池子、Alt 不重定时 |
+| §8 存为我的预设（UI 入口 + 我的分组） | 已做 | 右键「存为我的预设」→ `setMeta curvePresets`；导轨第 4 个 tab「我的」，按形状高亮 |
 | §4 越界红色 + toast 提醒 | 未做 | 需要把 `curveRange` 映射到值域 |
 | §6 归一化开关 + 三轴叠画（多轴行） | 未做 | 依赖时间轴统一变换栏的行元数据 |
 | §6 y 轴 150ms 过渡 | 未做 | — |

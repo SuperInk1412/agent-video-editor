@@ -19,10 +19,11 @@
 import {
   sampleCurve, normalizeCurve, presetCurve, curveLabel, curveSegments, CURVE_GROUPS,
   curveHandles, moveCurveHandle, curveRange, curveParamsText,
+  normalizeCustomPresets,
 } from '/core/curves.js';
 import { retimePathSpan } from '/core/camera.js';
 import {
-  spanCurveOps, curveFromEase, spanProgress, retimeSpanTimes, invertCurve,
+  spanCurveOps, curveFromEase, spanProgress, retimeSpanTimes, invertCurve, sameCurveShape,
 } from '/core/curve-spans.js';
 import { snapKeyframeTimes } from '/core/keyframe-edit.js';
 import { sampleTrack } from '/core/time.js';
@@ -206,6 +207,29 @@ export class CurvePanel {
       if (!this._cycleRow(e.shiftKey ? -1 : 1)) return;
       e.preventDefault();
       e.stopImmediatePropagation();
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'c' || e.key === 'C')) {
+      const spans = this._editSpans();
+      const curve = spans.length ? this._spanCurve(spans[0])?.curve : null;
+      if (!curve) return;
+      this._clipboard = normalizeCurve(curve);
+      this.toast?.(`已复制曲线：${curveLabel(curve)}`, 'info');
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'v' || e.key === 'V')) {
+      const curve = normalizeCurve(this._clipboard);
+      const spans = this._editSpans();
+      if (!curve || !spans.length) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      this.curve = curve;
+      this._syncHead();
+      this._syncRailGroup();
+      this.draw();
+      this._commit(curve, spans, { retime: !e.altKey });
       return;
     }
     const step = e.shiftKey ? 10 : 1;
@@ -809,12 +833,26 @@ export class CurvePanel {
     }
   }
 
+  /** Presets the user saved on this project (design §8 R1, 「我的」 tab). */
+  _customPresets() {
+    return normalizeCustomPresets(this.getProject?.()?.meta?.curvePresets);
+  }
+
+  /** Built-in preset by id, or one of the project's own presets. */
+  _resolvePreset(id) {
+    const custom = this._customPresets().find((p) => p.id === id);
+    if (custom) return normalizeCurve(custom.curve);
+    return presetCurve(id);
+  }
+
   _buildRail() {
     this.rail.innerHTML = '';
+    const mine = this._customPresets();
     const tabs = el('div', 'cp-tabs');
-    CURVE_GROUPS.forEach((group, i) => {
-      const tab = el('button', `cp-tab${i === this.railGroup ? ' on' : ''}`, group.short || group.title);
-      tab.title = group.title;
+    const tabSpecs = [...CURVE_GROUPS.map((g) => g.short || g.title), '我的'];
+    tabSpecs.forEach((label, i) => {
+      const tab = el('button', `cp-tab${i === this.railGroup ? ' on' : ''}`, label);
+      tab.title = i < CURVE_GROUPS.length ? CURVE_GROUPS[i].title : '我的预设（右键段 → 存为我的预设）';
       tab.onclick = () => {
         if (i === this.railGroup) return;
         this.railGroup = i;
@@ -823,8 +861,19 @@ export class CurvePanel {
       tabs.append(tab);
     });
     const grid = el('div', 'cp-thumbs');
-    const group = CURVE_GROUPS[this.railGroup] || CURVE_GROUPS[0];
-    for (const item of group.items) {
+    const custom = this.railGroup >= CURVE_GROUPS.length;
+    const items = custom
+      ? mine.map((preset) => ({ id: preset.id, label: preset.name, ready: true }))
+      : (CURVE_GROUPS[this.railGroup] || CURVE_GROUPS[0]).items;
+    if (custom && !items.length) {
+      const hint = el('div', '', '还没有自己的预设<br>在段上右键「存为我的预设」');
+      Object.assign(hint.style, {
+        padding: '10px 8px', fontSize: '11px', lineHeight: '1.5',
+        color: token('--text-3') || '#8b93a1', textAlign: 'center', width: '100%',
+      });
+      grid.append(hint);
+    }
+    for (const item of items) {
       const b = el('button', `cp-thumb${item.ready ? '' : ' disabled'}`);
       b.dataset.preset = item.id;
       b.title = item.label;
@@ -835,10 +884,36 @@ export class CurvePanel {
       b.onclick = item.ready
         ? (ev) => this._applyPreset(item.id, ev)
         : () => this.toast?.(`「${item.label}」还没做`);
+      if (item.ready) {
+        b.addEventListener('pointerenter', () => this._hoverPreset(item.id));
+        b.addEventListener('pointerleave', () => this._hoverPreset(null));
+      }
       grid.append(b);
     }
     this.rail.append(tabs, grid);
     this._markPreset();
+  }
+
+  /**
+   * Hover preview for one rail thumbnail: draw the candidate shape over every
+   * selected span of the shown track and name what it would touch. Nothing is
+   * written; leaving the thumbnail restores the header.
+   */
+  _hoverPreset(id) {
+    const curve = id ? this._resolvePreset(id) : null;
+    if (!curve && !this._hoverCurve) return;
+    if (curve && this._hoverCurve && sameCurveShape(curve, this._hoverCurve)) return;
+    this._hoverCurve = curve;
+    if (curve) {
+      const spans = this._editSpans();
+      const paths = new Set(spans.map((sp) => sp.path));
+      this.presetEl.textContent = `${spans.length ? '预览' : '需选中两个关键帧'} ${curveLabel(curve)}`
+        + (spans.length ? ` · ${paths.size} 条属性 · ${spans.length} 段` : '');
+      this.presetEl.title = this.presetEl.textContent;
+    } else {
+      this._syncHead();
+    }
+    if (this.isOpen()) this.draw();
   }
 
   /** Curve actually stored for the active segment (the drawn fallback is not). */
@@ -848,10 +923,14 @@ export class CurvePanel {
   }
 
   _markPreset() {
-    const live = this.drag?.mode === 'segment' ? this.curve : this._storedCurve();
+    const live = this.drag && this.drag.mode !== 'path' ? this.curve : this._storedCurve();
     const name = normalizeCurve(live)?.preset || '';
+    const mine = this._customPresets();
     this.rail.querySelectorAll('.cp-thumb').forEach((b) => {
-      b.classList.toggle('on', b.dataset.preset === name);
+      const id = b.dataset.preset;
+      const saved = mine.find((preset) => preset.id === id);
+      // Saved presets have no id in the curve itself: compare the shape.
+      b.classList.toggle('on', saved ? !!live && sameCurveShape(saved.curve, live) : id === name);
     });
   }
 
@@ -861,7 +940,7 @@ export class CurvePanel {
     ctx.clearRect(0, 0, w, h);
     ctx.strokeStyle = ready ? C('--accent') : C('--text-disabled');
     ctx.lineWidth = 1.5;
-    const curve = ready ? presetCurve(id) : null;
+    const curve = ready ? this._resolvePreset(id) : null;
     const range = curve ? curveRange(curve) : [0, 1];
     ctx.beginPath();
     for (let i = 0; i <= 64; i++) {
@@ -1456,6 +1535,30 @@ export class CurvePanel {
         ctx.lineWidth = 2.2;
         ctx.stroke();
       }
+    }
+
+    // Hover ghost: the candidate curve drawn through each selected span's own
+    // value range, so a preset can be compared before it is applied (§3 R1).
+    if (this._hoverCurve && numeric) {
+      ctx.save();
+      ctx.setLineDash([5, 4]);
+      ctx.strokeStyle = alpha(C('--accent-hover'), 0.85);
+      ctx.lineWidth = 1.6;
+      for (const span of this._editSpans().filter((sp) => sp.path === path)) {
+        const vA = keyValue(this._leftKey(span.path, span.from));
+        const vC = keyValue(this._leftKey(span.path, span.to));
+        if (vA == null || vC == null || Math.abs(vC - vA) <= 1e-9) continue;
+        const steps = Math.max(24, Math.round(Math.abs(g.xOf(span.to) - g.xOf(span.from))));
+        ctx.beginPath();
+        for (let i = 0; i <= steps; i++) {
+          const u = i / steps;
+          const x = g.xOf(span.from + u * (span.to - span.from));
+          const y = g.yOf(vA + (vC - vA) * sampleCurve(this._hoverCurve, u));
+          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      }
+      ctx.restore();
     }
 
     // Every key of the active track, on its real value.
@@ -2077,6 +2180,7 @@ export class CurvePanel {
       });
       menu.appendChild(button);
     };
+    item('存为我的预设', () => this._savePreset(span));
     item('反转曲线', () => this._invertSpan(span));
     item('对齐到帧', () => this._snapSpans());
     this.root.appendChild(menu);
@@ -2100,6 +2204,22 @@ export class CurvePanel {
     if (y < g.top - 4 || y > g.bottom + 4) return null;
     const t = g.tOf(x);
     return this._editSpans().find((span) => t >= span.from - 1e-4 && t <= span.to + 1e-4) || null;
+  }
+
+  /**
+   * Save the span's curve as a project preset (design §8 R1). Presets live in
+   * `meta.curvePresets` so they travel with the project, never global config.
+   */
+  _savePreset(span) {
+    const curve = this._spanCurve(span)?.curve;
+    if (!curve) return;
+    const mine = this._customPresets();
+    const name = `我的曲线 ${mine.length + 1}`;
+    const next = [...mine, { id: `mine_${Date.now().toString(36)}`, name, curve }];
+    this.onOp?.({ op: 'setMeta', path: 'curvePresets', value: next });
+    this.toast?.(`已存为「${name}」`, 'info');
+    this.railGroup = CURVE_GROUPS.length;
+    this._buildRail();
   }
 
   /** Mirror a span's curve left↔right (缓入 ↔ 缓出); presets have no mirror. */
@@ -2176,7 +2296,7 @@ export class CurvePanel {
   }
 
   _applyPreset(id, ev = null) {
-    const curve = presetCurve(id);
+    const curve = this._resolvePreset(id);
     if (!curve) return;
     // Shift = only the property on screen; Alt = write the curve without
     // retiming the inner keys (design §3 R1).
