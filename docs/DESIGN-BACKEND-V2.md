@@ -235,6 +235,10 @@ miku-swiss（138 元素、8 相机）：`buildFrameIR` 单帧 ≤ 3 ms（播放�
 - `npm test` 502/502（新增 14 项）、`npm run check:preview` PASS、`check-render-parity` PASS
   （144 格 1 格不同，允许 4）、`check-camfeed` PASS、`check-playback-perf` PASS（59.7 fps）。
 
+**R0 状态（2026-10-29）**：WP0.0 `6a3bf78`+`1d40497`、WP0.1 `2d71d82`（评审修订 `51d1f85`）、WP0.2 `39809dd`、
+WP0.3 `cfa151c`——全部合入 master，§4 冻结。**R1、R2、WP3.1 可以并行开工**（子代理一包一分支 `agent/wp-<编号>`，
+文件归属见各 WP，合入前过 §11 的四道门）。
+
 **WP0.2（预览只画 IR，`39809dd`）**：`preview.js` 的 `computeLayers` 变成 IR 适配层（只把内容解析成纹理），
 `_drawLayers` 每条 item 一个世界四边形，`hitTest` / 选框 / gizmo 读 `world`；屏幕矩阵分支
 （`u_world` 0/1、`u_px2w`、`u_z`、`u_carry`）从渲染器删除。像素验收（miku-swiss 副本 0–450 帧，
