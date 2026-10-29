@@ -39,13 +39,33 @@ export function planeOfFrame(frame) {
 
 // ---------------------------------------------------------------- plane order
 
-/** Camera -> plane distance in metres (absolute, like the legacy _planeDist). */
+/**
+ * Camera -> plane distance in metres (absolute, like the legacy _planeDist).
+ *
+ * Only classifies "one plane": a tilted plane's infinite extension can pass
+ * much closer to the camera than the visible quad, so it must never order two
+ * different planes (see `layerOriginDistance`).
+ */
 export function layerPlaneDistance(layer, camPos) {
   const p = layer?.plane?.p;
   const n = layer?.plane?.n;
   if (!p || !n) return 0;
   const c = vec3(camPos);
   return Math.abs((c[0] - p[0]) * n[0] + (c[1] - p[1]) * n[1] + (c[2] - p[2]) * n[2]);
+}
+
+/**
+ * Camera -> element origin distance in metres: the rule Blender already uses
+ * for the picture. `vdm_build.py` builds one real object per 2D plane and EEVEE
+ * sorts blended objects by object-origin distance, so the preview must sort the
+ * same way to stay parity-clean. The origin is the element's world frame
+ * position (`L.plane.p`, i.e. `frameOf(elementWorldNode(...)).pos`).
+ */
+export function layerOriginDistance(layer, camPos) {
+  const p = layer?.plane?.p;
+  if (!p) return 0;
+  const c = vec3(camPos);
+  return Math.hypot(c[0] - num(p[0]), c[1] - num(p[1]), c[2] - num(p[2]));
 }
 
 /** True when both layers live on the same plane (same normal, same distance). */
@@ -60,28 +80,32 @@ export function sameLayerPlane(a, b, camPos) {
 }
 
 /**
- * Shared draw / hit ordering key (PLAN §2.5):
+ * Shared draw / hit ordering key (PLAN §2.5, docs/FIX-LAYER-ORDER-EMPTY-CLICK.md):
  *
- * 1. different planes  -> farther from the camera first (painter's order);
- * 2. one plane         -> `el.z` layer order, from any viewing angle;
+ * 1. one plane         -> `el.z` layer order, from any viewing angle, so a
+ *                         full-screen backdrop stays behind the type;
+ * 2. different planes  -> camera -> element ORIGIN distance, farther first —
+ *                         the EEVEE rule Blender's bake already follows;
  * 3. exact ties        -> source order, only so the sort is deterministic.
+ *
+ * Plane distance decides only step 1. A tilted plane's infinite extension can
+ * run closer to the camera than the object itself (miku-swiss 相机 9 at 3 s:
+ * the s2_bg backdrop's plane is 25.2 m away, the tilted lyric plane 26.3 m,
+ * yet the lyric object is 27.2 m and the backdrop 29.8 m), so ordering the
+ * picture by it drew the backdrop last and covered the words.
  *
  * Node creation order / array order never decides a same-plane order: `el.z`
  * is compared before the `ia` / `ib` tie-break.
  */
 export function compareLayerPlanes(a, b, camPos, ia = 0, ib = 0) {
-  const da = layerPlaneDistance(a, camPos);
-  const db = layerPlaneDistance(b, camPos);
+  if (sameLayerPlane(a, b, camPos)) return (num(a?.el?.z) - num(b?.el?.z)) || (ia - ib);
+  const da = layerOriginDistance(a, camPos);
+  const db = layerOriginDistance(b, camPos);
   if (Math.abs(da - db) > PLANE_EPS) return db - da;
-  if (!sameLayerPlane(a, b, camPos)) {
-    // Almost equal distance but different normals: still two planes, and the
-    // distance cannot separate them any more — keep a deterministic layer order.
-    return (num(a?.el?.z) - num(b?.el?.z)) || (ia - ib);
-  }
-  return (num(a?.el?.z) - num(b?.el?.z)) || (ia - ib);
+  return ia - ib;
 }
 
-/** Layers sorted for drawing: far plane first, `el.z` inside one plane. */
+/** Layers sorted for drawing: far origin first, `el.z` inside one plane. */
 export function orderLayers(layers, camPos) {
   return (Array.isArray(layers) ? layers : [])
     .map((L, i) => ({ L, i }))

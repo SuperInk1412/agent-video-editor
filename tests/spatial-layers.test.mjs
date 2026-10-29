@@ -4,7 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  NORMAL_EPS, PLANE_EPS, compareLayerPlanes, layerPlaneDistance, mul4,
+  NORMAL_EPS, PLANE_EPS, compareLayerPlanes, layerOriginDistance, layerPlaneDistance, mul4,
   nodePlaneMatrix, orderLayers, planeOfFrame, sameLayerPlane, transformPlane,
 } from '../app/renderer/js/spatial-layers.js';
 import { basisFromDir } from '../core/scene.js';
@@ -33,6 +33,8 @@ const node = (over = {}) => ({
 const layer = (z, plane) => ({ el: { z }, plane });
 const flat = (p = [0, 5.4, 0]) => ({ p: p.slice(), n: [0, 0, 1] });
 const CAM = [0, 5.4, 20];
+/** A layer on the plane of a SpatialNode (what preview.js builds for `el.node`). */
+const frameLayer = (z, node) => layer(z, planeOfFrame(frameOf(node)));
 
 // Column-major 3x3 helpers, same layout as preview.js::M3 — copied here so the
 // test does not import the DOM/WebGL renderer module.
@@ -125,6 +127,50 @@ test('spatial-layers: different planes sort far first and ignore el.z', () => {
   const nearPlane = layer(0, flat([0, 5.4, 4])); // 16 m away, bottom layer number
   assert.deepEqual(orderLayers([nearPlane, far], CAM), [far, nearPlane]);
   assert.ok(layerPlaneDistance(far, CAM) > layerPlaneDistance(nearPlane, CAM));
+  assert.ok(layerOriginDistance(far, CAM) > layerOriginDistance(nearPlane, CAM));
+});
+
+test('spatial-layers: a tilted plane sorts by its origin, not by its infinite plane', () => {
+  // miku-swiss t = 3 s, 相机 9 — the reported bug. s2_bg is a 96 × 54 m backdrop
+  // facing +Z at z −2; s2_w2 is the lyric, rotated X 19.4° / Y 24.8° at z 0, i.e.
+  // 2 m IN FRONT of the backdrop. The backdrop's plane runs 25.2 m from the
+  // camera and the lyric's plane 26.3 m, so plane distance drew the backdrop last
+  // and covered the words — while the actual objects are 29.8 m and 27.2 m away.
+  const cam = [-15.41, 9.18, 23.21];
+  const bg = frameLayer(10, node({ pivot: [0, 5.4, -2] }));
+  const lyric = frameLayer(66, node({ pivot: [-1.408, 6.6, 0], rotation: [19.416801, 24.824218, 0] }));
+  assert.ok(layerPlaneDistance(bg, cam) < layerPlaneDistance(lyric, cam), 'the bug premise: planes say the backdrop is nearer');
+  assert.ok(layerOriginDistance(bg, cam) > layerOriginDistance(lyric, cam), 'the objects say the lyric is nearer');
+  assert.equal(layerOriginDistance(lyric, cam).toFixed(2), '27.23');
+  assert.equal(layerOriginDistance(bg, cam).toFixed(2), '29.79');
+  // Painter's order: the backdrop first, the words after it.
+  assert.deepEqual(orderLayers([lyric, bg], cam), [bg, lyric]);
+  assert.deepEqual(orderLayers([bg, lyric], cam), [bg, lyric]);
+});
+
+test('spatial-layers: one plane keeps el.z from any camera position', () => {
+  // Coplanar quads at different origins: origin distance would order them by
+  // where they sit, `el.z` owns the stack on one plane from every angle.
+  const farOrigin = layer(9, flat([-6, 5.4, 0])); // farther origin, top layer
+  const nearOrigin = layer(1, flat([0, 5.4, 0])); // nearer origin, bottom layer
+  assert.ok(layerOriginDistance(farOrigin, CAM) > layerOriginDistance(nearOrigin, CAM));
+  assert.ok(sameLayerPlane(farOrigin, nearOrigin, CAM));
+  for (const cam of [CAM, [-18, 2, 12], [12, 14, -6], [1.5, 5.4, -9]]) {
+    assert.deepEqual(orderLayers([farOrigin, nearOrigin], cam), [nearOrigin, farOrigin]);
+    assert.deepEqual(orderLayers([nearOrigin, farOrigin], cam), [nearOrigin, farOrigin]);
+  }
+});
+
+test('spatial-layers: co-located planes with different normals keep source order', () => {
+  // Two planes through one point can share an origin distance and a camera.
+  // Distance cannot separate them and `el.z` is a one-plane key, so the only
+  // remaining order is the source order (stable, so picking matches drawing).
+  const a = layer(9, { p: [0, 5.4, 0], n: [0, 0, 1] });
+  const b = layer(0, { p: [0, 5.4, 0], n: [0, 1, 0] });
+  assert.ok(!sameLayerPlane(a, b, CAM));
+  assert.equal(layerOriginDistance(a, CAM), layerOriginDistance(b, CAM));
+  assert.deepEqual(orderLayers([a, b], CAM), [a, b]);
+  assert.deepEqual(orderLayers([b, a], CAM), [b, a]);
 });
 
 test('spatial-layers: same plane needs both a parallel normal and an equal distance', () => {
@@ -155,8 +201,8 @@ test('spatial-layers: a carried plane is pulled toward the camera like the legac
   near(carried.p, [0, 5.4, 19], 1e-6, 'carried point');
   near(carried.n, [0, 0, 0.05], 1e-7, 'carried normal');
   near(layerPlaneDistance(layer(0, carried), CAM), 0.05, 1e-7, 'pulled-in distance');
-  // Screen-locked layers stay in front of a world plane 1 m from the camera,
-  // which is exactly what the old _planeDist produced.
+  // Screen-locked layers stay in front of a world plane 1 m from the camera:
+  // their origin is the carried point, 1 m away, so they are drawn last.
   const front = layer(0, flat([0, 5.4, 1]));
   assert.deepEqual(orderLayers([front, layer(1, carried)], CAM)[1], layer(1, carried));
 });

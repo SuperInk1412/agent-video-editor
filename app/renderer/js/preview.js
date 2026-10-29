@@ -1093,9 +1093,10 @@ export class Preview {
     if (world) {
       const cyW = (Number(world.meta?.height) || 1080) / 200;
       const S = W / (Number(world.meta?.width) || 1920);
-      // Same ordering as hitTest (spatial-layers.js): distance from the camera to
-      // each element's PLANE, far first; on one plane `el.z` decides, so a
-      // full-screen backdrop stays behind the type from any viewing angle.
+      // Same ordering as hitTest (spatial-layers.js): camera -> element ORIGIN
+      // distance (what EEVEE does for the 2D objects Blender builds), far first;
+      // on one plane `el.z` decides, so a full-screen backdrop stays behind the
+      // type from any viewing angle.
       list = orderLayers(layers, world.camPos);
       for (const pr of [this.prog.tex, this.prog.shape]) {
         gl.useProgram(pr.program);
@@ -1329,7 +1330,7 @@ export class Preview {
       const cyW = (Number(meta.height) || 1080) / 200;
       const camPos = this.scene3d.lastCam?.pos || [0, cyW, 20];
       // Same order as _drawLayers (spatial-layers.js), walked backwards: nearest
-      // plane first and, on one plane, the top el.z layer first — picking and
+      // origin first and, on one plane, the top el.z layer first — picking and
       // the picture can never disagree about which layer is on top.
       const list = orderLayers(layers, camPos);
       for (let i = list.length - 1; i >= 0; i--) {
