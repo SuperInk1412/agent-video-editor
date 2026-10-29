@@ -175,6 +175,50 @@ export class IRCache { constructor(); invalidate(changedIds); }            // �
 miku-swiss（138 元素、8 相机）：`buildFrameIR` 单帧 ≤ 3 ms（播放时 IRCache 命中后 ≤ 1 ms）。
 超出预算不得合入，以 `check-playback-perf` 和 WP0.3 的微基准为准。
 
+### 4.4 冻结记录（WP0.1 交付评审，2026-10-29 —— 本节以下全部**冻结**）
+
+交付：`core/frame-ir.js`（`buildFrameIR` / `buildRangeIR` / `IRCache` / `elementPixelMatrix` /
+`itemModelMatrix` / `cameraWorld16`）、`core/layers.js`（原 `app/renderer/js/spatial-layers.js` 的纯函数迁入，
+原文件改为重新导出）、`tests/frame-ir.test.mjs`（10 项，含 demo 工程 0–576 帧的冻结快照
+`tests/fixtures/frame-ir-golden.json`）。改动 §4 的字段或语义要升级 `FRAME_IR_VERSION` 并通知所有
+进行中的 WP（§12）。
+
+**与上面草稿的差异（评审要点，均已按此实现）**
+
+| 项 | 冻结结果 | 为什么 |
+|---|---|---|
+| `world` | 列主序 4×4，把「四边形的**项目像素**坐标」映射到世界米。有 node / 父级的元素与 `elementPixelMatrix` 逐位相同（不取整）；旧屏幕路径的元素由同一套屏幕数据推出等价矩阵 | WP0.1 验收要求两者相同；两种元素走同一个绘制路径 |
+| 四边形局部坐标 | lx, ly ∈ [-0.5, 0.5]，图片**上边**在 ly = +0.5，采样 `uv = (lx+0.5, 0.5-ly)`；`itemModelMatrix(item, size)` 是唯一的「IR → 顶点矩阵」转换 | 后端不再各自决定翻转；文字/图形/图片同一约定 |
+| `size` | 项目像素；`null` = 内容自己排版（**只有 text**，WP1.3 之前测量在消费方） | 文字几何统一是 WP1.3；在那之前 IR 不假装会量字 |
+| `content.uv` | **图片空间**（0,0 = 内容自己的左上）；`null` = 素材固有尺寸不在工程里，后端问素材。相机投屏的目标纹理是自下而上，翻转是后端的事 | 工程不存素材尺寸；WP4.1 编译时写入后再带 uv |
+| `depth` | `{ write, bias }`；`write = 有 node/父级 && opacity ≥ 0.5`（原 `preview.js::DEPTH_ALPHA`），`bias = LAYER_DEPTH_M·el.z` 米，沿法线 | 问题四的规则原样搬进来，行为不变 |
+| `drawOrder` | `items` 已按它排好，它是**主眼**（`opts.camera` / `opts.edit`）的混合顺序。投屏源相机各画各的图时，后端用 `core/layers.js::orderLayers` 就着 `plane` 重排——排序规则仍然只有一处 | 一帧只有一个主眼；多眼是投屏的内部需要 |
+| 顺序的稳定性 | 同平面同 `el.z` 时按元素在 `project.elements` 里的下标（`src`）决胜：打乱输入数组，结果不变 | 验收项「drawOrder 是全序（打乱输入后结果相同）」 |
+| `cameraLayers[]` | `{ id, name, active, opacity, picture: { scale, pivot, offset }, camera: { pos, look, roll, fov, focus, world }, near, far, dof, motionBlur }`。草稿里的 `rect` / `items` 不再需要：2D 元素是世界平面，不是每层一份清单 | 判定与 `preview.js::_drawCameraStack` 一致（透明度 < 0.002 或缩放 ≈ 0 的镜头层不出现） |
+| `camera` | `pos / look / up / roll / fov / focus` 为权威值，`world` 是同一姿态的列主序相机世界矩阵（GL 约定：看 -Z、+X 右、+Y 上） | 给只吃矩阵的后端；两处数字同源 |
+| `screenFx` | `{ bloom, ca, grain, scanline, vignette, grade, contrast, saturation }`；bloom 夹到 [0,3]，saturation 缺省 1 | 与合成着色器读法一致 |
+| `objects3d` | 只放这一帧活着的对象：`{ id, type, world, size, opacity }`；图像/视频/文字的 `size` 是 [1,1,1]×scale，盒子按 geom | 与 `engine/shot.js::bakeObjects` 同源 |
+| `world` | `{ source, hash }`；城市几何按 hash 取快照，IR 不装几何 | 城市生成在引擎侧（只有 node 能用），core 不能生成 |
+| `effects` | 预留；本轮渲染器只用 `content.glow` | 画面效果与预设是 WP3.5 |
+| `viewport` | 不参与 IR（IR 的单位是项目像素），只用于后端自己的帧缓冲 | 分辨率无关 |
+| 数值卫生 | 矩阵里的 `-0` 归一化成 `0` | JSON 不能表示 -0，冻结的 IR 必须能原样往返 |
+
+`IRCache` 的语义：键 = 帧号 + fps + 视角签名（camera / edit / solo）；条目只在**同一个 `rev`** 内命中；
+`invalidate(changedIds)` 只丢掉绘制清单里出现这些 id 的帧，不传参数则全清。返回的 IR 视为只读。
+
+**WP0.1 验收数字**（2026-10-29，master `09e243e` + 本包改动）
+
+- 逐帧比对（`.scratch/wp0.1/compare.mjs`：同一份工程喂给旧 `Preview.prototype.computeLayers` 与
+  `buildFrameIR`）：demo.json 0–576 帧、nightcity.json 0–240 帧、miku-swiss **副本** 0–450 帧——
+  元素集合、混合顺序、`el.z` 数组顺序、每个矩阵**零差异**（旧侧是 `Float32Array`，最差数值差
+  1.91e-6，属表示精度；`items[].world` 与 `elementPixelMatrix` 的差为 0）。
+- 性能（138 元素 / 8 相机 / 451 帧）：`buildFrameIR` 冷启动平均 **1.52 ms**、p50 1.41、p95 2.56
+  （预算 3 ms）；`IRCache` 命中 **0.001 ms**（预算 1 ms）。
+- `npm test` 498/498（新增 10 项）、`npm run check:preview` PASS。
+
+**给后续 WP 的两条约定**：WP0.2 的预览适配层只准调用 `itemModelMatrix` / `core/layers.js`，不准自己
+推导翻转或层序；WP1.1 的 v3 shot 包按本节字段写 `static` / `tracks`，静态字段用 `items[]` 的原名。
+
 ---
 
 ## 5. RenderWorkerPool：单一光栅渲染器
