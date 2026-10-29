@@ -2,7 +2,7 @@
 
 > 状态：**已实施**（2026-10-29，A 照着本方案做）。问题一 `25f54d2`、问题二 1/2 `853a085`；
 > 问题二 3「元素锁定」还需要另行批准。实施记录见文末。
-> **问题三（播放卡顿）2026-10-29 B 补写，待用户批准**，建议由 A 实施（`timeline.js`、`pathgizmo.js`）。
+> **问题三（播放卡顿）2026-10-29 用户已批准**：修法 1–5 由 A 实施（`timeline.js`、`pathgizmo.js`），6 性能检查 B 已完成并记下基线。
 > 每个问题一个提交，可单独回退。
 
 ---
@@ -169,6 +169,19 @@ JS 合计约 5 ms，其余 40 多 ms 是**浏览器每帧重排 / 重绘时间�
   播放头的准确值；正在输入的数值框不被覆盖；帧高亮带位置与播放头一致。
 - `npm test`、`check:preview` 通过；新增的 `check-playback-perf` 通过。
 
+### 基线（B，2026-10-29，修复前）
+
+`node scripts/check-playback-perf.mjs`（miku-swiss 副本，138 元素 / 8 相机 / 4507 个 DOM 节点，窗口 1536×816，DPR 1.25，
+从 2 s 起播 3 s），连跑两次：
+
+| 次 | 帧率 | 间隔 p50 | p95 | 每帧 JS：时间轴 / 预览 / gizmo |
+|---|---|---|---|---|
+| 1 | 22 fps | 50 ms | 50.1 ms | 3.5 / 2.3 / 23.6 ms |
+| 2 | 23 fps | 49.9 ms | 50.1 ms | 3.4 / 2.3 / 23.1 ms |
+
+判定：**FAIL**（门槛 p50 ≤ 20 ms、p95 ≤ 34 ms）。A 修完后在同一台机器、同一窗口尺寸再跑，应 PASS。
+`--report` 只打印不判定；`--project=<dir>` 换工程。脚本没有加进 `npm test`（要开 Electron，耗时约 15 s）。
+
 ### 风险
 
 - 漏掉某个"编辑后要刷新"的入口会导致行头显示旧值：所有 op 应用后统一走一次全量刷新，就不会漏。
@@ -181,11 +194,11 @@ JS 合计约 5 ms，其余 40 多 ms 是**浏览器每帧重排 / 重绘时间�
 | 项 | 负责 | 文件 |
 |---|---|---|
 | 问题一 排序 | A ✅ `25f54d2` | `app/renderer/js/spatial-layers.js`、单测 |
-| 问题一 对拍 | B（待做） | `scripts/check-render-parity.mjs` 加本例（斜文字在底板前） |
+| 问题一 对拍 | B ✅ `638e063` | `scripts/check-render-parity.mjs` 用例 F（正对相机的卡片在底板前 2 m）：新排序 2/144 PASS，换回旧排序 14/144 FAIL |
 | 问题二 1、2 | A ✅ `853a085` | `app/renderer/js/main.js` |
 | 问题二 3 锁定 | 待批准后定 | schema（`el.locked`）、`main.js` 点选/框选、时间轴开关 |
 | 问题三 1–5 播放卡顿 | A（建议，待批准） | `app/renderer/js/timeline.js`、`pathgizmo.js`、样式表 |
-| 问题三 6 性能检查 | B | `scripts/check-playback-perf.mjs`（新） |
+| 问题三 6 性能检查 | B ✅（本提交） | `scripts/check-playback-perf.mjs`（新），基线见问题三 |
 
 问题一、二、三互不依赖，可以并行；各自一个提交，记入改动日志。问题三建议先由 B 加性能检查记下基线，A 改完再测一次对比。
 
