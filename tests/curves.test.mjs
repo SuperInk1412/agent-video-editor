@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import {
   sampleBezier, sampleCurve, normalizeCurve, presetCurve, curveLabel, BEZIER_SOLVE_STEPS,
   samplePreset, curveParamsText, curveHandles, moveCurveHandle, curveRange,
+  normalizeCustomPresets, MAX_CUSTOM_PRESETS,
 } from '../core/curves.js';
 import { sampleTrack } from '../core/time.js';
 import { createProject, normalizeProject } from '../core/schema.js';
@@ -305,4 +306,38 @@ test('ops: cameraParamKey keeps and accepts curves too', () => {
   assert.equal(track().find((k) => k.t === 1).curve?.preset, 'easeInOut');
   applyOp(p, { op: 'cameraParamKey', id, path: 'fov', t: 1, v: 50, curve: null });
   assert.equal(track().find((k) => k.t === 1).curve, undefined, 'explicit null clears');
+});
+
+test('curves: a fresh project carries no custom presets', () => {
+  assert.deepEqual(fresh().meta.curvePresets, []);
+});
+
+test('curves: normalizeCustomPresets drops garbage and keeps ids stable', () => {
+  const list = normalizeCustomPresets([
+    { id: 'mine_a', name: '  弹一下  ', curve: { type: 'bezier', p1: [0.3, 0], p2: [0.7, 1] } },
+    { id: 'mine_a', name: 'dup id', curve: { type: 'bezier', p1: [0, 0], p2: [1, 1] } },
+    { name: 'no id', curve: presetCurve('bounce') },
+    { id: 'bad id!', name: '', curve: presetCurve('linear') },
+    { id: 'broken', name: 'no curve' },
+    null,
+    'nope',
+  ]);
+  assert.deepEqual(list.map((e) => e.name), ['弹一下', 'dup id', 'no id', '我的曲线 4']);
+  assert.equal(list[0].id, 'mine_a');
+  assert.equal(list[1].id, 'mine_2', 'a duplicate id is replaced, not merged');
+  assert.equal(list[2].id, 'mine_3');
+  assert.equal(list[3].curve.preset, 'linear');
+  assert.equal(list[2].curve.type, 'bounce');
+});
+
+test('curves: custom presets are capped and survive a project save', () => {
+  const many = Array.from({ length: MAX_CUSTOM_PRESETS + 5 }, (_, i) => ({
+    id: `mine_${i + 1}`, name: `p${i + 1}`, curve: presetCurve('easeIn'),
+  }));
+  assert.equal(normalizeCustomPresets(many).length, MAX_CUSTOM_PRESETS);
+  const p = fresh();
+  applyOp(p, { op: 'setMeta', path: 'curvePresets', value: many });
+  const saved = normalizeProject(JSON.parse(JSON.stringify(p)));
+  assert.equal(saved.meta.curvePresets.length, MAX_CUSTOM_PRESETS);
+  assert.equal(saved.meta.curvePresets[0].name, 'p1');
 });

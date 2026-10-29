@@ -7,6 +7,7 @@ import { PROJECT_SCHEMA } from './version.js';
 import { linkIssues, normalizeLinks, projectLinkIssues } from './links.js';
 import { feedIssues } from './camfeed.js';
 import { dirRollFromRotation, normalizeRotation } from './rotation.js';
+import { normalizeCustomPresets } from './curves.js';
 // A "project" is the single source of truth on disk: <project>/project.vdm.json
 
 export const SCHEMA = PROJECT_SCHEMA;
@@ -173,6 +174,8 @@ export function createProject(opts = {}) {
       tempo: 0,
       fx: { ...DEFAULT_FX },
       style: 'default',
+      // Curve presets saved from the F2 rail travel with the project.
+      curvePresets: [],
     },
     segments: [],
     elements: [],
@@ -241,6 +244,8 @@ export function normalizeProject(p) {
   m.tempo ??= 0;
   m.fx = { ...DEFAULT_FX, ...(m.fx || {}) };
   m.style = m.style || 'default';
+  // Garbage in a hand-edited project must not break the rail.
+  m.curvePresets = normalizeCustomPresets(m.curvePresets);
 
   p.segments ??= [];
   p.elements ??= [];

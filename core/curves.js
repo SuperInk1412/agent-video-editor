@@ -326,6 +326,34 @@ export function presetCurve(id) {
   return normalizeCurve({ type: p.type, preset: id, params: p.params });
 }
 
+/** How many user presets one project may carry (keeps the rail browsable). */
+export const MAX_CUSTOM_PRESETS = 40;
+
+/**
+ * Normalise the project's own curve presets (`meta.curvePresets`, saved from
+ * the F2 rail's 「我的」 group). Entries without a usable curve are dropped
+ * rather than failing the project, names are trimmed, and ids stay stable so a
+ * saved preset keeps its identity across saves and undo steps.
+ */
+export function normalizeCustomPresets(raw) {
+  const list = Array.isArray(raw) ? raw : [];
+  const out = [];
+  const ids = new Set();
+  for (const entry of list) {
+    if (!entry || typeof entry !== 'object') continue;
+    const curve = normalizeCurve(entry.curve);
+    if (!curve) continue;
+    let id = String(entry.id ?? '').trim();
+    if (!/^[A-Za-z0-9_-]{1,32}$/.test(id) || ids.has(id)) id = `mine_${out.length + 1}`;
+    while (ids.has(id)) id = `${id}_`;
+    ids.add(id);
+    const name = String(entry.name ?? '').trim().slice(0, 24) || `我的曲线 ${out.length + 1}`;
+    out.push({ id, name, curve });
+    if (out.length >= MAX_CUSTOM_PRESETS) break;
+  }
+  return out;
+}
+
 /** Human label for a curve stored on a keyframe. */
 export function curveLabel(curve) {
   const c = normalizeCurve(curve);
