@@ -18,6 +18,34 @@ const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
 const norm3 = (a) => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
 
+/** Ring samples per cap when an object is drawn as a cylinder (preview3d 48). */
+const CYL_SEG = 32;
+
+/**
+ * Convex hull of projected points (Andrew's monotone chain), in drawing order.
+ * Collinear input collapses to its two extreme points: an object seen edge-on
+ * has no area, and closing the path there would only double the line.
+ */
+function hull2d(pts) {
+  if (pts.length < 3) return pts.slice();
+  const p = pts.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const turn = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const lower = [];
+  for (const q of p) {
+    while (lower.length >= 2 && turn(lower[lower.length - 2], lower[lower.length - 1], q) <= 0) lower.pop();
+    lower.push(q);
+  }
+  const upper = [];
+  for (let i = p.length - 1; i >= 0; i--) {
+    const q = p[i];
+    while (upper.length >= 2 && turn(upper[upper.length - 2], upper[upper.length - 1], q) <= 0) upper.pop();
+    upper.push(q);
+  }
+  lower.pop();
+  upper.pop();
+  return lower.concat(upper);
+}
+
 export class PathGizmo {
   constructor(canvas, opts) {
     this.canvas = canvas;
@@ -526,27 +554,71 @@ export class PathGizmo {
     ctx.restore();
   }
 
-  /** Projected wireframe for the selected/hovered element. */
-  _objectBox(ctx, obj, time, color, label) {
-    if (obj.type === 'empty') { this._emptyMarker(ctx, obj, time, color, label); return; }
-    const k = this.scale;
-    const pts = this.objectCorners(obj, time).map((c) => this.project(c));
-    if (pts.some((p) => !p)) return;
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 1.4;
-    ctx.beginPath();
-    for (let i = 0; i < 8; i++) {
-      for (const bit of [1, 2, 4]) {
-        if (i & bit) continue;
-        ctx.moveTo(pts[i][0], pts[i][1]);
-        ctx.lineTo(pts[i | bit][0], pts[i | bit][1]);
+  /**
+   * World-space shape samples whose projection outlines the object: the eight
+   * corners of a box, or the two cap rings of a cylinder (radius `geom.w/2` in
+   * x and `geom.d/2` in z, height `geom.h`, exactly what preview3d draws).
+   * Enough points that the convex hull of the projection is the silhouette.
+   */
+  objectSamples(obj, time) {
+    if (obj.primitive !== 'cylinder') return this.objectCorners(obj, time);
+    const pose = this._worldPose(obj, time);
+    const g = obj.geom && typeof obj.geom === 'object' ? obj.geom : {};
+    const rx = 0.5 * Math.max(0.001, Number(g.w) || 2) * Math.abs(pose.scale[0] || 1);
+    const hy = 0.5 * Math.max(0.001, Number(g.h) || 2) * Math.abs(pose.scale[1] || 1);
+    const rz = 0.5 * Math.max(0.001, Number(g.d) || 2) * Math.abs(pose.scale[2] || 1);
+    const { right: r, up: u, forward: f } = pose.basis;
+    const c = pose.worldPos;
+    const out = [];
+    for (const sy of [-1, 1]) {
+      for (let i = 0; i < CYL_SEG; i++) {
+        const a = (i / CYL_SEG) * Math.PI * 2;
+        const cx = Math.cos(a) * rx;
+        const cz = Math.sin(a) * rz;
+        out.push([
+          c[0] + r[0] * cx + u[0] * hy * sy + f[0] * cz,
+          c[1] + r[1] * cx + u[1] * hy * sy + f[1] * cz,
+          c[2] + r[2] * cx + u[2] * hy * sy + f[2] * cz,
+        ]);
       }
     }
+    return out;
+  }
+
+  /**
+   * Screen-space silhouette polygon of an object at t, or null when any sample
+   * sits behind the lens (then there is no honest single outline to draw).
+   */
+  objectSilhouette(obj, time) {
+    const pts = this.objectSamples(obj, time).map((c) => this.project(c));
+    if (pts.some((p) => !p)) return null;
+    return hull2d(pts);
+  }
+
+  /**
+   * Outline of the selected/hovered element: one closed silhouette instead of a
+   * bounding-box wireframe. The box's 12 edges read as a screen-aligned frame
+   * whenever the camera is parented to the object, and they say nothing about a
+   * cylinder's round side; the projected hull does.
+   */
+  _objectOutline(ctx, obj, time, color, label) {
+    if (obj.type === 'empty') { this._emptyMarker(ctx, obj, time, color, label); return; }
+    const k = this.scale;
+    const hull = this.objectSilhouette(obj, time);
+    if (!hull || hull.length < 2) return;
+    // save/restore: rounded joins are for the silhouette only; the camera path
+    // and glyphs drawn later keep the default miter joins.
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.4;
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    hull.forEach((p, i) => (i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])));
+    if (hull.length > 2) ctx.closePath();
     ctx.stroke();
-    ctx.fillStyle = color;
-    for (const p of pts) ctx.fillRect(p[0] - 1.6, p[1] - 1.6, 3.2, 3.2);
+    ctx.restore();
     if (label) {
-      const top = pts.slice().sort((a, b) => a[1] - b[1])[0];
+      const top = hull.reduce((a, b) => (b[1] < a[1] ? b : a));
       ctx.font = `${10.5 * k}px ui-monospace, monospace`;
       ctx.fillStyle = color;
       ctx.fillText(label, top[0] + 6 * k, top[1] - 6 * k);
@@ -559,15 +631,15 @@ export class PathGizmo {
     const live = (o) => time >= (Number(o.start) || 0) - 1e-6 && time < (Number(o.start) || 0) + (Number(o.duration) || 0) - 1e-6;
     const active = objs.find((o) => o.id === this.objSel && live(o));
     const hover = objs.find((o) => o.id === this.objHover && live(o));
-    if (hover && hover !== active) this._objectBox(ctx, hover, time, 'rgba(23,217,255,.55)', null);
+    if (hover && hover !== active) this._objectOutline(ctx, hover, time, 'rgba(23,217,255,.55)', null);
     if (active) {
       this._kinLines(ctx, project, active, time);
       for (const id of childrenOf(project, active.id)) {
         const child = objs.find((o) => o.id === id);
-        if (child && live(child)) this._objectBox(ctx, child, time, 'rgba(255,209,102,.18)', null);
+        if (child && live(child)) this._objectOutline(ctx, child, time, 'rgba(255,209,102,.18)', null);
       }
       this._objectMotion(ctx, active, time);
-      this._objectBox(ctx, active, time, 'rgba(255,209,102,.95)', active.name || active.id);
+      this._objectOutline(ctx, active, time, 'rgba(255,209,102,.95)', active.name || active.id);
       this._objectAxes(ctx, active, time);
     }
   }
