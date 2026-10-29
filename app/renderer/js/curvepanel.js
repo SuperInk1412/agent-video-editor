@@ -159,6 +159,9 @@ export class CurvePanel {
     window.addEventListener('pointermove', (e) => this._move(e));
     window.addEventListener('pointerup', (e) => this._up(e));
     this.canvas.addEventListener('pointermove', (e) => this._hover(e));
+    // Double-click a colour key: the colour itself is edited in the inspector,
+    // so the panel's job is to bring the playhead there (design §5 R1).
+    this.canvas.addEventListener('dblclick', (e) => this._dblClick(e));
     // Capture phase: the panel edits keys, so Esc must reach it before the
     // window-level shortcut that closes the drawer (design §8, Esc three steps).
     window.addEventListener('keydown', (e) => this._onKey(e), true);
@@ -751,6 +754,15 @@ export class CurvePanel {
     } else {
       this.rangeEl.textContent = `未选关键帧${poolText}`;
     }
+    // A colour track has no curve to apply and no handles to drag (design §5
+    // R2): say what it is instead of offering a preset that would be skipped.
+    const trackKeys = this._trackKeys(track.path);
+    const colourTrack = trackKeys.length > 0 && !trackKeys.some((k) => keyValue(k) != null);
+    if (colourTrack) {
+      this.presetEl.textContent = '颜色跳变 · 在属性面板改颜色';
+      this.presetEl.title = this.presetEl.textContent;
+      return;
+    }
     // Show what is actually stored; with nothing stored the drawn shape is the
     // fallback the first handle drag or preset will write.
     const stored = normalizeCurve(track.segments[this.active]?.a?.curve);
@@ -1305,9 +1317,12 @@ export class CurvePanel {
     // segment endpoints it actually interpolates between.
     ctx.font = canvasFont();
     const [vMin, vMax] = g.range;
+    const trackKeys = this._isPathMode() ? [] : this._trackKeys(this._track()?.path);
+    const colourTrack = !this._isPathMode() && trackKeys.length > 0
+      && !trackKeys.some((k) => keyValue(k) != null);
     const tick = this._tickStep(vMax - vMin);
     const decimals = this._tickDecimals(tick);
-    for (let v = Math.ceil(vMin / tick) * tick; v <= vMax + 1e-9; v += tick) {
+    for (let v = Math.ceil(vMin / tick) * tick; v <= vMax + 1e-9 && !colourTrack; v += tick) {
       const value = Math.abs(v) < 1e-9 ? 0 : v;
       const y = g.yOf(value);
       ctx.strokeStyle = C('--border-subtle');
@@ -1386,10 +1401,39 @@ export class CurvePanel {
     const midY = (g.top + g.bottom) / 2;
     const numeric = keys.some((k) => keyValue(k) != null);
     if (!numeric) {
-      // Colour / text tracks have no numeric axis in this slice; P3 replaces
-      // this placeholder with the real step band. Keep it quiet but visible.
-      ctx.fillStyle = alpha(C('--text-2'), 0.16);
-      ctx.fillRect(g.plotLeft, midY - 5, Math.max(1, W - g.rightPad - g.plotLeft), 10);
+      // Colour track: colours stay stepped (design §5 R2), so the track is a
+      // band of flat segments — each key holds its colour until the next key —
+      // with a jump line at every change. No handles, no presets, no ticks.
+      const colourOf = (k) => String(k?.value ?? k?.v ?? '');
+      const stops = keys.filter((k) => colourOf(k));
+      const bandTop = g.top + 6;
+      const bandH = Math.max(6, g.bottom - g.top - 12);
+      const right = W - g.rightPad;
+      if (stops.length) {
+        ctx.fillStyle = colourOf(stops[0]);
+        ctx.fillRect(g.plotLeft, bandTop, Math.max(1, Math.min(right, g.xOf(stops[0].t)) - g.plotLeft), bandH);
+      }
+      stops.forEach((key, i) => {
+        const x0 = Math.max(g.plotLeft, g.xOf(key.t));
+        const next = stops[i + 1];
+        const x1 = Math.min(right, next ? g.xOf(next.t) : right);
+        if (x1 > x0) {
+          ctx.fillStyle = colourOf(key);
+          ctx.fillRect(x0, bandTop, x1 - x0, bandH);
+        }
+        if (next && x1 <= right) {
+          ctx.strokeStyle = alpha(C('--surface-0'), 0.9);
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(Math.round(x1) + 0.5, bandTop);
+          ctx.lineTo(Math.round(x1) + 0.5, bandTop + bandH);
+          ctx.stroke();
+        }
+      });
+      // A hairline frame keeps near-white colours visible on the panel.
+      ctx.strokeStyle = alpha(C('--border-strong'), 0.9);
+      ctx.lineWidth = 1;
+      ctx.strokeRect(g.plotLeft + 0.5, bandTop + 0.5, Math.max(1, right - g.plotLeft - 1), bandH - 1);
     } else {
       const samples = this._sampleKeys(keys, path);
       const x0 = Math.max(0, g.plotLeft);
@@ -1977,6 +2021,24 @@ export class CurvePanel {
       this._syncRailGroup();
       this.draw();
     }
+  }
+
+  /**
+   * Double-click. On a colour key the panel can only move the playhead — the
+   * colour value itself belongs to the inspector row (design §5 R1/§9), so the
+   * host app gets a chance to focus it through `onColourKey`.
+   */
+  _dblClick(e) {
+    if (!this.isOpen()) return;
+    const p = this._localPoint(e);
+    const hit = this._hitKey(p.x, p.y);
+    if (!hit) return;
+    const key = this._trackKeys(hit.path).find((k) => Math.abs(Number(k.t) - hit.t) <= 1e-4);
+    if (!key || keyValue(key) != null) return;
+    e.preventDefault();
+    const tl = this.getTimeline();
+    if (typeof tl?.setTime === 'function') tl.setTime(Number(key.t));
+    this.onColourKey?.({ path: hit.path, t: Number(key.t) });
   }
 
   _hover(e) {
