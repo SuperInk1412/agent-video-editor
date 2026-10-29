@@ -13,7 +13,7 @@ import { AssetsPanel, MEDIA_MIME } from './assets.js';
 import { Outliner } from './outliner.js';
 import { showMenu, hideMenu, initTooltips, icon, prefs } from './ui.js';
 import { initLayout, markTab, Timecode, StatusBar, LogDrawer } from './shell.js';
-import { frameStep, frameStart, frameWriteTime } from './timeline-math.js';
+import { frameStep, frameStart, frameWriteTime, lastFrameTime } from './timeline-math.js';
 import { initCommands, register as registerCommand, dispatch as dispatchCommand, runCommand, openPalette, openShortcuts } from './commands.js';
 import { pathPos, cameraTransform, cameraRange } from '/core/camera.js';
 import { feedPlan, hiddenFeeds, normalizeFeed } from '/core/camfeed.js';
@@ -308,13 +308,6 @@ function pictureTime(t) {
   const last = lastFrameTime(dur, fps);
   const asked = Math.max(0, Math.min(last, Number(t) || 0));
   return Math.max(0, Math.min(last, frameStart(asked, fps)));
-}
-
-/** Start of the last frame a project of `duration` seconds actually renders. */
-function lastFrameTime(duration, fps = projectFps()) {
-  const rate = Math.max(1, Math.round(Number(fps) || 24));
-  const frames = Math.max(1, Math.round((Number(duration) || 0) * rate));
-  return (frames - 1) / rate;
 }
 
 /**

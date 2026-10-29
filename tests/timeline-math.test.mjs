@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   normalizeFps, frameIndex, frameStart, frameStep, frameBand, planRulerTicks,
-  frameKeyTime, frameKeyTimeForFrame, frameWriteTime, frameClipEdit,
+  frameKeyTime, frameKeyTimeForFrame, frameWriteTime, frameClipEdit, lastFrameTime,
 } from '../app/renderer/js/timeline-math.js';
 
 const close = (a, b, eps = 1e-9) => assert.ok(Math.abs(a - b) <= eps, `${a} != ${b}`);
@@ -131,6 +131,57 @@ test('timeline-math: frameWriteTime keeps the exact project tail', () => {
   assert.equal(frameWriteTime(tail, 24), frameKeyTimeForFrame(239, 24));
   // float noise around the tail still keeps it exact
   assert.equal(frameWriteTime(tail + 1e-10, 24, tail), tail);
+});
+
+test('timeline-math: lastFrameTime stops one frame before the duration boundary', () => {
+  // 5 s @ 60 fps is 300 frames (f0 … f299): the boundary 5.0 is not a frame,
+  // and the playhead must park on 299/60 or the picture shows an empty frame.
+  assert.equal(lastFrameTime(5, 60), 299 / 60);
+  assert.equal(lastFrameTime(12.34, 24), 295 / 24);
+  assert.equal(lastFrameTime(12, 24), 287 / 24);
+  assert.equal(lastFrameTime(4, 30), 119 / 30);
+
+  // It names a real frame start, one frame before the boundary, and that frame
+  // is the last one the shot bake renders (`frames = round(duration * fps)`).
+  for (const [duration, fps] of [[5, 60], [12.34, 24], [9.995, 24], [4, 30]]) {
+    const last = lastFrameTime(duration, fps);
+    const where = `${duration}s@${fps}`;
+    assert.ok(Number.isFinite(last), `${where}: not finite`);
+    assert.equal(frameStart(last, fps), last, `${where}: not a frame start`);
+    assert.equal(frameIndex(last, fps), Math.round(duration * fps) - 1, `${where}: not the last frame`);
+    assert.ok(last < duration, `${where}: sits on the boundary`);
+  }
+
+  // On a frame boundary `frameStart(duration)` is already one frame past it,
+  // and one more frame from the last start lands exactly on the duration.
+  for (const [duration, fps] of [[5, 60], [12, 24], [4, 30], [2, 24]]) {
+    assert.equal(frameStart(duration, fps), duration, `${duration}s@${fps}: boundary is a frame start`);
+    assert.equal(lastFrameTime(duration, fps), frameStart(duration, fps) - 1 / fps);
+    assert.equal(lastFrameTime(duration, fps) + 1 / fps, duration);
+  }
+  // Mid-frame durations keep the same rule: never past `frameStart(duration)`,
+  // and equal to it once rounding up lands on the next frame (9.995 s @ 24fps
+  // is 239.88 frames -> 240 frames, last start 239/24 = 9.9583…).
+  assert.equal(lastFrameTime(9.995, 24), frameStart(9.995, 24));
+  assert.ok(lastFrameTime(9.3, 24) < frameStart(9.3, 24));
+
+  // A project shorter than half a frame still shows its single frame, and
+  // garbage durations are 0 instead of NaN.
+  assert.equal(lastFrameTime(0, 24), 0);
+  assert.equal(lastFrameTime(0, 60), 0);
+  assert.equal(lastFrameTime(0.001, 60), 0);
+  assert.equal(lastFrameTime(undefined, 24), 0);
+  assert.equal(lastFrameTime('nope', 24), 0);
+  assert.equal(lastFrameTime(-5, 24), 0, 'negative durations clamp to the first frame');
+
+  // fps goes through the same normalisation as every other helper: 0 / garbage
+  // -> the 24fps default, negatives -> 1 fps, fractional rates round.
+  assert.equal(lastFrameTime(5, 0), 119 / 24);
+  assert.equal(lastFrameTime(5, 'nope'), 119 / 24);
+  assert.equal(lastFrameTime(5), 119 / 24, '24fps by default');
+  assert.equal(lastFrameTime(5, 29.6), 149 / 30, '29.6 rounds to 30');
+  assert.equal(lastFrameTime(5, -5), 4, 'a negative rate clamps to 1 fps');
+  assert.equal(lastFrameTime(0.2, 60), 11 / 60, '0.2 s @ 60fps is 12 frames, the last starts at 11/60');
 });
 
 test('timeline-math: frameClipEdit snaps the dragged edge only', () => {

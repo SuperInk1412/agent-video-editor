@@ -285,6 +285,43 @@ test('spatial-parent: a camera child follows its parent through evalCameraWorld'
   near(evalCameraWorld(p, 2, cam).pos, base.pos, 1e-6, 'unparent restores the local camera');
 });
 
+test('spatial-parent: re-binding to the same parent keeps the zero frame', () => {
+  const p = fresh();
+  const cam = p.cameras[0];
+  const ob = applyOp(p, {
+    op: 'objectAdd',
+    object: { type: 'empty', start: 0, duration: 4, pivot: [0, cy, 0], scale: [1, 1, 1] },
+  }).changed[0];
+  // The parent turns half a revolution over the shot: the camera orbits it.
+  applyOp(p, { op: 'objectKey', id: ob, path: 'rotation.y', t: 0, v: 180, ease: 'linear' });
+  applyOp(p, { op: 'objectKey', id: ob, path: 'rotation.y', t: 4, v: 0 });
+  applyOp(p, { op: 'spatialParent', id: cam.id, parent: ob, t: 0 });
+  // -0 and +0 compare unequal under deepStrictEqual; the bind is a plain record.
+  const bind = () => JSON.stringify(cam.frameParent.bind);
+  const bindAtBind = bind();
+  const at = (t) => evalCameraWorld(p, t, cam).pos.map((v) => Math.round(v * 1e6) / 1e6);
+  const path = () => ({ t0: at(0), t2: at(2), t4: at(4) });
+  const before = path();
+
+  // The follow switches (跟随位置 / 旋转 / 缩放) send this op at the playhead.
+  // Re-binding there against the parent's *current* pose used to re-zero the
+  // child, which rotated the whole camera path by 90° and never came back.
+  applyOp(p, { op: 'spatialParent', id: cam.id, parent: ob, t: 2, inherit: { pos: false } });
+  assert.equal(bind(), bindAtBind, 'bind kept while a follow switch changes');
+  applyOp(p, { op: 'spatialParent', id: cam.id, parent: ob, t: 2, inherit: { pos: true } });
+  assert.equal(bind(), bindAtBind, 'bind kept on the way back');
+  assert.deepEqual(path(), before, 'the camera path is exactly where it was');
+
+  // A different parent is a real re-bind: the new zero frame is that parent's.
+  const other = applyOp(p, {
+    op: 'objectAdd',
+    object: { type: 'empty', start: 0, duration: 4, pivot: [4, cy, 0], scale: [1, 1, 1] },
+  }).changed[0];
+  applyOp(p, { op: 'spatialParent', id: cam.id, parent: other, t: 2 });
+  assert.equal(cam.frameParent.id, other);
+  assert.notEqual(bind(), bindAtBind, 'a new parent re-binds');
+});
+
 test('spatial-parent: the mixed graph rejects loops across elements, objects and cameras', () => {
   const p = fresh();
   const el = addEl(p, nodeEl([0, cy, 0]));
