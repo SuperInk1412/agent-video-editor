@@ -21,8 +21,9 @@ import {
   curveHandles, moveCurveHandle, curveRange, curveParamsText,
 } from '/core/curves.js';
 import { retimePathSpan } from '/core/camera.js';
+import { spanCurveOps } from '/core/curve-spans.js';
 import { sampleTrack } from '/core/time.js';
-import { cameraRef, elementRef, keyframeRef, objectRef } from '/core/selection.js';
+import { cameraRef, elementRef, keyframeRef, objectRef, splitRef } from '/core/selection.js';
 import { h, icon, token } from './ui.js';
 
 const el = (tag, cls, html) => {
@@ -158,13 +159,63 @@ export class CurvePanel {
     window.addEventListener('pointermove', (e) => this._move(e));
     window.addEventListener('pointerup', (e) => this._up(e));
     this.canvas.addEventListener('pointermove', (e) => this._hover(e));
+    // Capture phase: the panel edits keys, so Esc must reach it before the
+    // window-level shortcut that closes the drawer (design §8, Esc three steps).
+    window.addEventListener('keydown', (e) => this._onKey(e), true);
     window.addEventListener('resize', () => { if (this.isOpen()) this.draw(); });
+  }
+
+  /** True when focus is in a field the panel must not steal keys from. */
+  _isTypingTarget(node) {
+    const tag = String(node?.tagName || '').toLowerCase();
+    return tag === 'input' || tag === 'select' || tag === 'textarea' || node?.isContentEditable === true;
+  }
+
+  /**
+   * Esc, in that order: cancel the gesture in flight → drop the pool (the
+   * selection came from the timeline, so clearing is undoable and cheap) →
+   * close. Anything else is left to the global shortcut table.
+   */
+  _onKey(e) {
+    if (!this.isOpen() || !this.openState) return;
+    if (this._isTypingTarget(e.target) || e.key !== 'Escape') return;
+    e.preventDefault();
+    // Main's shortcut table uses a capture listener on the same window target,
+    // where stopPropagation() is not enough: only the immediate variant keeps
+    // Esc from also closing the drawer in the same keystroke.
+    e.stopImmediatePropagation();
+    e.stopPropagation();
+    if (this.drag || this.marquee) { this._cancelGesture(); return; }
+    if (this.selected.length) {
+      this.onSelect?.({ kind: 'keyframe', ids: [] });
+      return;
+    }
+    this.close();
+  }
+
+  /** Abandon the gesture under the pointer and put the panel back. */
+  _cancelGesture() {
+    const drag = this.drag;
+    this.drag = null;
+    this.marquee = null;
+    this.canvas.style.cursor = '';
+    if (drag?.mode === 'path') {
+      this._restoreSpanBackup();
+      if (this.isOpen()) this.draw();
+      return;
+    }
+    if (drag?.curve) this.curve = drag.curve;
+    if (this.isOpen()) {
+      this._syncHead();
+      this._syncRailGroup();
+      this.draw();
+    }
   }
 
   isOpen() { return !this.root.hidden; }
 
   // ------------------------------------------------------------ open / close
-  open(state) {
+  open(state, { reveal = true } = {}) {
     this.openState = state;
     // The F2 pool decides what the panel is about: every selected key of this
     // host, across property tracks. It is never replaced by an invented range.
@@ -190,8 +241,42 @@ export class CurvePanel {
     this._buildRail();
     this._buildPathSelect();
     this._syncHead();
-    this._reveal();
+    if (reveal) this._reveal();
     this.draw();
+  }
+
+  /**
+   * The timeline selection changed while the drawer is open (design §3): the
+   * pool is live state, not a snapshot. Keep the displayed row when it still
+   * owns selected keys, otherwise jump to the busiest one — without reopening,
+   * zooming or scrolling.
+   *
+   * @param {{kind?: string, ids?: string[]}|null} pool keyframe refs
+   */
+  setSelection(pool) {
+    if (!this.isOpen() || !this.openState) return;
+    const parsed = (Array.isArray(pool?.ids) ? pool.ids : [])
+      .map((ref) => splitRef(ref))
+      .filter((part) => part && part.path && Number.isFinite(Number(part.t)))
+      .map((part) => ({ path: part.path, t: Math.round(Number(part.t) * 1000) / 1000 }));
+    const same = parsed.length === this.selected.length
+      && parsed.every((s) => this.selected.some((o) => o.path === s.path
+        && Math.abs(o.t - s.t) <= 1e-4));
+    if (same) return;
+    const tracks = this.openState.tracks || [];
+    const counts = new Map();
+    for (const s of parsed) counts.set(s.path, (counts.get(s.path) || 0) + 1);
+    let index = this.openState.index;
+    if (!counts.get(tracks[index]?.path)) {
+      let best = -1;
+      let bestCount = 0;
+      tracks.forEach((track, i) => {
+        const n = counts.get(track.path) || 0;
+        if (n > bestCount) { best = i; bestCount = n; }
+      });
+      if (best >= 0) index = best;
+    }
+    this.open({ ...this.openState, index, selected: parsed }, { reveal: false });
   }
 
   /** Scroll the timeline so the edited segment (or first selected key) is visible. */
@@ -469,10 +554,16 @@ export class CurvePanel {
     const st = this.openState;
     const track = this._track();
     if (!st || !track) return;
-    const otherPaths = this._selectedPaths().filter((path) => path !== track.path);
-    const otherKeys = this.selected.filter((s) => s.path !== track.path).length;
-    const suffix = otherPaths.length ? ` · 另 ${otherPaths.length} 条属性 ${otherKeys} 键` : '';
-    this.titleEl.textContent = `曲线 · ${track.label || track.path}`;
+    const poolPaths = this._selectedPaths();
+    // One line tells the whole scope: which element/object/camera, which
+    // property, and how much of the timeline pool this drawer is acting on.
+    const poolText = this.selected.length
+      ? ` · 池 ${this.selected.length} 键 / ${poolPaths.length} 属性`
+      : '';
+    const hostName = this._hostName();
+    this.titleEl.textContent = hostName
+      ? `曲线 · ${hostName} · ${track.label || track.path}`
+      : `曲线 · ${track.label || track.path}`;
     if (track.path === 'path' && this.path) {
       const p = this.path;
       const curves = p.segments.map((seg) => this._segmentCurve(seg));
@@ -512,12 +603,12 @@ export class CurvePanel {
       const span = sel.length === 1
         ? `${sel[0].toFixed(2)}s · 1 键`
         : `${sel[0].toFixed(2)}s → ${sel[sel.length - 1].toFixed(2)}s · ${sel.length} 键`;
-      this.rangeEl.textContent = `${span} · ${pairs.length} 段${suffix}`;
+      this.rangeEl.textContent = `${span} · ${pairs.length} 段${poolText}`;
     } else if (s) {
       this.rangeEl.textContent = `${s.from.toFixed(2)}s → ${s.to.toFixed(2)}s · ${track.segments.length} 段 · `
-        + `第 ${this.active + 1} 段${suffix}`;
+        + `第 ${this.active + 1} 段`;
     } else {
-      this.rangeEl.textContent = `未选关键帧${suffix}`;
+      this.rangeEl.textContent = `未选关键帧${poolText}`;
     }
     // Show what is actually stored; with nothing stored the drawn shape is the
     // fallback the first handle drag or preset will write.
@@ -537,6 +628,18 @@ export class CurvePanel {
     if (!id) return 0;
     const idx = CURVE_GROUPS.findIndex((g) => g.items.some((it) => it.id === id));
     return idx >= 0 ? idx : 0;
+  }
+
+  /** Name of the element / 3D object / camera this drawer is editing. */
+  _hostName() {
+    const st = this.openState;
+    const p = this.getProject?.();
+    if (!st || !p) return '';
+    if (st.host === 'element') return (p.elements || []).find((x) => x.id === st.id)?.name || '';
+    if (st.host === 'object') return (p.scene?.objects || []).find((x) => x.id === st.id)?.name || '';
+    const cam = (p.cameras || []).find((x) => x.id === st.id)
+      || (p.camera?.id === st.id ? p.camera : null);
+    return cam?.name || '';
   }
 
   _syncRailGroup() {
@@ -801,20 +904,28 @@ export class CurvePanel {
   }
 
   /**
-   * Segments a preset can own on one track. Element/object curves are stored
-   * on the left key and shape the segment to the next key, so a segment is
-   * targeted when its left key is selected (path spans are handled separately).
+   * Segments a preset can own on one track: the run between two *adjacent
+   * selected* keys. Keys in between are inner keys and get retimed, so a
+   * single selected key never forms a segment on its own (design §3).
    */
   _selectedPairs(path) {
     const keys = this._trackKeys(path);
-    const selected = new Set(this._selectedFor(path).map((t) => Math.round(t * 1000) / 1000));
+    const present = new Set(keys.map((k) => Math.round(Number(k.t) * 1000) / 1000));
+    const anchors = this._selectedFor(path)
+      .map((t) => Math.round(t * 1000) / 1000)
+      .filter((t) => present.has(t));
     const pairs = [];
-    for (let i = 0; i + 1 < keys.length; i++) {
-      const from = Math.round(Number(keys[i].t) * 1000) / 1000;
-      const to = Math.round(Number(keys[i + 1].t) * 1000) / 1000;
-      if (selected.has(from)) pairs.push({ path, from, to });
+    for (let i = 0; i + 1 < anchors.length; i++) {
+      if (anchors[i + 1] > anchors[i] + 1e-4) pairs.push({ path, from: anchors[i], to: anchors[i + 1] });
     }
     return pairs;
+  }
+
+  /** True when both anchors of a span carry numeric values (not a colour key). */
+  _numericSpan(span) {
+    const keys = this._trackKeys(span.path);
+    const at = (t) => keys.find((k) => Math.abs(Number(k.t) - t) <= 1e-4);
+    return keyValue(at(span.from)) != null && keyValue(at(span.to)) != null;
   }
 
   _isSelectedSegment(span) {
@@ -1405,32 +1516,27 @@ export class CurvePanel {
     }
     this._startPress(e, {
       tap: () => {
-        if (this._isPathMode()) this._setSelection([]);
-        else this._switchSegmentAt(p);
+        // Tapping empty space never changes the pool: the selection is picked
+        // across elements in the timeline, and a stray click is costly (§8 R1).
+        if (!this._isPathMode()) this._switchSegmentAt(p);
       },
     });
   }
 
-  /** Tap on a segment switches the edited segment and drops the key selection. */
+  /** Tap on a segment switches the edited segment; the pool is left alone. */
   _switchSegmentAt(p) {
     const g = this._geo();
     const t = g.tOf(p.x);
     const segs = this._track()?.segments || [];
     const idx = segs.findIndex((s) => t >= s.from && t <= s.to);
-    if (idx < 0) {
-      if (this.selected.length) this._setSelection([]);
-      return;
-    }
+    if (idx < 0) return;
     if (idx !== this.active) {
       this.active = idx;
       this.curve = normalizeCurve(segs[idx].a?.curve) || presetCurve('easeInOut');
     }
-    if (this.selected.length) this._setSelection([]);
-    else {
-      this._syncHead();
-      this._syncRailGroup();
-      this.draw();
-    }
+    this._syncHead();
+    this._syncRailGroup();
+    this.draw();
   }
 
   _move(e) {
@@ -1506,26 +1612,32 @@ export class CurvePanel {
       this._applyPathPreset(curve);
       return;
     }
-    // Scope = every segment whose left key is selected, across the tracks the
-    // timeline pool covers. No key selected: fall back to the active segment.
-    const paths = this._selectedPaths();
+    // Scope = every segment between adjacent selected keys, across the
+    // property tracks the timeline pool covers. Colour tracks are skipped:
+    // colour keyframes stay stepped (design §5 R2), so they take no curve.
     const targets = [];
-    for (const path of paths) targets.push(...this._selectedPairs(path));
-    const seg = this._track()?.segments[this.active];
-    let list = targets;
-    if (!list.length && this.selected.length) {
-      this.toast?.('选中的关键帧后面没有可作用的关键帧', 'warn');
-      return;
+    let skippedColour = 0;
+    for (const path of this._selectedPaths()) {
+      for (const pair of this._selectedPairs(path)) {
+        if (this._numericSpan(pair)) targets.push(pair);
+        else skippedColour += 1;
+      }
     }
-    if (!list.length) {
-      if (!seg) return;
-      list = [{ path: this._track().path, from: seg.from, to: seg.to }];
+    if (!targets.length) {
+      if (!this.selected.length) {
+        this.toast?.('再添加一个关键帧', 'warn');
+      } else if (skippedColour) {
+        this.toast?.('颜色关键帧保持跳变，不套曲线', 'warn');
+      } else {
+        this.toast?.('再添加一个关键帧', 'warn');
+      }
+      return;
     }
     this.curve = curve;
     this._syncHead();
     this._syncRailGroup();
     this.draw();
-    this._commit(curve, list);
+    this._commit(curve, targets);
   }
 
   /**
@@ -1654,16 +1766,58 @@ export class CurvePanel {
     }
   }
 
-  _commit(curve, segments) {
-    if (!this.openState || !segments?.length) return;
+  /**
+   * Write one curve to every targeted segment (one batch = one undo step).
+   *
+   * Each span goes through core/curve-spans.js::spanCurveOps so the curve lands
+   * on *every* sub-segment of the span and the keys in between are retimed to
+   * where their value now sits on the curve (design §4). `retime: false` is the
+   * Alt gesture: same curve, no key moved.
+   */
+  _commit(curve, segments, { retime = true } = {}) {
+    if (!this.openState || !segments?.length) return null;
     const st = this.openState;
     const fallbackPath = this._track()?.path;
-    const ops = segments.map((s) => ({
-      op: 'keyCurve', host: st.host, id: st.id, path: s.path || fallbackPath,
-      from: Math.round(Number(s.from) * 1000) / 1000,
-      to: Math.round(Number(s.to) * 1000) / 1000,
-      curve: curve ? normalizeCurve(curve) : null,
-    }));
-    this.onOp?.(ops.length === 1 ? ops[0] : { op: 'batch', ops });
+    const shape = curve ? normalizeCurve(curve) : null;
+    const ops = [];
+    const paths = new Set();
+    let moved = 0;
+    let skipped = 0;
+    for (const seg of segments) {
+      const path = seg.path || fallbackPath;
+      const from = Math.round(Number(seg.from) * 1000) / 1000;
+      const to = Math.round(Number(seg.to) * 1000) / 1000;
+      const keys = this._trackKeys(path);
+      const built = spanCurveOps({ host: st.host, id: st.id, path, keys, from, to, curve: shape, retime });
+      if (built) {
+        ops.push(...built.ops);
+        moved += built.moved;
+      } else {
+        // Nothing to retime (no stored keys, non-numeric anchors): write the
+        // curve itself so the segment still shows the shape.
+        if (!shape) continue;
+        skipped += 1;
+        ops.push({ op: 'keyCurve', host: st.host, id: st.id, path, from, to, curve: shape });
+      }
+      paths.add(path);
+    }
+    if (!ops.length) return null;
+    const detail = moved ? ` · ${moved} 个内键已移动` : '';
+    const done = `已应用到 ${paths.size} 条属性 · ${segments.length} 段${detail}`;
+    const pending = this.onOp?.(ops.length === 1 ? ops[0] : { op: 'batch', ops });
+    if (pending?.then) {
+      pending.then((j) => {
+        if (j) this.toast?.(done, 'info');
+        else {
+          // The op was rejected: put the header back on the stored curve.
+          this._syncHead();
+          this._syncRailGroup();
+          this.draw();
+        }
+      });
+    } else {
+      this.toast?.(done, 'info');
+    }
+    return pending;
   }
 }
