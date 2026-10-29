@@ -16,6 +16,13 @@
 
 export const PLANE_EPS = 1e-4; // "one plane" = |distanceA - distanceB| <= this (PLAN §2.5)
 export const NORMAL_EPS = 1e-6; // unit-normal dot above 1 - NORMAL_EPS counts as parallel
+// Metres a coplanar layer is pushed toward the viewer per unit of `el.z`
+// (docs/FIX-LAYER-ORDER-EMPTY-CLICK.md §四 2). Mirrors Blender exactly:
+// vdm_build.py::make_updater moves each plane `layer_px * z` along its normal,
+// and in the unified space one local unit is 1/100 m with layer_px = 0.01 —
+// 0.1 mm per layer number, enough to keep a depth-tested stack free of
+// z-fighting without moving the picture.
+export const LAYER_DEPTH_M = 1e-4;
 
 const num = (n, d = 0) => (Number.isFinite(Number(n)) ? Number(n) : d);
 const vec3 = (v, d = [0, 0, 0]) => (Array.isArray(v) && v.length >= 3
@@ -80,37 +87,88 @@ export function sameLayerPlane(a, b, camPos) {
 }
 
 /**
- * Shared draw / hit ordering key (PLAN §2.5, docs/FIX-LAYER-ORDER-EMPTY-CLICK.md):
+ * Identity of one plane, independent of the camera: the unit normal and the
+ * plane's offset along it, both quantised to `PLANE_EPS`. Coplanar layers (a
+ * backdrop and the words written on it, a shadow and its text) share a key, so
+ * `el.z` can own their stack; everything else is a different group.
  *
- * 1. one plane         -> `el.z` layer order, from any viewing angle, so a
- *                         full-screen backdrop stays behind the type;
- * 2. different planes  -> camera -> element ORIGIN distance, farther first —
- *                         the EEVEE rule Blender's bake already follows;
- * 3. exact ties        -> source order, only so the sort is deterministic.
- *
- * Plane distance decides only step 1. A tilted plane's infinite extension can
- * run closer to the camera than the object itself (miku-swiss 相机 9 at 3 s:
- * the s2_bg backdrop's plane is 25.2 m away, the tilted lyric plane 26.3 m,
- * yet the lyric object is 27.2 m and the backdrop 29.8 m), so ordering the
- * picture by it drew the backdrop last and covered the words.
- *
- * Node creation order / array order never decides a same-plane order: `el.z`
- * is compared before the `ia` / `ib` tie-break.
+ * Quantising a pure per-layer value is what makes the grouping order-free: a
+ * shuffled layer list groups exactly like the sorted one, no pairwise
+ * "same plane" chaining that could depend on the input order.
  */
-export function compareLayerPlanes(a, b, camPos, ia = 0, ib = 0) {
-  if (sameLayerPlane(a, b, camPos)) return (num(a?.el?.z) - num(b?.el?.z)) || (ia - ib);
-  const da = layerOriginDistance(a, camPos);
-  const db = layerOriginDistance(b, camPos);
-  if (Math.abs(da - db) > PLANE_EPS) return db - da;
-  return ia - ib;
+export function layerPlaneKey(layer) {
+  const p = layer?.plane?.p;
+  const n = unit3(layer?.plane?.n);
+  if (!p || !n) return '';
+  const q = (v) => Math.round(v / PLANE_EPS) * PLANE_EPS;
+  const d = dot3(n, vec3(p));
+  return `${q(n[0])},${q(n[1])},${q(n[2])},${q(d)}`;
 }
 
-/** Layers sorted for drawing: far origin first, `el.z` inside one plane. */
+/** Draw order inside one plane: `el.z`, then source order (a strict total order). */
+export function compareLayerStack(a, b, ia = 0, ib = 0) {
+  return (num(a?.el?.z) - num(b?.el?.z)) || (ia - ib);
+}
+
+/**
+ * Layers sorted for drawing (PLAN §2.5, docs/FIX-LAYER-ORDER-EMPTY-CLICK.md):
+ *
+ * 1. group by plane — coplanar layers share one group (`layerPlaneKey`);
+ * 2. groups far to near by camera -> ORIGIN distance, the rule Blender's EEVEE
+ *    bake already follows, so a full-screen backdrop that is really behind the
+ *    type also sorts behind it;
+ * 3. inside a group, `el.z` owns the stack (a full-screen backdrop stays behind
+ *    the type from any viewing angle), then source order.
+ *
+ * The order is a strict total order — no comparator mixes "el.z" with a
+ * distance, so `Array.sort` can never bounce a pair back and forth as the
+ * camera moves (that was 问题四: the lyric flickered in 镜头 02 once the
+ * backdrop's ORIGIN came nearer than the lyric's).
+ *
+ * Since 问题四 the picture no longer depends on this order: opaque 2D planes
+ * write depth (preview.js::_drawLayers), so a wrong guess costs a blending edge
+ * at most, never a whole layer. Sorting only decides translucent stacking.
+ */
 export function orderLayers(layers, camPos) {
-  return (Array.isArray(layers) ? layers : [])
-    .map((L, i) => ({ L, i }))
-    .sort((A, B) => compareLayerPlanes(A.L, B.L, camPos, A.i, B.i))
-    .map((e) => e.L);
+  const groups = new Map();
+  (Array.isArray(layers) ? layers : []).forEach((L, i) => {
+    const key = layerPlaneKey(L);
+    let g = groups.get(key);
+    if (!g) {
+      g = { key, members: [], dist: Infinity, first: i };
+      groups.set(key, g);
+    }
+    g.members.push({ L, i });
+    // The group's distance is its nearest member: a big backdrop has one far
+    // origin, a card lying on it a near one, and the group is only as far as
+    // what sits on it.
+    g.dist = Math.min(g.dist, layerOriginDistance(L, camPos));
+  });
+  const ordered = [...groups.values()].sort((a, b) => (b.dist - a.dist) || (a.first - b.first));
+  const out = [];
+  for (const g of ordered) {
+    g.members.sort((A, B) => compareLayerStack(A.L, B.L, A.i, B.i));
+    for (const m of g.members) out.push(m.L);
+  }
+  return out;
+}
+
+/**
+ * Distance from a ray origin to where it meets the layer's plane, in metres
+ * (null when the ray runs parallel or the plane is behind it). The picking
+ * twin of the depth buffer: `hitTest` takes the smallest one so the element
+ * under the cursor is the one the picture shows there, whatever the draw order.
+ */
+export function layerRayDepth(layer, ray) {
+  const p = layer?.plane?.p;
+  const n = layer?.plane?.n;
+  const o = ray?.origin;
+  const d = ray?.dir;
+  if (!p || !n || !o || !d) return null;
+  const denom = d[0] * n[0] + d[1] * n[1] + d[2] * n[2];
+  if (Math.abs(denom) < 1e-9) return null;
+  const t = ((p[0] - o[0]) * n[0] + (p[1] - o[1]) * n[1] + (p[2] - o[2]) * n[2]) / denom;
+  return Number.isFinite(t) && t > 0 ? t : null;
 }
 
 // ---------------------------------------------------------------- matrices
@@ -160,11 +218,17 @@ export function transformPlane(plane, m) {
  * -right, local +Y is up, and the fragment shader flips v, so the picture
  * reads unmirrored from the front (world y is up, textures keep v = 0 at top).
  *
- * `opts` is the layer's motion/punch decoration only:
+ * `opts` is the layer's motion/punch decoration plus the same-plane stacking
+ * offset:
  *   offset: [x, y, z] world metres added to the frame position (screen-space
  *           x/y of core/evaluate.js::motionDelta, already converted by caller);
  *   roll:   extra degrees around the plane normal (motion shake);
- *   scale:  multiplier for the quad size (motion in/out + beat punch).
+ *   scale:  multiplier for the quad size (motion in/out + beat punch);
+ *   depth:  metres along the plane normal toward the viewer (positive = the
+ *           front face). The preview passes `LAYER_DEPTH_M * el.z` here so a
+ *           coplanar stack is separated for the depth buffer exactly like
+ *           Blender separates its objects (§四 2); the bake leaves it 0 because
+ *           vdm_build.py adds its own `layer_px * z` on top.
  * The node placement itself (pivot / basis / scale) is not repeated here, so
  * `el.transform` values are never applied twice (task 5).
  */
@@ -190,6 +254,9 @@ export function nodePlaneMatrix(frame, width, height, opts = {}) {
   const w = Math.max(1e-6, Math.abs(num(width, 1)) * k);
   const h = Math.max(1e-6, Math.abs(num(height, 1)) * k);
   const off = vec3(opts.offset);
+  // local +Z is the plane's forward (the front face), so a positive depth moves
+  // the quad toward the viewer without changing its size or orientation.
+  const push = num(opts.depth);
   return {
     w,
     h,
@@ -197,7 +264,7 @@ export function nodePlaneMatrix(frame, width, height, opts = {}) {
       -r[0] * w, -r[1] * w, -r[2] * w, 0,
       u[0] * h, u[1] * h, u[2] * h, 0,
       fw[0], fw[1], fw[2], 0,
-      pos[0] + off[0], pos[1] + off[1], pos[2] + off[2], 1,
+      pos[0] + off[0] + fw[0] * push, pos[1] + off[1] + fw[1] * push, pos[2] + off[2] + fw[2] * push, 1,
     ]),
   };
 }

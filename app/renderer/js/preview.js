@@ -29,10 +29,17 @@ import { Scene3D } from './preview3d.js';
 import { feedPlan, hiddenFeeds, normalizeFeed } from '/core/camfeed.js';
 import { clearCompiledTracks, compileProject } from '/core/tracks.js';
 import {
-  mul4, nodePlaneMatrix, orderLayers, planeOfFrame, transformPlane,
+  LAYER_DEPTH_M, layerOriginDistance, layerRayDepth, mul4, nodePlaneMatrix, orderLayers,
+  planeOfFrame, transformPlane,
 } from './spatial-layers.js';
 
 const IDENTITY4 = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+
+// A 2D plane fragment at least this opaque owns its pixel
+// (docs/FIX-LAYER-ORDER-EMPTY-CLICK.md §四 1). The depth-only pass discards
+// below it; the colour pass that follows keeps u_aCut 0 so text and shape edges
+// stay anti-aliased instead of turning into a hard rim.
+const DEPTH_ALPHA = 0.5;
 
 const VERT = `#version 300 es
 in vec2 a_pos;
@@ -77,11 +84,18 @@ uniform sampler2D u_tex;
 uniform vec4 u_uv;
 uniform float u_opacity;
 uniform float u_glow;
+// 2D planes own the depth buffer (docs/FIX-LAYER-ORDER-EMPTY-CLICK.md §四):
+// a fragment below this alpha is not part of the picture and must not own a
+// pixel — a text quad is mostly empty padding, and without the cut its rect
+// would occlude everything behind it. 0 = the legacy paths, which never cut.
+uniform float u_aCut;
 void main(){
   vec2 uv = mix(u_uv.xy, u_uv.zw, v_uv);
   vec4 c = texture(u_tex, uv);
+  float a = c.a * u_opacity;
+  if (a < u_aCut) discard;
   vec3 rgb = c.rgb * (1.0 + u_glow * 2.4);
-  outColor = vec4(rgb, c.a * u_opacity);
+  outColor = vec4(rgb, a);
 }`;
 
 const FRAG_SHAPE = `#version 300 es
@@ -92,6 +106,7 @@ uniform vec4 u_color;
 uniform vec2 u_size;
 uniform float u_radius;
 uniform float u_kind; // 0 rect, 1 ellipse
+uniform float u_aCut; // see FRAG_TEX
 void main(){
   vec2 px = v_uv * u_size;
   float aa = 1.2;
@@ -105,8 +120,10 @@ void main(){
     vec2 q = abs(px - u_size * 0.5) - (u_size * 0.5 - u_radius);
     d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - u_radius;
   }
-  float a = 1.0 - smoothstep(-aa, aa, d);
-  outColor = vec4(u_color.rgb, u_color.a * a);
+  float edge = 1.0 - smoothstep(-aa, aa, d);
+  float a = u_color.a * edge;
+  if (a < u_aCut) discard;
+  outColor = vec4(u_color.rgb, a);
 }`;
 
 const FRAG_FULL = `#version 300 es
@@ -988,7 +1005,15 @@ export class Preview {
     const pxToM = 1 / (100 * S);
     const width = L.w * pxToM * Math.abs(Number(frame.scale[0]) || 1);
     const height = L.h * pxToM * Math.abs(Number(frame.scale[1]) || 1);
-    const plane = nodePlaneMatrix(frame, width, height, { offset, roll: d.rotation, scale: d.scale });
+    const plane = nodePlaneMatrix(frame, width, height, {
+      offset,
+      roll: d.rotation,
+      scale: d.scale,
+      // Same plane, layer order: `el.z` decides the stack, so the depth buffer
+      // must see a hair of separation or the layers z-fight (§四 2). Same rule
+      // and same amount Blender applies in vdm_build.py::make_updater.
+      depth: LAYER_DEPTH_M * (Number(L.el.z) || 0),
+    });
     L.node.w = plane.w;
     L.node.h = plane.h;
     L.node.model = plane.model;
@@ -1080,12 +1105,19 @@ export class Preview {
 
   /**
    * 2D element layers. `world` = {vp, camPos, meta} draws them as planes in the
-   * 3D space (depth-tested against the 3D objects, no depth writes, far to
-   * near; equal depth keeps the layer order); null draws them flat on screen.
+   * 3D space (depth-tested against the 3D objects, far to near; coplanar layers
+   * are separated by `LAYER_DEPTH_M * el.z`); null draws them flat on screen.
    *
    * Node layers (`layer.node.model`) use the world-plane branch, every other
    * layer keeps the legacy screen path. `u_world` selects the branch in VERT:
    * 0 = flat screen blit, 1 = legacy screen plane, 2 = node world plane.
+   *
+   * Since 问题四 an opaque node plane also WRITES depth (a depth-only pass at
+   * DEPTH_ALPHA, then the blended colour pass): what covers what is decided by
+   * where the planes really are, so no ordering rule has to be right about a
+   * big backdrop versus an off-centre card. The order from `orderLayers` only
+   * decides how see-through layers blend — and still paints far to near, so a
+   * layer drawn "too late" finds its pixels already owned by the nearer plane.
    */
   _drawLayers(layers, W, H, world) {
     const gl = this.gl;
@@ -1093,10 +1125,9 @@ export class Preview {
     if (world) {
       const cyW = (Number(world.meta?.height) || 1080) / 200;
       const S = W / (Number(world.meta?.width) || 1920);
-      // Same ordering as hitTest (spatial-layers.js): camera -> element ORIGIN
-      // distance (what EEVEE does for the 2D objects Blender builds), far first;
-      // on one plane `el.z` decides, so a full-screen backdrop stays behind the
-      // type from any viewing angle.
+      // Blending order (spatial-layers.js::orderLayers): plane groups far to
+      // near, `el.z` inside one plane. Depth now owns the picture, so this is
+      // only about translucent stack — see the header.
       list = orderLayers(layers, world.camPos);
       for (const pr of [this.prog.tex, this.prog.shape]) {
         gl.useProgram(pr.program);
@@ -1118,8 +1149,12 @@ export class Preview {
         b(gl);
         const nodeMode = !!world && !!layer.node?.model;
         const mode = nodeMode ? 2 : (world ? 1 : 0);
+        // A see-through plane (transform.opacity below the cut) never owns a
+        // pixel: writing depth there would cut a hole into the stack behind it
+        // while still blending, so it stays sorting-only (方案 §四 风险).
+        const ownsDepth = nodeMode && (Number(layer.st.opacity) || 0) >= DEPTH_ALPHA;
+        const pr = layer.kind === 'tex' ? this.prog.tex : this.prog.shape;
         if (layer.kind === 'tex') {
-          const pr = this.prog.tex;
           gl.useProgram(pr.program);
           gl.uniformMatrix3fv(pr.u.u_mat, false, layer.M);
           gl.uniform2f(pr.u.u_res, W, H);
@@ -1135,12 +1170,10 @@ export class Preview {
           gl.activeTexture(gl.TEXTURE0);
           gl.bindTexture(gl.TEXTURE_2D, layer.feed ? this._feedTexture(layer.feed) : layer.tex);
           gl.uniform1i(pr.u.u_tex, 0);
-          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
         } else {
           // Solid/shape keeps the existing SDF fragment shader (rect / rounded
           // rect / ellipse) — only its quad placement is swapped, so a node
           // element gets a real world orientation without a second shape path.
-          const pr = this.prog.shape;
           gl.useProgram(pr.program);
           gl.uniformMatrix3fv(pr.u.u_mat, false, layer.M);
           gl.uniform2f(pr.u.u_res, W, H);
@@ -1154,8 +1187,20 @@ export class Preview {
           gl.uniform2f(pr.u.u_size, layer.w, layer.h);
           gl.uniform1f(pr.u.u_radius, layer.radius);
           gl.uniform1f(pr.u.u_kind, layer.shape);
-          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
         }
+        if (ownsDepth) {
+          // Depth-only pass: only the parts that really are the picture claim
+          // the pixel. Colour comes from the pass below at u_aCut 0, so a glyph
+          // keeps its anti-aliased rim instead of a one-bit edge.
+          gl.colorMask(false, false, false, false);
+          gl.depthMask(true);
+          gl.uniform1f(pr.u.u_aCut, DEPTH_ALPHA);
+          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+          gl.colorMask(true, true, true, true);
+          gl.depthMask(false);
+          gl.uniform1f(pr.u.u_aCut, 0);
+        }
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
       }
       gl.bindVertexArray(null);
     }
@@ -1329,16 +1374,25 @@ export class Preview {
       const meta = this.project?.meta || {};
       const cyW = (Number(meta.height) || 1080) / 200;
       const camPos = this.scene3d.lastCam?.pos || [0, cyW, 20];
-      // Same order as _drawLayers (spatial-layers.js), walked backwards: nearest
-      // origin first and, on one plane, the top el.z layer first — picking and
-      // the picture can never disagree about which layer is on top.
-      const list = orderLayers(layers, camPos);
-      for (let i = list.length - 1; i >= 0; i--) {
-        const L = list[i];
+      const ray = this.scene3d.ray(cx, cy);
+      // Nearest plane under the cursor, exactly like the depth-tested picture
+      // (§四 4): the pixel's own distance decides, never the draw order, so
+      // picking agrees with what is on screen even where the sort is wrong for
+      // blending. Equal distances mean one plane, whose top `el.z` is what
+      // _drawLayers filled last.
+      let best = null;
+      let bestD = Infinity;
+      for (const L of layers) {
         const poly = this._layerCorners(L);
-        if (poly && pointInPoly(cx, cy, poly)) return L.el.id;
+        if (!poly || !pointInPoly(cx, cy, poly)) continue;
+        const d = (ray && layerRayDepth(L, ray)) ?? layerOriginDistance(L, camPos);
+        const tie = best && Math.abs(d - bestD) <= 1e-6;
+        if (d < bestD - 1e-6 || (tie && Number(L.el.z) > Number(best.el.z))) {
+          best = L;
+          bestD = Math.min(d, bestD);
+        }
       }
-      return null;
+      return best ? best.el.id : null;
     }
     for (let i = layers.length - 1; i >= 0; i--) {
       const L = layers[i];

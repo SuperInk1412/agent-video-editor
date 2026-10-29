@@ -4,8 +4,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  NORMAL_EPS, PLANE_EPS, compareLayerPlanes, layerOriginDistance, layerPlaneDistance, mul4,
-  nodePlaneMatrix, orderLayers, planeOfFrame, sameLayerPlane, transformPlane,
+  LAYER_DEPTH_M, NORMAL_EPS, PLANE_EPS, compareLayerStack, layerOriginDistance, layerPlaneDistance,
+  layerPlaneKey, layerRayDepth, mul4, nodePlaneMatrix, orderLayers, planeOfFrame, sameLayerPlane,
+  transformPlane,
 } from '../app/renderer/js/spatial-layers.js';
 import { basisFromDir } from '../core/scene.js';
 import { frameOf } from '../core/spatial.js';
@@ -148,6 +149,85 @@ test('spatial-layers: a tilted plane sorts by its origin, not by its infinite pl
   assert.deepEqual(orderLayers([bg, lyric], cam), [bg, lyric]);
 });
 
+test('spatial-layers: one plane sorts as one group, so a backdrop never lands between two lyrics', () => {
+  // 问题四 (docs/FIX-LAYER-ORDER-EMPTY-CLICK.md §四): miku-swiss 镜头 02. The
+  // lyrics share one plane and own their stack with `el.z`, while the 96 × 54 m
+  // backdrop is a plane of its own. As the camera slides, the backdrop's ORIGIN
+  // falls BETWEEN the two lyric origins — the old comparator then mixed "el.z"
+  // for the lyric pair with a distance for the pairs against the backdrop,
+  // which is not transitive: f144 backdrop under, f145–147 over, f148 under…
+  // the flicker. Sorting whole plane groups keeps the pair together.
+  const shows = [[-15.41, 9.18, 23.21], [-13.2, 9.0, 24.0], [-11.0, 9.4, 24.6], [-9.0, 9.6, 25.1]];
+  const bg = frameLayer(10, node({ pivot: [0, 5.4, -2] }));
+  const lyricA = frameLayer(60, node({ pivot: [6.6, 6.4, 0] }));
+  const lyricB = frameLayer(66, node({ pivot: [1.408, 6.6, 0] }));
+  assert.equal(layerPlaneKey(lyricA), layerPlaneKey(lyricB), 'the two lyrics are one plane');
+  assert.notEqual(layerPlaneKey(bg), layerPlaneKey(lyricA), 'the backdrop is a plane of its own');
+  const perms = (a) => (a.length <= 1 ? [a]
+    : a.flatMap((v, i) => perms([...a.slice(0, i), ...a.slice(i + 1)]).map((p) => [v, ...p])));
+  for (const cam of shows) {
+    assert.ok(layerOriginDistance(bg, cam) < layerOriginDistance(lyricA, cam), `flicker premise A @ ${cam}`);
+    assert.ok(layerOriginDistance(bg, cam) > layerOriginDistance(lyricB, cam), `flicker premise B @ ${cam}`);
+    for (const input of perms([bg, lyricA, lyricB])) {
+      assert.deepEqual(orderLayers(input, cam).map((L) => L.el.z), [10, 60, 66], `camera ${cam}`);
+    }
+  }
+});
+
+test('spatial-layers: the draw order is a strict total order (shuffling cannot change it)', () => {
+  const cam = [-13.2, 9.0, 24.0];
+  const bg = frameLayer(10, node({ pivot: [0, 5.4, -2] }));
+  const lyricA = frameLayer(60, node({ pivot: [6.6, 6.4, 0] }));
+  const lyricB = frameLayer(66, node({ pivot: [1.408, 6.6, 0] }));
+  const card = frameLayer(70, node({ pivot: [2, 5.4, 3] }));
+  const perms = (a) => (a.length <= 1 ? [a]
+    : a.flatMap((v, i) => perms([...a.slice(0, i), ...a.slice(i + 1)]).map((p) => [v, ...p])));
+  const want = orderLayers([bg, lyricA, lyricB, card], cam).map((L) => L.el.z);
+  for (const input of perms([bg, lyricA, lyricB, card])) {
+    assert.deepEqual(orderLayers(input, cam).map((L) => L.el.z), want);
+  }
+  // Adjacent entries of one group agree with the stack comparator: the sort
+  // never has to fall back on "whatever the engine did".
+  const list = orderLayers([card, lyricB, bg, lyricA], cam);
+  for (let i = 0; i + 1 < list.length; i++) {
+    if (layerPlaneKey(list[i]) !== layerPlaneKey(list[i + 1])) continue;
+    assert.ok(compareLayerStack(list[i], list[i + 1]) <= 0, `stack ${list[i].el.z} then ${list[i + 1].el.z}`);
+  }
+});
+
+test('spatial-layers: ray depth is the picking twin of the depth buffer', () => {
+  const cam = [-13.2, 9.0, 24.0];
+  const bg = frameLayer(10, node({ pivot: [0, 5.4, -2] }));
+  const lyric = frameLayer(66, node({ pivot: [1.408, 6.6, 0] }));
+  // A ray through the lyric's origin hits its own plane exactly there, and the
+  // backdrop plane behind it is farther: that is the pick order the picture has.
+  const to = [1.408 - cam[0], 6.6 - cam[1], -cam[2]];
+  const len = Math.hypot(...to);
+  const ray = { origin: cam, dir: to.map((v) => v / len) };
+  near(layerRayDepth(lyric, ray), len, 1e-9, 'lyric plane hit');
+  assert.ok(layerRayDepth(bg, ray) > layerRayDepth(lyric, ray), 'backdrop plane is behind');
+  // Edge cases: a plane the ray runs parallel to, and one behind the camera.
+  assert.equal(layerRayDepth(lyric, { origin: cam, dir: [1, 0, 0] }), null);
+  assert.equal(layerRayDepth(lyric, { origin: cam, dir: [0, 0, 1] }), null);
+  assert.equal(layerRayDepth({}, ray), null);
+});
+
+test('spatial-layers: a coplanar stack is pushed toward the viewer, as Blender does', () => {
+  // Blender gives every 2D plane `layer_px * z` along its normal (vdm_build.py
+  // ::make_updater); in the unified space one local unit is 0.01 m and
+  // layer_px is 0.01, i.e. LAYER_DEPTH_M = 0.1 mm per layer number.
+  assert.equal(LAYER_DEPTH_M, 1e-4);
+  const frame = frameOf(node({ pivot: [0, 5.4, -2] })); // faces +Z, toward the camera
+  const plain = nodePlaneMatrix(frame, 2, 1);
+  const pushed = nodePlaneMatrix(frame, 2, 1, { depth: LAYER_DEPTH_M * 66 });
+  near([pushed.model[12], pushed.model[13], pushed.model[14]], [0, 5.4, -2 + 0.0066], 1e-5, 'pushed forward');
+  near([plain.model[12], plain.model[13], plain.model[14]], [0, 5.4, -2], 1e-5, 'no depth, no push');
+  near(Math.hypot(pushed.model[0], pushed.model[1], pushed.model[2]), 2, 1e-5, 'size unchanged');
+  // A negative push (an element behind the plane) moves the other way.
+  const back = nodePlaneMatrix(frame, 2, 1, { depth: LAYER_DEPTH_M * -66 });
+  near([back.model[12], back.model[13], back.model[14]], [0, 5.4, -2 - 0.0066], 1e-5, 'pushed back');
+});
+
 test('spatial-layers: one plane keeps el.z from any camera position', () => {
   // Coplanar quads at different origins: origin distance would order them by
   // where they sit, `el.z` owns the stack on one plane from every angle.
@@ -185,8 +265,8 @@ test('spatial-layers: same plane needs both a parallel normal and an equal dista
   const n0 = basisFromDir([0, 0, 1], 0).forward;
   const tilt = basisFromDir([0, 1e-7, 1], 0).forward;
   assert.ok(Math.abs(n0[0] * tilt[0] + n0[1] * tilt[1] + n0[2] * tilt[2] - 1) < NORMAL_EPS);
-  // compareLayerPlanes never returns NaN for missing planes.
-  assert.equal(Number.isFinite(compareLayerPlanes(layer(0), layer(1), CAM)), true);
+  // compareLayerStack never returns NaN for missing planes.
+  assert.equal(Number.isFinite(compareLayerStack(layer(0), layer(1))), true);
 });
 
 test('spatial-layers: a carried plane is pulled toward the camera like the legacy carry', () => {
