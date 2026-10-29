@@ -546,3 +546,14 @@ test('inspect: the documented miku-swiss probes reproduce (optional real data)',
   assert.ok(!text.includes('NaN'));
   assert.deepEqual(JSON.parse(text).stack.hit, 's2_w2');
 });
+
+test('inspect pixelCoverage: needs an element and a real preview', async () => {
+  const { pixelCoverage } = await import('../application/inspect-service.js');
+  // no element -> refused before anything boots
+  await assert.rejects(() => pixelCoverage('.', {}), (e) => e.code === 'INVALID_ARGUMENT');
+  // a missing project directory fails with a coded error, not a raw spawn crash
+  await assert.rejects(
+    () => pixelCoverage('/definitely/not/a/project', { elementId: 'x', f0: 0, f1: 0 }),
+    (e) => e.code === 'PIXEL_PROBE_FAILED' || e.code === 'INVALID_ARGUMENT',
+  );
+});

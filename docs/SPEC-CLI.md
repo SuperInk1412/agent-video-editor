@@ -64,6 +64,9 @@ brief 的每一行对应一个分镜（每段至少 1.2s）；媒体池里的图
 ```bash
 vdm inspect stack --at 5.0 [--point 960,540] [--camera live|cam_8] [--project dir] [--json]
 vdm inspect coverage --frames 142:158 [--focus s2_w2] [--camera cam_8] [--json]
+vdm inspect coverage --mode pixel --element s2_w4 --frames 142:158 [--camera cam_8] [--json]
+                            真像素：同一帧用离屏预览渲染两次（有该元素 / 隐藏它）做差，
+                            给出每帧该元素占多少像素（问题四「歌词像素」那个口径）
 vdm inspect cut-edges [--max-gap 1] [--include-spans] [--json]
 vdm inspect pixel --frame 150 --point 960,540 [--json]
 vdm inspect diff --before dirA --after dirB [--json]

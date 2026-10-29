@@ -639,6 +639,19 @@ function printCoverage(report) {
   }
 }
 
+function printPixelCoverage(report) {
+  const cam = report.camera ? ` · ${report.camera}` : '';
+  console.log(`${C.b(`pixel coverage  ${report.elementId} (${report.elementType})${cam}`)}   ${C.dim(`${report.size[0]}×${report.size[1]} · ${report.fps} fps`)}`);
+  console.log(C.dim('  frame  pixels   ratio     maxΔ  bbox'));
+  for (const row of report.frames) {
+    const bbox = row.bbox ? row.bbox.join(',') : '-';
+    console.log(`  f${String(row.frame).padEnd(5)} ${String(row.pixels).padEnd(8)} ${`${(row.ratio * 100).toFixed(3)}%`.padEnd(9)} ${String(row.maxChannel).padEnd(5)} ${bbox}`);
+  }
+  const counts = report.frames.map((r) => r.pixels);
+  const zero = counts.filter((n) => n === 0).length;
+  console.log(`  ${C.dim('summary')} frames ${counts.length} · zero ${zero === 0 ? C.gr(String(zero)) : C.re(String(zero))} · min ${Math.min(...counts)} · max ${Math.max(...counts)}`);
+}
+
 function printCutEdges(report) {
   console.log(`${C.b(`cut edges  ${report.fps} fps · ${report.maxGapFrames} frame window`)}   ${C.dim(`${report.scanned.cameras} cameras · ${report.scanned.cuts} cuts after t=0 · ${report.scanned.elements} elements / ${report.scanned.edges} edges`)}`);
   console.log(C.dim(`  cuts: ${report.cuts.map((c) => `${c.camera}@f${c.frame}`).join(' ')}`));
@@ -705,6 +718,19 @@ async function cmdInspect(root, argv, flags) {
   if (sub === 'coverage') {
     const frames = inspectFrames(flags.frames);
     if (!frames) throw new Error('inspect coverage needs --frames f0:f1');
+    if (flags.mode === 'pixel') {
+      // Real pixels: the same frame rendered twice through the offscreen app,
+      // once with the element hidden. Needs --element (or --focus).
+      const element = flags.element || flags.focus;
+      if (!element) throw new Error('inspect coverage --mode pixel needs --element <id>');
+      const { pixelCoverage } = await import('../application/inspect-service.js');
+      const report = await pixelCoverage(root, {
+        elementId: element, f0: frames[0], f1: frames[1], camera: flags.camera,
+      });
+      if (flags.json) { console.log(JSON.stringify(report, null, 2)); return; }
+      printPixelCoverage(report);
+      return;
+    }
     const report = inspectCoverage(project, {
       f0: frames[0], f1: frames[1], camera: flags.camera, focus: flags.focus,
       point: inspectPoint(flags.point), grid: flags.grid != null ? num(flags.grid) : undefined,

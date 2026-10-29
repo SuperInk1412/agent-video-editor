@@ -47,6 +47,9 @@
 // which one it used (`sizeSource`), so an estimate is never mistaken for a
 // measurement.
 
+import { spawn } from 'node:child_process';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { loadProject } from '../engine/storage.js';
 import { compileProject } from '../core/tracks.js';
 import { buildFrameIR, itemModelMatrix, FRAME_IR_VERSION } from '../core/frame-ir.js';
@@ -55,6 +58,9 @@ import {
   layerOriginDistance, layerRayDepth, mul4, orderLayers,
 } from '../core/layers.js';
 import { fault } from './errors.js';
+
+/** Repo root, for the offscreen pixel probe (the only measurement that needs Electron). */
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 /** Bump when the shape of a report changes (this module never writes a project). */
 export const INSPECT_VERSION = 1;
@@ -924,6 +930,55 @@ function objectChanges(id, kind, before, after, out) {
  * `ignore` defaults to the fields that differ between any two revisions of the
  * same file (`rev`, `meta.savedAt`); pass more paths to hide editor state.
  */
+/**
+ * Real pixels: how many pixels does `elementId` contribute in each frame?
+ *
+ * The geometric `coverage()` above answers "does this element cover this point
+ * and who is in front"; this answers "how much of the picture is it", which is
+ * the number the FIX document reports for problem four (歌词像素). It needs the
+ * real preview, so it boots the app offscreen and renders each frame twice —
+ * with the element and with it hidden — then counts the difference
+ * (`app/renderer/js/inspect-probe.js` + `scripts/inspect-pixels.mjs`).
+ *
+ * `projectDir` is a project directory (a `.scratch/` copy when you do not want
+ * to touch the user's project; the probe never writes to it).
+ */
+export async function pixelCoverage(projectDir, opts = {}) {
+  const elementId = opts.elementId || opts.element;
+  if (!elementId) throw fault('INVALID_ARGUMENT', 'pixelCoverage needs elementId');
+  const dir = path.resolve(projectDir);
+  const f0 = Math.max(0, Math.round(num(opts.f0, num(opts.from, 0))));
+  const f1 = Math.max(f0, Math.round(num(opts.f1, num(opts.to, f0))));
+  const args = [
+    path.join(REPO_ROOT, 'scripts', 'inspect-pixels.mjs'),
+    '--project', dir,
+    '--element', String(elementId),
+    '--frames', `${f0}:${f1}`,
+    '--json',
+  ];
+  if (opts.camera) args.push('--camera', String(opts.camera));
+  const run = await new Promise((resolve) => {
+    const child = spawn(process.execPath, args, { cwd: REPO_ROOT, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    let out = '';
+    let err = '';
+    child.stdout.on('data', (d) => { out += String(d); });
+    child.stderr.on('data', (d) => { err += String(d); });
+    child.on('error', (error) => resolve({ code: -1, out, err: String(error.message) }));
+    child.on('close', (code) => resolve({ code, out, err }));
+  });
+  if (run.code !== 0) {
+    throw fault('PIXEL_PROBE_FAILED', `pixel coverage failed: ${(run.err || run.out).trim().split(String.fromCharCode(10)).slice(-3).join(' | ')}`, {
+      exitCode: run.code,
+    });
+  }
+  const line = run.out.trim().split(String.fromCharCode(10)).filter(Boolean).pop();
+  try {
+    return JSON.parse(line);
+  } catch (error) {
+    throw fault('PIXEL_PROBE_FAILED', `pixel coverage printed something unexpected: ${line.slice(0, 200)}`, { error: error.message });
+  }
+}
+
 export function diff(a, b, opts = {}) {
   if (!a || !b || typeof a !== 'object' || typeof b !== 'object') {
     throw fault('INVALID_ARGUMENT', 'diff needs two project objects');
