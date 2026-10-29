@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  keyframeMoveOps, normalizeFps, frameIndex, frameKeyTimeForFrame,
+  keyframeMoveOps, normalizeFps, frameIndex, frameKeyTimeForFrame, snapKeyframeTimes,
 } from '../core/keyframe-edit.js';
 import * as rendererMath from '../app/renderer/js/timeline-math.js';
 import {
@@ -403,4 +403,34 @@ test('keyframe-edit: 3D / camera-param curves are re-attached with their host', 
   assert.equal(p.scene.objects[0].tracks['pivot.x'][0].curve.preset, 'easeOut');
   assert.equal(p.cameras[0].tracks.fov[0].curve.preset, 'easeIn');
   assert.deepEqual(p.cameras[0].tracks.fov.map((k) => k.t), [at(0, 1), 2]);
+});
+
+test('keyframe-edit: snapKeyframeTimes leaves whole-frame times alone', () => {
+  const res = snapKeyframeTimes([0.5, 1, 1.5], { fps: 24 });
+  assert.deepEqual(res.times, [0.5, 1, 1.5]);
+  assert.equal(res.moved, 0);
+  assert.deepEqual(snapKeyframeTimes([], {}), { times: [], moved: 0 });
+});
+
+test('keyframe-edit: snapKeyframeTimes pulls off-grid inner keys to the nearest frame', () => {
+  // 24 fps: frame 24 is 1.000s, frame 25 is 1.042s.
+  const res = snapKeyframeTimes([1.02, 1.6], { fps: 24 });
+  assert.deepEqual(res.times, [1, 1.584]);
+  assert.equal(res.moved, 2);
+});
+
+test('keyframe-edit: colliding frames slide forward instead of stacking', () => {
+  // 0.010s and 0.020s both round to frame 0.
+  const res = snapKeyframeTimes([0.01, 0.02], { fps: 24 });
+  assert.deepEqual(res.times, [0, 0.042]);
+  for (let i = 1; i < res.times.length; i++) {
+    assert.ok(res.times[i] > res.times[i - 1], 'strictly increasing');
+  }
+});
+
+test('keyframe-edit: snapKeyframeTimes refuses when the anchor leaves no room', () => {
+  assert.equal(snapKeyframeTimes([0.01, 0.02], { fps: 24, from: 0, to: 0.03 }), null,
+    'the second key would have to land past the anchor');
+  const ok = snapKeyframeTimes([0.2], { fps: 24, from: 0, to: 2 });
+  assert.deepEqual(ok.times, [0.209]);
 });

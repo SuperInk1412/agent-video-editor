@@ -68,6 +68,53 @@ const emptyResult = (error = null) => ({
   ops: [], batch: null, moves: [], deltaFrames: 0, error,
 });
 
+/**
+ * Snap a run of key times onto whole frames ("对齐到帧" in the curve panel).
+ *
+ * Inner keys are retimed off the frame grid on purpose, so the panel offers a
+ * one-shot cleanup. Every time moves to the frame *nearest* to it; when two
+ * land on the same frame the later one slides to the next free frame, so the
+ * order never changes. Returns null when there is no free frame left inside
+ * `(from, to)` — the caller then refuses the gesture instead of stacking keys.
+ *
+ * @param {number[]} times  ascending key times (s)
+ * @param {object}   opts   `{ fps, from, to }` — `from`/`to` are the anchors
+ *                          that must stay untouched (strict inside bounds)
+ * @returns {{times: number[], moved: number}|null}
+ */
+export function snapKeyframeTimes(times, { fps = 24, from = null, to = null } = {}) {
+  const rate = normalizeFps(fps);
+  const list = (Array.isArray(times) ? times : []).map(Number).filter(Number.isFinite);
+  if (!list.length) return { times: [], moved: 0 };
+  // `Number(null) === 0`: a missing bound must stay missing, not become 0s.
+  const bound = (v) => (v == null || v === ''
+    ? null
+    : (Number.isFinite(Number(v)) ? Number(v) : null));
+  const lo = bound(from);
+  const hi = bound(to);
+  const out = [];
+  let last = null;
+  let moved = 0;
+  for (const t of list) {
+    let frame = Math.round(t * rate);
+    let candidate = frameKeyTimeForFrame(frame, rate);
+    // Nearest free frame that is still strictly after the previous key.
+    while (last != null && candidate <= last + TIME_EPS) {
+      frame += 1;
+      candidate = frameKeyTimeForFrame(frame, rate);
+    }
+    if (lo != null && candidate <= lo + TIME_EPS) {
+      frame = Math.floor(lo * rate) + 1;
+      candidate = frameKeyTimeForFrame(frame, rate);
+    }
+    if (hi != null && candidate >= hi - TIME_EPS) return null;
+    if (Math.abs(candidate - t) > TIME_EPS) moved += 1;
+    out.push(candidate);
+    last = candidate;
+  }
+  return { times: out, moved };
+}
+
 const trackKeyOf = (type, id, path) => `${type}:${id}:${path}`;
 
 /** Remember every real op track a ref touches, with the track's full key list. */
