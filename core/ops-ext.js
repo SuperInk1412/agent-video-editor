@@ -18,10 +18,127 @@
 
 import { HIERARCHY_OP_KINDS, applyHierarchyOp, ELEMENT_PARENT_OP_KINDS, applyElementParentOp } from './hierarchy.js';
 import { LEGACY_PARENT_OP_KINDS, PARENT_STRENGTH_OP_KINDS, applyParentStrengthOp } from './parent-strength.js';
+import {
+  SOURCE_MANIFEST, coerceParamValue, isCodeElement, isSafeParamName, isSafeSourceFile, isSafeSourceId,
+  manifestIssues, sourceParams, sourceRecord, writeCodeParam,
+} from './code-layer.js';
 
 // The old 3D parent op names (objectParent, …) now write spatial parents
 // (core/parent-strength.js); HIERARCHY_OP_KINDS keeps listing them.
-export const EXT_OP_KINDS = [...new Set([...HIERARCHY_OP_KINDS, ...ELEMENT_PARENT_OP_KINDS, ...PARENT_STRENGTH_OP_KINDS])];
+//
+// -- code layers (§6.1) -----------------------------------------------------
+//
+// `sources/<id>/` is a directory, so the project document owns the registry
+// (`project.sources[]` = manifest + file texts) and the CLI / runtime materialise
+// it with `core/code-layer.js::sourceFiles()`. That keeps every source edit
+// inside the op log: locked, rev-checked, undoable, and visible to the agent.
+
+export const CODE_OP_KINDS = Object.freeze(['sourceAdd', 'sourceWrite', 'sourceRemove', 'codeParamSet']);
+
+export const EXT_OP_KINDS = [...new Set([
+  ...HIERARCHY_OP_KINDS, ...ELEMENT_PARENT_OP_KINDS, ...PARENT_STRENGTH_OP_KINDS, ...CODE_OP_KINDS,
+])];
+
+const str = (value, d = '') => (value === undefined || value === null ? d : String(value));
+
+/** Create or replace a registered source (`manifest` + `files`). */
+function sourceAdd(project, op, fail) {
+  const id = str(op.id);
+  if (!isSafeSourceId(id)) fail(`sourceAdd: id 必须是 [A-Za-z0-9][A-Za-z0-9_-]{0,63}，收到 ${JSON.stringify(op.id)}`);
+  if (!op.manifest || typeof op.manifest !== 'object' || Array.isArray(op.manifest)) {
+    fail('sourceAdd 需要 manifest 对象（就是 sources/<id>/manifest.json 的内容）');
+  }
+  const issues = manifestIssues(op.manifest, 'manifest');
+  if (issues.length) fail(`sourceAdd: ${issues[0].path} ${issues[0].msg}`);
+  const given = op.files === undefined ? {} : op.files;
+  if (!given || typeof given !== 'object' || Array.isArray(given)) fail('sourceAdd: files 必须是 { 相对路径: 文本 }');
+  const files = {};
+  for (const rel of Object.keys(given)) {
+    if (typeof given[rel] !== 'string') fail(`sourceAdd: files["${rel}"] 必须是字符串`);
+    if (rel === SOURCE_MANIFEST) fail('sourceAdd: manifest.json 由 manifest 字段生成，不要放进 files');
+    if (!isSafeSourceFile(rel)) fail(`sourceAdd: files 里的路径不安全 ${JSON.stringify(rel)}`);
+    files[rel] = given[rel];
+  }
+  // The directory name is the id: keep the two in sync no matter what the
+  // caller put in the manifest body.
+  const manifest = { ...op.manifest, id };
+  const list = Array.isArray(project.sources) ? project.sources : (project.sources = []);
+  const index = list.findIndex((entry) => entry && typeof entry === 'object' && str(entry.id) === id);
+  const record = { id, manifest, files };
+  if (index >= 0) list[index] = record; else list.push(record);
+  list.sort((a, b) => (str(a?.id) < str(b?.id) ? -1 : str(a?.id) > str(b?.id) ? 1 : 0));
+  return { changed: [id], source: record };
+}
+
+/** Replace one text file of a registered source. */
+function sourceWrite(project, op, fail) {
+  const id = str(op.id);
+  const record = sourceRecord(project, id);
+  if (!record) fail(`sourceWrite: 没有源 ${id}（先 vdm source new）`);
+  const rel = str(op.path);
+  if (rel === SOURCE_MANIFEST) fail('sourceWrite: 改 manifest 用 sourceAdd（它会重新校验参数格式）');
+  if (!isSafeSourceFile(rel)) fail(`sourceWrite: 路径不安全 ${JSON.stringify(op.path)}`);
+  if (typeof op.content !== 'string') fail('sourceWrite 需要 content 字符串');
+  const files = record.files && typeof record.files === 'object' && !Array.isArray(record.files) ? { ...record.files } : {};
+  if (files[rel] === op.content) return { changed: [] };
+  files[rel] = op.content;
+  record.files = files;
+  return { changed: [id], path: rel, bytes: op.content.length };
+}
+
+/** Drop a registered source. Refuses while a `code` element still uses it. */
+function sourceRemove(project, op, fail) {
+  const id = str(op.id);
+  const list = Array.isArray(project.sources) ? project.sources : null;
+  const index = list ? list.findIndex((entry) => entry && typeof entry === 'object' && str(entry.id) === id) : -1;
+  if (index < 0) fail(`sourceRemove: 没有源 ${id}`);
+  const users = (Array.isArray(project.elements) ? project.elements : [])
+    .filter((el) => isCodeElement(el) && str(el.code?.source) === id)
+    .map((el) => str(el.id));
+  if (users.length) {
+    fail(`sourceRemove: 源 ${id} 还被 ${users.join(', ')} 使用 —— 先把这些元素的 code.source 改掉或删掉再删源`);
+  }
+  list.splice(index, 1);
+  if (!list.length) delete project.sources;
+  return { changed: [id] };
+}
+
+/**
+ * Set one source parameter on a `code` element. Keyframes still go through the
+ * existing `keySet`; when the parameter is already keyed this writes the key at
+ * `t` (same rule as every other keyed property, core/links.js::setElementValue).
+ */
+function codeParamSet(project, op, fail, api) {
+  const id = str(op.id);
+  // `api.findElement` is already bound to the project: `findElement(id)`.
+  const find = typeof api?.findElement === 'function' ? api.findElement : null;
+  const el = find
+    ? find(id)
+    : (Array.isArray(project.elements) ? project.elements.find((e) => str(e?.id) === id) : null);
+  if (!el) fail(`codeParamSet: 没有元素 ${id}`);
+  if (!isCodeElement(el)) fail(`codeParamSet: ${id} 不是 code 元素（type 是 ${el.type}），普通属性请用 set / keySet`);
+  const name = str(op.name);
+  if (!isSafeParamName(name)) fail(`codeParamSet: 参数名必须是 [A-Za-z_][A-Za-z0-9_]*，收到 ${JSON.stringify(op.name)}`);
+  const declared = sourceParams(project, str(el.code?.source)).find((param) => str(param?.id) === name) || null;
+  const raw = op.value === undefined ? op.v : op.value;
+  if (raw === undefined) fail('codeParamSet 需要 value');
+  let value = coerceParamValue(declared?.type, raw);
+  if (typeof value === 'number' && Array.isArray(declared?.range) && declared.range.length >= 2) {
+    const min = Number(declared.range[0]);
+    const max = Number(declared.range[1]);
+    if (Number.isFinite(min) && Number.isFinite(max) && max >= min) value = Math.min(max, Math.max(min, value));
+  }
+  const t = Number.isFinite(Number(op.t)) ? Math.max(0, Number(op.t)) : 0;
+  const written = writeCodeParam(el, name, value, t);
+  return {
+    changed: [str(el.id)],
+    param: name,
+    path: written.path,
+    key: written.key,
+    value: written.value,
+    declared: !!declared,
+  };
+}
 
 /**
  * @param {object} project
@@ -33,5 +150,14 @@ export function applyExtOp(project, op, api) {
   if (LEGACY_PARENT_OP_KINDS.includes(op?.op) || PARENT_STRENGTH_OP_KINDS.includes(op?.op)) return applyParentStrengthOp(project, op, api);
   if (HIERARCHY_OP_KINDS.includes(op?.op)) return applyHierarchyOp(project, op, api);
   if (ELEMENT_PARENT_OP_KINDS.includes(op?.op)) return applyElementParentOp(project, op, api);
+  if (CODE_OP_KINDS.includes(op?.op)) {
+    const fail = typeof api?.fail === 'function' ? api.fail : (message) => {
+      throw Object.assign(new Error(message), { code: 'OP_INVALID' });
+    };
+    if (op.op === 'sourceAdd') return sourceAdd(project, op, fail);
+    if (op.op === 'sourceWrite') return sourceWrite(project, op, fail);
+    if (op.op === 'sourceRemove') return sourceRemove(project, op, fail);
+    return codeParamSet(project, op, fail, api);
+  }
   return null;
 }

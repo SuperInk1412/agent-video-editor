@@ -1,0 +1,51 @@
+{
+  "format": "vdm.source/1",
+  "id": "src_p5",
+  "label": "p5 起步模板",
+  "runtime": "p5",
+  "entry": "sketch.js",
+  "libs": { "p5": "1.9.4" },
+  "deterministic": true,
+  "params": [
+    {
+      "id": "density",
+      "label": "密度",
+      "group": "shape",
+      "type": "number",
+      "unit": "",
+      "default": 0.5,
+      "range": [0, 1],
+      "step": 0.01,
+      "keyable": "frame"
+    },
+    {
+      "id": "count",
+      "label": "格数",
+      "group": "shape",
+      "type": "int",
+      "default": 9,
+      "range": [2, 24],
+      "step": 1,
+      "keyable": "frame"
+    },
+    {
+      "id": "speed",
+      "label": "速度",
+      "group": "motion",
+      "type": "number",
+      "unit": "",
+      "default": 0.6,
+      "range": [0, 4],
+      "step": 0.05,
+      "keyable": "frame"
+    },
+    {
+      "id": "tint",
+      "label": "颜色",
+      "group": "style",
+      "type": "color",
+      "default": "#ffd166",
+      "keyable": "frame"
+    }
+  ]
+}

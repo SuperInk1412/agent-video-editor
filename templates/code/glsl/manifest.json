@@ -1,0 +1,40 @@
+{
+  "format": "vdm.source/1",
+  "id": "src_glsl",
+  "label": "glsl 起步模板",
+  "runtime": "glsl",
+  "entry": "shader.frag",
+  "deterministic": true,
+  "params": [
+    {
+      "id": "speed",
+      "label": "速度",
+      "group": "motion",
+      "type": "number",
+      "unit": "",
+      "default": 0.6,
+      "range": [0, 4],
+      "step": 0.05,
+      "keyable": "frame"
+    },
+    {
+      "id": "grid",
+      "label": "环数",
+      "group": "shape",
+      "type": "number",
+      "unit": "",
+      "default": 6,
+      "range": [1, 24],
+      "step": 1,
+      "keyable": "frame"
+    },
+    {
+      "id": "tint",
+      "label": "颜色",
+      "group": "style",
+      "type": "color",
+      "default": "#7af0c8",
+      "keyable": "frame"
+    }
+  ]
+}

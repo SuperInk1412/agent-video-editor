@@ -8,11 +8,14 @@ import { linkIssues, normalizeLinks, projectLinkIssues } from './links.js';
 import { feedIssues } from './camfeed.js';
 import { dirRollFromRotation, normalizeRotation } from './rotation.js';
 import { normalizeCustomPresets } from './curves.js';
+import { codeIssues, isSafeSourceFile, manifestIssues, normalizeCode, normalizeSources, sourceManifest, SOURCE_MANIFEST } from './code-layer.js';
 // A "project" is the single source of truth on disk: <project>/project.vdm.json
 
 export const SCHEMA = PROJECT_SCHEMA;
 
-export const ELEMENT_TYPES = ['image', 'video', 'text', 'solid', 'shape', 'audio', 'camfeed'];
+// `code` = a raster layer drawn by a sandboxed source (DESIGN-BACKEND-V2 §6.1,
+// core/code-layer.js). Its data lives in `element.code`.
+export const ELEMENT_TYPES = ['image', 'video', 'text', 'solid', 'shape', 'audio', 'camfeed', 'code'];
 export const SEGMENT_STATUS = ['draft', 'previewed', 'approved'];
 
 export const DEFAULT_TRANSFORM = { x: 0, y: 0, scale: 1, rotation: 0, opacity: 1 };
@@ -328,6 +331,10 @@ export function normalizeProject(p) {
     throw Object.assign(new Error('segments and elements must be arrays of objects'), { code: 'OP_INVALID' });
   }
 
+  // Code sources (§6.1) travel with the project; the disk copy under
+  // `sources/<id>/` is derived from this registry (core/code-layer.js).
+  if (p.sources !== undefined) p.sources = normalizeSources(p.sources);
+
   const segIds = new Set(p.segments.map((s) => s.id));
   p.segments = p.segments.map((s) => ({
     start: 0,
@@ -355,6 +362,9 @@ export function normalizeProject(p) {
     e.keyframes ??= [];
     e.visible = e.visible !== false;
     e.name = e.name || (e.type === 'text' ? (e.style.text || 'text') : e.type);
+    // Code layers carry one extra block (§6.1); everything else is shared with
+    // the 2D element model (a code layer is a normal node plane in 3D).
+    if (e.type === 'code') e.code = normalizeCode(e.code, sourceManifest(p, isRecord(e.code) ? e.code.source : ''));
     normalizeHostLinks(e);
     normalizeLocked(e);
     return e;
@@ -474,6 +484,10 @@ export function validateProject(p) {
     }
     if (e.node !== undefined) issues.push(...spatialNodeIssues(e.node, `${at}.node`));
     issues.push(...feedIssues(e, at));
+    if (e.type === 'code') {
+      if (e.code === undefined) push(`${at}.code`, 'code element needs a code block');
+      else issues.push(...codeIssues(e.code, `${at}.code`));
+    }
     if (e.links !== undefined) issues.push(...linkIssues(e.links, `${at}.links`));
     if (e.style?.size !== undefined) number(e.style.size, `${at}.style.size`, { min: 0 });
     if (e.segment && !segIds.has(e.segment)) push(`elements[${i}].segment`, `unknown segment ${e.segment}`);
@@ -532,6 +546,23 @@ export function validateProject(p) {
       if (obj.links !== undefined) issues.push(...linkIssues(obj.links, `${at}.links`));
       if (obj.geom !== undefined && record(obj.geom, `${at}.geom`)) for (const name of ['w', 'h', 'd']) number(obj.geom[name], `${at}.geom.${name}`, { min: 0, exclusive: true });
       tracks(obj.tracks, `${at}.tracks`);
+    });
+  }
+  // Code sources (§6.1): ids, manifest shape, safe file paths.
+  if (p.sources !== undefined) {
+    array(p.sources, 'sources', true).forEach((entry, i) => {
+      const at = `sources[${i}]`;
+      if (!record(entry, at)) return;
+      if (typeof entry.id !== 'string' || !entry.id) push(`${at}.id`, 'must be a nonempty source id');
+      else if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(entry.id)) push(`${at}.id`, 'must match [A-Za-z0-9][A-Za-z0-9_-]{0,63}');
+      issues.push(...manifestIssues(entry.manifest, `${at}.manifest`));
+      if (entry.files !== undefined && record(entry.files, `${at}.files`)) {
+        for (const rel of Object.keys(entry.files)) {
+          if (rel === SOURCE_MANIFEST) push(`${at}.files.${rel}`, 'manifest.json is generated from manifest');
+          else if (!isSafeSourceFile(rel)) push(`${at}.files.${rel}`, 'unsafe relative path');
+          else if (typeof entry.files[rel] !== 'string') push(`${at}.files.${rel}`, 'must be a string');
+        }
+      }
     });
   }
   // Cross-host link graph: known hosts/paths, matching units, no cycles/depth.

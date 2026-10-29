@@ -6,12 +6,18 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  paths, findProjectRoot, projectExists,
+  paths, findProjectRoot, projectExists, loadProject,
 } from '../engine/storage.js';
 import { projectService as localProjectService } from '../engine/projects.js';
 import { connectRuntime } from '../engine/runtime.js';
 import { errorData } from '../application/errors.js';
 import { coerceValue } from '../core/ops.js';
+import { newId } from '../core/schema.js';
+import {
+  CODE_RUNTIMES, DEFAULT_FRAME_BUDGET_MS, evaluateContractCheck, isSafeSourceId,
+  manifestIssues, paramProbes, scanSourceFiles, sourceFiles, sourceIds, sourceRecord,
+} from '../core/code-layer.js';
+import { createRenderPool, resolveParams } from '../engine/render-workers/pool.js';
 import { evalElement } from '../core/evaluate.js';
 import { migrateProject, orthoScreen, evaluateMigratedObject } from '../core/migrate.js';
 import { objectPose } from '../core/scene.js';
@@ -765,6 +771,273 @@ async function cmdInspect(root, argv, flags) {
   throw new Error(`unknown inspect subcommand ${sub}`);
 }
 
+// ---------------------------------------------------------------------------
+// 代码图层源（docs/DESIGN-BACKEND-V2.md §6.1 / §6.3）
+//
+//   vdm source ls
+//   vdm source new --runtime p5 [--id src_x] [--force]
+//   vdm source write <id> <path> --content "…" | --file a.js
+//   vdm source rm <id>
+//   vdm source check <id> [--frame 0] [--size 640x360] [--budget 200] [--json]
+//
+// 源的真身在项目文档的 `sources[]` 里（改它必须走 core/ops.js），
+// `sources/<id>/` 是给渲染池读的派生物；`source new|write|check` 会顺手同步。
+// ---------------------------------------------------------------------------
+
+const SOURCE_TEMPLATES = path.join(REPO, 'templates', 'code');
+const SOURCE_DIR = 'sources';
+const SOURCE_TEXT_RE = /\.(?:js|mjs|cjs|ts|frag|glsl|vert|json|md|txt|css|html|svg)$/i;
+
+async function readSourceDir(root, sourceId) {
+  const dir = path.join(root, SOURCE_DIR, sourceId);
+  const files = [];
+  const walk = async (current, prefix) => {
+    let entries;
+    try {
+      entries = await fsp.readdir(current, { withFileTypes: true });
+    } catch (e) {
+      if (e.code === 'ENOENT') return;
+      throw e;
+    }
+    for (const entry of entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
+      if (entry.name.startsWith('.')) continue;
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) { await walk(full, `${prefix}${entry.name}/`); continue; }
+      if (!entry.isFile() || !SOURCE_TEXT_RE.test(entry.name)) continue;
+      files.push({ path: `${prefix}${entry.name}`, content: await fsp.readFile(full, 'utf8') });
+    }
+  };
+  await walk(dir, '');
+  return files;
+}
+
+async function writeSourceFiles(root, sourceId, files) {
+  const dir = path.join(root, SOURCE_DIR, sourceId);
+  await fsp.mkdir(dir, { recursive: true });
+  for (const file of files) {
+    const target = path.join(dir, file.path);
+    await fsp.mkdir(path.dirname(target), { recursive: true });
+    await fsp.writeFile(target, file.content, 'utf8');
+  }
+  return dir;
+}
+
+/** Refresh `sources/<id>/` from the registered copy (the pool reads the disk). */
+async function materializeSource(root, project, sourceId) {
+  const files = sourceFiles(project, sourceId);
+  if (!files.length) return null;
+  return writeSourceFiles(root, sourceId, files);
+}
+
+/** alpha 统计（契约检查第 3 项）：全透明 / 全不透明都要说清楚。 */
+function alphaStats(rgba, size) {
+  if (!rgba || !rgba.length) return null;
+  let min = 255;
+  let max = 0;
+  let transparent = 0;
+  const pixels = rgba.length / 4;
+  for (let i = 3; i < rgba.length; i += 4) {
+    const a = rgba[i];
+    if (a < min) min = a;
+    if (a > max) max = a;
+    if (a === 0) transparent += 1;
+  }
+  return { min, max, transparentFraction: pixels ? transparent / pixels : 0, width: size[0], height: size[1] };
+}
+
+function parseSizeFlag(value, fallback) {
+  if (value == null || value === true) return fallback;
+  const [w, h] = String(value).toLowerCase().split('x').map((n) => Math.round(Number(n)));
+  if (!(w > 0 && h > 0)) throw new Error(`--size 需要 宽x高，例如 640x360，收到 ${value}`);
+  return [w, h];
+}
+
+const CHECK_MARK = (status) => (status === 'pass' ? C.gr('✓') : status === 'warn' ? C.ye('!') : C.re('✗'));
+
+function printSourceCheck(verdict) {
+  const head = `${C.b(verdict.sourceId)} ${C.dim(`${verdict.runtime} · ${verdict.size[0]}x${verdict.size[1]} · 第 ${verdict.frame} 帧 · ${verdict.fps}fps`)}`;
+  console.log(head);
+  for (const check of verdict.checks) {
+    console.log(`  ${CHECK_MARK(check.status)} ${check.title.padEnd(20)} ${C.dim(check.detail)}`);
+  }
+  const { counts } = verdict;
+  console.log(verdict.ok
+    ? C.gr(`PASS  ${counts.pass} 通过 · ${counts.warn} 提示 · 0 失败`)
+    : C.re(`FAIL  ${counts.fail} 项未通过（${verdict.checks.filter((c) => c.status === 'fail').map((c) => c.title).join('、')}）`));
+}
+
+/**
+ * 契约检查五项（§6.3）：静态扫描、同帧两次哈希、透明通道、单帧耗时、
+ * manifest 参数是否真的被读取。渲染复用 RenderWorkerPool（不另写光栅器）。
+ */
+async function sourceCheck(root, sourceId, flags) {
+  if (!isSafeSourceId(sourceId)) throw new Error(`源 id 不合法：${sourceId}`);
+  const project = await loadProject(root);
+  const registered = sourceRecord(project, sourceId);
+  const dir = registered
+    ? await materializeSource(root, project, sourceId)
+    : path.join(root, SOURCE_DIR, sourceId);
+  let manifest;
+  try {
+    manifest = JSON.parse(await fsp.readFile(path.join(dir, 'manifest.json'), 'utf8'));
+  } catch {
+    throw new Error(`源 ${sourceId} 读不到 manifest.json（${SOURCE_DIR}/${sourceId}/）—— 先 vdm source new --runtime <runtime>`);
+  }
+  const shape = manifestIssues(manifest);
+  if (shape.length) throw new Error(`源 ${sourceId} 的 manifest.json 有问题：${shape[0].path} ${shape[0].msg}`);
+
+  const runtime = String(manifest.runtime);
+  const files = await readSourceDir(root, sourceId);
+  const scan = scanSourceFiles(files, { runtime });
+  const size = parseSizeFlag(flags.size, [640, 360]);
+  const fps = Number(project.meta?.fps) || 24;
+  const frame = flags.frame != null ? Math.max(0, Math.round(num(flags.frame))) : 0;
+  const laterFrame = frame + Math.max(1, Math.round(fps / 2));
+  const seed = flags.seed != null ? Math.round(num(flags.seed)) : 0;
+  const budgetMs = flags.budget != null ? num(flags.budget) : DEFAULT_FRAME_BUDGET_MS;
+  const params = resolveParams(manifest, {});
+  // The budget is generous here on purpose: a frame that is merely too slow must
+  // still be measured (and reported), not killed before it produces a number.
+  const pool = createRenderPool({ root, timeoutMs: Math.max(1000, budgetMs * 4) });
+  const render = (input) => pool.render({
+    sourceId, runtime, fps, size, seed, useCache: false, frame, params, ...input,
+  });
+  try {
+    const first = await render({ wantRgba: true });
+    const second = await render({ wantRgba: false });
+    const baseline = new Map([[frame, first.hash]]);
+    const paramResults = [];
+    for (const probe of paramProbes(manifest, { params })) {
+      const probedParams = { ...params, [probe.id]: probe.to };
+      const result = { id: probe.id, changed: false, from: probe.from, to: probe.to, frame, error: null };
+      for (const at of [frame, laterFrame]) {
+        if (!baseline.has(at)) baseline.set(at, (await render({ frame: at })).hash);
+        const probed = await render({ frame: at, params: probedParams });
+        result.frame = at;
+        if (probed.hash !== baseline.get(at)) { result.changed = true; break; }
+      }
+      paramResults.push(result);
+    }
+    const verdict = evaluateContractCheck({
+      sourceId,
+      runtime,
+      manifest,
+      scan,
+      frame,
+      determinism: { frame, hash: first.hash, hashAgain: second.hash, same: first.hash === second.hash },
+      alpha: alphaStats(first.rgba, size),
+      timing: { ms: Math.max(first.ms, second.ms), budgetMs, frames: 2 },
+      params: paramResults,
+    });
+    return { ...verdict, manifest, size, fps, frame, ms: Math.max(first.ms, second.ms) };
+  } finally {
+    await pool.close();
+  }
+}
+
+async function cmdSource(root, rest, flags) {
+  const sub = rest[0] || 'ls';
+
+  if (sub === 'ls') {
+    const project = await loadProject(root);
+    const registered = sourceIds(project);
+    const rows = registered.map((id) => {
+      const record = sourceRecord(project, id);
+      return {
+        id,
+        runtime: record?.manifest?.runtime ?? null,
+        entry: record?.manifest?.entry ?? null,
+        params: Array.isArray(record?.manifest?.params) ? record.manifest.params.length : 0,
+        registered: true,
+        dir: fs.existsSync(path.join(root, SOURCE_DIR, id)),
+      };
+    });
+    let onDisk = [];
+    try {
+      onDisk = (await fsp.readdir(path.join(root, SOURCE_DIR), { withFileTypes: true }))
+        .filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+    } catch { /* no sources/ yet */ }
+    for (const id of onDisk.sort()) {
+      if (!registered.includes(id)) rows.push({ id, runtime: null, entry: null, params: 0, registered: false, dir: true });
+    }
+    if (flags.json) { console.log(JSON.stringify(rows, null, 2)); return; }
+    if (!rows.length) { console.log(C.dim('还没有代码源：vdm source new --runtime canvas2d')); return; }
+    for (const row of rows) {
+      const tag = row.registered ? '' : C.ye('  (只在磁盘上，未注册)');
+      console.log(`  ${C.mag(row.id.padEnd(12))} ${String(row.runtime ?? '-').padEnd(9)} ${String(row.params).padStart(2)} 参数  ${C.dim(row.entry ?? '')}${tag}`);
+    }
+    return;
+  }
+
+  if (sub === 'new') {
+    const runtime = String(flags.runtime ?? '');
+    if (!CODE_RUNTIMES.includes(runtime)) {
+      throw new Error(`--runtime 需要 ${CODE_RUNTIMES.join(' / ')}，收到 ${flags.runtime ?? '(空)'}`);
+    }
+    const templateDir = path.join(SOURCE_TEMPLATES, runtime);
+    const manifest = JSON.parse(await fsp.readFile(path.join(templateDir, 'manifest.json'), 'utf8'));
+    const files = {};
+    for (const name of await fsp.readdir(templateDir)) {
+      if (name === 'manifest.json') continue;
+      files[name] = await fsp.readFile(path.join(templateDir, name), 'utf8');
+    }
+    const project = await loadProject(root);
+    const taken = new Set(sourceIds(project));
+    // newId() adds to the set it is given: snapshot first so the duplicate check
+    // below only sees ids that were already there.
+    const id = flags.id ? String(flags.id) : newId('src', new Set(taken));
+    if (!isSafeSourceId(id)) throw new Error('--id 必须匹配 [A-Za-z0-9][A-Za-z0-9_-]{0,63}');
+    if (taken.has(id) && !flags.force) throw new Error(`源 ${id} 已经存在（要覆盖加 --force）`);
+    const record = { id, manifest: { ...manifest, id }, files };
+    await edit(root, { op: 'sourceAdd', id, manifest: record.manifest, files }, flags);
+    const written = flags['dry-run'] ? null : await writeSourceFiles(root, id, sourceFiles({ sources: [record] }, id));
+    if (flags.json) {
+      console.log(JSON.stringify({ id, runtime, entry: record.manifest.entry, dir: written, files: Object.keys(files).sort(), dryRun: !!flags['dry-run'] }, null, 2));
+      return;
+    }
+    console.log(`${C.gr('✓')} 源 ${C.b(id)}（${runtime}）${written ? `→ ${C.dim(path.relative(root, written))}` : C.dim('（--dry-run，没写盘）')}`);
+    console.log(C.dim(`  manifest.json + ${Object.keys(files).sort().join(', ')}  参数 ${Array.isArray(record.manifest.params) ? record.manifest.params.length : 0} 个`));
+    console.log(C.dim(`  下一步：vdm source check ${id}`));
+    return;
+  }
+
+  if (sub === 'write') {
+    const [, id, rel] = rest;
+    if (!id || !rel) throw new Error('usage: vdm source write <id> <path> (--content "…" | --file a.js)');
+    let content = flags.content;
+    if (content === undefined || content === true) {
+      if (flags.file) content = await fsp.readFile(path.resolve(String(flags.file)), 'utf8');
+      else throw new Error('需要 --content "文本" 或 --file <本地文件>');
+    }
+    const result = await edit(root, { op: 'sourceWrite', id, path: rel, content: String(content) }, flags);
+    if (!flags['dry-run']) await materializeSource(root, await loadProject(root), id);
+    if (flags.json) { console.log(JSON.stringify(result.result ?? result, null, 2)); return; }
+    console.log(`${C.gr('✓')} 写入 ${C.b(`${id}/${rel}`)} ${C.dim(`${String(content).length} 字符`)}`);
+    return;
+  }
+
+  if (sub === 'rm' || sub === 'remove') {
+    const id = rest[1];
+    if (!id) throw new Error('usage: vdm source rm <id>');
+    await edit(root, { op: 'sourceRemove', id }, flags);
+    if (!flags['dry-run']) await fsp.rm(path.join(root, SOURCE_DIR, id), { recursive: true, force: true });
+    console.log(`${C.gr('✓')} 删除源 ${C.b(id)}`);
+    return;
+  }
+
+  if (sub === 'check') {
+    const id = rest[1];
+    if (!id) throw new Error('usage: vdm source check <id> [--frame 0] [--size 640x360] [--budget 200] [--json]');
+    const verdict = await sourceCheck(root, id, flags);
+    if (flags.json) console.log(JSON.stringify(verdict, null, 2));
+    else printSourceCheck(verdict);
+    if (!verdict.ok) process.exitCode = 1;
+    return;
+  }
+
+  throw new Error(`unknown source subcommand ${sub}（ls / new / write / rm / check）`);
+}
+
 function usage() {
   console.log(`${C.b('vdm')} — VedioMaker CLI
 
@@ -790,6 +1063,11 @@ ${C.b('素材 / 分镜')}
   vdm import <file...>
   vdm beats [--src f] [--set-duration]
   vdm plan [--style neon|clean|film] [--brief "第一句\\n第二句"] [--seed 7]
+
+${C.b('代码图层')}
+  vdm source new --runtime canvas2d|p5|glsl [--id src_x] [--force]
+  vdm source check <id> [--frame 0] [--size 640x360] [--budget 200] [--json]
+  vdm source ls | write <id> <path> --content "…" | rm <id>
 
 ${C.b('3D 镜头')}
   vdm cam ls | set <path> <value> | add <t> <x> <y> <z> [--look x,y,z] | rm <t>
@@ -851,6 +1129,7 @@ async function main() {
     case 'world': return cmdWorld(root, rest, flags);
     case 'scene': return cmdScene(root, rest, flags);
     case 'inspect': return cmdInspect(root, rest, flags);
+    case 'source': return cmdSource(root, rest, flags);
     default:
       console.error(C.re(`unknown command: ${cmd}`));
       usage();

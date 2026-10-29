@@ -2,6 +2,7 @@
 // Ops are plain JSON so they can be logged, replayed, diffed and undone.
 import { normalizeFeed } from './camfeed.js';
 import { DEFAULT_TRANSFORM, DEFAULT_STYLE, DEFAULT_FX, ELEMENT_TYPES, newId, normalizeSpatialNode } from './schema.js';
+import { normalizeCode, sourceManifest } from './code-layer.js';
 import { SCENE_VERSION, normalizeObject } from './scene.js';
 import { normalizeCamera, retimeCamSpans, retimePathSpan, cameraRange } from './camera.js';
 import { assertSafeData, pathParts } from './json.js';
@@ -582,6 +583,8 @@ export function applyOp(p, op) {
       if (links.length) full.links = links;
       // Camera feed: which camera it shows and whether it lags one frame.
       if (full.type === 'camfeed') full.feed = normalizeFeed(el.feed);
+      // Code layer: the source + parameter block (§6.1, core/code-layer.js).
+      if (full.type === 'code') full.code = normalizeCode(el.code, sourceManifest(p, el.code?.source));
       if (full.type === 'video' || full.type === 'audio') {
         full.srcIn = Math.max(0, Number(el.srcIn) || 0);
       }

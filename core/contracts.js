@@ -74,6 +74,16 @@ const definitions = {
   }, ['id', 'to', 'from']],
   propLinkPatch: [{ host: linkHostKind, id: string, to: property, patch: object, t: time }, ['id', 'to', 'patch']],
   propUnlink: [{ host: linkHostKind, id: string, to: property }, ['id', 'to']],
+  // code layers (§6.1): the source registry lives in the project document, the
+  // disk copy under sources/<id>/ is derived from it.
+  sourceAdd: [{
+    id: { type: 'string', minLength: 1, maxLength: 64, pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$' },
+    manifest: { type: 'object', required: ['runtime', 'entry'] },
+    files: { type: 'object', additionalProperties: { type: 'string' } },
+  }, ['id', 'manifest']],
+  sourceWrite: [{ id: string, path: { type: 'string', minLength: 1, maxLength: 200 }, content: { type: 'string', maxLength: 2000000 } }, ['id', 'path', 'content']],
+  sourceRemove: [{ id: string }, ['id']],
+  codeParamSet: [{ id: string, name: { type: 'string', minLength: 1, maxLength: 64, pattern: '^[A-Za-z_][A-Za-z0-9_]{0,63}$' }, value: {}, v: {}, t: time }, ['id', 'name']],
 };
 
 export const PUBLIC_OPS = OP_KINDS.filter((op) => Object.hasOwn(definitions, op));
