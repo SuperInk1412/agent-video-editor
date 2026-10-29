@@ -141,6 +141,80 @@ function normalizeHostLinks(host) {
   else delete host.links;
 }
 
+// ---- locks (docs/DESIGN-BACKEND-V2.md §8.1 / D4) -------------------------
+// `locked: true` on an element, camera or 3D object means "a human pinned
+// this; agents may not write it". Humans still can, told apart by the
+// transaction's actorId. The flag is stored only when true, so a project
+// without locks loads and saves write-free.
+function normalizeLocked(host) {
+  if (!isRecord(host) || host.locked === true) return;
+  if (Object.hasOwn(host, 'locked')) delete host.locked;
+}
+
+/** Actors a lock rejects: `agent:<name>` and a bare `agent`. */
+export const isAgentActor = (actorId) => /^agent(:|$)/i.test(String(actorId ?? ''));
+
+/** JSON with sorted keys, so two normalised bodies compare by value. */
+const sortedJson = (value) => (Array.isArray(value)
+  ? `[${value.map(sortedJson).join(',')}]`
+  : value && typeof value === 'object'
+    ? `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${sortedJson(value[key])}`).join(',')}}`
+    : JSON.stringify(value === undefined ? null : value));
+
+/** Ids of every locked host, by collection. */
+export function lockedHosts(project) {
+  const out = { element: [], camera: [], object: [] };
+  const read = (list, kind) => {
+    for (const host of Array.isArray(list) ? list : []) {
+      if (host?.locked === true && host.id != null) out[kind].push(host.id);
+    }
+  };
+  read(project?.elements, 'element');
+  read(project?.cameras, 'camera');
+  read(project?.scene?.objects, 'object');
+  return out;
+}
+
+/**
+ * Locked hosts an agent's write would touch: a locked host whose body differs
+ * between `before` and `after`, or one the write deletes. Returns [] for every
+ * other actor — a human may unlock or edit at any time.
+ */
+export function lockedWriteIssues(before, after, { actorId } = {}) {
+  if (!isAgentActor(actorId)) return [];
+  const issues = [];
+  const collections = [
+    ['element', before?.elements, after?.elements, 'elements'],
+    ['camera', before?.cameras, after?.cameras, 'cameras'],
+    ['object', before?.scene?.objects, after?.scene?.objects, 'scene.objects'],
+  ];
+  for (const [kind, from, to, at] of collections) {
+    const list = Array.isArray(from) ? from : [];
+    const target = Array.isArray(to) ? to : [];
+    for (let i = 0; i < list.length; i++) {
+      const was = list[i];
+      if (was?.locked !== true) continue;
+      const now = target.find((host) => host?.id === was.id);
+      if (!now) {
+        issues.push({ id: was.id, kind, path: `${at}[${i}]`, msg: 'is locked and cannot be deleted by an agent' });
+      } else if (sortedJson(was) !== sortedJson(now)) {
+        issues.push({ id: was.id, kind, path: `${at}[${i}]`, msg: 'is locked; agent writes are rejected (a human can unlock it)' });
+      }
+    }
+  }
+  return issues;
+}
+
+/** Throw `LOCKED` when an agent's write touches a locked host. */
+export function assertUnlockedWrite(before, after, opts = {}) {
+  const issues = lockedWriteIssues(before, after, opts);
+  if (!issues.length) return;
+  const ids = [...new Set(issues.map((issue) => issue.id))];
+  const error = new Error(`locked: ${ids.join(', ')} — ${opts.actorId || 'agent'} may not write a locked element`);
+  Object.assign(error, { code: 'LOCKED', status: 409, issues, locked: ids });
+  throw error;
+}
+
 export function newId(prefix, taken) {
   const used = taken instanceof Set ? taken : new Set(taken || []);
   let i = 1;
@@ -282,14 +356,21 @@ export function normalizeProject(p) {
     e.visible = e.visible !== false;
     e.name = e.name || (e.type === 'text' ? (e.style.text || 'text') : e.type);
     normalizeHostLinks(e);
+    normalizeLocked(e);
     return e;
   });
   elIds.clear();
   p.elements.forEach((e) => elIds.add(e.id));
 
   normalizeCameraStack(p);
-  for (const obj of Array.isArray(p.scene?.objects) ? p.scene.objects : []) normalizeHostLinks(obj);
-  for (const cam of Array.isArray(p.cameras) ? p.cameras : []) normalizeHostLinks(cam);
+  for (const obj of Array.isArray(p.scene?.objects) ? p.scene.objects : []) {
+    normalizeHostLinks(obj);
+    normalizeLocked(obj);
+  }
+  for (const cam of Array.isArray(p.cameras) ? p.cameras : []) {
+    normalizeHostLinks(cam);
+    normalizeLocked(cam);
+  }
   p.world = normalizeWorld(p.world);
   return p;
 }
@@ -386,6 +467,7 @@ export function validateProject(p) {
     if (e.type === 'audio' && !e.src) push(`${at}.src`, 'audio element needs src');
     for (const name of ['fadeIn', 'fadeOut', 'srcIn', 'punch']) if (e[name] !== undefined) number(e[name], `${at}.${name}`, { min: 0 });
     if (e.loop !== undefined && typeof e.loop !== 'boolean') push(`${at}.loop`, 'must be boolean');
+    if (e.locked !== undefined && typeof e.locked !== 'boolean') push(`${at}.locked`, 'must be boolean');
     if (e.volume !== undefined) number(e.volume, `${at}.volume`, { min: 0, max: 1 });
     if (e.transform !== undefined && record(e.transform, `${at}.transform`)) {
       for (const name of Object.keys(DEFAULT_TRANSFORM)) if (e.transform[name] !== undefined) number(e.transform[name], `${at}.transform.${name}`);
@@ -409,6 +491,7 @@ export function validateProject(p) {
     if (!record(c, at)) return;
     id(c.id, `${at}.id`, camIds);
     if (c.fov !== undefined) number(c.fov, `${at}.fov`, { min: 1, max: 360 });
+    if (c.locked !== undefined && typeof c.locked !== 'boolean') push(`${at}.locked`, 'must be boolean');
     if (c.start !== undefined) number(c.start, `${at}.start`, { min: 0 });
     if (c.duration !== undefined) number(c.duration, `${at}.duration`, { min: 0, exclusive: true });
     for (const name of ['center', 'scale']) if (c[name] !== undefined) vector(c[name], `${at}.${name}`, 3);
@@ -445,6 +528,7 @@ export function validateProject(p) {
         number(obj.rot.roll, `${at}.rot.roll`);
       }
       if (obj.opacity !== undefined) number(obj.opacity, `${at}.opacity`, { min: 0, max: 1 });
+      if (obj.locked !== undefined && typeof obj.locked !== 'boolean') push(`${at}.locked`, 'must be boolean');
       if (obj.links !== undefined) issues.push(...linkIssues(obj.links, `${at}.links`));
       if (obj.geom !== undefined && record(obj.geom, `${at}.geom`)) for (const name of ['w', 'h', 'd']) number(obj.geom[name], `${at}.geom.${name}`, { min: 0, exclusive: true });
       tracks(obj.tracks, `${at}.tracks`);
