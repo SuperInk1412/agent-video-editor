@@ -287,3 +287,15 @@ t_B = t_A + firstArrival(curve, y_B) · (t_C − t_A)     // 单调、毫秒取�
 - **风险**：所有旧项目的颜色渲染都会变（画面可见变更）；迁移要在打开项目时写数据；
   三处求值必须对拍（RGB 完全一致）。
 - **要恢复这条线时**：把本附录改写回 §5，恢复 §11/§12 P3/§13 原条目，并请 B 做求值 + 对拍 + 迁移。
+
+---
+
+## 16. 进度登记
+
+| 阶段 | 提交 | 内容 |
+|---|---|---|
+| P1 | `5a909bb` | `core/curve-spans.js`：`firstArrival` / `spanProgress` / `innerKeys` / `retimeSpanTimes`（多轴取平均）/ `invertCurve`；`core/camera.js` 改用同一份 `firstArrival` |
+| P1 | `bbd328f` | `keySet` / `objectKey` / `cameraParamKey` 接受显式 `curve`（null 清除），搬键不再丢曲线 |
+| P1 | `c64064c` | `core/keyframe-edit.js::snapKeyframeTimes`（对齐到帧，保持严格递增，放不下就拒绝） |
+| P1 | `062c152` | `meta.curvePresets` + `normalizeCustomPresets`（我的预设，最多 40 条） |
+| P2 | （进行中） | 真实数值轴 + 整轨连续曲线 |
