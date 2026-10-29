@@ -3,7 +3,8 @@
 // owns pointer events, this module only knows how to draw and hit-test.
 import { evalCamera, pathPos, cameraTransform } from '/core/camera.js';
 import { childrenOf, parentIdOf } from '/core/hierarchy.js';
-import { objectWorldPoseWithLinks } from '/core/link-eval.js';
+import { objectWorldPoseWithLinks, evalCameraWorldWithLinks } from '/core/link-eval.js';
+import { worldFrameParent } from '/core/spatial-parent.js';
 
 const CYAN = '#17d9ff';
 const YELLOW = '#ffd166';
@@ -13,6 +14,7 @@ const GREEN = '#4ade80';
 const add3 = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
 const sub3 = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 const mul3 = (a, s) => [a[0] * s, a[1] * s, a[2] * s];
+const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
 const norm3 = (a) => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
 
@@ -79,11 +81,22 @@ export class PathGizmo {
     return p?.camera || null;
   }
 
+  /**
+   * Camera state at t exactly as the picture renders it: `evalCamera` plus the
+   * camera's spatial parent (`frameParent`, core/spatial-parent.js) and the
+   * three-axis rotation offset. A camera parented to a moving object flies with
+   * it, so the frustum, the path and the hit tests must use the same frame as
+   * the preview and the bake — plain `evalCamera` is the unparented pose.
+   */
+  stateAt(project, t, cam = null) {
+    return evalCameraWorldWithLinks(this.clean(project), t, cam);
+  }
+
   /** Pose of the shot camera at the playhead (shake disabled). */
   liveState() {
     const project = this.opts.project();
     if (!project?.camera) return null;
-    return evalCamera(this.clean(project), this.opts.time());
+    return this.stateAt(project, this.opts.time());
   }
 
   /** A path key already sits on the playhead (the live camera would double it). */
@@ -136,16 +149,47 @@ export class PathGizmo {
     ];
   }
 
-  /** World position of a path key: center(t) + relative path position. */
-  worldKey(cam, key) {
-    const center = cameraTransform(cam, key.t).center;
-    return add3(center, key.pos);
+  /**
+   * World position of the camera at t, spatial parent applied. Without a
+   * `frameParent` this is the cheap local form (centre + path offset); with one
+   * it is the parented frame the picture actually uses.
+   */
+  camWorldPos(cam, t, project = this.opts.project()) {
+    if (!worldFrameParent(cam)) return add3(cameraTransform(cam, t).center, pathPos(cam, t));
+    return evalCameraWorldWithLinks(this.clean(project), t, cam).pos;
   }
 
-  /** World position of a bezier handle (also center + relative handle). */
+  /** Rotation taking the camera's local frame to its parented world frame at t. */
+  frameRotation(cam, t) {
+    if (!worldFrameParent(cam)) return null;
+    const clean = this.clean(this.opts.project());
+    const local = this.basis(evalCamera({ ...clean, camera: cam, cameras: [cam], activeCameraId: cam.id }, t));
+    const world = this.basis(evalCameraWorldWithLinks(clean, t, cam));
+    return (v) => {
+      const a = dot3(v, local.r), b = dot3(v, local.u), c = dot3(v, local.f);
+      return [
+        world.r[0] * a + world.u[0] * b + world.f[0] * c,
+        world.r[1] * a + world.u[1] * b + world.f[1] * c,
+        world.r[2] * a + world.u[2] * b + world.f[2] * c,
+      ];
+    };
+  }
+
+  /** World position of a path key: the camera's own (parented) position at key.t. */
+  worldKey(cam, key) {
+    return this.camWorldPos(cam, key.t);
+  }
+
+  /** World position of a bezier handle (also centre + relative handle). */
   worldHandle(cam, key, kind, prev, next) {
     const center = cameraTransform(cam, key.t).center;
-    return add3(center, this.handle(key, kind, prev, next));
+    const local = add3(center, this.handle(key, kind, prev, next));
+    const rot = this.frameRotation(cam, key.t);
+    if (!rot) return local;
+    // Same point in the parented frame: the node moves with the parent, the
+    // offset between them turns with it.
+    const node = add3(center, key.pos);
+    return add3(this.camWorldPos(cam, key.t), rot(sub3(local, node)));
   }
 
   /** Project copy with shake disabled, so the gizmo never jitters. */
@@ -172,7 +216,7 @@ export class PathGizmo {
 
   /** Camera glyph: full frustum for the live camera, FOV wedge for path keys. */
   glyph(ctx, project, t, { main = false, selected = false } = {}) {
-    const st = evalCamera(project, t);
+    const st = this.stateAt(project, t, this.camera());
     if (!st) return;
     const { f, r, u } = this.basis(st);
     const aspect = this.canvas.width / Math.max(1, this.canvas.height);
@@ -309,16 +353,18 @@ export class PathGizmo {
     if (this.opts.editMode() && this.opts.grid()) this._grid(ctx, k);
 
     const keys = cam.path;
-    // path polyline
+    // path polyline. A parented camera flies with its parent, so every sample
+    // goes through the same frame as the picture; fewer samples then, because
+    // each one is a full camera evaluation.
     const t0 = keys[0].t, t1 = keys[keys.length - 1].t;
-    const step = Math.max(0.02, (t1 - t0) / 480);
+    const parented = !!worldFrameParent(cam);
+    const step = Math.max(0.02, (t1 - t0) / (parented ? 160 : 480));
     ctx.strokeStyle = 'rgba(23,217,255,.85)';
     ctx.lineWidth = 1.6;
     ctx.beginPath();
     let pen = false;
     for (let t = t0; t <= t1 + 1e-6; t += step) {
-      const world = add3(cameraTransform(cam, t).center, pathPos(cam, t));
-      const s = this.project(world);
+      const s = this.project(this.camWorldPos(cam, t));
       if (!s) { pen = false; continue; }
       if (pen) ctx.lineTo(s[0], s[1]); else { ctx.moveTo(s[0], s[1]); pen = true; }
     }
@@ -330,15 +376,13 @@ export class PathGizmo {
       ctx.fillStyle = 'rgba(255,209,102,.85)';
       for (let i = 0; i <= dots; i++) {
         const t = t0 + ((t1 - t0) * i) / dots;
-        const world = add3(cameraTransform(cam, t).center, pathPos(cam, t));
-        const s = this.project(world);
+        const s = this.project(this.camWorldPos(cam, t));
         if (s) ctx.fillRect(s[0] - 1.6, s[1] - 1.6, 3.2, 3.2);
       }
     }
 
     if (time >= t0 && time <= t1) {
-      const world = add3(cameraTransform(cam, time).center, pathPos(cam, time));
-      const now = this.project(world);
+      const now = this.project(this.camWorldPos(cam, time));
       if (now) {
         ctx.fillStyle = '#fff';
         ctx.beginPath(); ctx.arc(now[0], now[1], 2.6, 0, Math.PI * 2); ctx.fill();
@@ -817,5 +861,5 @@ export class PathGizmo {
 
 /** Camera state of the shot at time t (used when entering edit mode). */
 export function shotCamera(project, t) {
-  return evalCamera(project, t);
+  return evalCameraWorldWithLinks(project, t);
 }
