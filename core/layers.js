@@ -119,8 +119,16 @@ export function layerPlaneKey(layer) {
 export function compareLayerStack(a, b, ia = 0, ib = 0) {
   const srcA = Number.isFinite(a?.src) ? Number(a.src) : ia;
   const srcB = Number.isFinite(b?.src) ? Number(b.src) : ib;
-  return (num(a?.el?.z) - num(b?.el?.z)) || (srcA - srcB);
+  return (layerZ(a) - layerZ(b)) || (srcA - srcB);
 }
+
+/**
+ * The layer's `el.z`. A frame-IR item carries it as a top-level `z` (there is
+ * no project element on the item), so both shapes sort identically — that is
+ * what lets a backend re-order a frame's items for its own eye with this one
+ * rule (docs/DESIGN-BACKEND-V2.md §4.4).
+ */
+export const layerZ = (L) => (L?.z != null ? num(L.z) : num(L?.el?.z));
 
 /**
  * Layers sorted for drawing (PLAN §2.5, docs/FIX-LAYER-ORDER-EMPTY-CLICK.md):
@@ -244,7 +252,7 @@ export function transformPlane(plane, m) {
  * The node placement itself (pivot / basis / scale) is not repeated here, so
  * `el.transform` values are never applied twice (task 5).
  */
-export function nodePlaneMatrix(frame, width, height, opts = {}) {
+export function nodePlaneModel(frame, width, height, opts = {}) {
   const pos = vec3(frame?.pos);
   const basis = Array.isArray(frame?.basis) ? frame.basis : [];
   const r0 = unit3(basis[0]) || [1, 0, 0];
@@ -272,11 +280,20 @@ export function nodePlaneMatrix(frame, width, height, opts = {}) {
   return {
     w,
     h,
-    model: new Float32Array([
+    // Plain numbers on purpose: the frame IR scales this by the quad's pixel
+    // size and must not start from float32-rounded entries (one ULP there is
+    // already a visible sub-pixel shift for a 6000-pixel-wide quad).
+    model: [
       -r[0] * w, -r[1] * w, -r[2] * w, 0,
       u[0] * h, u[1] * h, u[2] * h, 0,
       fw[0], fw[1], fw[2], 0,
       pos[0] + off[0] + fw[0] * push, pos[1] + off[1] + fw[1] * push, pos[2] + off[2] + fw[2] * push, 1,
-    ]),
+    ],
   };
+}
+
+/** `nodePlaneModel` for a vertex attribute buffer (the renderer's old entry). */
+export function nodePlaneMatrix(frame, width, height, opts = {}) {
+  const out = nodePlaneModel(frame, width, height, opts);
+  return { w: out.w, h: out.h, model: new Float32Array(out.model) };
 }

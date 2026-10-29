@@ -19,9 +19,10 @@
 //     change is approved (a new `FRAME_IR_VERSION`).
 //
 // The migration itself (buildFrameIR vs the old preview.computeLayers, element
-// set / order / matrix over 1270 frames of demo, nightcity and a miku-swiss
-// copy) was verified with the one-off harness in `.scratch/wp0.1/`; the numbers
-// are in the delivery report and docs/CHANGELOG-presets.md.
+// set / order / matrix over demo 0–576, nightcity 0–240 and a miku-swiss copy
+// 0–450 — 1269 frames, of which nightcity draws nothing) was verified with the
+// one-off harness in `.scratch/wp0.1/`; the numbers are in the delivery report
+// and docs/CHANGELOG-presets.md.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -30,7 +31,7 @@ import path from 'node:path';
 import {
   FRAME_IR_VERSION, DEPTH_ALPHA, PIXEL_M,
   buildFrameIR, buildRangeIR, elementPixelMatrix, itemModelMatrix,
-  screenPixelMatrix, cameraWorld16, IRCache,
+  screenPixelMatrix, cameraWorld16, mediaUVOf, IRCache,
 } from '../core/frame-ir.js';
 import { orderLayers } from '../core/layers.js';
 import { compileProject } from '../core/tracks.js';
@@ -98,7 +99,7 @@ test('frame IR: version, JSON shape and frame/time convention', () => {
   const p = demo();
   const ir = buildFrameIR(p, 24);
   assert.equal(ir.version, FRAME_IR_VERSION);
-  assert.equal(FRAME_IR_VERSION, 1);
+  assert.equal(FRAME_IR_VERSION, 2);
   assert.equal(ir.frame, 24);
   assert.equal(ir.fps, 24);
   assert.equal(ir.t, 1); // t = frame / fps (P5: whole frames only)
@@ -296,10 +297,15 @@ test('frame IR: IRCache serves only the revision it was built at', () => {
   const other = buildFrameIR(p, 200, { cache: cache2 });
   assert.equal(cache2.size, 2);
   const changed = first.items[0].id;
+  const hitsBefore = cache2.hits;
+  const missesBefore = cache2.misses;
   cache2.invalidate([changed]);
   assert.equal(cache2.size, 1, 'only the frame with that element is gone');
-  assert.equal(buildFrameIR(p, 10, { cache: cache2 }), cache2.get('10|24|auto|-|-', p.rev));
-  assert.equal(cache2.get(`200|24|auto|-|-`, p.rev), other);
+  // the surviving frame is still served, the dropped one has to be rebuilt
+  assert.equal(buildFrameIR(p, 200, { cache: cache2 }), other, 'the untouched frame is still the cached object');
+  buildFrameIR(p, 10, { cache: cache2 });
+  assert.equal(cache2.hits, hitsBefore + 1);
+  assert.equal(cache2.misses, missesBefore + 1);
   // no ids means everything
   cache2.invalidate();
   assert.equal(cache2.size, 0);
@@ -309,6 +315,74 @@ test('frame IR: IRCache serves only the revision it was built at', () => {
   const editor = buildFrameIR(p, 10, { cache: cache3, edit: { mode: true, cam: null } });
   assert.equal(editor.camera.mode, 'editor');
   assert.equal(cache3.size, 2);
+});
+
+test('frame IR: scale 0 keeps the old answer per branch', () => {
+  const p = miniProject();
+  compileProject(p);
+  // legacy: M3.S(0, 0) collapsed the quad -> nothing to draw, zero columns
+  p.elements[1].transform.scale = 0;
+  const legacy = buildFrameIR(p, 30).items.find((it) => it.id === 'el_flat');
+  assert.ok(legacy, 'the element is still in the list (it is the shader that collapses)');
+  assert.ok(Math.abs(legacy.world[0]) < 1e-12 && Math.abs(legacy.world[4]) < 1e-12, 'zero-sized screen quad');
+  // node: _nodePlane used `Math.abs(x || 1)` -> a scale of 0 drew at full size
+  const p2 = miniProject();
+  p2.elements[0].node.scale = [0, 0, 1];
+  const node = buildFrameIR(p2, 30).items.find((it) => it.id === 'el_node');
+  const full = buildFrameIR(miniProject(), 30).items.find((it) => it.id === 'el_node');
+  assert.ok(Math.abs(node.world[0] - full.world[0]) < 1e-12, 'node scale 0 == scale 1 (bug-compatible)');
+});
+
+test('frame IR: media uv is one exported rule (stretch keeps the whole picture)', () => {
+  assert.deepEqual(mediaUVOf('stretch', 100, 100, [1920, 1080]), [0, 0, 1, 1]);
+  // a square image on a 16:9 frame covers by cropping top and bottom
+  assert.deepEqual(mediaUVOf('cover', 1000, 1000, [1920, 1080]), [0, 0.21875, 1, 0.78125]);
+  // a 21:9 image on the same frame crops the sides instead
+  const wide = mediaUVOf('cover', 2100, 900, [1920, 1080]);
+  assert.ok(Math.abs(wide[0] - 0.1190) < 1e-4 && Math.abs(wide[2] - 0.8810) < 1e-4, `wide uv ${wide}`);
+  assert.deepEqual(mediaUVOf('contain', 1000, 1000, [1920, 1080]), mediaUVOf('cover', 1000, 1000, [1920, 1080]));
+  // no intrinsic size yet -> null, the backend decodes the media and asks again
+  assert.equal(mediaUVOf('cover', 0, 0, [1920, 1080]), null);
+  const p = miniProject();
+  p.elements.push({ id: 'el_img', type: 'image', start: 0, duration: 4, z: 5, src: 'media/a.jpg', style: { fit: 'stretch' } });
+  const item = buildFrameIR(p, 30).items.find((it) => it.id === 'el_img');
+  assert.deepEqual(item.content.uv, [0, 0, 1, 1], 'stretch is not cropped by the IR either');
+});
+
+test('frame IR: a backend can re-order raw items for its own eye', () => {
+  const p = miniProject();
+  // three coplanar legacy layers in one plane, z decides their stack
+  p.elements.push({ id: 'el_low', type: 'solid', start: 0, duration: 4, z: -1, transform: { x: 0, y: 0, scale: 1, rotation: 0, opacity: 1 }, style: { w: 100, h: 100, fill: '#fff' } });
+  p.elements.push({ id: 'el_high', type: 'solid', start: 0, duration: 4, z: 9, transform: { x: 0, y: 0, scale: 1, rotation: 0, opacity: 1 }, style: { w: 100, h: 100, fill: '#fff' } });
+  const ir = buildFrameIR(p, 30);
+  const ids = ir.items.map((it) => it.id);
+  assert.ok(ids.indexOf('el_low') < ids.indexOf('el_high'));
+  // orderLayers reads items straight from the IR (top-level `z`, no project element)
+  for (const camPos of [[0, 5.4, 20], [3, 7, 12], [-8, 2, 30]]) {
+    const reordered = orderLayers(ir.items, camPos).map((it) => it.id).join(',');
+    assert.equal(reordered, ids.join(','), `order for eye ${camPos}`);
+  }
+});
+
+test('frame IR: 3D objects match what the Blender bake bakes', () => {
+  const p = miniProject();
+  p.scene = {
+    objects: [
+      { id: 'ob_box', type: 'solid', start: 0, duration: 4, geom: { w: 2, h: 3, d: 4 }, scale: [2, 2, 2], pivot: [0, 1, 0], style: { color: '#ff0000', emissive: 2 } },
+      { id: 'ob_empty', type: 'empty', start: 0, duration: 4, pivot: [0, 0, 0] },
+      { id: 'ob_off', type: 'solid', start: 6, duration: 1, pivot: [0, 0, 0] },
+    ],
+  };
+  const ir = buildFrameIR(p, 30);
+  assert.deepEqual(ir.objects3d.map((o) => o.id), ['ob_box'], 'only drawable, live objects');
+  const box = ir.objects3d[0];
+  // unit basis (no scale) + size = geom * |scale|, exactly like bakeObjects
+  const len = (m, i) => Math.hypot(m[i], m[i + 1], m[i + 2]);
+  assert.ok(Math.abs(len(box.world, 0) - 1) < 1e-12, 'world carries a unit basis');
+  assert.deepEqual(box.size, [4, 6, 8]);
+  assert.equal(box.color, '#ff0000');
+  assert.equal(box.emissive, 2);
+  assert.deepEqual([box.world[12], box.world[13], box.world[14]], [0, 1, 0]);
 });
 
 test('frame IR: buildRangeIR streams every frame of the range', () => {
@@ -341,10 +415,11 @@ test('frame IR: the demo project matches the frozen snapshot', () => {
     };
   });
   if (process.env.UPDATE_GOLDEN === '1') {
-    fs.writeFileSync(goldenPath, `${JSON.stringify({ about: 'frozen buildFrameIR output for tests/fixtures/demo.json (WP0.1, §4 freeze)', fps: p.meta.fps, frames: now })}\n`);
+    fs.writeFileSync(goldenPath, `${JSON.stringify({ about: 'frozen buildFrameIR output for tests/fixtures/demo.json (§4 freeze)', version: FRAME_IR_VERSION, fps: p.meta.fps, frames: now })}\n`);
     return;
   }
   const golden = readJson('tests/fixtures/frame-ir-golden.json');
+  assert.equal(golden.version, FRAME_IR_VERSION, 'regenerate the snapshot when the IR version moves');
   assert.equal(golden.fps, 24);
   assert.equal(golden.frames.length, now.length);
   for (let i = 0; i < now.length; i++) {

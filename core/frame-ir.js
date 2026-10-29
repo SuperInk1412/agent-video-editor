@@ -43,11 +43,12 @@ import { cameraLayers, cameraTransform, cameraAtTime } from './camera.js';
 import { elementWorldParent } from './spatial-parent.js';
 import { frameOf } from './spatial.js';
 import { normalizeFeed } from './camfeed.js';
-import { basisFromDir, poseMatrix, OBJECT_TYPES } from './scene.js';
-import { LAYER_DEPTH_M, nodePlaneMatrix, orderLayers, planeOfFrame } from './layers.js';
+import { basisFromDir } from './scene.js';
+import { mediaSpec, textSpec, videoFrame } from './objects-media.js';
+import { LAYER_DEPTH_M, nodePlaneModel, orderLayers, planeOfFrame } from './layers.js';
 
 /** Bump when the shape of a FrameIR changes (frozen key, §4 / §12). */
-export const FRAME_IR_VERSION = 1;
+export const FRAME_IR_VERSION = 2;
 
 /** One project pixel in metres (unified space, docs/DESIGN-UNIFIED-SPACE.md). */
 export const PIXEL_M = 0.01;
@@ -76,15 +77,19 @@ export function pixelMatrixOf(frame, el, t, meta = {}) {
   const dx = (Number(d.x) || 0) / 100;
   const dy = -(Number(d.y) || 0) / 100;
   const offset = [0, 1, 2].map((i) => -base.right[i] * dx + base.up[i] * dy);
-  const { model } = nodePlaneMatrix(
+  // Bug-compatible with preview.js::_nodePlane (`Math.abs(x || 1)`): a node
+  // scale of 0 draws at full size, not as a sliver. The screen path below has
+  // no such fallback because M3.S(0, 0) really did collapse the quad — the two
+  // branches disagree on scale 0 in the old renderer and this keeps that.
+  const sc = frame.scale || [];
+  const { model: m } = nodePlaneModel(
     frame,
-    PIXEL_M * Math.abs(num([...frame.scale || []][0], 1)),
-    PIXEL_M * Math.abs(num([...frame.scale || []][1], 1)),
+    PIXEL_M * (Math.abs(num(sc[0], 1)) || 1),
+    PIXEL_M * (Math.abs(num(sc[1], 1)) || 1),
     { offset, roll: d.rotation, scale: d.scale },
   );
-  // nodePlaneMatrix keeps the normal at unit length; the IR is in pixels along
+  // nodePlaneModel keeps the normal at unit length; the IR is in pixels along
   // the normal too (layer offsets and Blender's pixel geometry): scale it.
-  const m = Array.from(model);
   for (let i = 8; i < 11; i++) m[i] *= PIXEL_M;
   // `-0` is not JSON (it serialises as `0`), and a frozen IR must survive a
   // round trip unchanged: normalise it where negations create it.
@@ -123,7 +128,9 @@ export function screenPixelMatrix(st, meta = {}) {
   const rad = ((Number(st?.rotation) || 0) * Math.PI) / 180;
   const c = Math.cos(rad);
   const s = Math.sin(rad);
-  const k = PIXEL_M * (Number(st?.scale) || 1);
+  // The legacy screen matrix multiplied by st.scale verbatim: scale 0 was an
+  // invisible quad, and it stays one (no `|| 1` fallback here, unlike nodes).
+  const k = PIXEL_M * (Number.isFinite(Number(st?.scale)) ? Number(st.scale) : 1);
   return [
     k * c, -k * s, 0, 0,
     k * s, k * c, 0, 0,
@@ -145,8 +152,12 @@ export function screenPixelMatrix(st, meta = {}) {
 export function itemModelMatrix(item, size = item.size) {
   const m = item?.world;
   if (!Array.isArray(m) || m.length < 16) return null;
-  const w = Array.isArray(size) ? num(size[0]) : 0;
-  const h = Array.isArray(size) ? num(size[1]) : 0;
+  // `size: null` means the content typesets its own box (text until WP1.3):
+  // there is no matrix without one, and pretending there is would draw a
+  // collapsed quad instead of failing loudly.
+  if (!Array.isArray(size)) return null;
+  const w = num(size[0]);
+  const h = num(size[1]);
   const bias = num(item?.depth?.bias);
   const out = new Float32Array(16);
   for (let i = 0; i < 4; i++) {
@@ -250,14 +261,25 @@ export function cameraWorld16(state) {
   ].map((v) => v + 0); // `-0` is not JSON
 }
 
-/** Image-space uv rect for a cover-fitted media element (null = the backend asks the media). */
-function mediaUV(el, meta) {
-  const iw = num(el?.meta?.width);
-  const ih = num(el?.meta?.height);
-  if (!(iw > 0 && ih > 0)) return null;
-  const fw = num(meta?.width, 1920) || 1920;
-  const fh = num(meta?.height, 1080) || 1080;
-  const ia = iw / ih;
+/**
+ * Image-space uv rect of a full-frame media element: which part of the media
+ * fills the quad. `stretch` uses all of it; every other fit crops to cover —
+ * that is what the 2D renderer always did (`preview.js::coverUV`), including
+ * `contain` (a 2D element is a full-frame plane, so there is no letterbox).
+ *
+ * Exported so a backend never re-invents the formula: with `content.uv = null`
+ * (the project does not know the media's intrinsic size) the consumer calls
+ * this with the size it decoded. WP4.1 writes that size into the element and
+ * the IR starts carrying the rect itself.
+ */
+export function mediaUVOf(fit, iw, ih, frame) {
+  const w = num(iw);
+  const h = num(ih);
+  if (fit === 'stretch') return [0, 0, 1, 1];
+  if (!(w > 0 && h > 0)) return null;
+  const fw = num(frame?.[0], 1920) || 1920;
+  const fh = num(frame?.[1], 1080) || 1080;
+  const ia = w / h;
   const fa = fw / fh;
   if (ia > fa) {
     const f = fa / ia;
@@ -267,21 +289,29 @@ function mediaUV(el, meta) {
   return [0, (1 - f) / 2, 1, 1 - (1 - f) / 2];
 }
 
-/** 3D objects live on this frame (the IR only carries what is on screen now). */
-function objectsOf(project, t, nodeOpts) {
+/** 3D object types that draw something (same set engine/shot.js::bakeObjects bakes). */
+const DRAWABLE_OBJECTS = new Set(['solid', 'shape', 'text', 'image', 'video', 'container']);
+
+/**
+ * 3D objects live on this frame, in the same shape engine/shot.js::bakeObjects
+ * bakes them: a unit-basis world matrix, `size` = geometry × |scale|, plus the
+ * colour / media / text the object is made of. Objects that only organise the
+ * scene (`empty`, `camera`, `audio`) are not drawable and stay out.
+ */
+function objectsOf(project, t, nodeOpts, fps) {
   const objs = project.scene?.objects || [];
   if (!objs.length) return [];
   const poses = new Map();
   const out = [];
   for (const o of objs) {
-    if (!OBJECT_TYPES.includes(o.type) || o.visible === false) continue;
+    if (!DRAWABLE_OBJECTS.has(o.type) || o.visible === false) continue;
     const start = num(o.start);
     const dur = num(o.duration);
     if (t < start - 1e-6 || t >= start + dur - 1e-6) continue;
     const pose = objectWorldPoseWithLinks(project, o, t, poses, nodeOpts);
     const geom = o.geom || {};
-    // Planes / text keep their own w×h (media and font decide it); a box is a
-    // unit cube scaled to geom — the same split engine/shot.js::bakeObjects uses.
+    // A plane / text carries its own w×h (media and font decide it); a box is a
+    // unit cube scaled to geom — the split shot.js uses.
     const unit = o.type === 'image' || o.type === 'video' || o.type === 'text';
     const g = unit ? [1, 1, 1] : [
       Math.max(0.001, num(geom.w, 2) || 2),
@@ -289,12 +319,27 @@ function objectsOf(project, t, nodeOpts) {
       Math.max(0.001, num(geom.d, 2) || 2),
     ];
     const sc = Array.isArray(pose.scale) ? pose.scale : [1, 1, 1];
+    const basis = pose.basis || {};
+    const off = (v) => (Array.isArray(v) ? v.map((x) => num(x) + 0) : [0, 0, 0]);
+    const world = [
+      ...off(basis.right), 0,
+      ...off(basis.up), 0,
+      ...off(basis.forward), 0,
+      ...off(pose.worldPos), 1,
+    ];
     out.push({
       id: o.id,
       type: o.type,
-      world: Array.from(poseMatrix(pose)),
+      // Unit basis + size (a backend scales the quad itself); worldPos already
+      // carries the parent chain and the object's own pivot.
+      world,
       size: [g[0] * Math.abs(num(sc[0], 1)), g[1] * Math.abs(num(sc[1], 1)), g[2] * Math.abs(num(sc[2], 1))],
       opacity: clamp(num(pose.opacity, 1), 0, 1),
+      color: o.style?.color || o.style?.fill || '#8fe0ff',
+      emissive: Math.max(0, num(o.style?.emissive)),
+      ...(unit && o.type !== 'text' ? { media: mediaSpec(o) } : {}),
+      ...(unit && o.type === 'text' ? { text: textSpec(o) } : {}),
+      ...(o.type === 'video' ? { frame: videoFrame(o, t, fps, Number(o._sequenceCount) || Infinity) } : {}),
     });
   }
   return out;
@@ -324,7 +369,7 @@ export function buildFrameIR(project, frame, opts = {}) {
     opts.edit && opts.edit.mode ? `edit:${opts.edit.cam || ''}` : '-',
     solo ? [...solo].sort().join(',') : '-',
   ].join('|');
-  const sig = `${f}|${fps}|${viewSig}`;
+  const sig = `${f}|${fps}|${viewSig}|${opts.city?.hash || '-'}`;
   if (cache) {
     const hit = cache.get(sig, rev);
     if (hit) return hit;
@@ -360,7 +405,7 @@ export function buildFrameIR(project, frame, opts = {}) {
       // consumer measures it and passes the size to itemModelMatrix().
       content = {
         text: String(st.text ?? ''),
-        size: num(st.size, 96) || 96,
+        fontSize: num(st.size, 96) || 96,
         color: st.color || style.color || '#ffffff',
         font: style.font || 'SimHei',
         weight: num(style.weight, 400) || 400,
@@ -374,7 +419,11 @@ export function buildFrameIR(project, frame, opts = {}) {
       };
     } else if (el.type === 'image' || el.type === 'video') {
       kind = el.type;
-      content = { src: el.src || '', fit: style.fit || 'cover', uv: mediaUV(el, meta) };
+      content = {
+        src: el.src || '',
+        fit: style.fit || 'cover',
+        uv: mediaUVOf(style.fit || 'cover', el.meta?.width, el.meta?.height, size),
+      };
       quad = [size[0], size[1]];
     } else if (el.type === 'camfeed') {
       kind = 'camfeed';
@@ -414,6 +463,11 @@ export function buildFrameIR(project, frame, opts = {}) {
         blend: style.blend || 'normal',
         depth: {
           write: !!nodeFrame && st.opacity >= DEPTH_ALPHA,
+          // A backend that owns depth must draw twice: a depth-only pass that
+          // discards below `cut` (so a glyph keeps its anti-aliased rim and a
+          // text box does not punch a hole), then the colour pass at cut 0
+          // (docs/FIX-LAYER-ORDER-EMPTY-CLICK.md §四 1).
+          cut: DEPTH_ALPHA,
           bias: nodeFrame ? LAYER_DEPTH_M * z : 0,
         },
         drawOrder: 0,
@@ -443,7 +497,7 @@ export function buildFrameIR(project, frame, opts = {}) {
     mode: eye.mode,
     pos: eye.state.pos,
     look: eye.state.look,
-    up: eye.state.up,
+    up: cameraWorld16(eye.state).slice(4, 7),
     roll: num(eye.state.roll),
     fov: num(eye.state.fov, 50) || 50,
     focus: num(eye.state.focus),
@@ -487,7 +541,7 @@ export function buildFrameIR(project, frame, opts = {}) {
     ids.push(cam.id);
   }
 
-  const objects3d = objectsOf(project, t, nodeOpts);
+  const objects3d = objectsOf(project, t, nodeOpts, fps);
   for (const o of objects3d) ids.push(o.id);
 
   const ir = {
@@ -502,7 +556,11 @@ export function buildFrameIR(project, frame, opts = {}) {
     items,
     objects3d,
     screenFx: screenFxOf(meta),
-    world: { source: project.world?.source || 'procedural', hash: opts.city?.hash || null },
+    world: {
+      source: project.world?.source || 'none',
+      background: meta.background || '#000000',
+      hash: opts.city?.hash || null,
+    },
   };
   if (cache) cache.set(sig, ir, rev, ids);
   return ir;
