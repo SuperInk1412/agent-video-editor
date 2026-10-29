@@ -3064,8 +3064,34 @@ export class Timeline {
     // The lane's diamonds are rebuilt (merged <-> per-axis), so the pool's
     // highlight has to be repainted on the new nodes.
     this._paintPool();
+    // Opening a row near the bottom used to put its sub-rows below the fold:
+    // the row you just opened looked like it had disappeared.
+    if (entry.expanded) this._revealRows(entry.row, entry.subRows[entry.subRows.length - 1]?.row);
     // The rows below moved: refresh whatever the new span makes visible.
     this._scheduleValueSync();
+  }
+
+  /**
+   * Scroll just enough that `last` is inside the scroller while `first` stays
+   * below the sticky ruler. Used when a row grows (a transform row expanding
+   * into its X/Y/Z sub-rows): the new rows must land in view, and the header
+   * that was clicked must not be pushed out of it.
+   */
+  _revealRows(first, last) {
+    const sc = this.scroll;
+    if (!sc || !first || !last || last.hidden) return;
+    const sr = sc.getBoundingClientRect();
+    const rulerH = this.rulerRow?.offsetHeight || 26;
+    const top = sr.top + rulerH + 4;
+    const bottom = sr.bottom - 4;
+    if (!(sr.height > rulerH + 8)) return; // scroller too short to judge
+    const fr = first.getBoundingClientRect();
+    const lr = last.getBoundingClientRect();
+    let delta = 0;
+    if (lr.bottom > bottom) delta = lr.bottom - bottom;
+    // Keep the header visible: never scroll it above the ruler.
+    if (delta > 0 && fr.top - delta < top) delta = Math.max(0, fr.top - top);
+    if (delta > 0.5) sc.scrollTop += delta;
   }
 
   _toggleXformKey(entry, shift) {
