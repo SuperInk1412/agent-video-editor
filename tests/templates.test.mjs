@@ -85,7 +85,7 @@ test('template registry: C-b keyability (DOF frame, shutter/seed shot)', () => {
 
 test('template registry: camera lens/shake/dof properties and labels', () => {
   const lens = groupProperties('camera', 'lens').map((p) => p.label);
-  assert.deepEqual(lens, ['视场角 FOV', '看向前方', '转弯侧倾', '最大侧倾', '手动 roll']);
+  assert.deepEqual(lens, ['视场角 FOV', '看向前方', '转弯侧倾', '最大侧倾']);
   const shake = groupProperties('camera', 'shake').map((p) => p.label);
   assert.deepEqual(shake, ['抖动幅度', '抖动频率', '随速度增强', '随机种子']);
   const dof = groupProperties('camera', 'dofMb').map((p) => p.label);

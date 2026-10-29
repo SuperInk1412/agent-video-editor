@@ -1418,7 +1418,7 @@ export class Inspector {
           onChange: setCamRotAxis(i),
         })),
       }),
-      h('div', { class: 'hint' }, '相机自己的三轴偏移：X 低头 · Y 右摇 · Z 画面旋转（与旧手动 roll 叠加，迁移后并入 Z）。'),
+      h('div', { class: 'hint' }, '相机自己的三轴偏移：X 低头 · Y 右摇 · Z 画面旋转（旧手动 roll 已并入 Z）。'),
     ));
     this.root.appendChild(h('div', { class: 'hint pad' },
       '相机属性折叠在时间轴相机行里：点行首 ▾ 展开；位置是飞行路径关键帧，中心点 / 画面 / 透明度 / 缩放也能逐帧打点。'));

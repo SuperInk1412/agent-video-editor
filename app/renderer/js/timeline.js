@@ -1655,8 +1655,8 @@ export class Timeline {
     }
 
     const fov = this._camValue(cam, 'fov');
-    // Three-axis rotation offset (core/rotation.js). The old manual roll row
-    // below is kept until the 2c migration folds it into rotation.z.
+    // Three-axis rotation offset (core/rotation.js). Z is the old manual roll:
+    // the open-time migration folds it in (core/rotation-migrate.js).
     const camRot = AX.map((ax) => {
       const value = this._camValue(cam, `rotation.${ax}`, this.time);
       return Number.isFinite(value) ? value : 0;
@@ -1672,13 +1672,12 @@ export class Timeline {
         }));
       });
       if (rotMode === 'full') {
-        host.appendChild(this._camHintRow('X 俯仰 · Y 转身 · Z 画面内旋转（与旧手动 roll 同号，先叠加）'));
+        host.appendChild(this._camHintRow('X 俯仰 · Y 转身 · Z 画面内旋转（旧手动 roll 已并入 Z）'));
       }
     }
     const lookAhead = this._camValue(cam, 'lookAhead');
     const bankGain = this._camValue(cam, 'bankGain');
     const maxRoll = this._camValue(cam, 'maxRoll');
-    const roll = this._camValue(cam, 'roll');
     const shakeAmp = this._camValue(cam, 'shake.amp');
     const shakeFreq = this._camValue(cam, 'shake.freq');
     const shakeGain = this._camValue(cam, 'shake.speedGain');
@@ -1712,11 +1711,6 @@ export class Timeline {
       if (show('maxRoll')) {
         host.appendChild(this._camParamNumRow(cam, 'maxRoll', '最大侧倾°', maxRoll, {
           step: 1, min: 0, max: 60,
-        }));
-      }
-      if (show('roll')) {
-        host.appendChild(this._camParamNumRow(cam, 'roll', '手动 roll°', roll, {
-          step: 1, min: -60, max: 60,
         }));
       }
     }

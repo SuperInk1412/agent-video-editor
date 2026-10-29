@@ -138,12 +138,6 @@ export const PROPERTIES = {
     keyable: KEYABILITY.frame, value: 'maxRoll',
     channel: { kind: 'scalar', path: 'maxRoll' }, ops: CAMERA_OPS, row: 'number',
   }),
-  'camera.roll': prop('camera.roll', {
-    label: '手动 roll', group: 'lens', type: 'number', unit: '°',
-    default: 0, range: [-60, 60], step: 1,
-    keyable: KEYABILITY.frame, value: 'roll',
-    channel: { kind: 'scalar', path: 'roll' }, ops: CAMERA_OPS, row: 'number',
-  }),
 
   // ---- camera: shake ----
   'camera.shake.amp': prop('camera.shake.amp', {
@@ -209,7 +203,7 @@ export const ELEMENTS = {
     properties: [
       'camera.path', 'transform.center', 'camera.picturePivot', 'camera.pictureOffset',
       'transform.opacity', 'transform.scale',
-      'camera.fov', 'camera.lookAhead', 'camera.bankGain', 'camera.maxRoll', 'camera.roll',
+      'camera.fov', 'camera.lookAhead', 'camera.bankGain', 'camera.maxRoll',
       'camera.shake.amp', 'camera.shake.freq', 'camera.shake.speedGain', 'camera.shake.seed',
       'camera.dof.enabled', 'camera.dof.fstop', 'camera.motionBlur.enabled', 'camera.motionBlur.shutter',
       'element.visible',

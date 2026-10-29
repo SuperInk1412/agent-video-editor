@@ -31,7 +31,7 @@ const OB_TRANSFORM = ['pivot', 'position', 'scale', 'rotation.x', 'rotation.y', 
 const CAM_GROUPS = {
   camPos: ['center', 'picturePivot', 'pictureOffset', 'opacity', 'scale'],
   camRot: ['rotation.x', 'rotation.y', 'rotation.z'],
-  camMain: ['fov', 'lookAhead', 'bankGain', 'maxRoll', 'roll'],
+  camMain: ['fov', 'lookAhead', 'bankGain', 'maxRoll'],
   camShake: ['shake.amp', 'shake.freq', 'shake.speedGain'],
   camDof: ['dof.enabled', 'dof.fstop'],
 };
