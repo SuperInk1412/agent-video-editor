@@ -59,6 +59,31 @@ vdm plan --style neon --brief $'第一句\n第二句' --seed 7
 brief 的每一行对应一个分镜（每段至少 1.2s）；媒体池里的图片和视频按种子洗牌后轮流使用，
 用完一轮才会重复。
 
+## 代码图层（source）
+
+```bash
+vdm source new --runtime canvas2d|p5|glsl [--id src_x] [--force]
+vdm source check <id> [--frame 0] [--size 640x360] [--budget 200] [--json]
+vdm source ls
+vdm source write <id> <path> --content "…" | --file sketch.js
+vdm source rm <id>
+```
+
+- 源的真身是项目文档里的 `sources[]`（`manifest` + 文件正文），所以每一次改源都走 `core/ops.js`
+  （加锁、rev、可撤销）；`sources/<id>/` 是给渲染池读的派生物，`new` / `write` / `check` 会顺手同步。
+- `source new` 从 `templates/code/<runtime>/` 拷起步模板（manifest + 入口文件 + 一句 README），
+  生成完可以立刻 `vdm source check` 通过。
+- `source check` 的五项（DESIGN-BACKEND-V2 §6.3）：① 禁用 API 静态扫描（`Date.now` /
+  `performance.now` / `Math.random` / `fetch` / `XMLHttpRequest` / `WebSocket` / `requestAnimationFrame`，
+  p5 另查 `loop()` / `frameRate()` / `loadImage` 这类读取）；② 同一帧渲染两次比哈希；
+  ③ 透明通道（全透明判失败、全不透明给提示）；④ 单帧耗时（默认预算 200 ms）；
+  ⑤ manifest 声明的参数是否真的被读取（逐个改参数再渲一遍，画面不变就是写死了）。
+  渲染复用 `engine/render-workers/pool.js`，只有找不到 Electron 时才会 `DEPENDENCY_MISSING`；
+  有失败时进程退出码是 1，`--json` 给结构化结果。
+- 元素侧：`vdm add --type code` 之后把 `code.source` 指向源；写参数用
+  `{"op":"codeParamSet","id":"el_1","name":"density","value":0.8}`，打帧仍用现有
+  `vdm key set <el> code.params.<name> <t> <v>`。`code.params.<name>` 也能当 propLink 的目标和来源。
+
 ## 测量（inspect）
 
 ```bash

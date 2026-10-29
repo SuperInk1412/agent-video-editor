@@ -108,6 +108,32 @@ const target = (path, unit) => Object.freeze({
   combine: unit === 'ratio' ? 'mul' : 'add',
 });
 
+// Code parameters (§6.1): `code.params.<name>` is a plain number whose meaning
+// (pixels, seconds, 0..1 …) is declared by the source manifest, which core
+// cannot read. They therefore carry `unit: 'any'` and may link to any numeric
+// channel. Nothing else is allowed to skip the unit check.
+const ANY_UNIT = 'any';
+const CODE_PARAM_PREFIX = 'code.params.';
+const CODE_PARAM_RE = /^code\.params\.[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+const CODE_PARAM_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+const unitsCompatible = (a, b) => a === b || a === ANY_UNIT || b === ANY_UNIT;
+const codeParamTarget = (path) => Object.freeze({ path, unit: ANY_UNIT, combine: 'add' });
+
+/** Parameter names a code element currently carries (base values only). */
+function codeParamNames(host) {
+  const params = isRecord(host?.code?.params) ? host.code.params : {};
+  return Object.keys(params).filter((name) => CODE_PARAM_NAME_RE.test(name)).sort();
+}
+
+/** Element targets, plus one target per parameter when the host is a code layer. */
+function elementTargets(host) {
+  const base = isRecord(host?.node) ? NODE_ELEMENT_TARGETS : LEGACY_ELEMENT_TARGETS;
+  if (!isRecord(host) || host.type !== 'code') return base;
+  const names = codeParamNames(host);
+  if (!names.length) return base;
+  return [...base, ...names.map((name) => codeParamTarget(`${CODE_PARAM_PREFIX}${name}`))];
+}
+
 const NODE_TARGETS = Object.freeze([
   target('pivot.x', 'length'), target('pivot.y', 'length'), target('pivot.z', 'length'),
   target('position.x', 'length'), target('position.y', 'length'), target('position.z', 'length'),
@@ -161,13 +187,16 @@ export function linkTargets(kind, host = null) {
   const k = normalizeHostKind(kind);
   if (k === 'cam') return CAMERA_TARGETS;
   if (k === 'ob') return NODE_TARGETS;
-  return isRecord(host?.node) ? NODE_ELEMENT_TARGETS : LEGACY_ELEMENT_TARGETS;
+  return elementTargets(host);
 }
 
 /** Target descriptor for a host property, or null when it is not linkable. */
 export function findLinkTarget(kind, host, path) {
   const key = path == null ? '' : String(path);
   if (!key) return null;
+  // A code parameter that has no base value yet is still linkable: the source
+  // manifest is the contract, and `vdm source check` reports unknown names.
+  if (hostKindOrNull(kind) === 'el' && host?.type === 'code' && CODE_PARAM_RE.test(key)) return codeParamTarget(key);
   return linkTargets(kind, host).find((t) => t.path === key) || null;
 }
 
@@ -480,7 +509,7 @@ export function projectLinkIssues(project) {
           push(`${loc}.from.path`, `${KIND_LABEL[sourceKind]} ${sourceHost.id ?? from.id} has no readable property ${from.path}`);
           return;
         }
-        if (target && target.unit !== sourceTarget.unit) {
+        if (target && !unitsCompatible(target.unit, sourceTarget.unit)) {
           push(loc, `unit mismatch: ${to} is ${target.unit}, ${from.path} is ${sourceTarget.unit}`);
         }
         if (!target) return;
@@ -568,6 +597,16 @@ function elementLocal(el, meta, path, t) {
   if (path === 'style.size') return num(sampleTrack(keys, 'style.size', t, num(el.style?.size, 96)), 96);
   if (path === 'fx.glow') return num(sampleTrack(keys, 'fx.glow', t, num(el.fx?.glow, 0)), 0);
   if (path === 'audio.volume') return num(sampleTrack(keys, 'audio.volume', t, num(el.volume, 1)), 1);
+  if (path.startsWith(CODE_PARAM_PREFIX)) {
+    // Code parameters (§6.1): the element stores the current value, keyframes
+    // live at `code.params.<name>`. Property links are numeric, so only numeric
+    // parameters resolve here; strings / booleans / colours are sampled by
+    // core/code-layer.js::codeParamsAt (which steps them at the key).
+    const name = path.slice(CODE_PARAM_PREFIX.length);
+    const base = isRecord(el.code?.params) ? el.code.params[name] : undefined;
+    if (typeof base !== 'number' || !Number.isFinite(base)) return null;
+    return num(sampleTrack(keys, path, t, base), base);
+  }
   const node = isRecord(el.node) ? el.node : null;
   if (node) {
     // Migrated 2D element: `el.node` is the transform source, node channels are
@@ -680,6 +719,14 @@ function writeElementLocal(el, meta, path, t, value) {
   }
   if (path === 'audio.volume') {
     setElementValue(el, 'audio.volume', t, clamp(value), (v) => { el.volume = v; });
+    return true;
+  }
+  if (path.startsWith(CODE_PARAM_PREFIX)) {
+    const name = path.slice(CODE_PARAM_PREFIX.length);
+    if (!CODE_PARAM_NAME_RE.test(name)) return false;
+    el.code = isRecord(el.code) ? el.code : { source: '', params: {}, seed: 0, size: null, cache: 'live' };
+    el.code.params = isRecord(el.code.params) ? el.code.params : {};
+    setElementValue(el, path, t, value, (v) => { el.code.params[name] = v; });
     return true;
   }
   if (node) {
@@ -1161,7 +1208,7 @@ function propLink(project, op, fail) {
     fail(`${KIND_LABEL[child.kind]} ${child.host.id} has no linkable property ${to}`);
   }
   const parent = sourceRef(project, op.from, fail);
-  if (target.unit !== parent.target.unit) {
+  if (!unitsCompatible(target.unit, parent.target.unit)) {
     fail(`property link units differ: ${to} is ${target.unit}, ${parent.path} is ${parent.target.unit}`);
   }
   const t = roundT(op.t);
@@ -1226,7 +1273,7 @@ function propLinkPatch(project, op, fail) {
   const parent = sourceRef(project, fromRaw, fail);
   const target = findLinkTarget(child.kind, child.host, to);
   if (!target) fail(`${KIND_LABEL[child.kind]} ${child.host.id} has no linkable property ${to}`);
-  if (target.unit !== parent.target.unit) {
+  if (!unitsCompatible(target.unit, parent.target.unit)) {
     fail(`property link units differ: ${to} is ${target.unit}, ${parent.path} is ${parent.target.unit}`);
   }
   const combine = patch.combine !== undefined ? String(patch.combine) : existing.combine;
