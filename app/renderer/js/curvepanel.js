@@ -21,7 +21,7 @@ import {
   curveHandles, moveCurveHandle, curveRange, curveParamsText,
 } from '/core/curves.js';
 import { retimePathSpan } from '/core/camera.js';
-import { spanCurveOps } from '/core/curve-spans.js';
+import { spanCurveOps, curveFromEase, spanProgress, retimeSpanTimes } from '/core/curve-spans.js';
 import { sampleTrack } from '/core/time.js';
 import { cameraRef, elementRef, keyframeRef, objectRef, splitRef } from '/core/selection.js';
 import { h, icon, token } from './ui.js';
@@ -202,6 +202,11 @@ export class CurvePanel {
     if (drag?.mode === 'path') {
       this._restoreSpanBackup();
       if (this.isOpen()) this.draw();
+      return;
+    }
+    if (drag?.mode === 'spanCurve') {
+      this.curve = drag.baseCurve;
+      this._restoreLiveSpans();
       return;
     }
     if (drag?.curve) this.curve = drag.curve;
@@ -613,7 +618,7 @@ export class CurvePanel {
     // Show what is actually stored; with nothing stored the drawn shape is the
     // fallback the first handle drag or preset will write.
     const stored = normalizeCurve(track.segments[this.active]?.a?.curve);
-    const live = this.drag?.mode === 'segment' ? this.curve : stored;
+    const live = this.drag && this.drag.mode !== 'path' ? this.curve : stored;
     const detail = live ? curveParamsText(live) : '';
     this.presetEl.textContent = live
       ? (detail ? `${curveLabel(live)} · ${detail}` : curveLabel(live))
@@ -928,6 +933,37 @@ export class CurvePanel {
     return keyValue(at(span.from)) != null && keyValue(at(span.to)) != null;
   }
 
+  /** The key that starts a span (it owns the curve of that segment). */
+  _leftKey(path, t) {
+    return this._trackKeys(path).find((k) => Math.abs(Number(k.t) - t) <= 1e-4) || null;
+  }
+
+  /**
+   * Every span the pool can edit: numeric, between adjacent selected keys, on
+   * any property track of this host (design §3 pool semantics).
+   */
+  _editSpans() {
+    const spans = [];
+    for (const path of this._selectedPaths()) {
+      for (const span of this._selectedPairs(path)) {
+        if (this._numericSpan(span)) spans.push(span);
+      }
+    }
+    return spans;
+  }
+
+  /**
+   * Curve drawn on a span. A stored curve wins; otherwise the shape follows the
+   * key's real `ease` (fitted to handles), so the handles never claim an
+   * `easeInOut` the data does not have (§7 R1, core/curve-spans.js).
+   */
+  _spanCurve(span) {
+    const left = this._leftKey(span.path, span.from);
+    const stored = normalizeCurve(left?.curve);
+    if (stored) return { curve: stored, fitted: false };
+    return { curve: curveFromEase(left?.ease), fitted: true };
+  }
+
   _isSelectedSegment(span) {
     return !!this.path?.segments.some((s) => Math.abs(s.from - span.from) <= 1e-4
       && Math.abs(s.to - span.to) <= 1e-4);
@@ -1232,16 +1268,23 @@ export class CurvePanel {
     // Every key of the active track, on its real value.
     this._drawKeys(ctx, g, keys, path);
 
-    // active handles with guides
-    const seg = track?.segments[this.active];
-    if (seg && this.curve) {
-      for (const handle of curveHandles(this.curve)) {
-        const hp = this._handlePos(seg, g, handle);
+    // Handles for every editable span of the displayed track (§7: the old
+    // "active segment only" rule hid the handles the selection promised).
+    const shown = this._editSpans().filter((span) => span.path === path);
+    for (const span of shown) {
+      const info = this._spanCurve(span);
+      if (!info?.curve) continue;
+      const draggingThis = this.drag?.mode === 'spanCurve'
+        && this.drag.span?.path === span.path
+        && Math.abs(this.drag.span.from - span.from) <= 1e-4;
+      const handles = curveHandles(draggingThis ? this.drag.curve : info.curve);
+      for (const handle of handles) {
+        const hp = this._handlePos(span, g, handle);
         if (!hp) continue;
         const visible = hp.x >= g.plotLeft - 14 && hp.x <= W - g.rightPad + 14
           && hp.y >= g.top - 14 && hp.y <= g.bottom + 14;
         if (!visible) continue;
-        const origin = this._handleOrigin(seg, g, handle);
+        const origin = this._handleOrigin(span, g, handle);
         if (origin) {
           ctx.setLineDash([3, 4]);
           ctx.strokeStyle = alpha(C('--text-2'), 0.35);
@@ -1249,17 +1292,25 @@ export class CurvePanel {
           ctx.setLineDash([]);
         }
         ctx.setLineDash([3, 4]);
-        ctx.strokeStyle = alpha(C('--text-2'), 0.32);
-        ctx.beginPath(); ctx.moveTo(g.plotLeft, hp.y); ctx.lineTo(W - g.rightPad, hp.y); ctx.stroke();
+        ctx.strokeStyle = alpha(C('--text-2'), 0.22);
         ctx.beginPath(); ctx.moveTo(hp.x, g.top); ctx.lineTo(hp.x, g.bottom); ctx.stroke();
         ctx.setLineDash([]);
-        const active = this.drag?.handle?.id === handle.id;
+        const active = this.drag?.handle?.id === handle.id && draggingThis;
         ctx.beginPath();
-        ctx.arc(hp.x, hp.y, active ? 9.5 : 8, 0, Math.PI * 2);
-        ctx.fillStyle = C('--text-1');
-        ctx.fill();
-        ctx.strokeStyle = C('--accent-hover');
-        ctx.lineWidth = 1.5;
+        ctx.arc(hp.x, hp.y, active ? 9.5 : 7.5, 0, Math.PI * 2);
+        // Fitted handles are hollow: they show the key's current ease, not
+        // stored data, until the first drag writes a real curve.
+        if (info.fitted) {
+          ctx.fillStyle = C('--surface-0');
+          ctx.fill();
+          ctx.strokeStyle = C('--text-1');
+          ctx.lineWidth = 1.6;
+        } else {
+          ctx.fillStyle = C('--text-1');
+          ctx.fill();
+          ctx.strokeStyle = C('--accent-hover');
+          ctx.lineWidth = 1.5;
+        }
         ctx.stroke();
       }
     }
@@ -1289,16 +1340,21 @@ export class CurvePanel {
       }
       return best ? { span: best.span, handle: best.handle } : null;
     }
-    const seg = this._track()?.segments[this.active];
-    if (!seg) return null;
+    const path = this._track()?.path;
+    if (!path) return null;
     let best = null;
-    for (const handle of curveHandles(this.curve)) {
-      const hp = this._handlePos(seg, g, handle);
-      if (!hp) continue;
-      const d = Math.hypot(hp.x - x, hp.y - y);
-      if (d <= 15 && (!best || d < best.d)) best = { handle, d };
+    for (const span of this._editSpans()) {
+      if (span.path !== path) continue;
+      const info = this._spanCurve(span);
+      if (!info?.curve) continue;
+      for (const handle of curveHandles(info.curve)) {
+        const hp = this._handlePos(span, g, handle);
+        if (!hp) continue;
+        const d = Math.hypot(hp.x - x, hp.y - y);
+        if (d <= 15 && (!best || d < best.d)) best = { span, handle, curve: info.curve, d };
+      }
     }
-    return best?.handle || null;
+    return best ? { span: best.span, handle: best.handle, curve: best.curve } : null;
   }
 
   /**
@@ -1493,18 +1549,25 @@ export class CurvePanel {
           range: g.range,
         };
       } else {
-        const seg = this._track()?.segments[this.active];
-        this._spanBackup = null;
+        // Scalar track: one curve for the dragged span, applied pool-wide on
+        // release. Inner keys follow live unless Alt holds them still (§7).
+        const range = this._segProgressRange(g, hit.span);
         this.drag = {
-          mode: 'segment',
-          handle: hit,
-          seg: this.active,
-          curve: this.curve,
+          mode: 'spanCurve',
+          span: hit.span,
+          handle: hit.handle,
+          curve: hit.curve,
+          baseCurve: hit.curve,
           pointer: p,
-          // Progress window the handle is drawn in: one pixel of drag has to
-          // change `handle.v` the same amount the handle visually moves.
-          range: seg ? this._segProgressRange(g, seg) : g.range,
+          range,
+          alt: !!e.altKey,
+          moved: false,
         };
+        this._snapshotSpans();
+        this.curve = hit.curve;
+        this._syncHead();
+        this._markPreset();
+        this.draw();
       }
       this.canvas.style.cursor = 'grabbing';
       return;
@@ -1545,9 +1608,10 @@ export class CurvePanel {
     const handle = drag.handle;
     const g = this._geo();
     const p = this._localPoint(e);
-    const from = drag.mode === 'path' ? drag.span.from : this._track()?.segments[drag.seg]?.from;
-    const to = drag.mode === 'path' ? drag.span.to : this._track()?.segments[drag.seg]?.to;
-    if (from == null || to == null) return;
+    const span = drag.mode === 'segment' ? this._track()?.segments[drag.seg] : drag.span;
+    if (!span || span.from == null || span.to == null) return;
+    const from = span.from;
+    const to = span.to;
     const spanPx = Math.max(1, g.xOf(to) - g.xOf(from));
     const plotH = Math.max(1, g.bottom - g.top);
     const damping = Number.isFinite(handle.damping) ? handle.damping : 1;
@@ -1563,11 +1627,17 @@ export class CurvePanel {
       v = clamp(v, 0, 1);
     }
     this.curve = moveCurveHandle(drag.curve, handle.id, u, v);
+    drag.curve = this.curve;
+    drag.moved = true;
     if (drag.mode === 'path') {
       drag.span.curve = this.curve;
       drag.span.left.curve = this.curve;
       drag.span.left.spanTo = drag.span.to;
       this._scheduleLiveSpan();
+    } else if (drag.mode === 'spanCurve') {
+      // Alt is read live so the gesture can be released without retiming.
+      drag.alt = !!e.altKey;
+      this._applyLiveSpans(drag.curve);
     }
     this._syncHead();
     this._markPreset();
@@ -1591,8 +1661,76 @@ export class CurvePanel {
       }
       return;
     }
+    if (drag.mode === 'spanCurve') {
+      if (!drag.moved) {
+        this._restoreLiveSpans();
+        return;
+      }
+      // Build the ops from the *committed* state: the live preview already
+      // moved the key objects in memory, and the engine never saw those moves,
+      // so a keyCurve pointing at a preview-only time would be rejected.
+      this._restoreLiveSpans();
+      this._commit(drag.curve, this._editSpans(), { retime: !drag.alt });
+      return;
+    }
     const seg = this._track()?.segments[drag.seg];
     if (seg) this._commit(this.curve, [seg]);
+  }
+
+  // ------------------------------------------------ live span retiming (§4/§7)
+
+  /** Remember the spans a handle drag is about to retime (live preview + undo). */
+  _snapshotSpans() {
+    this._dragBackup = this._editSpans().map((span) => {
+      const keys = this._trackKeys(span.path);
+      const at = (t) => keys.find((k) => Math.abs(Number(k.t) - t) <= 1e-4) || null;
+      return {
+        span,
+        left: at(span.from),
+        right: at(span.to),
+        inner: keys
+          .filter((k) => Number(k.t) > span.from + 1e-4 && Number(k.t) < span.to - 1e-4)
+          .map((k) => ({ key: k, t: Number(k.t) })),
+      };
+    });
+  }
+
+  /**
+   * Move the inner keys of every editable span to where `curve` first reaches
+   * their value, in the in-memory project (no rev, no history) so the preview,
+   * the timeline and the drawn line all follow the handle under the pointer.
+   * Recomputes from the origin every frame, so a drag back and forth is exact.
+   */
+  _applyLiveSpans(curve) {
+    const retime = !this.drag?.alt;
+    for (const entry of this._dragBackup || []) {
+      for (const item of entry.inner) item.key.t = item.t;
+      if (!retime || !entry.inner.length) continue;
+      const points = entry.inner.map((item) => ({
+        t: item.t,
+        ys: [spanProgress(keyValue(entry.left), keyValue(entry.right), keyValue(item.key))],
+      }));
+      const timed = retimeSpanTimes({ from: entry.span.from, to: entry.span.to, curve, points });
+      if (!timed) continue;
+      timed.forEach((res, i) => {
+        if (!res.outOfRange && entry.inner[i]) entry.inner[i].key.t = res.newT;
+      });
+    }
+    this.onLivePreview?.();
+  }
+
+  /** Put every retimed inner key back and drop the backup. */
+  _restoreLiveSpans() {
+    for (const entry of this._dragBackup || []) {
+      for (const item of entry.inner) item.key.t = item.t;
+    }
+    this._dragBackup = null;
+    this.onLivePreview?.();
+    if (this.isOpen()) {
+      this._syncHead();
+      this._syncRailGroup();
+      this.draw();
+    }
   }
 
   _hover(e) {
