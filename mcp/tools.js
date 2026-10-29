@@ -2,6 +2,8 @@ import { EDIT_SCHEMA, OP_SCHEMA } from '../core/contracts.js';
 import { validateContract } from '../application/validate-contract.js';
 import { errorData, fault } from '../application/errors.js';
 import { assertSafeData } from '../core/json.js';
+import { ChangeSetService, CHANGESET_STATUS } from '../application/changeset-service.js';
+import { projectService } from '../engine/projects.js';
 import {
   coverage as inspectCoverage, cutEdges as inspectCutEdges, diff as inspectDiff,
   stackAt as inspectStackAt,
@@ -27,6 +29,33 @@ const inspectTool = (name, description, inputSchema, inspect) => ({
   name, description, inputSchema, outputSchema: { type: 'object' },
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }, inspect,
 });
+/**
+ * A change set tool (docs/DESIGN-BACKEND-V2.md §8.1, WP2.2). It runs on this
+ * project's own folder — `application/changeset-service.js` over the same
+ * ProjectService the runtime uses, taking the project lock per transaction —
+ * because a change set also keeps a record beside the journal. Writing one is a
+ * normal edit: one transaction, one revision, the same LOCKED rule as
+ * `vdm_project_apply_ops`.
+ */
+const changeSetTool = (name, description, inputSchema, changeset, readOnly = true) => ({
+  name, description, inputSchema, outputSchema: { type: 'object' },
+  annotations: { readOnlyHint: readOnly, destructiveHint: !readOnly, idempotentHint: readOnly, openWorldHint: false },
+  changeset,
+});
+const actorSchema = { type: 'string', minLength: 1, maxLength: 200 };
+/** `apply` takes a stored proposal (id) or a new one (ops, same shape as an edit). */
+const changeSetApplySchema = {
+  type: 'object', additionalProperties: false, $defs: EDIT_SCHEMA.$defs,
+  properties: {
+    id: string,
+    ops: { type: 'array', minItems: 1, maxItems: 1000, items: { $ref: '#/$defs/op' } },
+    actorId: actorSchema,
+    intent: { type: 'string', maxLength: 512 },
+    expectedRev: integer,
+    requestId: { ...string, maxLength: 200 },
+    dryRun: { type: 'boolean' },
+  },
+};
 
 export const TOOLS = [
   tool('vdm_capabilities', 'Read supported project models, edit operations, render limits and installed Blender availability.', schema(), 'capabilities'),
@@ -61,9 +90,23 @@ export const TOOLS = [
   inspectTool('vdm_inspect_diff', 'Diff two project revisions as changed[{id,kind,path,before,after}] (docs/DESIGN-BACKEND-V2.md §8.3) for a change report. Omit one side to compare it with the live project; rev and meta.savedAt are ignored by default. before/after are full project objects (vdm_project_read section=project).', schema({
     before: { type: 'object' }, after: { type: 'object' }, ignore: { type: 'array', items: string, maxItems: 32 }, limit: { type: 'integer', minimum: 1, maximum: 10000 },
   }), 'diff'),
+  // Change sets (docs/DESIGN-BACKEND-V2.md §8.1, WP2.2). A change set groups the
+  // transactions of one accepted edit, keeps the §8.3 diff of what it changed and
+  // can be reverted one property at a time without forcing a conflict.
+  changeSetTool('vdm_changeset_list', 'List change sets newest first: id, actorId, intent, status, baseRev/rev, transaction ids, how many properties changed and how many decisions a revert left. Read-only.', schema({
+    status: { enum: [...CHANGESET_STATUS] }, actorId: actorSchema, limit: { type: 'integer', minimum: 1, maximum: 200 }, offset: integer,
+  }), 'list'),
+  changeSetTool('vdm_changeset_show', 'Read one change set: status, the changed[{id,kind,path,before,after}] list from the §8.3 diff, counts, verification status and revert decisions. Read-only; ops are summarised as opsCount.', schema({
+    id: string, limit: { type: 'integer', minimum: 1, maximum: 5000 },
+  }, ['id']), 'show'),
+  changeSetTool('vdm_changeset_apply', 'Apply one change set. Either id (a stored proposal, applied at its base revision) or ops (a new change set: same op contract as vdm_project_apply_ops) plus actorId and intent. expectedRev is a precondition, requestId makes a retry replay, dryRun validates and writes nothing. A host with locked:true rejects actorId agent:* with code LOCKED; ui/human/local may write it. Returns id, status, baseRev, rev, transactions, changed[] and the report.', changeSetApplySchema, 'apply', false),
+  changeSetTool('vdm_changeset_revert', 'Revert a change set — the whole group by default, one entry with index (changed[] first, then added[], then removed[]) or with entityId and/or path. Only properties nobody touched since are inverted; a changed property, a deleted key or a deleted host becomes a decision in report.decisions and the status becomes needs-decision. dryRun reports the plan and writes nothing.', schema({
+    id: string, index: integer, entityId: string, path: string, actorId: actorSchema,
+    expectedRev: integer, requestId: { ...string, maxLength: 200 }, dryRun: { type: 'boolean' },
+  }, ['id']), 'revert', false),
 ];
 
-export function listTools() { return TOOLS.map(({ method, transform, inspect, ...entry }) => entry); }
+export function listTools() { return TOOLS.map(({ method, transform, inspect, changeset, ...entry }) => entry); }
 
 /** The measurement half of callTool: the pure service runs on the live project. */
 function runInspect(kind, project, input) {
@@ -89,6 +132,32 @@ function runInspect(kind, project, input) {
   throw fault('INVALID_ARGUMENT', `unknown inspect tool ${kind}`);
 }
 
+/**
+ * The change set half of callTool. It needs the project root the runtime
+ * reports in `.vdm/app.json`; without one there is nothing to commit against.
+ */
+async function runChangeSet(client, action, input) {
+  const root = client?.info?.root ?? client?.root ?? null;
+  if (typeof root !== 'string' || !root) {
+    throw fault('RUNTIME_UNAVAILABLE', 'change set tools need a project runtime (its info carries the project root)');
+  }
+  const service = new ChangeSetService(projectService(root));
+  const actorId = input.actorId ?? 'agent:mcp';
+  if (action === 'list') return service.list({ status: input.status, actorId: input.actorId, limit: input.limit, offset: input.offset });
+  if (action === 'show') return service.show(input.id, { limit: input.limit });
+  if (action === 'apply') {
+    if (input.id !== undefined && input.ops !== undefined) throw fault('INVALID_ARGUMENT', 'vdm_changeset_apply takes either id or ops, not both');
+    if (input.id === undefined && input.ops === undefined) throw fault('INVALID_ARGUMENT', 'vdm_changeset_apply needs id (a stored proposal) or ops (a new change set)');
+    return service.apply({ ...input, actorId });
+  }
+  if (action === 'revert') {
+    const payload = { id: input.id, expectedRev: input.expectedRev, requestId: input.requestId, actorId, dryRun: input.dryRun, path: input.path, entityId: input.entityId, index: input.index };
+    const one = input.index !== undefined || input.entityId !== undefined || input.path !== undefined;
+    return one ? service.revertOne(payload) : service.revert(payload);
+  }
+  throw fault('INVALID_ARGUMENT', `unknown change set tool ${action}`);
+}
+
 export async function callTool(client, name, input = {}) {
   const entry = TOOLS.find((item) => item.name === name);
   if (!entry) throw fault('UNKNOWN_TOOL', `unknown tool ${name}`);
@@ -97,7 +166,9 @@ export async function callTool(client, name, input = {}) {
     validateContract(input, entry.inputSchema);
     let result = entry.inspect
       ? runInspect(entry.inspect, await client.call('project.read'), input)
-      : await client.call(entry.method, entry.transform(input));
+      : entry.changeset
+        ? await runChangeSet(client, entry.changeset, input)
+        : await client.call(entry.method, entry.transform(input));
     if (Array.isArray(result)) result = { items: result };
     // Editing snapshots stay on the runtime; avoid returning the full project
     // for every small operation, especially on retried requests.
