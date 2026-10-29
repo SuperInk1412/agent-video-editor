@@ -255,6 +255,48 @@ def _unit_cube_mesh(name):
     return mesh
 
 
+def _unit_cylinder_mesh(name, segments=48):
+    """Unit cylinder: radius 0.5 (geom.w / geom.d are the diameter), height 1.
+
+    Same shape the viewport draws (preview3d.js::UNIT_CYLINDER): smooth side,
+    flat caps, so a `primitive: "cylinder"` solid renders the same in both.
+    """
+    verts = []
+    faces = []
+    smooth = []
+    for i in range(segments):
+        a = 2.0 * math.pi * i / segments
+        verts.append((math.cos(a) * 0.5, -0.5, math.sin(a) * 0.5))
+        verts.append((math.cos(a) * 0.5, 0.5, math.sin(a) * 0.5))
+    for i in range(segments):
+        j = (i + 1) % segments
+        faces.append((i * 2, j * 2, j * 2 + 1, i * 2 + 1))
+        smooth.append(True)
+    top = len(verts)
+    verts.append((0.0, 0.5, 0.0))
+    bottom = len(verts)
+    verts.append((0.0, -0.5, 0.0))
+    for i in range(segments):
+        j = (i + 1) % segments
+        faces.append((top, i * 2 + 1, j * 2 + 1))
+        smooth.append(False)
+        faces.append((bottom, j * 2, i * 2))
+        smooth.append(False)
+    mesh = bpy.data.meshes.new(name)
+    mesh.from_pydata(verts, [], faces)
+    mesh.update()
+    for poly, sm in zip(mesh.polygons, smooth):
+        poly.use_smooth = sm
+    return mesh
+
+
+def _solid_mesh(name, primitive):
+    """Mesh for a solid: a cylinder when the object says so, else the unit cube."""
+    if str(primitive or '').lower() == 'cylinder':
+        return _unit_cylinder_mesh(name)
+    return _unit_cube_mesh(name)
+
+
 def _build_objects(scene, shot, root=None):
     """Timeline elements as emissive boxes, animated exactly like the viewport.
     Image/video/text objects are built as planes / 3D text by vdm_objects.py."""
@@ -269,7 +311,7 @@ def _build_objects(scene, shot, root=None):
             vdm_objects.build_media_object(scene, o, root, updaters)
             continue
         name = str(o.get('name') or o.get('id') or f'element_{i}')
-        mesh = _unit_cube_mesh('el_' + str(o.get('id') or i))
+        mesh = _solid_mesh('el_' + str(o.get('id') or i), o.get('primitive'))
         obj = bpy.data.objects.new(name, mesh)
         obj.rotation_mode = 'QUATERNION'
         mat = _element_material('elmat_' + str(o.get('id') or i), o.get('color'), o.get('emissive'))

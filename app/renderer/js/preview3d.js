@@ -323,6 +323,34 @@ const UNIT_CUBE = (() => {
   return new Float32Array(v);
 })();
 
+/**
+ * Unit cylinder for `primitive: "cylinder"` solids: radius 0.5 (so `geom.w` /
+ * `geom.d` are the diameter in x / z), height 1 (`geom.h`), smooth side normals
+ * and flat caps. Same interleaved layout as UNIT_CUBE (position + normal, 24
+ * bytes) so the object program and its lighting are shared.
+ */
+const UNIT_CYLINDER = (() => {
+  const seg = 48;
+  const v = [];
+  const push = (p, n) => v.push(p[0], p[1], p[2], n[0], n[1], n[2]);
+  const r = 0.5, hy = 0.5;
+  for (let i = 0; i < seg; i++) {
+    const a0 = (i / seg) * Math.PI * 2;
+    const a1 = ((i + 1) / seg) * Math.PI * 2;
+    const n0 = [Math.cos(a0), 0, Math.sin(a0)];
+    const n1 = [Math.cos(a1), 0, Math.sin(a1)];
+    const b0 = [n0[0] * r, -hy, n0[2] * r];
+    const b1 = [n1[0] * r, -hy, n1[2] * r];
+    const t0 = [n0[0] * r, hy, n0[2] * r];
+    const t1 = [n1[0] * r, hy, n1[2] * r];
+    push(b0, n0); push(b1, n1); push(t1, n1);
+    push(b0, n0); push(t1, n1); push(t0, n0);
+    push([0, hy, 0], [0, 1, 0]); push(t0, [0, 1, 0]); push(t1, [0, 1, 0]);
+    push([0, -hy, 0], [0, -1, 0]); push(b1, [0, -1, 0]); push(b0, [0, -1, 0]);
+  }
+  return { data: new Float32Array(v), count: v.length / 6 };
+})();
+
 export class Scene3D {
   constructor(gl) {
     this.gl = gl;
@@ -395,6 +423,17 @@ export class Scene3D {
     this.objVao = gl.createVertexArray();
     gl.bindVertexArray(this.objVao);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.cornerBuf);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
+    gl.bindVertexArray(null);
+    // Same layout, cylinder vertices: `primitive: "cylinder"` solids draw this.
+    this.cylVao = gl.createVertexArray();
+    gl.bindVertexArray(this.cylVao);
+    const cylBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, cylBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, UNIT_CYLINDER.data, gl.STATIC_DRAW);
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
     gl.enableVertexAttribArray(1);
@@ -553,7 +592,13 @@ export class Scene3D {
       const col = hexRgb(obj.style?.color || obj.style?.fill || '#8fe0ff');
       const alpha = pose.opacity * Math.max(0, Math.min(1, Number(obj.style?.opacity ?? 1)));
       const dist = Math.hypot(pose.worldPos[0] - camPos[0], pose.worldPos[1] - camPos[1], pose.worldPos[2] - camPos[2]);
-      const item = { m, nm, col, alpha, dist, emissive: Math.max(0, Number(obj.style?.emissive) || 0) };
+      const item = {
+        m, nm, col, alpha, dist,
+        emissive: Math.max(0, Number(obj.style?.emissive) || 0),
+        // `primitive: "cylinder"` is a real cylinder (docs/SPEC-OBJECTS.md);
+        // everything else solid draws the unit cube, as it always has.
+        mesh: obj.primitive === 'cylinder' ? 'cyl' : 'box',
+      };
       if (alpha >= 0.999) opaque.push(item);
       else transparent.push(item);
     }
@@ -781,6 +826,12 @@ export class Scene3D {
     gl.uniform3f(u.u_color, it.col[0], it.col[1], it.col[2]);
     gl.uniform1f(u.u_emissive, it.emissive);
     gl.uniform1f(u.u_alpha, it.alpha);
+    if (it.mesh === 'cyl') {
+      gl.bindVertexArray(this.cylVao);
+      gl.drawArrays(gl.TRIANGLES, 0, UNIT_CYLINDER.count);
+      gl.bindVertexArray(this.objVao);
+      return;
+    }
     gl.drawArrays(gl.TRIANGLES, 0, 36);
   }
 

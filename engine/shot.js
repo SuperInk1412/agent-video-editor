@@ -69,7 +69,11 @@ export function bakeObjects(project, { fps = 24, from = 0, to = null } = {}) {
   const objs = project.scene?.objects || [];
   if (!objs.length) return [];
   const f0 = Math.round(from * fps) + 1;
-  const f1 = Math.round((to ?? project.meta.duration) * fps) + 1;
+  // The range is half-open [from, to): the last frame is the one that still
+  // starts before `to`. `+1` here baked one extra frame at t = duration, which
+  // no clip covers (they are `[start, start+duration)`), so the tail frame was
+  // empty in every shot.
+  const f1 = Math.max(f0, Math.round((to ?? project.meta.duration) * fps));
   const out = [];
   const poses = new Map();
   const evalOpts = linksEvalOptions(project);
@@ -107,6 +111,9 @@ export function bakeObjects(project, { fps = 24, from = 0, to = null } = {}) {
       id: o.id,
       name: o.name || o.id,
       type: o.type,
+      // `primitive` decides the mesh for a solid (box / cylinder); the preview
+      // reads the same field (app/renderer/js/preview3d.js::UNIT_CYLINDER).
+      ...(o.type === 'solid' && o.primitive ? { primitive: String(o.primitive) } : {}),
       color: o.style?.color || o.style?.fill || '#8fe0ff',
       emissive: Math.max(0, Number(o.style?.emissive) || 0),
       ...(isPlane(o) ? { media: { ...mediaSpec(o), sequence: o._sequenceDir ? { dir: o._sequenceDir, count: seqCount } : null } } : {}),
