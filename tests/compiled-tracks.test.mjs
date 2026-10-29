@@ -27,8 +27,9 @@ test('compiled element/channel indices preserve exact boundary and interpolation
 
 test('editing invalidates compiled snapshots before mutable paths are changed', () => {
   const project = createProject();
-  applyOp(project, { op: 'addElement', element: { type: 'solid', duration: 5,
-    keyframes: [{ t: 0, path: 'transform.x', value: 0, ease: 'linear' }, { t: 4, path: 'transform.x', value: 4 }] } });
+  const keys = [{ t: 0, path: 'transform.x', value: 0, ease: 'linear' }, { t: 4, path: 'transform.x', value: 4 }];
+  const { element } = applyOp(project, { op: 'addElement', element: { type: 'solid', duration: 5 } });
+  delete element.node; element.keyframes = keys; // legacy 2D (addElement now creates nodes)
   compileProject(project);
   applyOp(project, { op: 'set', id: 'el_1', path: 'keyframes.1.t', value: 2 });
   assert.equal(evalElement(project.elements[0], 1).x, 2);

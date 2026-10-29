@@ -21,7 +21,7 @@ const OBJ_TYPES = new Set(['solid', 'shape', 'text', 'image', 'video', 'containe
 /** A camera with a unified spatial parent needs the world wrapper; others keep the shipped bake. */
 // ...or a three-axis rotation offset (core/rotation.js), which only that path applies.
 const hasFrameParent = (cam) => !!cam?.frameParent?.id
-  || Array.isArray(cam?.rotation)
+  || (Array.isArray(cam?.rotation) && cam.rotation.some((v) => Number(v)))
   || ['rotation.x', 'rotation.y', 'rotation.z'].some((p) => Array.isArray(cam?.tracks?.[p]) && cam.tracks[p].length);
 
 /**

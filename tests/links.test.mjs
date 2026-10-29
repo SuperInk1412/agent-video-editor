@@ -322,6 +322,7 @@ test('links: schema keeps links on elements, objects and cameras without creatin
   // Shape + graph validation on hand-edited data.
   const bad = JSON.parse(JSON.stringify(p));
   const badEl = bad.elements.find((e) => e.id === 'el_a');
+  delete badEl.node; // a legacy 2D element (addElement now creates nodes)
   badEl.links[0].to = 'position.x'; // legacy elements have no position.*
   assert.ok(validateProject(bad).some((issue) => issue.path.endsWith('.links[0].to')));
   assert.ok(linkIssues([{ id: '' }], 'l').some((issue) => issue.path === 'l[0].id'));
@@ -359,6 +360,7 @@ test('links: 2D element paths match the legacy node model', () => {
   const p = fresh();
   const a = addEl(p, { id: 'el_a', transform: { x: 0, y: 100 } });
   const b = addEl(p, { id: 'el_b' });
+  delete a.node; delete b.node; // legacy 2D elements (addElement now creates nodes)
   applyOp(p, { op: 'keySet', id: 'el_b', path: 'transform.x', t: 0, value: 0, ease: 'linear' });
   applyOp(p, { op: 'keySet', id: 'el_b', path: 'transform.x', t: 2, value: 200 });
 

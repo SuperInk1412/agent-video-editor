@@ -117,7 +117,9 @@ test('normalizeObject: defaults, type guard, sorted tracks', () => {
   });
   assert.equal(o.type, 'solid');
   nearVec(o.pivot, [1, 2, 0]);
-  near(len(o.rot.dir), 1);
+  // a static dir/roll is stored as three-axis rotation: dir +Z, roll 0 -> [0, 0, 0]
+  nearVec(o.rotation, [0, 0, 0]);
+  assert.equal(o.rot, undefined);
   nearVec(o.scale, [1, 1, 1]);
   assert.deepEqual(o.tracks.opacity.map((k) => k.t), [0, 2]);
 });

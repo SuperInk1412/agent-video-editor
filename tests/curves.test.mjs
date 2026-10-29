@@ -107,7 +107,9 @@ test('ops: keyCurve on an element stays on its path when two paths share a time'
     op: 'keyCurve', host: 'element', id, path: 'transform.z', from: 0, to: 2,
     curve: { type: 'bezier', preset: 'easeIn', p1: [0.42, 0], p2: [1, 1] },
   });
-  const at = (path) => p.elements[0].keyframes.find((k) => k.path === path && k.t === 0);
+  // the old transform.y / z paths land on the node's pivot.y / z (core/rotation-ops.js)
+  const node = { 'transform.y': 'pivot.y', 'transform.z': 'pivot.z' };
+  const at = (path) => p.elements[0].keyframes.find((k) => k.path === node[path] && k.t === 0);
   assert.ok(at('transform.z').curve, 'transform.z gets the curve');
   assert.equal(at('transform.z').curve.preset, 'easeIn');
   assert.equal(at('transform.y').curve, undefined, 'transform.y keeps its own key');

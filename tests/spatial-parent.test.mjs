@@ -338,6 +338,7 @@ test('spatial-parent: a legacy element without a node is carried through its der
   const parent = addEl(p, nodeEl([0, cy, 0]));
   keyRoll(p, parent.id, 0, 90);
   const legacy = addEl(p, { transform: { x: 100, y: 0, z: 0, scale: 2, rotation: 0 } });
+  delete legacy.node; // addElement now creates nodes (core/rotation-ops.js)
   const before = frameAt(p, legacy, 0);
   near(before.pos, [1, cy, 0], 1e-9, 'derived from transform.x = 100 px');
 

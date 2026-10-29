@@ -163,10 +163,13 @@ test('hybrid migration preserves every camera, object and exact animated camera 
 
 test('migration preserves upstream value curves on scalar element tracks', () => {
   const p = createProject({ duration: 4 });
-  applyOp(p, { op: 'addElement', element: { type: 'solid', duration: 4, keyframes: [
+  const { element } = applyOp(p, { op: 'addElement', element: { type: 'solid', duration: 4 } });
+  // a legacy 2D element (addElement now creates nodes, core/rotation-ops.js)
+  delete element.node;
+  element.keyframes = [
     { t: 0, path: 'transform.x', value: 0, curve: presetCurve('easeIn') },
     { t: 4, path: 'transform.x', value: 100 },
-  ] } });
+  ];
   const migrated = migrateProject(p).scenes.root.objects.find((o) => o.id === 'el_1');
   assert.deepEqual(migrated.tracks['pivot.x'][0].curve, presetCurve('easeIn'));
   for (const time of [0, 0.5, 1, 2, 3, 4]) {

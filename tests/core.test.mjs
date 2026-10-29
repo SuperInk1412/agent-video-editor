@@ -28,8 +28,9 @@ test('addElement preserves a unified spatial node', () => {
       node: { pivot: [1, 5.4, 2], position: [0.5, 0, 0], dir: [0, 0, 1], roll: 12, scale: [2, 3, 1] },
     },
   });
+  // dir / roll are stored as three-axis rotation (core/rotation-ops.js)
   assert.deepEqual(element.node, {
-    pivot: [1, 5.4, 2], position: [0.5, 0, 0], dir: [0, 0, 1], roll: 12, scale: [2, 3, 1],
+    pivot: [1, 5.4, 2], position: [0.5, 0, 0], scale: [2, 3, 1], rotation: [0, 0, 12],
   });
   assert.deepEqual(p.elements[0].node, element.node);
 });
@@ -60,13 +61,18 @@ test('keyRemove drops one key when t is given, the whole path otherwise', () => 
   const p = fresh();
   const { element } = applyOp(p, { op: 'addElement', element: { type: 'solid', start: 0, duration: 3 } });
   const id = element.id;
-  applyOp(p, { op: 'keySet', id, path: 'transform.scale', t: 0, value: 1 });
-  applyOp(p, { op: 'keySet', id, path: 'transform.scale', t: 1, value: 2 });
-  applyOp(p, { op: 'keySet', id, path: 'transform.x', t: 0, value: 5 });
-  applyOp(p, { op: 'keyRemove', id, path: 'transform.scale', t: 1 });
-  assert.deepEqual(p.elements[0].keyframes.map((k) => [k.path, k.t]), [['transform.scale', 0], ['transform.x', 0]]);
+  applyOp(p, { op: 'keySet', id, path: 'transform.opacity', t: 0, value: 1 });
+  applyOp(p, { op: 'keySet', id, path: 'transform.opacity', t: 1, value: 0.5 });
+  applyOp(p, { op: 'keySet', id, path: 'pivot.x', t: 0, value: 5 });
+  applyOp(p, { op: 'keyRemove', id, path: 'transform.opacity', t: 1 });
+  assert.deepEqual(p.elements[0].keyframes.map((k) => [k.path, k.t]), [['transform.opacity', 0], ['pivot.x', 0]]);
+  applyOp(p, { op: 'keyRemove', id, path: 'transform.opacity' });
+  assert.deepEqual(p.elements[0].keyframes.map((k) => k.path), ['pivot.x']);
+  // an old transform.* path removes the node keys it was written as
+  applyOp(p, { op: 'keySet', id, path: 'transform.scale', t: 0, value: 2 });
+  assert.deepEqual(p.elements[0].keyframes.map((k) => k.path).sort(), ['pivot.x', 'scale.x', 'scale.y']);
   applyOp(p, { op: 'keyRemove', id, path: 'transform.scale' });
-  assert.deepEqual(p.elements[0].keyframes.map((k) => k.path), ['transform.x']);
+  assert.deepEqual(p.elements[0].keyframes.map((k) => k.path), ['pivot.x']);
 });
 
 test('splitElement keeps both halves looking exactly like the original', () => {
@@ -80,8 +86,9 @@ test('splitElement keeps both halves looking exactly like the original', () => {
   const right = p.elements.find((e) => e.start === 2);
   assert.equal(left.duration, 2);
   assert.equal(right.duration, 2);
-  assert.deepEqual(left.keyframes.map((k) => k.t), [0.5, 3], 'left keeps the key it interpolates towards');
-  assert.deepEqual(right.keyframes.map((k) => k.t), [0.5, 3], 'key times stay absolute');
+  const times = (el) => el.keyframes.filter((k) => k.path === 'scale.x').map((k) => k.t);
+  assert.deepEqual(times(left), [0.5, 3], 'left keeps the key it interpolates towards');
+  assert.deepEqual(times(right), [0.5, 3], 'key times stay absolute');
 });
 
 test('addSegment sorts and element assignment validates', () => {

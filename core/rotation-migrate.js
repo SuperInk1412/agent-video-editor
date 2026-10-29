@@ -24,12 +24,8 @@ import { objectPose } from './scene.js';
 import { planSpatialMigration } from './migrate-spatial.js';
 import { normalizeRotation, rotationFromDirRoll, rotationFromBasis, rotationMatrix } from './rotation.js';
 
-/**
- * Off until the creation paths write rotation too (createProject's camera,
- * addElement 2D, objectAdd, normalizeCamera's default roll): otherwise every
- * open re-migrates freshly authored data. The UI side (2b) is done.
- */
-export const ROTATION_MIGRATION = false;
+/** On: the UI edits rotation.x/y/z (2b) and new data is written that way (core/rotation-ops.js). */
+export const ROTATION_MIGRATION = true;
 
 const r6 = (v) => Math.round(Number(v) * 1e6) / 1e6;
 const AXES = ['x', 'y', 'z'];

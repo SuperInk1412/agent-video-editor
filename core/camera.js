@@ -3,6 +3,7 @@
 import { clamp, speedWarp } from './time.js';
 import { normalizeTracks, sampleAxes, sampleChannel, sampleVec3 } from './scene.js';
 import { normalizeCurve, sampleCurve } from './curves.js';
+import { normalizeRotation } from './rotation.js';
 
 export const DEFAULT_CAMERA = {
   id: null,
@@ -13,7 +14,6 @@ export const DEFAULT_CAMERA = {
   lookAhead: 90,
   bankGain: 1.2,
   maxRoll: 32,
-  roll: 0,
   center: [0, 0, 0],
   opacity: 1,
   scale: [1, 1, 1],
@@ -162,6 +162,10 @@ export function normalizeCamera(cam) {
   if (cam?.duration != null && Number.isFinite(Number(cam.duration))) c.duration = Math.max(0.001, Number(cam.duration));
   else delete c.duration;
   c.tracks = normalizeTracks(cam?.tracks);
+  // Three-axis rotation offset (core/rotation.js). A manual roll still adds
+  // at runtime until core/rotation-migrate.js folds it in; a zero one is gone.
+  if (!Number(c.roll) && !c.tracks.roll?.length) delete c.roll;
+  if (Array.isArray(cam?.rotation) || c.roll === undefined) c.rotation = normalizeRotation(cam?.rotation);
   c.visible = c.visible !== false;
   c.shake = { ...DEFAULT_CAMERA.shake, ...(cam?.shake || {}) };
   c.dof = { ...DEFAULT_CAMERA.dof, ...(cam?.dof || {}) };

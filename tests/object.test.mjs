@@ -66,7 +66,8 @@ test('objectKey: vec3 / scalar / dir tracks, replace at the same time, sorted', 
   applyOp(p, { op: 'objectKey', id: o.id, path: 'dir', t: 1, v: [0, 2, 0] });
   assert.equal(o.tracks.opacity[0].v, 0.25);
   assert.equal(o.tracks['scale.z'][0].v, 2);
-  assert.deepEqual(o.tracks.dir[0].v, [0, 1, 0]);
+  // a dir key on a rotation object becomes rotation.x/y/z keys (core/rotation-ops.js)
+  assert.ok(!o.tracks.dir && ['x', 'y', 'z'].every((a) => o.tracks[`rotation.${a}`]?.length === 1));
 
   const pose = objectPose(o, 1);
   assert.ok(Math.abs(pose.opacity - 0.25) < 1e-9);

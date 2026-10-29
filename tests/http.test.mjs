@@ -10,7 +10,7 @@ import { createProject } from '../core/schema.js';
 import { applyOp } from '../core/ops.js';
 import { saveProject, loadProject } from '../engine/storage.js';
 import { startServer } from '../engine/server.js';
-import { evalElement } from '../core/evaluate.js';
+import { elementLocalNode } from '../core/spatial-parent.js';
 import { presetCurve } from '../core/curves.js';
 
 async function setup(t, options = {}) {
@@ -161,12 +161,14 @@ test('the upstream curve editor can submit keyCurve through the shared HTTP tran
   ] });
   assert.equal(response.status, 200, JSON.stringify(await response.clone().json()));
   const saved = await loadProject(root);
-  assert.ok(evalElement(saved.elements[0], 1, saved.meta).x < 50);
+  // transform.x keys land on the node's pivot.x (1 m = 100 px)
+  const pivotX = (pr) => elementLocalNode(pr, pr.elements[0], 1).pivot[0];
+  assert.ok(pivotX(saved) < 0.5);
   const repeated = await (await post('api/ops', { expectedRev: 2, requestId: 'curve-clear', ops: [
     { op: 'keyCurve', host: 'element', id: 'el_1', path: 'transform.x', from: 0, to: 2, curve: null },
   ] })).json();
   assert.equal(repeated.rev, 3);
-  assert.equal(evalElement(repeated.project.elements[0], 1, repeated.project.meta).x, 50);
+  assert.ok(Math.abs(pivotX(repeated.project) - 0.5) < 1e-9);
 });
 
 test('audio, timeline cuts and parenting round-trip through HTTP, history and persisted projects', async (t) => {

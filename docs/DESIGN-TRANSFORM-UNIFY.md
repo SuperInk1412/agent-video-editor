@@ -124,6 +124,9 @@
   - 旧 2D → 空间节点；节点 `dir/roll`、物体 `rot` 与 `dir/roll` 轨道、相机 `roll` → `rotation` / `rotation.*`；链接 `roll` → `rotation.z`。相机旧手动 roll 与 2b 后的旋转偏移同时存在时，静态 roll 精确并进 X/Y/Z（X/Y 有关键帧时保留 roll）。
   - 验收：`npm test` 442/442；miku-swiss 副本 137 个元素 4247 个采样位置差 ≤ 9e-16、相机零差；Blender t=4/21 迁移前后逐像素相同；预览只有状态栏文字不同；A 的属性面板对旧 2D / 节点 / 物体 / 相机显示的三格与计算值一致。
   - **开关仍关**：新建路径还在写旧格式（`createProject` 的相机、`addElement` 的 2D、`objectAdd` 的 `rot`、`normalizeCamera` 默认 `roll: 0`），开关一开每次打开都会重新迁移、重复提示和备份，撤销历史测试失败 12 条。先让新建路径直接写 `rotation`，再开。
+  - **新建即三轴（用户批准）+ 开关打开**：`core/rotation-ops.js`（新）。新 2D 元素直接建成空间节点（`rotation`，`transform.*` 关键帧换成 `pivot.*`/`scale.*`/`rotation.z`）；带 `dir/roll` 的节点、静态朝向的 3D 物体、相机（去掉 0 值 `roll`、补 `rotation`）都直接写三轴。旧写法的 op 自动翻译：`keySet/keyRemove/keyCurve/set/updateElement` 的 `transform.*` 与 `roll`、物体 `objectKey dir/roll`、`propLink` 的 `roll`。相机非零手动 roll 仍在运行时叠加，打开时并进 `rotation`。`engine/shot.js` 只对非零旋转偏移的相机走世界烘焙。
+  - 验收：`npm test` 446/446（新增 4 条，含"新项目反复打开都没有迁移"）；按新语义改了 14 个旧测试（测旧 2D 行为的改为手写旧格式数据，测通用关键帧的改用非空间路径）；`check:evaluate` 121 样本全等、`check:preview`、`check-camfeed` 3/3、`check-render-parity` 1/144（已知自发光黄）均 PASS；编辑器里新加文字 = 节点 + 三格旋转、无迁移提示。
+  - **待 A（用户转告）**：界面里还写旧字段的两处可以换成新写法（现在靠 op 翻译仍能用）：右键「面向镜头」写物体 `dir` 键 → 改写 `rotation.x/y/z`；时间轴相机「手动 roll°」行 → 去掉，用旋转 Z。
 - 2026-10-28 · 第 2 步 2b（A）· `79309d8` · 三轴旋转界面：
   - 时间轴：2D 节点 / 3D 物体 / 相机各三行 `旋转 X°/Y°/Z°`，每行独立输入、菱形和属性链接；第一次给只有 `dir/roll` 的宿主写键时先补全 `rotation` 基础值，避免跳帧。
   - 属性面板：2D 节点 / 3D 物体 / 相机都是 X/Y/Z 三格（`↳` 链接 `rotation.x/y/z`）；2D 节点球和 3D 物体球拖动后写回三个角（`rotationFromDirRoll` 保留当前自转）。

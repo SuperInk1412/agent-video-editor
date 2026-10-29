@@ -55,6 +55,7 @@ test('rotation links: targets exist on objects/cameras/nodes, not legacy 2D', ()
   const cam = addCam(p, { name: 'cam_r' });
   const node = addEl(p, { node: { pivot: [0, cy, 0], position: [0, 0, 0], dir: [0, 0, 1], roll: 0, scale: [1, 1, 1], rotation: [0, 0, 0] } });
   const legacy = addEl(p, { node: undefined });
+  delete legacy.node; // addElement now creates nodes (core/rotation-ops.js)
   for (const path of ['rotation.x', 'rotation.y', 'rotation.z']) {
     assert.equal(findLinkTarget('ob', obj, path)?.unit, 'angle');
     assert.equal(findLinkTarget('cam', cam, path)?.unit, 'angle');

@@ -59,7 +59,8 @@ test('hierarchy: objectParent writes a spatial parent and never moves the child'
     assert.equal(c.parent, undefined, 'no old parent record');
     assert.equal(c.frameParent.id, parent);
     assert.equal(c.frameParent.mode, 'world');
-    samePose(objectWorldPose(q, c, t), before);
+    // the bind is stored to 6 decimals; the turn is now rotation.y keys
+    samePose(objectWorldPose(q, c, t), before, 1e-5);
     assert.deepEqual(c.pivot, [0, 0, -5], 'own values untouched');
   }
 });

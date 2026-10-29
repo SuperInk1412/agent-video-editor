@@ -13,7 +13,9 @@ import { clamp, ease, speedWarp } from './time.js';
 import { compiledTrack, segmentIndex } from './tracks.js';
 import { SCENE_MODEL_VERSION } from './version.js';
 import { sampleCurve, normalizeCurve } from './curves.js';
-import { basisFromRotation, dirRollFromRotation, normalizeRotation, sampleRotation, ROTATION_PATHS } from './rotation.js';
+import { basisFromRotation, dirRollFromRotation, normalizeRotation, rotationFromDirRoll, sampleRotation, ROTATION_PATHS } from './rotation.js';
+
+const keyedDirRoll = (tracks) => ['dir', 'roll'].some((k) => Array.isArray(tracks?.[k]) && tracks[k].length > 0);
 
 export const SCENE_VERSION = SCENE_MODEL_VERSION;
 export const PX_PER_M = 100; // v2 (pixels) -> v3 (metres) migration scale
@@ -310,9 +312,12 @@ export function normalizeObject(o = {}) {
     position: vec3(o.position),
     scale: vec3(o.scale, [1, 1, 1]),
     // three-axis rotation replaces the older dir/roll (core/rotation.js)
+    // (a static dir/roll converts exactly; keyed ones wait for core/rotation-migrate.js)
     ...(Array.isArray(o.rotation)
       ? { rotation: normalizeRotation(o.rotation), rot: undefined }
-      : { rot: { dir: V.norm(vec3(rot.dir, [0, 0, -1])), roll: num(rot.roll, 0) } }),
+      : keyedDirRoll(o.tracks)
+        ? { rot: { dir: V.norm(vec3(rot.dir, [0, 0, -1])), roll: num(rot.roll, 0) } }
+        : { rotation: rotationFromDirRoll(V.norm(vec3(rot.dir, [0, 0, -1])), num(rot.roll, 0)), rot: undefined }),
     opacity: clamp(num(o.opacity, 1), 0, 1),
     tracks: normalizeTracks(o.tracks),
   };

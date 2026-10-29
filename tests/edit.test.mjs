@@ -94,16 +94,16 @@ test('move/duplicate/keySet reject junk numbers and unknown segments', () => {
 test('keySet over an existing key keeps its ease unless a new one is given', () => {
   const p = fresh();
   const { element } = applyOp(p, { op: 'addElement', element: { type: 'solid', start: 0, duration: 2 } });
-  applyOp(p, { op: 'keySet', id: element.id, path: 'transform.x', t: 1, value: 5, ease: 'outExpo' });
-  applyOp(p, { op: 'keySet', id: element.id, path: 'transform.x', t: 1, value: 9 });
-  assert.deepEqual(element.keyframes.map((k) => [k.value, k.ease]), [[9, 'outExpo']]);
+  applyOp(p, { op: 'keySet', id: element.id, path: 'transform.opacity', t: 1, value: 0.5, ease: 'outExpo' });
+  applyOp(p, { op: 'keySet', id: element.id, path: 'transform.opacity', t: 1, value: 0.9 });
+  assert.deepEqual(element.keyframes.map((k) => [k.value, k.ease]), [[0.9, 'outExpo']]);
 });
 
 test('duplicate at a new time moves the animation with the copy', () => {
   const p = fresh();
   const { element } = applyOp(p, {
     op: 'addElement',
-    element: { type: 'text', start: 1, duration: 2, style: { text: 'a' }, keyframes: [{ t: 1.5, path: 'transform.scale', value: 2 }] },
+    element: { type: 'text', start: 1, duration: 2, style: { text: 'a' }, keyframes: [{ t: 1.5, path: 'transform.opacity', value: 0.5 }] },
   });
   const { element: copy } = applyOp(p, { op: 'duplicateElement', id: element.id, start: 4 });
   assert.equal(copy.start, 4);

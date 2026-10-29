@@ -134,6 +134,7 @@ test('link-eval: blender overlay table matches the JS evaluator', () => {
 
   // Legacy 2D element: overlay in project px / screen y, applied by evalElement.
   const legacy = addEl(p, { transform: { x: 10, y: 20, scale: 1, rotation: 0, opacity: 1 } });
+  delete legacy.node; // addElement now creates nodes (core/rotation-ops.js)
   link(p, legacy.id, 'pivot.x', { host: 'ob', id: src.id, path: 'pivot.x' });
   near(elementLinkOverlay(p, legacy, 1).x, 60, 1e-9, 'legacy x = local 10 px + 0.5 m');
   assert.equal(elementOverlay(p, legacy, 1).x, 60, 'legacy overlay reuses elementOverlay');

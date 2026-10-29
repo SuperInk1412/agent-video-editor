@@ -8,6 +8,7 @@ import { assertSafeData, pathParts } from './json.js';
 import { clearCompiledTracks } from './tracks.js';
 import { normalizeCurve } from './curves.js';
 import { EXT_OP_KINDS, applyExtOp } from './ops-ext.js';
+import { createAsNode, nodeWithRotation, rotationFormatOp } from './rotation-ops.js';
 import { LINK_OP_KINDS, applyLinkOp, normalizeLinks, pruneLinksForHost } from './links.js';
 // Spatial parents (core/spatial-parent.js). The two op names are spelled out in
 // OP_KINDS below instead of spreading SPATIAL_PARENT_OP_KINDS: this module is
@@ -515,6 +516,9 @@ export function applyOp(p, op) {
   if (!op || typeof op !== 'object') fail('op must be an object');
   const kind = op.op;
   if (!kind) fail('op.op missing');
+  // old orientation fields -> rotation.x/y/z (core/rotation-ops.js)
+  const asRotation = rotationFormatOp(p, op);
+  if (asRotation) return applyOp(p, asRotation);
   const changed = [];
 
   switch (kind) {
@@ -567,7 +571,12 @@ export function applyOp(p, op) {
       };
       // A migrated/upgraded 2D element carries its unified node on create.
       // Old callers that only send transform keep the legacy path.
-      if (el.node !== undefined) full.node = normalizeSpatialNode(el.node);
+      if (el.node !== undefined) {
+        full.node = normalizeSpatialNode(el.node);
+        nodeWithRotation(full);
+      }
+      // New 2D elements are SpatialNodes with rotation (core/rotation-ops.js).
+      else createAsNode(p.meta, full);
       // Property links travel with the element on create (never auto-created).
       const links = el.links === undefined ? [] : normalizeLinks(el.links, { strict: true });
       if (links.length) full.links = links;
