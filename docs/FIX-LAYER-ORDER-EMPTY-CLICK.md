@@ -266,7 +266,7 @@ Blender 每块 2D 平面是真实物体，遮挡由几何决定，所以相机 9
 | 问题三 1–5 播放卡顿 | A ✅ `0484387` | `app/renderer/js/timeline.js`、`pathgizmo.js`、`main.js`、`css/timeline.css` |
 | 问题三 6 性能检查 | B ✅ `ce5189f` | `scripts/check-playback-perf.mjs`（新），基线见问题三 |
 | 问题四 1–5 深度遮挡 | A（待实施） | `app/renderer/js/preview.js`（着色器 + `_drawLayers` + `hitTest`）、`spatial-layers.js`、单测 |
-| 问题四 对拍 G | B（待做） | `scripts/check-render-parity.mjs` 用例 G |
+| 问题四 对拍 G | B ✅（本提交） | `scripts/check-render-parity.mjs` 用例 G（左侧宽卡片在宽底板前 2 m，底板中心更近）。**现在 FAIL 是预期的**：当前代码 8/144（G 区 6 格被盖）；换回问题一之前的平面距离排序则 F 区 13 格失败、G 通过——只有按深度判遮挡才能 F、G 同时通过，A 实施后应 PASS |
 
 问题一、二、三互不依赖，可以并行；各自一个提交，记入改动日志。问题三建议先由 B 加性能检查记下基线，A 改完再测一次对比。
 

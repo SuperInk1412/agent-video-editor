@@ -12,10 +12,13 @@
 //      camera 2 m in front of a large backdrop. Its plane is farther from the
 //      camera than the backdrop's plane, its origin nearer — ordering by plane
 //      distance draws the backdrop over the card; Blender (EEVEE origin order) does not.
+//   G  §四: a wide card on the left, 2 m in front of a wide backdrop whose
+//      CENTRE is nearer the camera than the card's origin — ordering by origin
+//      distance draws the backdrop over the card; Blender keeps the card in front.
 // The preview frame and a Blender still are classified on a 16×9 grid of
 // colour classes; the check fails when more than a few edge cells differ.
 //
-//   node scripts/check-render-parity.mjs [--keep] [--only=A,B,C,D,E,F]
+//   node scripts/check-render-parity.mjs [--keep] [--only=A,B,C,D,E,F,G]
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -35,7 +38,7 @@ const T = 0.5;
 const GRID = [16, 9];
 const ALLOWED = 4; // edge cells may land on either side of an anti-aliased border
 
-const only = (process.argv.find((a) => a.startsWith('--only=')) || '--only=A,B,C,D,E,F').slice(7).split(',');
+const only = (process.argv.find((a) => a.startsWith('--only=')) || '--only=A,B,C,D,E,F,G').slice(7).split(',');
 
 const run = (cmd, args, opts = {}) => new Promise((resolve, reject) => {
   const p = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, ...opts });
@@ -111,6 +114,17 @@ async function build() {
       { op: 'addElement', element: { id: 'el_facing', type: 'solid', start: 0, duration: 2, z: 6,
         node: { pivot: card, position: [0, 0, 0], rotation: rotationFromDirRoll(toCam, 0), scale: [1, 1, 1] },
         style: { w: 1000, h: 650, fill: '#20e020' } } },
+    );
+  }
+  if (only.includes('G')) {
+    // bottom band (row 7) is empty in A–F; card origin 23.7 m, backdrop centre 23.0 m
+    ops.push(
+      { op: 'addElement', element: { id: 'el_wide_bd', type: 'solid', start: 0, duration: 2, z: 7,
+        node: { pivot: [2, -1, -2], position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+        style: { w: 4400, h: 700, fill: '#ffffff' } } },
+      { op: 'addElement', element: { id: 'el_side', type: 'solid', start: 0, duration: 2, z: 8,
+        node: { pivot: [-11, -1, 0], position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+        style: { w: 1000, h: 500, fill: '#20e020' } } },
     );
   }
   // Move / turn the source after every bind: linked children must follow.
