@@ -18,7 +18,7 @@
     "blender:check": "node scripts/blender-check.mjs",
     "logs": "node scripts/logs.mjs --project projects/miku-swiss --lines 120 --follow",
     "check:preview": "node scripts/check-preview.mjs",
-    "check:evaluate": "node scripts/check-evaluate.mjs",
+    "check:v3-reader": "node scripts/check-v3-reader.mjs",
     "benchmark": "node scripts/benchmark.mjs"
   },
   "keywords": [

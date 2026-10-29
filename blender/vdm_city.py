@@ -668,7 +668,7 @@ def _build_city_geometry(scene, city):
 def _embed_elements(scene, opts, shot=None):
     """The project's 2D elements as planes in the world (unified space).
 
-    The 2D SceneBuilder (same eval_element as 2D projects) builds them in pixel
+    The 2D SceneBuilder (same shot-v3 numbers as 2D projects) builds them in pixel
     units under a screen rig: the rig sits at the screen-plane centre
     (height / 200 m, bottom edge on the ground) and scales 1/100, so a pixel is
     a centimetre and transform.z moves an element toward the camera."""
