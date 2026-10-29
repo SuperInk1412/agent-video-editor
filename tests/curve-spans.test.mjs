@@ -264,3 +264,23 @@ test('curve-spans: a span with adjacent anchors still gets its curve', () => {
   assert.deepEqual([res.ops[0].from, res.ops[0].to], [0, 1]);
   assert.equal(res.moved, 0);
 });
+
+test('curve-spans: spanCurveOps output applies through applyOp in one batch', async () => {
+  const { createProject, normalizeProject } = await import('../core/schema.js');
+  const { applyOp } = await import('../core/ops.js');
+  const p = normalizeProject(createProject({ title: 'span', duration: 4 }));
+  const { element } = applyOp(p, { op: 'addElement', element: { type: 'solid', start: 0, duration: 4 } });
+  const id = element.id;
+  const path = 'transform.opacity';
+  for (const [t, value] of [[0, 0], [1, 0.25], [2, 1]]) {
+    applyOp(p, { op: 'keySet', id, path, t, value });
+  }
+  const keys = p.elements[0].keyframes.filter((k) => k.path === path);
+  const res = spanCurveOps({ host: 'element', id, path, keys, from: 0, to: 2, curve: presetCurve('linear') });
+  applyOp(p, { op: 'batch', ops: res.ops });
+  const after = p.elements[0].keyframes.filter((k) => k.path === path).sort((a, b) => a.t - b.t);
+  assert.deepEqual(after.map((k) => k.t), [0, 0.5, 2], 'the inner key landed where linear reaches 0.25');
+  assert.deepEqual(after.map((k) => k.value), [0, 0.25, 1], 'values are untouched');
+  assert.deepEqual(after.map((k) => k.curve?.preset), ['linear', 'linear', undefined],
+    'both sub-segments carry the curve, the right anchor does not');
+});
