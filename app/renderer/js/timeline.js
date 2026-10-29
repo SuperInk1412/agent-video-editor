@@ -34,6 +34,11 @@ import {
   effectiveElementRowValue, elementRowKeyPath, elementRowTarget, localElementRowValue,
   localElementRowValueAt, nodeRowPatch, rowToTarget,
 } from './element-link-value.js';
+import {
+  XF_AXES, XF_ROWS, xfAxisKeyOps, xfAxisKeyState, xfAxisLinkPath, xfAxisPath,
+  xfAxisUnkeyOps, xfKeyOps, xfKeyState, xfLinkPaths, xfLocalValues, xfMode,
+  xfSetAxisOps, xfUnkeyOps, xfValues, xfVectorPath, bundleOps,
+} from './xform.js';
 import { normalizeFps, frameIndex, frameStart, frameBand, planRulerTicks, frameWriteTime, frameClipEdit } from './timeline-math.js';
 
 const el = (tag, cls, html) => {
@@ -70,23 +75,38 @@ const CLIP_META_MIN = 90;
 // revealProperty() after a "转到父级" jump. `transform.*` is the legacy 2D row
 // path; link data itself is always pivot.* / roll / scale.* (core/links.js).
 const EL_LINK_ROW_PATH = Object.freeze({
-  'pivot.x': 'transform.x', 'pivot.y': 'transform.y', 'pivot.z': 'transform.z',
-  'position.x': null, 'position.y': null,
-  'scale.x': 'transform.scale', 'scale.y': 'transform.scale', scale: 'transform.scale',
-  roll: 'transform.rotation', opacity: 'transform.opacity',
-  'rotation.x': 'rotation.x', 'rotation.y': 'rotation.y', 'rotation.z': 'rotation.z',
+  'pivot.x': 'pivot', 'pivot.y': 'pivot', 'pivot.z': 'pivot',
+  'position.x': 'position', 'position.y': 'position', 'position.z': 'position',
+  'scale.x': 'scale', 'scale.y': 'scale', 'scale.z': 'scale', scale: 'scale',
+  roll: 'rotation', opacity: 'transform.opacity',
+  'rotation.x': 'rotation', 'rotation.y': 'rotation', 'rotation.z': 'rotation',
   'audio.volume': 'audio.volume',
 });
 const OB_LINK_ROW_PATH = (path) => {
   if (path === 'opacity' || path === 'roll') return path;
-  if (/^rotation\.[xyz]$/.test(path)) return path;
+  if (/^rotation\.[xyz]$/.test(path)) return 'rotation';
   return /^(pivot|position|scale)\./.test(path) ? path.slice(0, path.indexOf('.')) : null;
 };
 const CAM_LINK_ROW_PATH = (path) => {
-  if (path.startsWith('pivot.')) return 'center';
+  if (path.startsWith('pivot.')) return 'pivot';
   if (path.startsWith('scale.')) return 'scale';
+  if (path.startsWith('rotation.')) return 'rotation';
+  if (path === 'position' || path === 'path') return 'position';
   return path;
 };
+
+/** Link target path -> the row this timeline draws, for one 2D element. */
+function elLinkRowPath(el, path) {
+  const source = String(path ?? '');
+  if (el?.node) return EL_LINK_ROW_PATH[source] ?? null;
+  if (source === 'pivot.x') return 'transform.x';
+  if (source === 'pivot.y') return 'transform.y';
+  if (source === 'pivot.z') return 'transform.z';
+  if (source === 'scale.x' || source === 'scale.y') return 'transform.scale';
+  if (source === 'roll' || source === 'rotation.z') return 'transform.rotation';
+  if (source === 'opacity') return 'transform.opacity';
+  return null;
+}
 
 export class Timeline {
   constructor(root, {
@@ -128,7 +148,7 @@ export class Timeline {
     this.expanded = new Set();
     this.sections = {
       content: 'full', transform: 'full', audio: 'full', camPos: 'full',
-      camRot: 'full', camMain: 'collapsed', camShake: 'collapsed', camDof: 'collapsed',
+      camMain: 'collapsed', camShake: 'collapsed', camDof: 'collapsed',
     };
     this.propSel = null;
     this._scrollTo = null;
@@ -137,6 +157,8 @@ export class Timeline {
     this._editTimes = new Map();
     this._propRows = [];
     this._elPropRows = [];
+    this._xformRows = [];
+    this._xformOpen = new Set();
     this._linkButtons = [];
     this._objHeads = new Map();
     this._elHeads = new Map();
@@ -508,9 +530,10 @@ export class Timeline {
     }
     if (!kind || id == null || !this.project) return false;
     const source = String(path ?? '');
+    const el = kind === 'element' ? this._element(id) : null;
     const rowPath = kind === 'camera' ? CAM_LINK_ROW_PATH(source)
       : kind === 'object' ? OB_LINK_ROW_PATH(source)
-        : EL_LINK_ROW_PATH[source] ?? null;
+        : elLinkRowPath(el, source);
     if (rowPath) {
       const q = CSS.escape(String(id));
       const sel = kind === 'camera' ? `.tl-camprop[data-cam="${q}"][data-path="${CSS.escape(rowPath)}"]`
@@ -981,6 +1004,7 @@ export class Timeline {
     this._camPropRows = [];
     this._propRows = [];
     this._elPropRows = [];
+    this._xformRows = [];
     this._linkButtons = [];
     this._objHeads = new Map();
     this._elHeads = new Map();
@@ -1631,50 +1655,33 @@ export class Timeline {
     // One "位置" property (path keys) plus the rest of the base transform.
     // The camera transform group stays open by default: it is what users edit
     // most, while lens/shake/DOF stay folded with summaries.
-    this._appendSection(host, '变换', 'camPos');
+    this._appendSection(host, '变换', 'camPos', 'm / 度 / 倍');
     const xformMode = this._groupMode('camPos');
     if (xformMode !== 'collapsed') {
       const tr = cameraTransform(cam, this.time);
-      const show = (path) => xformMode === 'full' || this._camTracked(cam, path);
-      if (show('center')) {
-        host.appendChild(this._camVecRow(cam, 'center', '中心点', 3, tr.center, { step: 0.1, unit: 'm' }));
+      const show = (rowKey) => xformMode === 'full'
+        || xfKeyState(cam, 'cam', rowKey, this.time, 0).has
+        || (rowKey === 'position' && (cam.path || []).length > 0);
+      if (show('pivot')) this._xformRow(host, cam, 'cam', 'pivot', { step: 0.1, unit: 'm' });
+      if (show('position')) {
+        // The flight path point is read-only here; the path gizmo edits it.
+        this._xformRow(host, cam, 'cam', 'position', {
+          step: 0.1, unit: 'm', readOnly: true, point: true,
+        });
       }
-      if (xformMode === 'full' || (cam.path || []).length > 0) host.appendChild(this._camPosRow(cam));
-      if (show('picturePivot')) {
-        host.appendChild(this._camVecRow(cam, 'picturePivot', '画面中心', 2, tr.picturePivot, {
-          step: 0.01, min: 0, max: 1, unit: '0..1',
-        }));
+      if (show('rotation')) {
+        this._xformRow(host, cam, 'cam', 'rotation', {
+          step: 0.5, unit: '°',
+          tip: 'X 俯仰 · Y 转身 · Z 画面内旋转（旧手动 roll 已并入 Z）',
+        });
       }
-      if (show('pictureOffset')) {
-        host.appendChild(this._camVecRow(cam, 'pictureOffset', '画面位置', 2, tr.pictureOffset, {
-          step: 0.01, min: -1, max: 1, unit: '-1..1',
-        }));
+      if (show('scale')) this._xformRow(host, cam, 'cam', 'scale', { step: 0.05, unit: '倍' });
+      if (xformMode === 'full' || this._camTracked(cam, 'opacity')) {
+        this._camOpacityRow(cam, tr.opacity);
       }
-      if (show('opacity')) host.appendChild(this._camOpacityRow(cam, tr.opacity));
-      if (show('scale')) host.appendChild(this._camVecRow(cam, 'scale', '缩放', 3, tr.scale, { step: 0.05, unit: '倍' }));
     }
 
     const fov = this._camValue(cam, 'fov');
-    // Three-axis rotation offset (core/rotation.js). Z is the old manual roll:
-    // the open-time migration folds it in (core/rotation-migrate.js).
-    const camRot = AX.map((ax) => {
-      const value = this._camValue(cam, `rotation.${ax}`, this.time);
-      return Number.isFinite(value) ? value : 0;
-    });
-    this._appendSection(host, '三轴旋转', 'camRot', 'X / Y / Z');
-    const rotMode = this._groupMode('camRot');
-    if (rotMode !== 'collapsed') {
-      const showRot = (path) => rotMode === 'full' || this._camTracked(cam, path);
-      AX.forEach((axis, i) => {
-        if (!showRot(`rotation.${axis}`)) return;
-        host.appendChild(this._camParamNumRow(cam, `rotation.${axis}`, `旋转 ${axis.toUpperCase()}°`, camRot[i], {
-          step: 0.5,
-        }));
-      });
-      if (rotMode === 'full') {
-        host.appendChild(this._camHintRow('X 俯仰 · Y 转身 · Z 画面内旋转（旧手动 roll 已并入 Z）'));
-      }
-    }
     const lookAhead = this._camValue(cam, 'lookAhead');
     const bankGain = this._camValue(cam, 'bankGain');
     const maxRoll = this._camValue(cam, 'maxRoll');
@@ -1689,7 +1696,20 @@ export class Timeline {
     this._appendSection(host, '镜头 / 构图', 'camMain', lensSummary);
     const lensMode = this._groupMode('camMain');
     if (lensMode !== 'collapsed') {
+      const tr = cameraTransform(cam, this.time);
       const show = (path) => lensMode === 'full' || this._camTracked(cam, path);
+      // 画面中心 / 画面位置 used to sit in 变换; they are picture-space
+      // composition values, so they live with the lens now (§9.1).
+      if (show('picturePivot')) {
+        host.appendChild(this._camVecRow(cam, 'picturePivot', '画面中心', 2, tr.picturePivot, {
+          step: 0.01, min: 0, max: 1, unit: '0..1',
+        }));
+      }
+      if (show('pictureOffset')) {
+        host.appendChild(this._camVecRow(cam, 'pictureOffset', '画面位置', 2, tr.pictureOffset, {
+          step: 0.01, min: -1, max: 1, unit: '-1..1',
+        }));
+      }
       if (show('fov')) {
         host.appendChild(this._camParamNumRow(cam, 'fov', '视场角 FOV', fov, {
           step: 1, min: 1, max: 360, badge: fov >= 180 ? '鱼眼' : '',
@@ -1887,7 +1907,7 @@ export class Timeline {
   }
 
   _camOpacityRow(cam, value) {
-    return this._camVecRow(cam, 'opacity', '透明度', 1, [value], {
+    return this._camVecRow(cam, 'opacity', '不透明度', 1, [value], {
       step: 0.01, min: 0, max: 1, letter: '',
     });
   }
@@ -2005,7 +2025,7 @@ export class Timeline {
   }
 
   _camParamNumRow(cam, path, label, value, { step = 0.1, min, max, badge = '', keyable = true } = {}) {
-    const row = el('div', 'tl-row tl-camprop tl-camparamrow tl-linkrow');
+    const row = el('div', `tl-row tl-camprop tl-camparamrow tl-linkrow${badge ? ' has-badge' : ''}`);
     row.dataset.cam = cam.id;
     row.dataset.path = path;
     const g = el('div', 'tl-gutter');
@@ -2050,7 +2070,7 @@ export class Timeline {
   }
 
   _camParamSelectRow(cam, path, label, value, options, { badge = '', keyable = true } = {}) {
-    const row = el('div', 'tl-row tl-camprop tl-camparamrow tl-linkrow');
+    const row = el('div', `tl-row tl-camprop tl-camparamrow tl-linkrow${badge ? ' has-badge' : ''}`);
     row.dataset.cam = cam.id;
     row.dataset.path = path;
     const g = el('div', 'tl-gutter');
@@ -2188,24 +2208,20 @@ export class Timeline {
     if (mode === 'collapsed') return;
     const show = (path) => mode === 'full' || this._elTrack(e, this._elKeyPath(e, path)).length > 0;
     if (e.node) {
-      // Unified node rows: pivot / position / scale xyz + roll + opacity. One
-      // scalar row per axis keeps the existing keyframe lane / drag machinery.
-      const nodeRows = [
-        ['pivot.x', '中心点 X', { step: 0.05, axis: 'x', letter: 'X', unit: 'm' }],
-        ['pivot.y', '中心点 Y', { step: 0.05, axis: 'y', letter: 'Y', unit: 'm' }],
-        ['pivot.z', '中心点 Z', { step: 0.05, axis: 'z', letter: 'Z', unit: 'm' }],
-        ['position.x', '位置 X', { step: 0.05, axis: 'x', letter: 'X', unit: 'm' }],
-        ['position.y', '位置 Y', { step: 0.05, axis: 'y', letter: 'Y', unit: 'm' }],
-        ['position.z', '位置 Z', { step: 0.05, axis: 'z', letter: 'Z', unit: 'm' }],
-        ['scale.x', '缩放 X', { step: 0.01, axis: 'x', letter: 'X', unit: '', min: 0 }],
-        ['scale.y', '缩放 Y', { step: 0.01, axis: 'y', letter: 'Y', unit: '', min: 0 }],
-        ['scale.z', '缩放 Z', { step: 0.01, axis: 'z', letter: 'Z', unit: '', min: 0 }],
-        ['rotation.x', '旋转 X°', { step: 0.5, axis: 'x', letter: 'X', unit: '°' }],
-        ['rotation.y', '旋转 Y°', { step: 0.5, axis: 'y', letter: 'Y', unit: '°' }],
-        ['rotation.z', '旋转 Z°', { step: 0.5, axis: 'z', letter: 'Z', unit: '°' }],
-      ];
-      for (const [path, label, opts] of nodeRows) {
-        if (show(path)) host.appendChild(this._elementNumRow(e, path, label, opts));
+      // Unified transform rows (§9): 中心点 → 位置 → 旋转 → 缩放 → 不透明度.
+      const showRow = (rowKey) => mode === 'full' || xfKeyState(e, 'el', rowKey, this.time, 0).has;
+      if (showRow('pivot')) this._xformRow(host, e, 'el', 'pivot', { step: 0.05, unit: 'm' });
+      if (showRow('position')) {
+        this._xformRow(host, e, 'el', 'position', {
+          step: 0.05, unit: 'm', point: true, noKey: true,
+        });
+      }
+      if (showRow('rotation')) this._xformRow(host, e, 'el', 'rotation', { step: 0.5, unit: '°' });
+      if (showRow('scale')) {
+        this._xformRow(host, e, 'el', 'scale', {
+          step: 0.01, unit: '',
+          dimZ: true, dimTip: '平面没有厚度：Z 缩放只影响挂在下面的子元素',
+        });
       }
       if (show('transform.opacity')) {
         host.appendChild(this._elementNumRow(e, 'transform.opacity', '不透明度', {
@@ -2348,17 +2364,15 @@ export class Timeline {
         host.appendChild(this._colorRow(o));
       }
     }
-    this._appendSection(host, '变换', 'transform', 'm / 倍');
+    this._appendSection(host, '变换', 'transform', 'm / 度 / 倍');
     const mode = this._groupMode('transform');
     if (mode !== 'collapsed') {
-      const show = (path) => mode === 'full' || this._propKeys(o, path).length > 0;
-      if (show('pivot')) host.appendChild(this._vecRow(o, 'pivot', '中心点'));
-      if (show('position')) host.appendChild(this._vecRow(o, 'position', '位置'));
-      if (show('scale')) host.appendChild(this._vecRow(o, 'scale', '缩放'));
-      for (const axis of AX) {
-        if (show(`rotation.${axis}`)) host.appendChild(this._objectRotationRow(o, axis));
-      }
-      if (show('opacity')) host.appendChild(this._opacityRow(o));
+      const showRow = (rowKey) => mode === 'full' || xfKeyState(o, 'ob', rowKey, this.time, 0).has;
+      if (showRow('pivot')) this._xformRow(host, o, 'ob', 'pivot', { step: 0.05, unit: 'm' });
+      if (showRow('position')) this._xformRow(host, o, 'ob', 'position', { step: 0.05, unit: 'm', point: true });
+      if (showRow('rotation')) this._xformRow(host, o, 'ob', 'rotation', { step: 0.5, unit: '°' });
+      if (showRow('scale')) this._xformRow(host, o, 'ob', 'scale', { step: 0.01, unit: '倍' });
+      if (mode === 'full' || this._hasTrack(o, 'opacity')) this._opacityRow(o);
     }
   }
 
@@ -2455,7 +2469,15 @@ export class Timeline {
   }
 
   _camTracked(cam, path) {
-    return (cam?.tracks?.[path] || []).length > 0;
+    const tr = cam?.tracks || {};
+    if (path === 'center' || path === 'scale') {
+      return (tr[path] || []).length > 0
+        || XF_AXES.some((ax) => (tr[`${path}.${ax}`] || []).length > 0);
+    }
+    if (path === 'rotation') {
+      return XF_AXES.some((ax) => (tr[`rotation.${ax}`] || []).length > 0);
+    }
+    return (tr[path] || []).length > 0;
   }
 
   /**
@@ -2634,6 +2656,7 @@ export class Timeline {
     row.dataset.path = 'geom';
     const g = el('div', 'tl-gutter');
     g.dataset.obj = o.id;
+    g.appendChild(el('span', 'tl-linkflag'));
     g.appendChild(el('span', 'tl-plabel', '几何'));
     const inputs = [];
     for (const [ax, letter] of [['w', 'W'], ['h', 'H'], ['d', 'D']]) {
@@ -2660,6 +2683,7 @@ export class Timeline {
     row.dataset.path = 'color';
     const g = el('div', 'tl-gutter');
     g.dataset.obj = o.id;
+    g.appendChild(el('span', 'tl-linkflag'));
     g.appendChild(el('span', 'tl-plabel', '颜色'));
     const color = document.createElement('input');
     color.type = 'color';
@@ -2750,6 +2774,320 @@ export class Timeline {
     row.append(g, lane);
     this._propRows.push({ objId: o.id, path: 'opacity', kind: 'opacity', inputs: [inp], kf, lane, row, sig: '' });
     return row;
+  }
+
+  // ------------------------------------------------------------ unified transform rows
+  /** Owner object of a transform row (the panel may render while it is gone). */
+  _xformHost(entry) {
+    if (!entry) return null;
+    if (entry.kind === 'cam') return this._camById(entry.id);
+    if (entry.kind === 'ob') return this._obj(entry.id);
+    return this._element(entry.id);
+  }
+
+  _xformClass(kind) {
+    return kind === 'cam' ? 'tl-camprop' : kind === 'el' ? 'tl-elprop' : '';
+  }
+
+  _xformData(node, kind, id) {
+    node.dataset.kind = kind;
+    node.dataset.id = String(id);
+    if (kind === 'cam') node.dataset.cam = String(id);
+    else if (kind === 'ob') node.dataset.obj = String(id);
+    else node.dataset.el = String(id);
+  }
+
+  /**
+   * One row of the unified transform section: [↳] 标签 [X][Y][Z] [◆] plus three
+   * X/Y/Z sub-rows (docs/DESIGN-TRANSFORM-UNIFY.md §9). The parent ◆ keys all
+   * three axes; expanded sub-rows key one axis each. Position is the motion
+   * path: its sub-rows only show/edit values and the parent ◆ keys the point.
+   */
+  _xformRow(container, owner, kind, rowKey, opts = {}) {
+    const id = owner.id;
+    const {
+      step = 0.1, min, max, unit = '', percent = false, readOnly = false,
+      dimZ = false, dimTip = '', point = rowKey === 'position', noKey = false, tip = '',
+    } = opts;
+    const label = (XF_ROWS.find((r) => r.key === rowKey) || {}).label || rowKey;
+    const row = el('div', `tl-row tl-prop tl-xrow ${this._xformClass(kind)}`.trim());
+    this._xformData(row, kind, id);
+    row.dataset.path = rowKey;
+    const g = el('div', 'tl-gutter');
+    this._xformData(g, kind, id);
+
+    g.appendChild(this._linkButton(kind, owner, xfLinkPaths(kind, owner, rowKey)));
+
+    const lab = el('span', 'tl-plabel');
+    const caret = h('button', {
+      type: 'button', class: 'tl-xcaret', 'aria-label': `展开${label}逐轴`,
+      'data-tip': `展开 ${label} 的 X/Y/Z 子行（逐轴打帧）`,
+    }, '▸');
+    lab.append(caret, document.createTextNode(label));
+    if (tip) lab.dataset.tip = tip;
+    g.appendChild(lab);
+
+    const cells = [];
+    for (const ax of XF_AXES) {
+      const { box, inp } = this._numBox(ax, ax.toUpperCase());
+      inp.step = String(step);
+      if (min != null) inp.min = String(min);
+      if (max != null) inp.max = String(max);
+      if (percent) { inp.dataset.scale = '100'; inp.dataset.unit = '%'; }
+      box.classList.add(`tl-xcell-${ax}`);
+      box.dataset.tip = `${label} ${ax.toUpperCase()}${unit ? ` (${unit})` : ''}`;
+      if (readOnly) {
+        inp.readOnly = true;
+        inp.tabIndex = -1;
+        box.classList.add('tl-ro');
+      }
+      if (dimZ && ax === 'z') {
+        box.classList.add('dim');
+        box.dataset.tip = dimTip || `${label} Z：平面没有厚度，只影响挂在下面的子元素`;
+      }
+      cells.push({ ax, box, inp });
+      g.appendChild(box);
+    }
+
+    const kf = kfButton();
+    g.appendChild(kf);
+    const lane = el('div', 'tl-track');
+    row.append(g, lane);
+    container.appendChild(row);
+
+    const subRows = [];
+    for (const ax of XF_AXES) {
+      const sub = el('div', `tl-row tl-xsub ${this._xformClass(kind)}`.trim());
+      this._xformData(sub, kind, id);
+      sub.dataset.path = xfAxisPath(kind, rowKey, ax);
+      sub.dataset.sub = '1';
+      const sg = el('div', 'tl-gutter');
+      this._xformData(sg, kind, id);
+      const linkPath = xfAxisLinkPath(kind, owner, rowKey, ax);
+      sg.appendChild(this._linkButton(kind, owner, linkPath ? [linkPath] : []));
+      const slab = el('span', 'tl-plabel tl-xsub-label');
+      slab.textContent = ax.toUpperCase();
+      sg.appendChild(slab);
+      const { box, inp } = this._numBox(ax, ax.toUpperCase());
+      inp.step = String(step);
+      if (min != null) inp.min = String(min);
+      if (max != null) inp.max = String(max);
+      if (percent) { inp.dataset.scale = '100'; inp.dataset.unit = '%'; }
+      box.classList.add('tl-xsub-cell');
+      box.dataset.tip = `${label} ${ax.toUpperCase()} 子行${unit ? ` (${unit})` : ''}`;
+      if (readOnly) {
+        inp.readOnly = true;
+        inp.tabIndex = -1;
+        box.classList.add('tl-ro');
+      }
+      if (dimZ && ax === 'z') {
+        box.classList.add('dim');
+        box.dataset.tip = dimTip || `${label} Z：平面没有厚度，只影响挂在下面的子元素`;
+      }
+      sg.appendChild(box);
+      const skf = kfButton();
+      sg.appendChild(skf);
+      const slane = el('div', 'tl-track');
+      sub.append(sg, slane);
+      sub.hidden = true;
+      container.appendChild(sub);
+      subRows.push({ ax, row: sub, gutter: sg, box, input: inp, kf: skf, lane: slane });
+    }
+
+    const openKey = `${kind}:${id}:${rowKey}`;
+    const entry = {
+      kind, id, rowKey, label, row, gutter: g, caret, cells, kf, lane, subRows,
+      expanded: this._xformOpen.has(openKey),
+      openKey, point, readOnly, noKey, dimZ, sig: new Map(),
+    };
+    this._xformRows.push(entry);
+
+    // Restore the open state after a re-render: the row → sub-rows toggle is
+    // DOM-only, but `_xformOpen` survives project/ops renders.
+    entry.row.classList.toggle('open', entry.expanded);
+    entry.caret.textContent = entry.expanded ? '▾' : '▸';
+    entry.caret.setAttribute('aria-expanded', String(entry.expanded));
+    entry.caret.dataset.tip = entry.expanded
+      ? `收起 ${label} 的逐轴子行`
+      : `展开 ${label} 的 X/Y/Z 子行（逐轴打帧）`;
+    for (const sub of subRows) sub.row.hidden = !entry.expanded;
+
+    const commit = (axis, input) => {
+      const host = this._xformHost(entry);
+      if (!host || readOnly) return;
+      const v = readNumber(input);
+      if (!Number.isFinite(v)) return;
+      const t = this._editTimes.get(`${kind}:${id}:${rowKey}.${axis}`) ?? this._frameTime();
+      const ops = xfSetAxisOps(this.project, host, kind, rowKey, axis, v, t, this._tol());
+      const op = bundleOps(ops);
+      if (op) this.onOp?.(op);
+    };
+    const bindInput = (axis, input) => {
+      if (readOnly) return;
+      const editKey = `${kind}:${id}:${rowKey}.${axis}`;
+      input.addEventListener('focus', () => this.onPause?.());
+      input.addEventListener('input', () => {
+        this._editTimes.set(editKey, this._frameTime());
+        this._schedule(editKey, () => commit(axis, input));
+      });
+      input.addEventListener('blur', () => { this._flush(editKey); this._syncProps(); });
+    };
+    for (const cell of cells) bindInput(cell.ax, cell.inp);
+    for (const sub of subRows) bindInput(sub.ax, sub.input);
+
+    caret.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      this._toggleXformExpand(entry);
+    });
+    kf.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      this._toggleXformKey(entry, ev.shiftKey);
+    });
+    for (const sub of subRows) {
+      sub.kf.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        this._toggleXformAxisKey(entry, sub, ev.shiftKey);
+      });
+    }
+
+    this._paintXformEntry(entry);
+    return entry;
+  }
+
+  _tol() {
+    return 0.5 / (Number(this._last?.project?.meta?.fps) || Number(this.project?.meta?.fps) || 24);
+  }
+
+  _toggleXformExpand(entry) {
+    entry.expanded = !entry.expanded;
+    if (entry.expanded) this._xformOpen.add(entry.openKey);
+    else this._xformOpen.delete(entry.openKey);
+    entry.row.classList.toggle('open', entry.expanded);
+    entry.caret.textContent = entry.expanded ? '▾' : '▸';
+    entry.caret.setAttribute('aria-expanded', String(entry.expanded));
+    entry.caret.dataset.tip = entry.expanded
+      ? `收起 ${entry.label} 的逐轴子行`
+      : `展开 ${entry.label} 的 X/Y/Z 子行（逐轴打帧）`;
+    for (const sub of entry.subRows) sub.row.hidden = !entry.expanded;
+    this._paintXformEntry(entry);
+  }
+
+  _toggleXformKey(entry, shift) {
+    const host = this._xformHost(entry);
+    if (!host || entry.noKey) return;
+    this.onPause?.();
+    const t = this._frameTime();
+    const tol = this._tol();
+    const st = xfKeyState(host, entry.kind, entry.rowKey, t, tol);
+    const ops = (shift || st.at)
+      ? xfUnkeyOps(this.project, host, entry.kind, entry.rowKey, t, tol)
+      : xfKeyOps(this.project, host, entry.kind, entry.rowKey, t);
+    const op = bundleOps(ops);
+    if (op) this.onOp?.(op);
+  }
+
+  _toggleXformAxisKey(entry, sub, shift) {
+    const host = this._xformHost(entry);
+    if (!host || entry.point || entry.noKey || sub.kf.disabled) return;
+    this.onPause?.();
+    const t = this._frameTime();
+    const tol = this._tol();
+    const st = xfAxisKeyState(host, entry.kind, entry.rowKey, sub.ax, t, tol);
+    const ops = (shift || st.at)
+      ? xfAxisUnkeyOps(this.project, host, entry.kind, entry.rowKey, sub.ax, t, tol)
+      : xfAxisKeyOps(this.project, host, entry.kind, entry.rowKey, sub.ax, t);
+    const op = bundleOps(ops);
+    if (op) this.onOp?.(op);
+  }
+
+  /** Paint one row + its sub-rows from the project the panel last rendered. */
+  _paintXformEntry(entry) {
+    const host = this._xformHost(entry);
+    if (!host) return;
+    const t = this.time;
+    const tol = this._tol();
+    const values = xfValues(this.project, host, entry.kind, t)[entry.rowKey] || [0, 0, 0];
+    entry.cells.forEach((cell, i) => writeNumber(cell.inp, values[i]));
+    entry.subRows.forEach((sub, i) => writeNumber(sub.input, values[i]));
+
+    const st = xfKeyState(host, entry.kind, entry.rowKey, t, tol);
+    paintKf(entry.kf, st, { point: entry.point, noKey: entry.noKey, label: entry.label });
+    for (const sub of entry.subRows) {
+      const mode = xfMode(host, entry.kind, entry.rowKey);
+      const disabled = entry.point || entry.noKey || mode === 'base'
+        || (mode === 'vector' && entry.rowKey !== 'position');
+      sub.kf.disabled = disabled;
+      sub.kf.classList.toggle('off', disabled);
+      if (disabled) {
+        sub.kf.textContent = '◇';
+        sub.kf.dataset.tip = entry.noKey
+          ? '2D 位置暂不逐轴打帧：屏幕运动写在中心点（运动路径 §5 待做）'
+          : entry.point
+            ? '位置整点打键：点父行 ◆；子行只改数值'
+            : '整向量轨道：逐轴键要等字段迁移；先在父行 ◆ 打整组';
+      } else {
+        const ast = xfAxisKeyState(host, entry.kind, entry.rowKey, sub.ax, t, tol);
+        paintKf(sub.kf, ast, { axis: sub.ax, label: entry.label });
+        sub.kf.dataset.tip = sub.kf.dataset.tip || '给这个轴单独打帧 / 删帧（Shift+点击删除）';
+      }
+    }
+    this._refreshXformLane(entry, host, st);
+  }
+
+  _refreshXformLane(entry, host, st) {
+    // Expanded axis rows show their own keys; the merged summary would only
+    // duplicate them. Collapsed rows keep the union on the parent lane (§9.1).
+    const hideParent = st.mode === 'axis' && entry.expanded;
+    const parentSig = hideParent ? 'hidden' : `${st.mode}|${st.times.join(',')}`;
+    if (entry.sig.get('parent') !== parentSig) {
+      entry.sig.set('parent', parentSig);
+      clearLaneKeys(entry.lane);
+      if (hideParent) {
+        entry.lane.keys = [];
+      } else {
+        const summary = st.mode === 'axis';
+        const path = st.mode === 'path' ? 'path'
+          : st.mode === 'vector' ? xfVectorPath(entry.kind, entry.rowKey) : null;
+        entry.lane.keys = st.times.map((t) => this._xformKeyNode(entry, entry.lane, t, path, summary, entry.label));
+      }
+    }
+    for (const k of entry.lane.keys || []) k.node.classList.toggle('at', Math.abs(k.t - this.time) < 1e-3);
+
+    entry.subRows.forEach((sub, i) => {
+      const ast = xfAxisKeyState(host, entry.kind, entry.rowKey, sub.ax, this.time, this._tol());
+      const sig = ast.times.join(',');
+      if (sub.sig === sig) {
+        for (const k of sub.keys || []) k.node.classList.toggle('at', Math.abs(k.t - this.time) < 1e-3);
+        return;
+      }
+      sub.sig = sig;
+      clearLaneKeys(sub.lane);
+      sub.keys = ast.times.map((t) => this._xformKeyNode(entry, sub.lane, t,
+        xfAxisPath(entry.kind, entry.rowKey, sub.ax), false, `${entry.label} ${sub.ax.toUpperCase()}`));
+      for (const k of sub.keys) k.node.classList.toggle('at', Math.abs(k.t - this.time) < 1e-3);
+    });
+  }
+
+  _xformKeyNode(entry, lane, t, path, summary, label) {
+    const d = el('div', 'tl-key');
+    d.dataset.t = String(t);
+    d.style.left = `${t * this.pps}px`;
+    d.dataset.tip = `${label} · ${t.toFixed(2)}s`;
+    if (summary) {
+      d.classList.add('tl-key-sum');
+    } else {
+      if (entry.kind === 'cam') d.dataset.cam = entry.id;
+      else if (entry.kind === 'ob') d.dataset.obj = entry.id;
+      else d.dataset.el = entry.id;
+      if (path) d.dataset.path = path;
+    }
+    lane.appendChild(d);
+    return { t, node: d };
+  }
+
+  _syncXformRows() {
+    for (const entry of this._xformRows) this._paintXformEntry(entry);
   }
 
   // ------------------------------------------------------------ values / keys
@@ -2937,6 +3275,7 @@ export class Timeline {
       }
       this._refreshCamPropLane(pr, cam);
     }
+    this._syncXformRows();
     for (const [id, h] of this._objHeads) {
       const o = this._obj(id);
       if (!o) continue;
@@ -4028,6 +4367,12 @@ export class Timeline {
     const gutterEl = target.closest?.('.tl-gutter[data-id]');
 
     // ---- property rows: tap selects, drag box-selects keyframes ----
+    const camPropGutter = target.closest?.('.tl-camprop[data-cam] .tl-gutter');
+    if (camPropGutter) {
+      const pr = camPropGutter.closest('.tl-camprop');
+      this._deferGesture(ev, { onTap: () => this._selectProperty('cam', pr.dataset.cam, pr.dataset.path, ev) });
+      return;
+    }
     const elPropGutter = target.closest?.('.tl-elprop[data-el] .tl-gutter');
     if (elPropGutter) {
       const pr = elPropGutter.closest('.tl-elprop');
@@ -4253,6 +4598,7 @@ const camPosEditKey = (camId) => `camera:position:${camId}`;
  */
 function keyframeRefOf(node) {
   if (!node?.classList?.contains('tl-key')) return null;
+  if (node.classList.contains('tl-key-sum')) return null;
   const t = Number(node.dataset.t);
   if (!Number.isFinite(t)) return null;
   if (node.dataset.cam) return keyframeRef(cameraRef(node.dataset.cam), node.dataset.path || 'path', t);
@@ -4294,6 +4640,29 @@ function caretButton(open, expandTip, collapseTip) {
 /** ◆ toggle (glyph kept on purpose: keyframe symbol, DESIGN.md §5). */
 function kfButton() {
   return h('button', { type: 'button', class: 'tl-kf', 'aria-label': '关键帧' }, '◆');
+}
+
+/** Paint one ◆ with the row/axis state (at playhead / has keys / empty). */
+function paintKf(btn, st, { point = false, noKey = false, axis = null, label = '' } = {}) {
+  if (!btn) return;
+  const off = noKey;
+  btn.disabled = off;
+  btn.classList.toggle('off', off);
+  btn.classList.toggle('on', !off && !!st.at);
+  btn.classList.toggle('has', !off && !st.at && !!st.has);
+  btn.classList.toggle('part', !off && !!st.partial);
+  btn.textContent = st.at ? '◆' : '◇';
+  if (off) {
+    btn.dataset.tip = '2D 位置暂不逐轴打帧：屏幕运动写在中心点（运动路径 §5 待做）';
+    return;
+  }
+  const what = axis ? `${label} ${axis.toUpperCase()}` : label;
+  const where = point ? '轨迹点' : '关键帧';
+  btn.dataset.tip = st.at
+    ? `${what}：删除当前帧${where}（Shift+点击也可）`
+    : st.has
+      ? `${what}：在当前时间打${where}（已有 ${(st.times || []).length} 个）`
+      : `${what}：在当前时间打${where}`;
 }
 
 function clipHandles() {

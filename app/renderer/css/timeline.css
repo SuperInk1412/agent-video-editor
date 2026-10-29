@@ -263,15 +263,44 @@ body.tl-parent-dragging, body.tl-parent-dragging * { cursor: crosshair !importan
 }
 
 /* ---------------- property rows ---------------- */
+/* One grid for every property row, including the four unified transform rows
+   (docs/DESIGN-TRANSFORM-UNIFY.md §9): [↳ 20px][label][X][Y][Z][◆ 24px].
+   The label shrinks with the name column; the three value cells stay equal so
+   a scalar row (one cell) and a vector row (three cells) line up. */
+.tl-rows { --tl-label-w: clamp(56px, calc(var(--tl-gutter, 340px) - 268px), 96px); }
 .tl-prop { height: 28px; }
 .tl-prop.sel { background: var(--accent-bg); }
 .tl-prop.sel .tl-gutter { background: var(--accent-bg); color: var(--text-1); }
 .tl-prop.sel .tl-track { background: var(--accent-bg); }
-.tl-prop .tl-gutter {
-  display: grid; grid-template-columns: 54px repeat(3, minmax(0, 1fr)) 24px;
+.tl-prop > .tl-gutter,
+.tl-camprop > .tl-gutter,
+.tl-xsub > .tl-gutter {
+  display: grid;
+  grid-template-columns: 20px var(--tl-label-w) repeat(3, minmax(0, 1fr)) 24px;
   gap: 4px; padding: 0 9px; align-items: center;
 }
-.tl-plabel { color: var(--text-2); font-size: var(--fs-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tl-plabel {
+  display: block; min-width: 0; line-height: var(--h-md);
+  color: var(--text-2); font-size: var(--fs-sm);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tl-xcaret {
+  display: inline-block; width: 12px; height: 16px; padding: 0; margin-right: 1px;
+  vertical-align: -1px; line-height: 1;
+  color: var(--text-3); background: transparent; border: 0; cursor: pointer;
+  font-size: 10px; text-align: center;
+}
+.tl-xcaret:hover { color: var(--text-1); }
+.tl-xsub { height: 24px; }
+.tl-xsub > .tl-gutter { padding-left: 9px; }
+.tl-xsub .tl-plabel { padding-left: 14px; color: var(--text-3); font-size: var(--fs-xs); }
+.tl-xsub[hidden] { display: none; }
+.tl-xcell-x { grid-column: 3; }
+.tl-xcell-y { grid-column: 4; }
+.tl-xcell-z { grid-column: 5; }
+/* Sub-rows stack their single field in the first value cell so X/Y/Z read as a
+   normal list instead of a staircase under the parent's axis columns. */
+.tl-xsub-cell { grid-column: 3; }
 .tl-plocal {
   display: inline-block; margin-right: 3px; color: var(--edit);
   border: 1px solid var(--edit-border); border-radius: var(--r-sm);
@@ -295,16 +324,18 @@ body.tl-parent-dragging, body.tl-parent-dragging * { cursor: crosshair !importan
 .tl-num input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 .tl-num input:focus { box-shadow: none; }
 .tl-num i:empty { display: none; }
-.tl-scalar { grid-column: span 3; }
-.tl-keyspace { width: 22px; }
+.tl-num.tl-ro { background: transparent; border-color: var(--border-subtle); }
+.tl-num.tl-ro input { color: var(--text-2); cursor: default; }
+.tl-num.dim { opacity: .55; }
+.tl-num.dim input { color: var(--text-3); }
+.tl-scalar { grid-column: 3; }
+.tl-keyspace { grid-column: 6; width: 22px; }
 
 /* ---------------- property links (PLAN-ui-round3 §4.2) ---------------- */
-/* A 20px `↳` column leads every linkable property row; rows that cannot be
-   linked keep a placeholder of the same width so the name column never jumps.
-   The button is the first grid item, so the label and value columns keep their
-   order; only this row's template gets the extra first track. */
+/* The 20px `↳` column is the first track of every property row; rows that
+   cannot be linked keep a placeholder of the same width. */
 .tl-linkbtn {
-  justify-self: center; display: grid; place-items: center;
+  grid-column: 1; justify-self: center; display: grid; place-items: center;
   width: 20px; height: 20px; padding: 0; flex: 0 0 20px;
   font-size: var(--fs-sm); line-height: 1;
   color: var(--text-disabled); background: transparent;
@@ -312,28 +343,17 @@ body.tl-parent-dragging, body.tl-parent-dragging * { cursor: crosshair !importan
 }
 .tl-linkbtn:hover { color: var(--accent); background: var(--accent-bg); border-color: var(--accent-border); }
 .tl-linkbtn.on { color: var(--accent); background: var(--accent-bg); border-color: var(--accent-border); }
-.tl-linkflag { width: 20px; }
-.tl-linkrow .tl-linkbtn, .tl-linkrow .tl-linkflag { grid-column: 1; }
-.tl-prop.tl-linkrow .tl-gutter {
-  grid-template-columns: 20px 54px repeat(3, minmax(0, 1fr)) 24px;
-}
-.tl-camxform.tl-linkrow .tl-gutter,
-.tl-camposrow.tl-linkrow .tl-gutter {
-  grid-template-columns: 20px clamp(56px, calc(var(--tl-gutter, 340px) - 268px), 96px) repeat(3, minmax(0, 1fr)) 24px;
-}
-.tl-camxform.tl-linkrow .tl-kf { grid-column: 6; }
-.tl-camparamrow.tl-linkrow .tl-gutter {
-  grid-template-columns: 20px clamp(72px, calc(var(--tl-gutter, 340px) - 260px), 104px) 110px minmax(0, 1fr) 24px;
-}
-.tl-camparamrow.tl-linkrow .tl-camfish { grid-column: 4; }
-.tl-camparamrow.tl-linkrow .tl-kf { grid-column: 5; }
+.tl-linkflag { grid-column: 1; width: 20px; }
 .tl-color { width: 100%; height: var(--h-sm); padding: 1px; }
 .tl-kf {
-  width: 22px; height: 22px; padding: 0; font-size: var(--fs-xs); color: var(--text-disabled);
+  grid-column: 6; width: 22px; height: 22px; padding: 0; font-size: var(--fs-xs); color: var(--text-disabled);
   background: transparent; border: 1px solid transparent; cursor: pointer;
 }
 .tl-kf:hover { color: var(--keyframe); background: transparent; border-color: var(--keyframe-border); border-radius: var(--r-sm); }
 .tl-kf.has { color: var(--text-3); }
+.tl-kf.part { color: var(--keyframe); opacity: .55; }
+.tl-kf.off { opacity: .3; cursor: default; }
+.tl-kf.off:hover { color: var(--text-disabled); border-color: transparent; }
 .tl-kf.on { color: var(--keyframe); background: var(--keyframe-bg); border-color: var(--keyframe-border); border-radius: var(--r-sm); }
 .tl-colorbox { height: var(--h-sm); border: 1px solid var(--border); border-radius: var(--r-sm); }
 .tl-hex {
@@ -354,6 +374,10 @@ body.tl-parent-dragging, body.tl-parent-dragging * { cursor: crosshair !importan
   width: 9px; height: 9px; margin: -4.5px 0 0 -4.5px;
   background: var(--keyframe); border-color: var(--surface-0);
 }
+/* Collapsed transform row: the three axes' keys merge onto the parent lane.
+   A merged key is a summary, not a draggable per-path key. */
+.tl-key-sum { background: transparent; border-color: var(--keyframe); opacity: .75; }
+.tl-key-sum:hover { background: transparent; }
 
 /* ---------------- camera element rows ---------------- */
 /* camera path keys live in the camera 位置 row, never on the ruler */
@@ -365,26 +389,18 @@ body.tl-parent-dragging, body.tl-parent-dragging * { cursor: crosshair !importan
 .tl-camhead .tl-objkind { margin-left: auto; }
 .tl-camdot { width: 7px; height: 7px; border-radius: 50%; background: var(--clip-camera); flex: 0 0 7px; }
 .tl-camprop { height: 28px; }
-/* label columns shrink with --tl-gutter so 3 numbers + ◆ still fit at 280px */
-.tl-camprop .tl-gutter {
-  display: grid; grid-template-columns: clamp(72px, calc(var(--tl-gutter, 340px) - 236px), 104px) 110px minmax(0, 1fr);
-  gap: 6px; padding: 0 9px; align-items: center;
+/* Keyable single-value camera rows: the field fills the value area; an optional
+   badge takes the last cell and ◆ stays pinned in the last grid track. */
+.tl-camparamrow .tl-camnum,
+.tl-camparamrow .tl-camselect {
+  grid-column: 3 / span 3; width: 100%; min-width: 0;
+  height: var(--h-sm); padding: 0 4px;
 }
-/* Transform rows are a real property row: 1 label + up to 3 numbers + ◆. */
-.tl-camxform .tl-gutter {
-  grid-template-columns: clamp(56px, calc(var(--tl-gutter, 340px) - 244px), 96px) repeat(3, minmax(0, 1fr)) 24px;
-  gap: 4px;
-}
-.tl-camxform .tl-kf { width: 100%; grid-column: 5; }
-/* Keyable single-value camera rows: label, input, badge, ◆, then the lane. */
-.tl-camparamrow .tl-gutter {
-  grid-template-columns: clamp(72px, calc(var(--tl-gutter, 340px) - 236px), 104px) 110px minmax(0, 1fr) 24px;
-  gap: 4px;
-}
-.tl-camparamrow .tl-kf { width: 100%; grid-column: 4; }
-.tl-camparamrow .tl-camfish { grid-column: 3; }
-.tl-camnum { width: 110px; }
-.tl-camselect { width: 110px; height: var(--h-sm); padding: 0 4px; font-size: var(--fs-xs); }
+.tl-camparamrow.has-badge .tl-camnum,
+.tl-camparamrow.has-badge .tl-camselect { grid-column: 3 / span 2; }
+.tl-camparamrow .tl-camfish { grid-column: 5; }
+.tl-camnum { width: 100%; }
+.tl-camselect { height: var(--h-sm); padding: 0 4px; font-size: var(--fs-xs); }
 .tl-camfish {
   justify-self: start; font-size: var(--fs-xs); line-height: 14px; color: var(--edit);
   border: 1px solid var(--edit-border); background: var(--edit-bg); border-radius: var(--r-pill); padding: 0 6px;

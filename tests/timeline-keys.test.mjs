@@ -135,7 +135,7 @@ test('keyedSections lists the groups that must stay open', () => {
   assert.deepEqual(keyedSections(null), []);
 });
 
-test('three-axis rotation keys open the rotation rows (and camera camRot)', () => {
+test('three-axis rotation keys open the unified transform group', () => {
   const p = project();
   const el = { ...p.elements[3], keyframes: [{ t: 0, path: 'rotation.z', value: 10 }] };
   const ek = elementHostKeys(el);
@@ -156,6 +156,10 @@ test('three-axis rotation keys open the rotation rows (and camera camRot)', () =
   const ck = cameraHostKeys(cam);
   assert.equal(ck.keyed, true);
   assert.ok(ck.paths.has('rotation.y'));
-  assert.deepEqual(ck.groups, new Set(['camPos', 'camRot']));
-  assert.deepEqual(keyedSections(ck), ['camPos', 'camRot']);
+  assert.deepEqual(ck.groups, new Set(['camPos']));
+  assert.deepEqual(keyedSections(ck), ['camPos']);
+
+  // Per-axis centre/scale tracks open the same transform group.
+  const camAxis = { ...p.cameras[0], tracks: { 'center.x': [{ t: 0, v: 1 }], 'scale.z': [{ t: 0, v: 2 }] } };
+  assert.deepEqual(cameraHostKeys(camAxis).groups, new Set(['camPos']));
 });

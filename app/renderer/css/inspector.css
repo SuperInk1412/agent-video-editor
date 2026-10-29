@@ -94,6 +94,11 @@ button.insp-name:hover { background: var(--surface-2); border-color: var(--borde
 }
 .insp .prop > label { display: flex; align-items: center; gap: 3px; line-height: var(--h-md); min-width: 0; }
 .insp .prop > .ctl { grid-column: 2 / span 6; min-width: 0; }
+/* Unified transform rows: the four labels are short, so give the three value
+   cells the 12px and keep -12.5 readable at the default panel width. */
+.insp .prop.xf-row { grid-template-columns: 60px repeat(6, minmax(0, 1fr)) 18px 20px; }
+.insp .prop.xf-row .nbox { padding: 0 4px; gap: 2px; }
+.insp .prop.xf-row .nbox input { font-size: var(--fs-xs); }
 .insp .prop.w-third > .ctl { grid-column: 2 / span 2; min-width: 64px; }
 .insp .prop.w-half > .ctl { grid-column: 2 / span 3; min-width: 96px; }
 .insp .prop.w-full > .ctl { grid-column: 2 / span 6; }
@@ -121,6 +126,8 @@ button.insp-name:hover { background: var(--surface-2); border-color: var(--borde
   transition: border-color var(--dur-fast);
 }
 .insp .nbox:hover { border-color: var(--border-strong); }
+.insp .nbox.dim { opacity: .5; }
+.insp .nbox.dim input { color: var(--text-3); }
 .insp .nbox:focus-within { border-color: var(--accent-border); box-shadow: var(--focus-ring); }
 .insp .nbox input {
   flex: 1 1 auto; width: 100%; min-width: 0; height: 100%; padding: 0;

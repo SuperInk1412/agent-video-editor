@@ -27,16 +27,21 @@ const EL_TRANSFORM = [
 const EL_AUDIO = ['audio.volume'];
 const OB_TRANSFORM = ['pivot', 'position', 'scale', 'rotation.x', 'rotation.y', 'rotation.z', 'opacity'];
 // Camera groups mirror the timeline's camera row builders. `path` keys are the
-// 位置 row of the 变换 group.
+// 位置 row of the 变换 group; the four unified transform rows share camPos, and
+// the picture-space composition rows live with the lens (§9).
 const CAM_GROUPS = {
-  camPos: ['center', 'picturePivot', 'pictureOffset', 'opacity', 'scale'],
-  camRot: ['rotation.x', 'rotation.y', 'rotation.z'],
-  camMain: ['fov', 'lookAhead', 'bankGain', 'maxRoll'],
+  camPos: [
+    'center', 'center.x', 'center.y', 'center.z',
+    'scale', 'scale.x', 'scale.y', 'scale.z',
+    'rotation.x', 'rotation.y', 'rotation.z',
+    'opacity',
+  ],
+  camMain: ['picturePivot', 'pictureOffset', 'fov', 'lookAhead', 'bankGain', 'maxRoll'],
   camShake: ['shake.amp', 'shake.freq', 'shake.speedGain'],
   camDof: ['dof.enabled', 'dof.fstop'],
 };
 
-export const CAMERA_GROUPS = ['camPos', 'camRot', 'camMain', 'camShake', 'camDof'];
+export const CAMERA_GROUPS = ['camPos', 'camMain', 'camShake', 'camDof'];
 
 const collect = (keyed, paths, groups, group, list) => {
   for (const path of list) {

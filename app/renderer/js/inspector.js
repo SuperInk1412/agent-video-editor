@@ -16,9 +16,13 @@ import { widthFor, isWidth } from './field-width.js';
 import { frameWriteTime } from './timeline-math.js';
 import { elementNodeAt } from './node-at.js';
 import { splitRef } from '/core/selection.js';
+import {
+  XF_AXES, XF_ROWS, bundleOps, xfAxisLinkPath, xfKeyOps, xfKeyState, xfOpacityKeyState,
+  xfOpacityOps, xfOpacityUnkeyOps, xfSetAxisOps, xfUnkeyOps, xfValues,
+} from './xform.js';
 import { h, icon, prefs } from './ui.js';
 import {
-  linkJumpTarget, linkOf, linkSourceLabel, linkSummary, openLinkMenu,
+  linkJumpTarget, linkOf, linkPropLabel, linkSourceLabel, linkSummary, openLinkMenu,
 } from './link-menu.js';
 import {
   effectiveElementRowValue, elementRowKeyPath, elementRowTarget, localElementRowValue,
@@ -259,7 +263,11 @@ export class Inspector {
   }
 
   _linked(link) {
-    return !!link && !!linkOf(this._linkHost(link.kind, link.id), link.path);
+    if (!link) return false;
+    const host = this._linkHost(link.kind, link.id);
+    if (!host) return false;
+    const paths = Array.isArray(link.paths) && link.paths.length ? link.paths : [link.path];
+    return paths.some((p) => !!linkOf(host, p));
   }
 
   /**
@@ -270,8 +278,12 @@ export class Inspector {
   _linkButton(link) {
     const btn = h('button', { type: 'button', class: 'link-btn', 'aria-label': '属性父级' });
     btn.textContent = '↳';
+    // A row-level button carries several axis paths (one menu for X/Y/Z); the
+    // old single-path form is unchanged.
+    const paths = Array.isArray(link.paths) && link.paths.length ? link.paths.slice() : [link.path];
     const paint = () => {
-      const current = linkOf(this._linkHost(link.kind, link.id), link.path);
+      const host = this._linkHost(link.kind, link.id);
+      const current = paths.map((p) => linkOf(host, p)).find(Boolean) || null;
       btn.classList.toggle('on', !!current);
       btn.dataset.tip = current
         ? `属性父级：${linkSourceLabel(this._last?.project, current)}（右键：转到 / 解除）`
@@ -283,7 +295,8 @@ export class Inspector {
         project: this._last?.project,
         hostKind: link.kind,
         id: link.id,
-        to: link.path,
+        paths,
+        labels: paths.map((p) => linkPropLabel(p)),
         anchor, x, y,
         t: this.opts.getTime?.(),
         onOp: this.opts.onOp,
@@ -366,22 +379,26 @@ export class Inspector {
   }
 
   /** numeric box: optional axis letter / prefix, numfield input, unit suffix */
-  _num({ value, step = 0.01, min, max, percent = false, unit, axis, prefix, placeholder, aria, onChange }) {
+  _num({ value, step = 0.01, min, max, percent = false, unit, axis, prefix, placeholder, aria, onChange, dim = false, tip = '', readOnly = false }) {
     const input = h('input', { type: 'text', step, min, max, placeholder: placeholder || '', 'aria-label': aria || null });
     if (percent) { input.dataset.scale = '100'; input.dataset.unit = '%'; }
+    if (readOnly) { input.readOnly = true; input.tabIndex = -1; }
     attachNumberField(input);
     writeNumber(input, value, { force: true });
-    input.addEventListener('input', () => {
-      const v = readNumber(input);
-      if (v == null || !Number.isFinite(v)) return;
-      onChange(v);
-    });
-    input.addEventListener('blur', () => this._flush());
-    const box = h('span', { class: 'nbox' },
+    if (!readOnly) {
+      input.addEventListener('input', () => {
+        const v = readNumber(input);
+        if (v == null || !Number.isFinite(v)) return;
+        onChange(v);
+      });
+      input.addEventListener('blur', () => this._flush());
+    }
+    const box = h('span', { class: `nbox${dim ? ' dim' : ''}${readOnly ? ' ro' : ''}` },
       axis ? h('span', { class: `ax ax-${axis}`, 'aria-hidden': 'true' }, axis.toUpperCase())
         : prefix ? h('span', { class: 'ax', 'aria-hidden': 'true' }, prefix) : null,
       input,
       unit && !percent ? h('span', { class: 'unit', 'aria-hidden': 'true' }, unit) : null);
+    if (dim) box.dataset.tip = tip || '这个轴在当前类型上不改变外观';
     // clicking the axis letter / unit focuses the value
     box.addEventListener('pointerdown', (e) => {
       if (e.target === input) return;
@@ -466,17 +483,23 @@ export class Inspector {
    * items: [{ axis | prefix, value, step, min, max, unit, percent, onChange, aria }]
    * keyPaths: element tracks keyed together by the row's ◆.
    */
-  _vec({ label, items, keyPaths, keyer }) {
-    const kfNode = keyer ? this._kfButton(keyer.state, keyer.set, keyer.unset)
-      : keyPaths ? this._elKfButton(keyPaths) : null;
+  _vec({ label, items, keyPaths, keyer, kfNode: explicitKf, rowLink = null }) {
+    const kfNode = explicitKf !== undefined ? explicitKf
+      : keyer ? this._kfButton(keyer.state, keyer.set, keyer.unset)
+        : keyPaths ? this._elKfButton(keyPaths) : null;
+    const rowLinkNode = rowLink ? this._linkButton(rowLink) : null;
     // A per-input `link` gets its own `↳` right of that input (X/Y rows link
-    // independently); the row label carries the small 父 mark when any does.
+    // independently) unless the row carries one multi-axis `↳` instead; the
+    // row label keeps the small 父 mark either way.
     const boxes = items.map((it) => {
       const box = this._num(it);
-      return it.link ? h('span', { class: 'vec-cell' }, box, this._linkButton(it.link)) : box;
+      return it.link && !rowLinkNode
+        ? h('span', { class: 'vec-cell' }, box, this._linkButton(it.link))
+        : box;
     });
-    const linked = items.some((it) => it.link && this._linked(it.link));
-    return this._row(label, h('div', { class: `vec vec-${items.length}` }, ...boxes), kfNode, 'w-full', null, linked);
+    const linked = (rowLink && this._linked(rowLink))
+      || items.some((it) => it.link && this._linked(it.link));
+    return this._row(label, h('div', { class: `vec vec-${items.length}` }, ...boxes), kfNode, 'w-full', rowLinkNode, linked);
   }
 
   /** read-only value row */
@@ -501,6 +524,95 @@ export class Inspector {
     });
     const linked = items.some((it) => it.link && this._linked(it.link));
     return this._row(label, h('div', { class: 'vec vec-3' }, ...boxes), kfNode, 'w-full', null, linked);
+  }
+
+  _xfTol() {
+    return 0.5 / (Number(this._last?.project?.meta?.fps) || 24);
+  }
+
+  _xfOp(ops) {
+    const op = bundleOps(ops);
+    if (!op) return;
+    this._flush();
+    this.opts.onOp(op);
+  }
+
+  /**
+   * One unified transform row for the property panel (DESIGN-TRANSFORM-UNIFY
+   * §9): a total ◆ keys the row, three cells edit/link X/Y/Z. The timeline adds
+   * the expandable per-axis sub-rows; here the row is the compact form.
+   */
+  _xfRow(project, host, kind, rowKey, {
+    step = 0.1, unit = '', readOnly = false, noKf = false,
+    dimZ = false, dimTip = '', label = '',
+  } = {}) {
+    const t = this.opts.getTime();
+    const vals = xfValues(project, host, kind, t)[rowKey] || [0, 0, 0];
+    const tol = this._xfTol();
+    const lab = label || (XF_ROWS.find((r) => r.key === rowKey) || {}).label || rowKey;
+    const state = () => {
+      const st = xfKeyState(host, kind, rowKey, this.opts.getTime(), tol);
+      return st.at ? 'on' : st.has ? 'anim' : 'none';
+    };
+    const kfNode = noKf
+      ? h('button', {
+        type: 'button', class: 'kf-btn off', disabled: true, 'aria-label': '关键帧',
+        'data-tip': '2D 位置暂不单独打帧：屏幕运动写在中心点（运动路径 §5 待做）',
+      }, '◇')
+      : this._kfButton(
+        state,
+        () => this._xfOp(xfKeyOps(project, host, kind, rowKey, this._keyTime())),
+        () => this._xfOp(xfUnkeyOps(project, host, kind, rowKey, this._keyTime(), tol)),
+      );
+    const axisPaths = XF_AXES.map((ax) => xfAxisLinkPath(kind, host, rowKey, ax)).filter(Boolean);
+    const rowLink = axisPaths.length ? { kind, id: host.id, paths: axisPaths } : null;
+    const row = this._vec({
+      label: lab,
+      kfNode,
+      rowLink,
+      items: XF_AXES.map((ax, i) => {
+        return {
+          axis: ax,
+          value: Math.round(Number(vals[i]) * 1000) / 1000,
+          step, unit, aria: `${lab} ${ax.toUpperCase()}`,
+          readOnly,
+          link: null,
+          onChange: readOnly ? null : (v) => this._xfOp(
+            xfSetAxisOps(project, host, kind, rowKey, ax, v, this._keyTime(), tol),
+          ),
+          dim: dimZ && ax === 'z',
+          tip: dimZ && ax === 'z'
+            ? (dimTip || '平面没有厚度：Z 缩放只影响挂在下面的子元素')
+            : '',
+        };
+      }),
+    });
+    // The four short transform labels fit a narrower column than the default
+    // 72px, which gives the three value cells room for values like -12.5.
+    row.classList.add('xf-row');
+    return row;
+  }
+
+  /** Opacity row after the four transform rows (same key semantics as the timeline). */
+  _xfOpacity(project, host, kind) {
+    const t = this.opts.getTime();
+    const tol = this._xfTol();
+    const value = Math.round(Number(xfValues(project, host, kind, t).opacity) * 1000) / 1000;
+    return this._field({
+      label: '不透明度', value, step: 0.01, min: 0, max: 1, percent: true,
+      link: { kind, id: host.id, path: 'opacity' },
+      keyer: {
+        state: () => {
+          const st = xfOpacityKeyState(host, kind, this.opts.getTime(), tol);
+          return st.at ? 'on' : st.has ? 'anim' : 'none';
+        },
+        set: () => this._xfOp(xfOpacityOps(project, host, kind, value, this._keyTime(), true)),
+        unset: () => this._xfOp(xfOpacityUnkeyOps(host, kind, this._keyTime(), tol)),
+      },
+      onChange: (v) => this._xfOp(xfOpacityOps(
+        project, host, kind, v, this._keyTime(), xfOpacityKeyState(host, kind, t, tol).has,
+      )),
+    });
   }
 
   /** the selected element's key on `path` within half a frame of the playhead */
@@ -650,18 +762,34 @@ export class Inspector {
     }
 
     const node = el.node ? elementNodeAt(el, project.meta, time) : null;
-    const nodeVec = (group, label, step, unit) => {
+    const nodeVec = (group, label, step, unit, { dimZ = false, dimTip = '', noKf = false } = {}) => {
       const arr = Array.isArray(node?.[group]) ? node[group] : [0, 0, 0];
-      return this._vec({
+      const kf = noKf
+        ? h('button', {
+          type: 'button', class: 'kf-btn off', disabled: true, 'aria-label': '关键帧',
+          'data-tip': '2D 位置暂不单独打帧：屏幕运动写在中心点（运动路径 §5 待做）',
+        }, '◇')
+        : undefined;
+      const paths = ['x', 'y', 'z'].map((ax) => `${group}.${ax}`);
+      const rowLink = noKf ? null : { kind: 'el', id: el.id, paths };
+      const row = this._vec({
         label,
-        keyPaths: ['x', 'y', 'z'].map((ax) => `${group}.${ax}`),
+        kfNode: kf,
+        rowLink,
+        keyPaths: noKf ? undefined : paths,
         items: ['x', 'y', 'z'].map((ax, i) => ({
           axis: ax, value: round(kv(`${group}.${ax}`, arr[i]), 3), step, unit,
           aria: `${label} ${ax.toUpperCase()}`,
-          link: link(`${group}.${ax}`),
+          link: null,
           onChange: edit(`${group}.${ax}`, null),
+          dim: dimZ && ax === 'z',
+          tip: dimZ && ax === 'z'
+            ? (dimTip || '平面没有厚度：Z 缩放只影响挂在下面的子元素')
+            : '',
         })),
       });
+      row.classList.add('xf-row');
+      return row;
     };
     // Three-axis rotation (DESIGN-TRANSFORM-UNIFY §2). The node may still carry
     // only dir/roll from before 2c; show the equivalent angles and write a full
@@ -695,33 +823,6 @@ export class Inspector {
       }
       this._commit(`${el.id}:rotation`, ops.length === 1 ? ops[0] : { op: 'batch', ops }, 60);
     };
-    const rotKf = node ? this._kfButton(
-      () => {
-        if (rotAxes.some((ax) => this._keyAtPlayhead(`rotation.${ax}`))) return 'on';
-        return rotAxes.some((ax) => (el.keyframes || []).some((k) => k.path === `rotation.${ax}`)) ? 'anim' : 'none';
-      },
-      () => {
-        const t = keyT();
-        const ops = [];
-        if (!Array.isArray(el.node.rotation)) {
-          ops.push({ op: 'updateElement', id: el.id, patch: { node: { ...el.node, rotation: nodeRot.slice() } } });
-        }
-        for (const ax of rotAxes) {
-          const i = rotAxes.indexOf(ax);
-          const local = localElementRowValue(project, el, `rotation.${ax}`, time, nodeRot[i]);
-          ops.push({ op: 'keySet', id: el.id, path: `rotation.${ax}`, t, value: Number.isFinite(local) ? local : nodeRot[i] });
-        }
-        this.opts.onOp(ops.length === 1 ? ops[0] : { op: 'batch', ops });
-      },
-      () => {
-        const ops = [];
-        for (const ax of rotAxes) {
-          const k = this._keyAtPlayhead(`rotation.${ax}`);
-          if (k) ops.push({ op: 'keyRemove', id: el.id, path: `rotation.${ax}`, t: k.t });
-        }
-        if (ops.length) this.opts.onOp({ op: 'batch', ops });
-      },
-    ) : null;
     const opacityField = this._field({
       label: '不透明度', value: round(kv('transform.opacity', el.transform.opacity), 3),
       step: 0.01, min: 0, max: 1, percent: true, kf: true, path: kp('transform.opacity'),
@@ -744,18 +845,11 @@ export class Inspector {
       // exact and linkable.
       this.root.appendChild(this._sec('变换', {},
         nodeVec('pivot', '中心点', 0.05, 'm'),
-        nodeVec('position', '位置', 0.05, 'm'),
-        this._rotationRow({
-          label: '三轴旋转',
-          kfNode: rotKf,
-          items: rotAxes.map((ax, i) => ({
-            axis: ax, value: round(kv(`rotation.${ax}`, nodeRot[i]), 2),
-            link: link(`rotation.${ax}`), onChange: edit(`rotation.${ax}`),
-          })),
-        }),
+        nodeVec('position', '位置', 0.05, 'm', { noKf: true }),
+        this._xfRow(project, el, 'el', 'rotation', { step: 0.5, unit: '°' }),
+        nodeVec('scale', '缩放', 0.01, '', { dimZ: true }),
+        this._xfOpacity(project, el, 'el'),
         rotBallHost,
-        nodeVec('scale', '缩放', 0.01, ''),
-        opacityField,
         ...bindRows,
       ));
     } else {
@@ -1091,7 +1185,7 @@ export class Inspector {
     const spatialParent = this._spatialParentSummary(project, obj);
     if (spatialParent) this.root.appendChild(spatialParent);
     this.root.appendChild(h('div', { class: 'hint pad' },
-      '内容、中心点、位置、缩放、不透明度已移到时间轴左侧：选中元素后点元素行的 ▾ 展开编辑。',
+      '内容在时间轴左侧：选中元素后点元素行的 ▾ 展开编辑；变换栏四行与时间轴一致。',
       '复制 / 删除 / 面向镜头 / 落地在元素行的 ⋯ 菜单里。'));
 
     const poseRot = Array.isArray(pose.rotation)
@@ -1186,18 +1280,14 @@ export class Inspector {
       onEnd: () => { this._ballDragging = false; },
       onChange: (rot) => writeObjRotation(rot),
     });
-    this.root.appendChild(this._sec('三轴旋转', { tag: obj.parent?.id ? '本地' : null },
-      this._rotationRow({
-        label: '旋转°',
-        kfNode: objRotKf,
-        items: rotAxes.map((axis, i) => ({
-          axis, value: Math.round(poseRot[i] * 10) / 10,
-          link: { kind: 'ob', id, path: `rotation.${axis}` },
-          onChange: setObjRotAxis(i),
-        })),
-      }),
+    this.root.appendChild(this._sec('变换', { tag: obj.parent?.id ? '本地' : null },
+      this._xfRow(project, obj, 'ob', 'pivot', { step: 0.05, unit: 'm' }),
+      this._xfRow(project, obj, 'ob', 'position', { step: 0.05, unit: 'm' }),
+      this._xfRow(project, obj, 'ob', 'rotation', { step: 0.5, unit: '°' }),
+      this._xfRow(project, obj, 'ob', 'scale', { step: 0.01, unit: '倍' }),
+      this._xfOpacity(project, obj, 'ob'),
       ballHost,
-      h('div', { class: 'hint' }, '拖球面改三个角；时间轴上每个轴单独打帧。X 俯仰 · Y 转身 · Z 画面内。'),
+      h('div', { class: 'hint' }, '四行顺序与时间轴一致；拖球面改三个角，逐轴打帧在时间轴的子行。X 俯仰 · Y 转身 · Z 画面内。'),
     ));
 
     if (MEDIA_TYPES.has(obj.type)) this.root.appendChild(this._renderMedia(obj));
@@ -1366,62 +1456,16 @@ export class Inspector {
     const spatialParent = this._spatialParentSummary(project, cam);
     if (spatialParent) this.root.appendChild(spatialParent);
     this.root.appendChild(this._parentTools(project, cam, 'cam'));
-    const camRot = ['x', 'y', 'z'].map((ax, i) => {
-      const linked = cameraValueWithLinks(project, cam, `rotation.${ax}`, time);
-      return Number.isFinite(linked) ? linked : cameraRotationAt(cam, time)[i];
-    });
-    const rotAxes = ['x', 'y', 'z'];
-    const setCamRotAxis = (i) => (v) => {
-      const path = `rotation.${rotAxes[i]}`;
-      const t = this._keyTime();
-      const local = writeBackLocalValue(project, { host: 'cam', id: cam.id }, path, t, v);
-      const value = Number.isFinite(local) ? local : v;
-      if ((cam.tracks?.[path] || []).length) {
-        this.opts.onOp({ op: 'cameraParamKey', id: cam.id, path, t, v: value });
-        return;
-      }
-      const rot = cameraRotationAt(cam, this.opts.getTime()).slice();
-      rot[i] = value;
-      this.opts.onOp({ op: 'cameraSet', id: cam.id, patch: { rotation: rot } });
-    };
-    const camRotKf = this._kfButton(
-      () => {
-        if (rotAxes.some((ax) => (cam.tracks?.[`rotation.${ax}`] || [])
-          .some((k) => Math.abs(k.t - this.opts.getTime()) <= 0.5 / (project.meta?.fps || 24)))) return 'on';
-        return rotAxes.some((ax) => (cam.tracks?.[`rotation.${ax}`] || []).length) ? 'anim' : 'none';
-      },
-      () => {
-        const t = this._keyTime();
-        const rot = cameraRotationAt(cam, t);
-        this.opts.onOp({
-          op: 'batch',
-          ops: rotAxes.map((ax, i) => ({ op: 'cameraParamKey', id: cam.id, path: `rotation.${ax}`, t, v: rot[i] })),
-        });
-      },
-      () => {
-        const ops = [];
-        for (const ax of rotAxes) {
-          const k = (cam.tracks?.[`rotation.${ax}`] || [])
-            .find((x) => Math.abs(x.t - this.opts.getTime()) <= 1e-3);
-          if (k) ops.push({ op: 'cameraParamUnkey', id: cam.id, path: `rotation.${ax}`, t: k.t });
-        }
-        if (ops.length) this.opts.onOp({ op: 'batch', ops });
-      },
-    );
-    this.root.appendChild(this._sec('三轴旋转', {},
-      this._rotationRow({
-        label: '旋转°',
-        kfNode: camRotKf,
-        items: rotAxes.map((axis, i) => ({
-          axis, value: round(camRot[i], 2),
-          link: { kind: 'cam', id: cam.id, path: `rotation.${axis}` },
-          onChange: setCamRotAxis(i),
-        })),
-      }),
-      h('div', { class: 'hint' }, '相机自己的三轴偏移：X 低头 · Y 右摇 · Z 画面旋转（旧手动 roll 已并入 Z）。'),
+    this.root.appendChild(this._sec('变换', {},
+      this._xfRow(project, cam, 'cam', 'pivot', { step: 0.1, unit: 'm' }),
+      this._xfRow(project, cam, 'cam', 'position', { step: 0.1, unit: '', readOnly: true }),
+      this._xfRow(project, cam, 'cam', 'rotation', { step: 0.5, unit: '°' }),
+      this._xfRow(project, cam, 'cam', 'scale', { step: 0.05, unit: '倍' }),
+      this._xfOpacity(project, cam, 'cam'),
+      h('div', { class: 'hint' }, 'X 俯仰 · Y 转身 · Z 画面内旋转（旧手动 roll 已并入 Z）。位置是飞行路径（单位 m），只读；在时间轴或视口打点。'),
     ));
     this.root.appendChild(h('div', { class: 'hint pad' },
-      '相机属性折叠在时间轴相机行里：点行首 ▾ 展开；位置是飞行路径关键帧，中心点 / 画面 / 透明度 / 缩放也能逐帧打点。'));
+      '镜头 / 构图（FOV、画面中心 / 位置、抖动、景深）在时间轴的相机行里：点行首 ▾ 展开；中心点 / 旋转 / 缩放、不透明度也能逐帧打点。'));
     const feeds = (project.elements || []).filter((e) => e.type === 'camfeed'
       && normalizeFeed(e.feed).camera === cam.id);
     this.root.appendChild(this._sec('这台相机的投屏', { key: 'camfeeds', count: feeds.length },
