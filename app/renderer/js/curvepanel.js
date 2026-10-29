@@ -1000,11 +1000,49 @@ export class CurvePanel {
     const plotRight = L.W - L.rightPad;
     const xOf = (t) => gutter + Number(t) * pps - scroll;
     const tOf = (x) => (x + scroll - gutter) / Math.max(1, pps);
-    const range = this._isPathMode() ? this._progressWindow() : this._valueWindow();
+    const range = this._displayRange();
     const height = Math.max(1, L.bottom - L.top);
     const yOf = (v) => L.bottom - ((Number(v) - range[0]) / (range[1] - range[0])) * height;
     const vOf = (y) => range[0] + ((L.bottom - y) / height) * (range[1] - range[0]);
     return { ...L, gutter, pps, scroll, plotLeft, plotRight, range, xOf, tOf, yOf, vOf };
+  }
+
+  /**
+   * Row switches ease the value window over ~150ms (design §6/§14) so the new
+   * scale is readable instead of jumping. Only a *track change* starts a
+   * tween: dragging a key or a handle must move the axis instantly.
+   */
+  _displayRange() {
+    const target = this._isPathMode() ? this._progressWindow() : this._valueWindow();
+    const key = String(this._track()?.path || '');
+    if (key !== this._rangeKey) {
+      this._rangeKey = key;
+      if (this._lastRange) this._rangeTween = { from: this._lastRange.slice(), t0: performance.now() };
+    }
+    const tween = this._rangeTween;
+    if (!tween) {
+      this._lastRange = target;
+      return target;
+    }
+    const p = clamp((performance.now() - tween.t0) / 150, 0, 1);
+    if (p >= 1) {
+      this._rangeTween = null;
+      this._lastRange = target;
+      return target;
+    }
+    if (!this._rangeRaf) {
+      this._rangeRaf = requestAnimationFrame(() => {
+        this._rangeRaf = 0;
+        if (this.isOpen()) this.draw();
+      });
+    }
+    const ease = p < 0.5 ? 2 * p * p : 1 - ((-2 * p + 2) ** 2) / 2;
+    const range = [
+      tween.from[0] + (target[0] - tween.from[0]) * ease,
+      tween.from[1] + (target[1] - tween.from[1]) * ease,
+    ];
+    this._lastRange = range;
+    return range;
   }
 
   /** Segment endpoints' real values, or null when they have no value span. */

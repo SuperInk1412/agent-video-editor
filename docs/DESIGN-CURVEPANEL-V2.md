@@ -351,6 +351,6 @@ t_B = t_A + firstArrival(curve, y_B) · (t_C − t_A)     // 单调、毫秒取�
 | §8 存为我的预设（UI 入口 + 我的分组） | 已做 | 右键「存为我的预设」→ `setMeta curvePresets`；导轨第 4 个 tab「我的」，按形状高亮 |
 | §4 越界红色 + toast 提醒 | 已做（限不透明度等确实有上下限的属性） | `_valueBounds()` / `draw()` 红色段 / `_clipsRange()` 追加 toast |
 | §6 归一化开关 + 三轴叠画（多轴行） | 未做 | 依赖时间轴统一变换栏的行元数据 |
-| §6 y 轴 150ms 过渡 | 未做 | — |
+| §6 y 轴 150ms 过渡 | 已做 | `_displayRange()`：只在换行时补间，拖键/拖柄即时跟随 |
 | §9 ▸ 展开面板（大预览 / R G B / 最近色） | 未做 | 现为系统取色 + 十六进制 |
 | §9 3D 文字颜色打帧 | 阻塞 | `objectKey` 的 `SCALAR_TRACKS` 不认 `style.color`，要扩轨道词表 |
