@@ -398,3 +398,19 @@ test('frame IR v4: textGeometryOf caches fonts, glyphs and meshes', (t) => {
   const broken = textGeometryOf({ text: 'A', fontSize: 10, font: 'Arial' }, { Arial: new Uint8Array([9, 9, 9, 9]) });
   assert.equal(broken, null);
 });
+
+test('a colour change keeps the mesh id and only changes the item colour', (t) => {
+  if (skipped('latin', t)) return;
+  const fonts = { Arial: read(found.latin) };
+  const p = textProject();
+  const first = buildFrameIR(p, 0, { fonts });
+  const before = first.items.find((item) => item.id === 'tx_a');
+  p.elements.find((el) => el.id === 'tx_a').style.color = '#ff0000';
+  const second = buildFrameIR(p, 0, { fonts });
+  const after = second.items.find((item) => item.id === 'tx_a');
+  assert.equal(before.content.mesh, after.content.mesh, 'colour is not part of the mesh key');
+  assert.equal(before.content.color, '#ffcc00');
+  assert.equal(after.content.color, '#ff0000');
+  assert.deepEqual(first.meshes[before.content.mesh], second.meshes[after.content.mesh],
+    'the same triangles are reused; only the draw colour changes');
+});

@@ -1334,8 +1334,12 @@ export class Preview {
           layer.kind = 'mesh';
           layer.mesh = mesh;
           layer.meshId = c.mesh;
-          layer.color = mesh.color && mesh.color.length === 3 ? mesh.color : hexRgb(c.color);
-          layer.opacity = (Number(item.opacity) || 0) * (Number.isFinite(Number(mesh.opacity)) ? Number(mesh.opacity) : 1);
+          // Colour and opacity come from the *item*, never from the mesh record:
+          // the mesh id deliberately leaves colour out of its key, so a colour
+          // change (or a colour keyframe) keeps the same triangles but must
+          // repaint. `mesh.color` is only the snapshot the mesh was built with.
+          layer.color = hexRgb(c.color);
+          layer.opacity = Number(item.opacity) || 0;
           layer.quad = [item.size[0], item.size[1]];
           layer.w = item.size[0] * S;
           layer.h = item.size[1] * S;

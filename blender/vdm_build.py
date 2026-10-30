@@ -890,9 +890,11 @@ class SceneBuilder:
         if points and faces:
             me.from_pydata(points, [], faces)
         me.update()
-        # `mesh.color` is the sRGB triple the preview draws with; the IR's
-        # content colour is the fallback (they only differ if the mesh is shared)
-        color = mesh.get('color') if isinstance(mesh.get('color'), (list, tuple)) else st0.get('color')
+        # Colour and opacity come from the item's content (`st0`), not from the
+        # mesh record: the mesh id leaves colour out of its key, so a colour
+        # change keeps the same triangles and must still repaint. `mesh.color`
+        # is only the snapshot the mesh was first built with.
+        color = st0.get('color')
         mat, nodes = flat_material(f"{el['id']}_mat", color, st0['opacity'])
         obj = self.add_object(me, mat, el['id'])
         return obj, nodes
