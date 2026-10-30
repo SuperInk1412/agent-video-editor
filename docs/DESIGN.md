@@ -540,6 +540,7 @@
 | `css/assets.css` | 资源页、图层页 | 左栏 |
 | `css/timeline.css` | 时间轴、曲线面板 | 时间轴 |
 | `css/dialogs.css` | 项目选择器、新建项目、删除确认、媒体选择器、命令面板、速查表 | 模态 |
+| `css/source.css` | 源码视图（文件列表 / 行号 / diff 行）、`源码已在外部修改` 提示条（WP3.6b） | 模态 / 视口 |
 | `js/ui.js` | `h()`、`icon()`、`token()`、tooltip、菜单（`showMenu`）、`prefs`（`vdm.ui.v1` 读写） | 公共 |
 | `js/shell.js` | 分隔条、折叠、尺寸持久化、状态栏、日志抽屉 | 外壳 |
 | `js/commands.js` | 命令注册表、快捷键分发、命令面板、速查表 | 全局 |
@@ -549,6 +550,7 @@
 | `js/inspector-code.js` | 检查器的「代码图层」分区：源行、参数控件、渲染状态、源检查行（WP3.6a） | 属性页 |
 | `js/source-badge.js` | 源徽标、时间线/大纲源图标、驱动路径判断、编译快照接缝（`setSourceSnapshots`） | 属性页 · 时间轴 · 左栏 |
 | `js/inspector-source-mode.js` | 叠加 / 接管开关、属性行右键与 `⋯` 菜单的 `全部叠加 / 全部接管` | 属性页 |
+| `js/source-view.js` | 只读源码视图、`载入外部修改`（diff → 契约检查 → 一次事务）、`sources/<id>/` 监视提示（WP3.6b） | 模态 / 视口 |
 
 - 不引入任何 npm 依赖、框架或网络资源。渲染器仍是原生 ES module。
 - 写项目只能经 `main.js::op()`（→ `core/ops.js`）；UI 组件只回调，不直接 `fetch` 写接口。

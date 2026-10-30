@@ -9,10 +9,12 @@
 //   (b) drag the range slider    ->  exactly one rev bump, value lands, Ctrl+Z
 //       takes it back
 //   (c) click ◆                  ->  `code.params.<name>` key at the playhead
-//   (d) 查看源码                  ->  the WP3.6b stub toast (button is wired)
+//   (d) 查看源码                  ->  the read-only source view (WP3.6b): the
+//       <pre> text is the file, Esc closes it
 //   (e) the render row           ->  实时 + a measured frame time once the PNG
 //       arrives; `—` for what the preview cannot see (cache hits)
-//   (f) a bad source             ->  a --danger line + 查看详情 at the top
+//   (f) a bad source             ->  a --danger line + 查看详情 (which opens the
+//       source view on the check results)
 //   (g) `/api/raster` pointed at a dead route -> the --warn 圆点 (waiting) and
 //       the --text-3 方块 (previous frame) appear in the edit viewport, and
 //       playing / the shot view never draw them
@@ -157,6 +159,7 @@ const probe = `(async () => {
     if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'z', code: 'KeyZ', ctrlKey: true, bubbles: true, cancelable: true }));
   };
+  const esc = () => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true, cancelable: true }));
   try {
     await waitFor(() => app && app.S && app.S.project);
     out.title = document.title;
@@ -182,9 +185,21 @@ const probe = `(async () => {
       return r.dataset.codeParam + ':number';
     }).join(',');
 
-    /* (d) 查看源码 is wired to the WP3.6b stub */
+    /* (d) 查看源码 opens the read-only source view (WP3.6b, §2.2): the <pre>
+       text is the file and Esc closes it again */
     q('[data-action="code-view-source"]', S).click();
-    out.viewToast = await waitFor(() => text(q('#toasts')).indexOf('源码视图即将提供') >= 0, 3000);
+    out.viewOpen = await waitFor(() => {
+      const view = q('[data-role="source-view"]');
+      return !!view && !view.hasAttribute('hidden');
+    }, 5000);
+    const viewPre = q('[data-role="source-view"] .srcv-text');
+    out.viewPre = viewPre ? viewPre.textContent : '';
+    out.viewSourceMatches = out.viewPre === app.S.project.sources.find((s) => s.id === '${GOOD}').files['main.js'];
+    esc();
+    out.viewClosed = await waitFor(() => {
+      const view = q('[data-role="source-view"]');
+      return !view || view.hasAttribute('hidden');
+    }, 3000);
 
     /* (e) the render row: 实时 + a measured frame time, — for what we cannot see */
     out.runLive = await waitFor(() => text(q('.code-run', sec())).indexOf('实时') >= 0, 15000);
@@ -261,8 +276,18 @@ const probe = `(async () => {
     out.dangerToken = tokenRgb('--danger');
     out.checkLineColour = getComputedStyle(q('.code-check-text', sec())).color;
     out.hasDetail = !!q('[data-action="source-check-detail"]', sec());
+    /* 查看详情 opens the source view on the check results (WP3.6b §2.1) */
     q('[data-action="source-check-detail"]', sec()).click();
-    out.detailToast = await waitFor(() => text(q('#toasts')).indexOf('源码检查') >= 0, 3000);
+    out.detailOpen = await waitFor(() => {
+      const view = q('[data-role="source-view"]');
+      return !!view && !view.hasAttribute('hidden') && !!q('.srcv-problem', view);
+    }, 5000);
+    out.detailProblems = qa('[data-role="source-view"] .srcv-problem').map((node) => text(node)).join(' | ');
+    esc();
+    out.detailClosed = await waitFor(() => {
+      const view = q('[data-role="source-view"]');
+      return !view || view.hasAttribute('hidden');
+    }, 3000);
     out.badRows = qa('.prop[data-code-param]', sec()).length;
 
     /* (g) the stage marks: edit viewport + paused only */
@@ -427,7 +452,9 @@ async function main() {
   check(d.controls === 'density:range,tint:color,glow:boolean,mode:enum,speed:number',
     '控件按 manifest type：range / color / boolean / enum / number', d.controls);
   check(flat(d.sourceText).includes('rain') && d.runtime.includes('canvas2d'), '源行显示 label + runtime', `${flat(d.sourceText)} · ${d.runtime}`);
-  check(d.hasViewSource && d.viewToast, '查看源码 已接线（本包 toast 占位）', `button=${d.hasViewSource} toast=${d.viewToast}`);
+  check(d.hasViewSource && d.viewOpen && d.viewSourceMatches && d.viewClosed,
+    '查看源码 → 只读源码视图（<pre> = 源文件，Esc 关闭）',
+    `button=${d.hasViewSource} open=${d.viewOpen} text=${d.viewPre.length} 字符 一致=${d.viewSourceMatches} closed=${d.viewClosed}`);
   check(d.runLive && d.runState === '实时' && /\d+\.\d ms\/帧/.test(d.runMs),
     '渲染行：实时 + 最近帧耗时', flat(d.runText));
   check(flat(d.runText).includes('缓存命中 —'), '渲染行：预览看不到缓存命中时显示 —', flat(d.runText));
@@ -443,7 +470,8 @@ async function main() {
     '坏源：分区顶部 --danger 行 + 查看详情', flat(d.checkText));
   check(rgb(d.checkColour) === rgb(d.dangerToken) && rgb(d.checkLineColour) === rgb(d.dangerToken),
     '坏源那一行用 --danger', `line=${d.checkColour} token=${d.dangerToken}`);
-  check(d.detailToast, '查看详情 已接线（本包 toast 占位）', `toast=${d.detailToast}`);
+  check(d.detailOpen && d.detailClosed && /Date\.now|读取/.test(d.detailProblems),
+    '查看详情 打开源码视图的检查结果（WP3.6b）', `${flat(d.detailProblems).slice(0, 90)}…`);
   check(d.fallbackMark && near12(d.fallbackSize),
     'fallback：12×12 --text-3 方块', `${JSON.stringify(d.fallbackSize)} fill=${d.fallbackFill} · ${d.fallbackTip}`);
   check(rgb(d.fallbackFill) === rgb(d.text3Token), '方块颜色来自 --text-3 token', `fill=${d.fallbackFill}`);

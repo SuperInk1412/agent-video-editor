@@ -143,3 +143,92 @@ test('sources over HTTP: a code runtime is refused as a compile source', async (
   const listed = await get('api/sources');
   assert.equal(listed.body.sources.find((entry) => entry.id === 'p5_test').compilable, false);
 });
+
+// ---------------------------------------------------------------------------
+// The source view's two read-only routes (WP3.6b, §2.2 / §7.1)
+// ---------------------------------------------------------------------------
+
+const SKETCH = `export function draw(ctx, vdm) {
+  ctx.fillStyle = vdm.param('tint');
+  ctx.fillRect(0, 0, vdm.size[0], vdm.size[1]);
+}
+`;
+
+const CODE_MANIFEST = {
+  id: 'rain',
+  label: 'rain',
+  runtime: 'canvas2d',
+  entry: 'main.js',
+  deterministic: true,
+  params: [{ id: 'tint', type: 'color', default: '#ff8800' }],
+};
+
+test('sources over HTTP: the copy and its contract check', async (t) => {
+  const { root, service, post } = await setup(t);
+  const get = getter(service);
+  const registered = await post('api/ops', {
+    ops: [{ op: 'sourceAdd', id: 'rain', manifest: CODE_MANIFEST, files: { 'main.js': SKETCH } }],
+  });
+  assert.equal(registered.status, 200);
+
+  // No copy yet: a state, not an HTTP error.
+  const none = await get('api/sources/rain/files');
+  assert.equal(none.status, 200);
+  assert.equal(none.body.ok, false);
+  assert.equal(none.body.missing, true);
+  assert.deepEqual(none.body.files, []);
+
+  // A check with no copy reports the missing entry instead of throwing.
+  const noCopyCheck = await post('api/sources/rain/check', {});
+  assert.equal(noCopyCheck.status, 200);
+  const noCopyVerdict = await noCopyCheck.json();
+  assert.equal(noCopyVerdict.ok, false);
+  assert.ok(noCopyVerdict.problems.some((problem) => problem.message.includes('找不到 main.js')));
+
+  // An external editor writes sources/rain/.
+  const dir = path.join(root, 'sources', 'rain');
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(path.join(dir, 'manifest.json'), `${JSON.stringify(CODE_MANIFEST, null, 2)}\n`);
+  await fs.writeFile(path.join(dir, 'main.js'), `${SKETCH}\n// edited outside\n`);
+
+  const copy = await get('api/sources/rain/files');
+  assert.equal(copy.status, 200);
+  assert.equal(copy.body.ok, true);
+  assert.equal(copy.body.dir, 'sources/rain');
+  assert.deepEqual(copy.body.files.map((file) => file.path), ['main.js', 'manifest.json']);
+  assert.match(copy.body.files.find((file) => file.path === 'main.js').content, /edited outside/);
+  assert.equal(copy.body.manifest.entry, 'main.js');
+  assert.ok(copy.body.scannedAt);
+
+  // Check the copy on the wire: it passes and says which checks ran.
+  const checked = await post('api/sources/rain/check', {});
+  assert.equal(checked.status, 200);
+  const verdict = await checked.json();
+  assert.equal(verdict.ok, true);
+  assert.deepEqual(verdict.checks.map((row) => row.id), ['manifest', 'entry', 'static']);
+  assert.equal(verdict.source, 'rain');
+  assert.equal(verdict.runtime, 'canvas2d');
+
+  // A candidate that reads the wall clock is refused before it can be loaded.
+  const bad = await post('api/sources/rain/check', {
+    files: [{ path: 'main.js', content: 'export function draw(ctx) { ctx.fillStyle = Date.now() % 2 ? "#222" : "#444"; }\n' }],
+  });
+  assert.equal(bad.status, 200);
+  const badVerdict = await bad.json();
+  assert.equal(badVerdict.ok, false);
+  assert.ok(badVerdict.problems.some((problem) => problem.kind === 'static'));
+
+  // The write itself stays the normal op path: one transaction, one rev.
+  const before = await getter(service)('api/project');
+  const loaded = await post('api/ops', {
+    ops: [{ op: 'sourceWrite', id: 'rain', path: 'main.js', content: `${SKETCH}\n// edited outside\n` }],
+    expectedRev: before.body.project.rev,
+  });
+  assert.equal(loaded.status, 200);
+  const after = await loaded.json();
+  assert.equal(after.project.rev, before.body.project.rev + 1);
+  assert.match(after.project.sources[0].files['main.js'], /edited outside/);
+  // After the load the copy and the registry agree, so the check still passes.
+  const reloaded = await post('api/sources/rain/check', {});
+  assert.equal((await reloaded.json()).ok, true);
+});

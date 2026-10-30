@@ -55,6 +55,48 @@ ipcMain.handle('vdm:pick-folder', async () => {
   return (await findProjectRoot(res.filePaths[0])) || res.filePaths[0];
 });
 
+/**
+ * 在编辑器中打开：把 `sources/<id>/<file>` 交给系统默认程序打开
+ * (docs/DESIGN-WP3.6-4.6-UI.md §2.2 / §7.1, WP3.6b).
+ *
+ * `sources/<id>/` is the *derived* copy the render pool and external editors
+ * read; the project registry stays the truth. A source created in the app may
+ * not have a copy yet, so missing files are written from the payload the
+ * renderer sent — never overwriting an existing one, because that file may hold
+ * the external edit the user is about to load.
+ */
+const SAFE_SOURCE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+const safeRelPath = (rel) => typeof rel === 'string' && rel.length > 0 && rel.length <= 200
+  && !rel.includes('\\') && !rel.startsWith('/') && !/^[A-Za-z]:/.test(rel)
+  && rel.split('/').every((part) => part && part !== '.' && part !== '..' && !part.startsWith('.'));
+
+ipcMain.handle('vdm:open-source', async (_e, payload) => {
+  if (!engine?.info?.root) throw new Error('引擎还没有启动');
+  const sourceId = String(payload?.sourceId || '');
+  const file = String(payload?.file || '');
+  if (!SAFE_SOURCE_ID.test(sourceId)) throw new Error(`源 id 不合法：${sourceId}`);
+  if (!safeRelPath(file)) throw new Error(`文件路径不合法：${file}`);
+  const dir = path.join(engine.info.root, 'sources', sourceId);
+  const writeOne = async (rel, content) => {
+    if (!safeRelPath(rel) || typeof content !== 'string') return;
+    const target = path.join(dir, rel);
+    if (path.relative(dir, target).startsWith('..')) return;
+    await fsp.mkdir(path.dirname(target), { recursive: true });
+    try {
+      await fsp.access(target);
+      return; // an existing file is the external editor's copy: never clobber it
+    } catch { /* missing: materialise it below */ }
+    await fsp.writeFile(target, content, 'utf8');
+  };
+  await fsp.mkdir(dir, { recursive: true });
+  for (const entry of Array.isArray(payload?.files) ? payload.files : []) {
+    await writeOne(String(entry?.path || ''), entry?.content);
+  }
+  const target = path.join(dir, file);
+  const error = await shell.openPath(target);
+  return { ok: !error, path: target, error: error || null };
+});
+
 async function boot() {
   const wanted = path.resolve(resolveRoot());
   const root = (await findProjectRoot(wanted)) || wanted;

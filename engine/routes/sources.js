@@ -1,7 +1,10 @@
-// Compiled sources over HTTP (docs/DESIGN-BACKEND-V2.md §7.1 / §7.8, WP4.1).
+// Compiled sources over HTTP (docs/DESIGN-BACKEND-V2.md §7.1 / §7.8, WP4.1;
+// source view §2.2 and 载入外部修改 §7.1 of docs/DESIGN-WP3.6-4.6-UI.md, WP3.6b).
 //
 //   GET  /api/sources                  registry + manifest + compile status
 //   GET  /api/sources/<id>/base        base.json (§7.8.1) — 404 when missing/broken
+//   GET  /api/sources/<id>/files       the `sources/<id>/` copy an editor writes
+//   POST /api/sources/<id>/check       contract check of a candidate source
 //   POST /api/sources/<id>/compile     compile + write base.json, change nothing
 //   POST /api/sources/<id>/apply       upsert the compiled elements, one transaction
 //
@@ -9,9 +12,16 @@
 // `.vdm/sources/<id>/` and §7.8.1 makes the compiler its only writer. `apply`
 // goes through the one op path (`ctx.transact`), so it is rev-checked, logged
 // and undoable like every other edit.
-import { applyCompiled, compileSource, listSources, readBase } from '../../application/source-service.js';
+//
+// `files` / `check` are read-only on purpose: 载入外部修改 diffs the copy and
+// then submits `sourceWrite` ops through /api/ops, so the write stays one
+// transaction with one undo step (and this file gains no second write path).
+import {
+  applyCompiled, checkSourceFiles, compileSource, listSources, readBase, readSourceCopy,
+} from '../../application/source-service.js';
+import { sourceRecord } from '../../core/code-layer.js';
 
-const SOURCE_ROUTE = /^\/api\/sources\/([A-Za-z0-9][A-Za-z0-9_-]{0,63})\/(compile|apply|base)$/;
+const SOURCE_ROUTE = /^\/api\/sources\/([A-Za-z0-9][A-Za-z0-9_-]{0,63})\/(compile|apply|base|files|check)$/;
 
 export function register(router, ctx) {
   const { json, readBody, transact, getProject, broadcast } = ctx;
@@ -22,12 +32,18 @@ export function register(router, ctx) {
     return json(res, 200, { ok: true, ...listed });
   });
 
-  /** base.json of one source, validated (§7.8.1 "版本与降级"). */
+  /** base.json of one source, validated (§7.8.1 "版本与降级"), or the disk copy. */
   router.getMatch(SOURCE_ROUTE, async (req, res, { params }) => {
     const sourceId = params[1];
     const action = params[2];
+    if (action === 'files') {
+      const copy = await readSourceCopy({ root: ctx.root, sourceId });
+      // A source nobody opened in an editor outside the app has no copy at all:
+      // that is a state the UI shows, not an error the fetch should throw on.
+      return json(res, 200, { ok: copy.ok, ...copy });
+    }
     if (action !== 'base') {
-      return json(res, 405, { ok: false, code: 'METHOD_NOT_ALLOWED', error: `GET /api/sources/<id>/${action} 不支持（compile / apply 用 POST）` });
+      return json(res, 405, { ok: false, code: 'METHOD_NOT_ALLOWED', error: `GET /api/sources/<id>/${action} 不支持（compile / apply / check 用 POST）` });
     }
     const base = await readBase({ root: ctx.root, sourceId });
     return json(res, base.ok ? 200 : 404, {
@@ -35,7 +51,7 @@ export function register(router, ctx) {
     });
   });
 
-  /** Compile one source: writes base.json, touches no project state. */
+  /** Compile one source, check a candidate, or apply the compiled elements. */
   router.postMatch(SOURCE_ROUTE, async (req, res, { params }) => {
     const sourceId = params[1];
     const action = params[2];
@@ -55,6 +71,37 @@ export function register(router, ctx) {
         elements: compiled.elements,
         warnings: compiled.warnings,
       });
+    }
+    if (action === 'check') {
+      const body = await readBody(req);
+      const registered = sourceRecord(getProject(), sourceId);
+      const runtime = String(registered?.manifest?.runtime ?? '') || null;
+      let files = Array.isArray(body.files) ? body.files : null;
+      let manifest = body.manifest === undefined ? undefined : body.manifest;
+      let manifestText = typeof body.manifestText === 'string' ? body.manifestText : (body.manifestText === null ? null : undefined);
+      let scannedAt = null;
+      // No candidate in the body: check the on-disk copy, which is what
+      // 载入外部修改 is about.
+      if (!files) {
+        const copy = await readSourceCopy({ root: ctx.root, sourceId });
+        files = copy.files;
+        scannedAt = copy.scannedAt;
+        if (manifest === undefined) manifest = copy.manifest;
+        if (manifestText === undefined) manifestText = copy.manifestText;
+      }
+      // A copy without manifest.json does not change the manifest: the check
+      // then runs against the registered one (the project keeps it).
+      if ((manifest === undefined || manifest === null) && (manifestText === undefined || manifestText === null)) {
+        manifest = registered?.manifest ?? null;
+      }
+      const verdict = checkSourceFiles({
+        sourceId,
+        manifest: manifest === undefined ? null : manifest,
+        manifestText: manifestText === undefined ? null : manifestText,
+        files,
+        runtime,
+      });
+      return json(res, 200, { ok: verdict.ok, ...verdict, copy: scannedAt ? { scannedAt } : null });
     }
     if (action !== 'apply') {
       return json(res, 405, { ok: false, code: 'METHOD_NOT_ALLOWED', error: `POST /api/sources/<id>/${action} 不支持` });

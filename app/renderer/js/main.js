@@ -11,6 +11,8 @@ import './inspector-code.js';
 import { AgentPanel } from './ai.js';
 import { ReviewPanel } from './review.js';
 import { ReportDraftPanel } from './report.js';
+// 源码视图 + 外部修改监视 (docs/DESIGN-WP3.6-4.6-UI.md §2.2 / §7.1, WP3.6b).
+import { createSourceView, createSourceWatch } from './source-view.js';
 import { PipelinePanel } from './pipeline.js';
 import { LogPanel } from './logs.js';
 import { ProjectsPanel } from './projects.js';
@@ -84,6 +86,7 @@ const S = {
 
 let preview, timeline, inspector, agentPanel, review, pipelinePanel, logPanel, gizmo, projects, curvePanel;
 let reportPanel; // the 报告草稿 floating panel (WP2.5c)
+let sourceView, sourceWatch; // 源码视图 + sources/<id>/ 监视 (WP3.6b, §2.2 / §7.1)
 // Property-link "转到父级" navigation stack (PLAN-ui-round3 §4.3). Jumping never
 // writes the project and never touches Ctrl+Z; Alt+← / the inspector chip walks
 // back through the panels the user came from.
@@ -2562,6 +2565,12 @@ function switchLeftTab(name) {
   prefs.set('leftTab', name);
 }
 
+/** The selected element, when it is a `code` layer (源码视图 entry, §2.2). */
+function selectedCodeElement() {
+  const el = (S.project?.elements || []).find((entry) => entry.id === S.selection.elementId);
+  return el && el.type === 'code' ? el : null;
+}
+
 // ---------------------------------------------------------------- change set preview (WP2.5a)
 // Accepting a change set is one transaction; before that, the review page can
 // show the result without writing anything: `/api/changesets {preview}` returns
@@ -3444,6 +3453,8 @@ async function boot() {
     canGoBack: () => canGoBackLink(),
     onBack: () => goBackLink(),
     onToast: (msg, level = 'info') => toast(msg, level),
+    // 源码视图 (WP3.6b §2.2): the section's 查看源码 / 查看详情 entries.
+    onViewSource: (payload) => sourceView?.open(payload),
     // 代码图层的渲染状态行（WP3.6a §2.1）：读预览的 raster 状态，读不到就是 —。
     rasterState: (el, t) => preview?.rasterStateOf?.(el?.id, t) ?? null,
     onFollowCamera: (id) => followCamera(id, { selectHost: true }),
@@ -3529,6 +3540,35 @@ async function boot() {
     openReport: (report) => jumpToReport(report),
   });
   review.mount($('#panelReview'));
+
+  // 源码视图 + 外部修改监视 (WP3.6b, docs/DESIGN-WP3.6-4.6-UI.md §2.2 / §7.1).
+  // Read-only window; 载入外部修改 diffs `sources/<id>/` against the registry,
+  // runs the contract check, and only then writes through `op()` — one
+  // transaction, so Ctrl+Z takes the whole load back.
+  sourceView = createSourceView({
+    getProject: () => S.project,
+    toast,
+    op: (ops) => op(...(Array.isArray(ops) ? ops : [ops])),
+    setAIDraft: (intent) => { switchRightTab('ai'); agentPanel.setDraft(intent); },
+    openInEditor: (payload) => (window.vdmDesktop?.openSource
+      ? window.vdmDesktop.openSource(payload)
+      : Promise.resolve({ ok: false, error: '桌面版才能用系统程序打开' })),
+    // The app's own key handler ignores keys while a modal is open; this window
+    // forwards the two shortcuts a load cannot do without (§7.1 "可撤销").
+    undo: () => runCommand('edit.undo'),
+    redo: () => runCommand('edit.redo'),
+    onLoaded: (sourceId) => sourceWatch?.settle?.(sourceId),
+  });
+  sourceWatch = createSourceWatch({
+    getProject: () => S.project,
+    label: (sourceId) => {
+      const record = (S.project?.sources || []).find((entry) => entry?.id === sourceId);
+      return String(record?.manifest?.label ?? '') || sourceId;
+    },
+    load: (sourceId) => sourceView.load(sourceId),
+    open: (payload) => sourceView.open(payload),
+  });
+  sourceWatch.start();
 
   // 报告草稿 (WP2.5c): a floating card in the viewport, not a modal (§10.4-2).
   // The panel owns the draft; `S.reportDraft` mirrors it for __vdm and the
@@ -4654,6 +4694,20 @@ async function boot() {
     when: () => (readClipboard() ? true : '剪贴板里没有复制的元素'),
     run: (e) => { e?.preventDefault(); pasteClipboard(); },
   });
+  // 源码视图 (§2.2): second entry point after the inspector's 查看源码.
+  registerCommand({
+    id: 'source.view', title: '查看源码', group: '编辑', icon: 'terminal',
+    keywords: 'source code view 源码 查看',
+    when: () => {
+      const el = selectedCodeElement();
+      if (!el) return '先选中一个代码图层';
+      return el.code?.source ? true : '这个代码图层还没有源';
+    },
+    run: () => {
+      const el = selectedCodeElement();
+      if (el?.code?.source) sourceView?.open({ sourceId: String(el.code.source) });
+    },
+  });
 
   /**
    * Everything Delete may remove right now: host refs of the element pool
@@ -5159,6 +5213,8 @@ async function boot() {
     sourceSnapshots: () => readSourceSnapshots(),
     renderActions,
     agentPanel, review, pipelinePanel, logPanel,
+    // 源码视图 + `sources/<id>/` 监视 (WP3.6b): probes drive both.
+    sourceView, sourceWatch,
     // 报告草稿 (WP2.5c): the panel, and its mirror in `S.reportDraft`.
     report: reportPanel,
     layout,

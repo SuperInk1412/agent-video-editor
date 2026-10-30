@@ -12,8 +12,10 @@
 // `manifest.json` (`sourceWrite` refuses it by contract). One drag of the
 // slider is one op via the panel's debounced commit, hence one Ctrl+Z.
 //
-// The source view and the full `vdm source check` belong to WP3.6b: their two
-// entry points are wired here and toast a stub until it lands.
+// The source view itself (read-only window, 载入外部修改, the external-change
+// watch) is `source-view.js`; both entries below hand it the source id. The
+// full `vdm source check` is still a CLI command — the window's 重新检查 runs
+// the static half and the load-time check runs the same rules on the copy.
 import { registerInspectorSection } from './inspector.js';
 import { h, showMenu } from './ui.js';
 import { writeNumber } from './numfield.js';
@@ -33,7 +35,7 @@ const RUN_TIP = {
   fallback: '上一帧：这一帧迟到或失败，画面显示同通道最近一帧',
   none: '这一帧的画面里没有这个图层',
 };
-const SOURCE_STUB = '源码视图即将提供';
+const SOURCE_STUB = '这个面板没有接上源码视图';
 
 const toast = (insp, msg, level = 'info') => insp.opts.onToast?.(msg, level);
 const isRecord = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
@@ -74,7 +76,7 @@ function keyState(el, path, t, tol) {
 }
 
 /** One-line contract failure on top of the section (§2.1) + its 查看详情 entry. */
-function checkLine(insp, errors) {
+function checkLine(insp, errors, sourceId) {
   const first = errors[0];
   const more = errors.length > 1 ? ` 等 ${errors.length} 处` : '';
   return h('div', { class: 'code-check', role: 'status' },
@@ -82,9 +84,21 @@ function checkLine(insp, errors) {
       `这个源没通过检查：${first?.name || first?.id || '契约失败'}${more}`),
     h('button', {
       type: 'button', class: 'btn ghost mini', 'data-action': 'source-check-detail',
-      'data-tip': '检查结果\nWP3.6b 的源码视图会显示完整清单',
-      onclick: () => toast(insp, `源码检查：${titleOf(first).slice(0, 180)}${more ? `（共 ${errors.length} 处）` : ''}`, 'error'),
+      'data-tip': '在源码视图里看完整检查结果（WP3.6b）',
+      onclick: () => openSourceView(insp, sourceId, 'check'),
     }, '查看详情'));
+}
+
+/**
+ * Open the read-only source view (§2.2). Without a handler (a probe that only
+ * built the panel) fall back to a toast instead of dying on a missing callback.
+ */
+function openSourceView(insp, sourceId, focus = null) {
+  if (typeof insp?.opts?.onViewSource === 'function' && sourceId) {
+    insp.opts.onViewSource({ sourceId: String(sourceId), focus });
+    return;
+  }
+  toast(insp, sourceId ? `源码视图：${sourceId}（这个面板没有接入口）` : SOURCE_STUB, 'info');
 }
 
 /** 源 row: `rain · p5 1.9.4` + runtime badge + 查看源码 (§2.1). */
@@ -100,8 +114,8 @@ function sourceRow(insp, manifest, sourceId) {
     runtime ? h('span', { class: 'code-rt', 'data-tip': `运行时 ${runtime}${lib ? ` ${lib}` : ''}` }, `${runtime}${lib ? ` ${lib}` : ''}`) : null,
     h('button', {
       type: 'button', class: 'btn ghost mini', 'data-action': 'code-view-source',
-      'data-tip': '查看源码（只读）\nWP3.6b 提供',
-      onclick: () => toast(insp, SOURCE_STUB),
+      'data-tip': '查看源码（只读）\n外部编辑器改了 sources/ 后在这里「载入外部修改」',
+      onclick: () => openSourceView(insp, sourceId),
     }, '查看源码'));
   return insp._row('源', ctl, null, 'w-full');
 }
@@ -302,7 +316,7 @@ function renderSection({ insp, project, element, time }) {
   // files, so a sketch that reads the wall clock is called out right here —
   // before anyone asks the render pool why the frame is not deterministic.
   const scan = sourceId && manifest ? scanSourceFiles(sourceFiles(project, sourceId), { runtime: manifest.runtime }) : null;
-  if (scan?.errors?.length) body.push(checkLine(insp, scan.errors));
+  if (scan?.errors?.length) body.push(checkLine(insp, scan.errors, sourceId));
 
   body.push(sourceRow(insp, manifest, sourceId));
 

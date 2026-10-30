@@ -28,7 +28,7 @@ import path from 'node:path';
 import { SOURCE_SNAPSHOT_VERSION } from '../core/version.js';
 import { snapshotProblems } from '../core/source-eval.js';
 import { compileHtml, compileSvg, COMPILE_RUNTIMES } from '../core/source-map.js';
-import { isSafeSourceId, sourceRecord, SOURCE_MANIFEST } from '../core/code-layer.js';
+import { isSafeSourceId, manifestIssues, isSafeSourceFile, scanSourceFiles, sourceRecord, SOURCE_MANIFEST } from '../core/code-layer.js';
 import { isRecord } from '../core/json.js';
 import { parseFont, metricsOf, layoutText } from '../core/glyphs.js';
 import { resolveFontFile } from '../engine/shot.js';
@@ -58,6 +58,146 @@ export function sourceDir(root, sourceId) {
 /** `.vdm/sources/<id>/base.json` (§7.8.1). */
 export function basePath(root, sourceId) {
   return path.join(sourceDir(root, sourceId), 'base.json');
+}
+
+/** The directory an external editor writes: `sources/<id>/` (not `.vdm/`). */
+export function copyDir(root, sourceId) {
+  return path.join(path.resolve(root || '.'), 'sources', String(sourceId));
+}
+
+/** Files of a source copy the UI may show and load back (text only). */
+export const SOURCE_COPY_TEXT_RE = /\.(?:js|mjs|cjs|ts|frag|glsl|vert|json|md|txt|css|html|svg)$/i;
+
+/**
+ * Read `sources/<id>/` — the copy an external editor edits (DESIGN-WP3.6 §7.1).
+ * The project registry is the truth; this is what the person just saved.
+ *
+ * Never throws: a missing directory is `{ ok: false, missing: true }`, which is
+ * the normal state of a source that was never opened outside the app.
+ */
+export async function readSourceCopy({ root, sourceId }) {
+  const id = String(sourceId ?? '');
+  const scannedAt = new Date().toISOString();
+  const empty = (problems, extra = {}) => ({
+    ok: false, source: id, dir: `sources/${id}`, files: [], manifest: null,
+    manifestText: null, problems, scannedAt, ...extra,
+  });
+  if (!isSafeSourceId(id)) return empty([`源 id 不合法：${JSON.stringify(sourceId)}`]);
+  if (!root) return empty(['没有项目目录']);
+  const dir = copyDir(root, id);
+  const files = [];
+  const problems = [];
+  const walk = async (current, prefix) => {
+    let entries;
+    try {
+      entries = await fs.readdir(current, { withFileTypes: true });
+    } catch (error) {
+      if (error.code === 'ENOENT') return false;
+      throw error;
+    }
+    for (const entry of entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
+      if (entry.name.startsWith('.')) continue;
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) { await walk(full, `${prefix}${entry.name}/`); continue; }
+      if (!entry.isFile() || !SOURCE_COPY_TEXT_RE.test(entry.name)) continue;
+      const rel = `${prefix}${entry.name}`;
+      if (!isSafeSourceFile(rel)) { problems.push(`副本里有不安全的路径：${rel}`); continue; }
+      const content = await fs.readFile(full, 'utf8');
+      files.push({ path: rel, content, bytes: Buffer.byteLength(content, 'utf8') });
+    }
+    return true;
+  };
+  const there = await walk(dir, '');
+  if (!there) return empty([], { missing: true });
+  if (!files.length) return empty(['副本里没有文本文件'], { missing: false });
+  const manifestFile = files.find((file) => file.path === SOURCE_MANIFEST) || null;
+  let manifest = null;
+  let manifestError = null;
+  if (manifestFile) {
+    try {
+      manifest = JSON.parse(manifestFile.content);
+    } catch (error) {
+      manifestError = error.message;
+    }
+  }
+  return {
+    ok: true, source: id, dir: `sources/${id}`, files,
+    manifest, manifestText: manifestFile ? manifestFile.content : null, manifestError,
+    problems, scannedAt,
+  };
+}
+
+const checkRow = (id, title, status, detail) => ({ id, title, status, detail });
+
+/**
+ * Contract check of a candidate source — the half of `vdm source check` that
+ * needs no frame (§6.3-1 plus the manifest / entry shape).
+ *
+ * `载入外部修改` runs this on the copy **before** the transaction: text that
+ * fails here never reaches `project.sources[]`. Rendering checks (same-frame
+ * hash, alpha, timing, parameter probes) still belong to `vdm source check`.
+ */
+export function checkSourceFiles({ sourceId = '', manifest = null, manifestText = null, files = [], runtime = null } = {}) {
+  const id = String(sourceId ?? '');
+  const problems = [];
+  const push = (kind, message, extra = {}) => problems.push({ kind, message, ...extra });
+  const list = [];
+  for (const file of Array.isArray(files) ? files : []) {
+    if (!isRecord(file) || typeof file.path !== 'string' || typeof file.content !== 'string') continue;
+    if (file.path === SOURCE_MANIFEST) continue; // the manifest is not a text file here
+    if (!isSafeSourceFile(file.path)) { push('path', `不安全的文件路径：${file.path}`, { file: file.path }); continue; }
+    list.push({ path: file.path, content: file.content });
+  }
+  if (!list.length) push('copy', '没有可载入的文本文件（副本是空的，或只有 manifest.json）');
+
+  let parsed = isRecord(manifest) ? manifest : null;
+  let manifestError = null;
+  if (typeof manifestText === 'string') {
+    try {
+      parsed = JSON.parse(manifestText);
+    } catch (error) {
+      manifestError = error.message;
+      parsed = null;
+      push('manifest', `manifest.json 解析失败：${error.message}`, { file: SOURCE_MANIFEST });
+    }
+  }
+  const present = parsed !== null || manifestError !== null;
+  const shape = parsed === null ? [] : manifestIssues(parsed);
+  for (const issue of shape) push('manifest', `${issue.path} ${issue.msg}`, { file: SOURCE_MANIFEST });
+  const rt = String(parsed?.runtime ?? runtime ?? '');
+  const entry = String(parsed?.entry ?? '');
+  if (parsed && !entry) push('entry', 'manifest 没有 entry', { file: SOURCE_MANIFEST });
+  const entryThere = entry ? list.some((file) => file.path === entry) : false;
+  if (entry && !entryThere) push('entry', `找不到 ${entry}`, { file: entry });
+
+  const scan = scanSourceFiles(list, { runtime: rt || null });
+  for (const error of scan.errors) push('static', error.message, { file: error.file, line: error.line, name: error.name });
+
+  const checks = [
+    checkRow('manifest', 'manifest.json 形状', !present ? 'warn' : (shape.length || manifestError ? 'fail' : 'pass'),
+      manifestError ? `解析失败：${manifestError}` : (shape.length ? shape.map((issue) => `${issue.path} ${issue.msg}`).join('；') : 'manifest 合法')),
+    checkRow('entry', '入口文件存在', !entry ? 'warn' : (entryThere ? 'pass' : 'fail'),
+      entry ? (entryThere ? entry : `副本里没有 ${entry}`) : 'manifest 没有声明 entry'),
+    checkRow('static', '静态扫描：禁用的 API', scan.errors.length ? 'fail' : (scan.warnings.length ? 'warn' : 'pass'),
+      scan.errors.length
+        ? scan.errors.map((error) => error.message).join('；')
+        : (scan.warnings.length
+          ? scan.warnings.map((warning) => warning.message || `${warning.name} @ ${warning.file}:${warning.line}`).join('；')
+          : `扫描 ${scan.files} 个文件，没有禁用 API`)),
+  ];
+  return {
+    ok: problems.length === 0,
+    source: id,
+    runtime: rt || null,
+    entry: entry || null,
+    manifest: { present, ok: !manifestError && !shape.length, error: manifestError, runtime: rt || null, entry: entry || null },
+    files: list.map((file) => file.path),
+    scan: { errors: scan.errors, warnings: scan.warnings, files: scan.files },
+    checks,
+    problems,
+    checkedAt: new Date().toISOString(),
+    notes: ['同帧哈希 / 透明通道 / 单帧耗时 / 参数探测要真的渲染一帧，用 vdm source check'],
+  };
 }
 
 /**

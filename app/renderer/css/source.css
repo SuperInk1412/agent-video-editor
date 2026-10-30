@@ -1,0 +1,159 @@
+/* Source view + external-change notice (WP3.6b, docs/DESIGN-WP3.6-4.6-UI.md §2.2 / §7.1).
+   Tokens only: no colour literals outside tokens.css. */
+
+/* ---------------- the window ---------------- */
+/* `.modal` supplies the scrim; the card is the only thing this file sizes. */
+.srcv-card {
+  width: min(1100px, 88vw);
+  height: min(720px, 80vh);
+  max-height: none;
+  display: flex; flex-direction: column; overflow: hidden;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-modal);
+}
+
+.srcv-head { gap: var(--sp-3); }
+.srcv-title { display: flex; align-items: baseline; gap: var(--sp-2); min-width: 0; }
+.srcv-title strong { flex: 0 1 auto; font-size: var(--fs-lg); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.srcv-rt {
+  flex: 0 0 auto; padding: 0 6px; border-radius: var(--r-pill);
+  font-family: var(--font-mono); font-size: var(--fs-xs);
+  color: var(--accent); background: var(--accent-bg); border: 1px solid var(--accent-border);
+}
+.srcv-ver { flex: 0 0 auto; font-size: var(--fs-xs); color: var(--text-3); }
+.srcv-actions { display: flex; align-items: center; gap: var(--sp-1); flex: 0 0 auto; }
+
+/* ---------------- a source that cannot be shown ---------------- */
+.srcv-error {
+  display: flex; align-items: center; gap: var(--sp-2); flex: 0 0 auto;
+  padding: 4px var(--sp-3);
+  color: var(--danger); background: var(--danger-bg);
+  border-bottom: 1px solid var(--danger-border);
+  font-size: var(--fs-sm); line-height: 1.5;
+}
+.srcv-error-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.srcv-error-more { color: var(--text-3); font-size: var(--fs-xs); flex: 0 0 auto; }
+.srcv-error .btn { margin-left: auto; }
+
+/* ---------------- files | code ---------------- */
+.srcv-body { flex: 1 1 auto; display: flex; min-height: 0; }
+
+.srcv-files {
+  flex: 0 0 190px; display: flex; flex-direction: column; gap: 1px;
+  min-height: 0; overflow: auto; padding: var(--sp-1);
+  border-right: 1px solid var(--border-subtle); background: var(--surface-1);
+}
+.srcv-file {
+  display: flex; align-items: center; gap: var(--sp-1);
+  height: var(--h-sm); padding: 0 6px; border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--text-2);
+  font-family: var(--font-mono); font-size: var(--fs-xs); text-align: left;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.srcv-file:hover { background: var(--surface-3); color: var(--text-1); }
+.srcv-file.on { background: var(--accent-bg); color: var(--accent); }
+.srcv-file-name { overflow: hidden; text-overflow: ellipsis; }
+.srcv-dot { flex: 0 0 auto; width: 6px; height: 6px; margin-left: auto; border-radius: var(--r-pill); background: var(--warn); }
+.srcv-file-empty { padding: var(--sp-2); color: var(--text-3); font-size: var(--fs-xs); }
+
+.srcv-pane { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+
+.srcv-code {
+  flex: 1 1 auto; display: flex; align-items: flex-start;
+  min-height: 0; overflow: auto;
+  background: var(--surface-1);
+  font-family: var(--font-mono); font-size: var(--fs-sm); line-height: 1.55;
+}
+.srcv-ln, .srcv-text { margin: 0; padding: var(--sp-2) 0; font: inherit; }
+.srcv-ln {
+  position: sticky; left: 0; z-index: 1; flex: 0 0 auto;
+  padding-left: var(--sp-3); padding-right: var(--sp-2);
+  text-align: right; color: var(--text-disabled);
+  background: var(--surface-1); border-right: 1px solid var(--border-subtle);
+  user-select: none;
+}
+.srcv-text {
+  flex: 1 1 auto; padding-left: var(--sp-3); padding-right: var(--sp-4);
+  color: var(--text-1); white-space: pre; user-select: text; outline: none;
+}
+.srcv-text:focus-visible { box-shadow: inset var(--focus-ring); }
+
+/* ---------------- status bar ---------------- */
+.srcv-foot {
+  flex: 0 0 auto; display: flex; align-items: center; gap: var(--sp-2);
+  padding: 6px var(--sp-3);
+  border-top: 1px solid var(--border-subtle); background: var(--surface-1);
+  font-size: var(--fs-xs); color: var(--text-3); white-space: nowrap;
+}
+.srcv-meta { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; }
+.srcv-check { flex: 0 0 auto; }
+.srcv-spacer { flex: 1 1 auto; }
+.srcv-dirty { flex: 0 0 auto; color: var(--warn); font-variant-numeric: tabular-nums; }
+.srcv-dirty.muted { color: var(--text-3); }
+
+/* ---------------- diff / check panel ---------------- */
+.srcv-diffpane { background: var(--surface-1); }
+.srcv-diff-head {
+  flex: 0 0 auto; display: flex; align-items: center; gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--fs-sm);
+}
+.srcv-diff-title { font-weight: 500; }
+.srcv-diff-title.ok { color: var(--ok); }
+.srcv-diff-title.bad { color: var(--danger); }
+.srcv-diff-title.muted { color: var(--text-3); }
+.srcv-diff-note { font-size: var(--fs-xs); color: var(--text-3); }
+
+.srcv-problems {
+  flex: 0 0 auto; max-height: 40%; overflow: auto;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--danger-bg); border-bottom: 1px solid var(--danger-border);
+}
+.srcv-problem { color: var(--danger); font-size: var(--fs-sm); line-height: 1.5; overflow-wrap: anywhere; }
+.srcv-problem.muted { color: var(--text-3); }
+
+.srcv-diffrows {
+  flex: 1 1 auto; min-height: 0; overflow: auto; padding: var(--sp-1) 0;
+  font-family: var(--font-mono); font-size: var(--fs-sm); line-height: 1.55;
+  font-variant-numeric: tabular-nums;
+}
+.srcv-dfile {
+  display: flex; align-items: baseline; gap: var(--sp-2);
+  padding: 2px var(--sp-3); color: var(--text-2); font-size: var(--fs-xs);
+}
+.srcv-dfile[data-status="added"] .srcv-dfile-name { color: var(--ok); }
+.srcv-dfile[data-status="removed"] .srcv-dfile-name { color: var(--text-3); }
+.srcv-dfile-stat { color: var(--text-3); }
+
+.srcv-drow { display: grid; grid-template-columns: 52px 52px 16px minmax(0, 1fr); white-space: pre; }
+.srcv-dnum { padding-right: 6px; text-align: right; color: var(--text-disabled); user-select: none; }
+.srcv-dmark { text-align: center; color: var(--text-3); }
+.srcv-dtext { overflow: hidden; text-overflow: ellipsis; padding-right: var(--sp-3); }
+.srcv-drow.add { background: var(--ok-bg); }
+.srcv-drow.add .srcv-dmark, .srcv-drow.add .srcv-dtext { color: var(--ok); }
+.srcv-drow.del { background: var(--danger-bg); }
+.srcv-drow.del .srcv-dmark, .srcv-drow.del .srcv-dtext { color: var(--danger); }
+.srcv-drow.gap { color: var(--text-disabled); }
+.srcv-drow.gap > span { grid-column: 1 / -1; text-align: center; }
+
+/* ---------------- 源码已在外部修改 [载入] ---------------- */
+/* Anchored over the stage like the preview banner, but at the bottom: it must
+   never sit where the 正在预览 banner does, and it must not resize the canvas. */
+.source-banner {
+  position: absolute; bottom: var(--sp-3); left: 50%; transform: translateX(-50%);
+  z-index: 4; display: flex; align-items: center; gap: var(--sp-2);
+  height: var(--h-lg); max-width: calc(100% - 2 * var(--sp-3)); padding: 0 var(--sp-3);
+  background: var(--surface-2); border: 1px solid var(--warn); border-radius: var(--r-pill);
+  color: var(--text-1); font-size: var(--fs-sm); box-shadow: var(--shadow-pop);
+  backdrop-filter: blur(3px);
+}
+.source-banner[hidden] { display: none; }
+.source-banner .btn { height: var(--h-sm); padding: 0 8px; font-size: var(--fs-xs); }
+.sb-dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: var(--r-pill); background: var(--warn); }
+.sb-text { font-weight: 500; white-space: nowrap; }
+.sb-src { font-size: var(--fs-xs); color: var(--accent); white-space: nowrap; }
+.sb-stat { font-size: var(--fs-xs); color: var(--text-3); }
+.sb-x { flex: 0 0 auto; }
