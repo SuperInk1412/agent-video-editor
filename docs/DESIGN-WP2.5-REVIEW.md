@@ -1,4 +1,4 @@
-# WP2.5 · 协作界面方案（等用户批准后开工）
+# WP2.5 · 协作界面方案（已批准，按 2.5d → 2.5a/2.5b → 2.5c 实施）
 
 > **修订 R1（2026-10-29，B 应用户要求补写，见文末 §10）**：锁定改为通用语义（视口里点不中、拖不动）；
 > 采纳前可以在画面里实时预览；改动用人话显示；报告改为可混合附件的"报告草稿"并自动附测量；
@@ -303,6 +303,8 @@ Electron 探针脚本 `scripts/check-review-ui.mjs`（`--capture` + `--eval`，�
 
 ### 11.1 三条后端面在 R1 里被低估
 
+> **已实现（`1cb6bbc`）**：`/api/changesets`（list/show/propose/preview/apply/revert/revert-one）、`/api/measure`（六种测量）、`/api/agent/approve`（诚实 404）、`/api/agent/state`。测试在 `tests/http.test.mjs`（3 条）与 `tests/changeset.test.mjs`（1 条）。
+
 | 缺口 | 实测 | 补法 |
 |---|---|---|
 | 变更集 HTTP 面 | 渲染进程只能访问 `/core/*`；`application/changeset-service.js` 是 Node 模块，浏览器里跑不了；`/api/rpc` 要 runtime token 且没有 changeset 方法。**审阅页现在拿不到任何跨进程的变更集**——`ai.js` 的 Map 只在一次 agent 运行内有效，刷新即空 | 新增 `GET /api/changesets`、`GET /api/changesets/:id`、`POST /api/changesets/preview|apply|revert|revert-one`，全部转给 `ChangeSetService`，`actorId: 'ui'` |
@@ -314,12 +316,13 @@ Electron 探针脚本 `scripts/check-review-ui.mjs`（`--capture` + `--eval`，�
 `engine/server.js:253` 仍 `new AgentRunner(...)`：`/api/agent` 收到 `proposal` 后**直接 transact**——没有变更集、没有计划、没有批准。
 `ai.js` 已经按 `AgentLoop` 的事件（`plan` / `changeset` / `step`）写好了，生产里却收不到。
 
-所以 2.5a 的前置不是"加一个 approve 路由"，而是**把 `/api/agent` 切到 `AgentLoop`**：
+**实际做法（`1cb6bbc`）**：不切 `AgentLoop`，而是让 `AgentRunner` 的 proposal 走 `ChangeSetService.apply({ actorId: 'agent:dsh' })`。
+理由：`ProcessAgent` 说的是工具调用 NDJSON（`{"type":"tool",...}`），dsh headless 说的是"一次 prompt + 一段 JSON 回复"，
+两者之间缺一层适配；现在切过去会让 `/api/agent` 端到端失效。于是：
 
-- `POST /api/agent` → `loop.run({ task })`；`POST /api/agent/approve` → `loop.approve({ planId })`（无待批准时 404 `NO_PENDING_PLAN`）；
-- `GET /api/agent/state` 返回 `loop.state`，刷新后审阅页仍能看到当前运行与待审阅变更集；
-- `AgentLoop` **没有 `cancel()`**（只有 `AgentRunner` 有），`/api/agent/cancel` 会 500：加一个步间中止标志（`cancel()` 置位、`#step` 检查、状态 `cancelled`）；
-- `AgentRunner` 留到 2.5a 合并后再删，单独提交、可回退。
+- 每次 AI 写入都成为一条可回退的变更集，UI 收到 `changeset` SSE 事件——审阅面板立刻有 AI 来源的数据；
+- `POST /api/agent/approve` 先诚实返回 404 `NO_PENDING_PLAN`，`GET /api/agent/state` 报告 legacy 运行；
+- 计划/批准 + `AgentLoop` 切换留给 **WP2.5e**（等 dsh 适配层，或 R4 之后），`AgentRunner` 到那时再删。
 
 ### 11.3 画面预览怎么落地（§10.2-4 的实现细节）
 
@@ -334,7 +337,7 @@ Electron 探针脚本 `scripts/check-review-ui.mjs`（`--capture` + `--eval`，�
 ### 11.4 另外三件小事
 
 - **过期采纳**：`apply({ id })` 默认用 `record.baseRev`，人改过之后会 `REV_CONFLICT`；"仍然采纳"必须显式传 `expectedRev: 当前 rev`，这条要进 2.5a 的测试。
-- **临时解锁采纳**：一次事务里做——内存副本清 `locked` → 跑 ops → 把 `locked: true` 复原 → `replace` 提交；这样 `changed` 里不出现 `locked`，一次 Ctrl+Z 全退。
+- **临时解锁采纳**：实测不需要 `overrideLocked`——`core/schema.js::lockedWriteIssues` 只拦 `agent:*`，审阅页用 `actorId: 'ui'` 采纳就能写锁定元素，`locked` 保持 `true`（等于"临时解锁并采纳"），而且一次事务就是一次 Ctrl+Z。
 - **图标**：sprite（`app/renderer/index.html`）里没有 `i-lock` / `i-lock-open`，2.5b 要加；`hitTest` 只返回一个 id，锁定穿透要加 `hitTestAll()`。
 
 ### 11.5 快捷键实测
