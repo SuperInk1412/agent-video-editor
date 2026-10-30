@@ -770,6 +770,22 @@ vdm.beat, vdm.volume                       // 节拍、音量（来自工程）
 8. **编译源的 runtime 是 `html` / `svg`**，登记在 `project.sources[]`（和代码源同表），写回用现有
    `sourceWrite` op；4.1 需要把 runtime 白名单扩到 `core/code-layer.js` / `core/source-map.js`。
 
+#### 7.8.7 修订 R1（2026-10-30，WP4.2 开工时对照实现）
+
+WP4.2 动手前对照本节与实现，发现三处冲突。按「冻结记录优先、任务书作废」处理，记录在此：
+
+1. **`override` 的语义是「本地值胜出、源被忽略」**——§7.8.2 表格、§7.3、§7.8.3、§7.8.6 #5 四处一致。
+   任何写成「`override` = 源值」的表述作废；界面上的「接管」就是这个语义。
+2. **`FRAME_IR_VERSION` 升到 5**：`item.source` 增加 `fallback: 'editor-layer'`，IR 形状确实变了
+   （UI 要区分「有源但降级」与「无源」）。§7.8.2 里「不升 `FRAME_IR_VERSION`」作废；
+   `tests/fixtures/frame-ir-golden.json` 与硬编码版本的测试同步升版。
+3. **非法 `el.source` / `sourceMode` 静默丢弃**，不拦加载、不抛错；`validateProject` 只报问题（§7.8.2 原文）。
+   任务书里的「抛 `INVALID_ARGUMENT`」作废（core 只用 `OP_INVALID`，`INVALID_ARGUMENT` 属于 application）。
+4. **`SOURCE_PATHS` 的归属**：定义在 `core/source-eval.js`（求值侧），`core/source-map.js`（4.1）直接
+   re-export，不复制第二份常量。
+
+以上四条对 4.1–4.4 都有效；后续若再改，按本节开头的升版流程记 R2。
+
 ---
 
 ## 8. 人机协作核心
