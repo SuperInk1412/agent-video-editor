@@ -6,6 +6,7 @@ import { Timeline } from './timeline.js';
 import { CurvePanel, curvePathLabel } from './curvepanel.js';
 import { Inspector } from './inspector.js';
 import { AgentPanel } from './ai.js';
+import { ReviewPanel } from './review.js';
 import { PipelinePanel } from './pipeline.js';
 import { LogPanel } from './logs.js';
 import { ProjectsPanel } from './projects.js';
@@ -68,7 +69,7 @@ const S = {
   safeArea: !!prefs.get('safeArea', false),
 };
 
-let preview, timeline, inspector, agentPanel, pipelinePanel, logPanel, gizmo, projects, curvePanel;
+let preview, timeline, inspector, agentPanel, review, pipelinePanel, logPanel, gizmo, projects, curvePanel;
 // Property-link "转到父级" navigation stack (PLAN-ui-round3 §4.3). Jumping never
 // writes the project and never touches Ctrl+Z; Alt+← / the inspector chip walks
 // back through the panels the user came from.
@@ -2461,10 +2462,11 @@ async function addAudioAt(m, start = null) {
 function switchRightTab(name) {
   // the log list moved to the status-bar drawer; keep the old tab name working
   if (name === 'logs') { logDrawer?.open(); return; }
-  if (!['insp', 'ai', 'pipe'].includes(name)) name = 'insp';
+  if (!['insp', 'ai', 'review', 'pipe'].includes(name)) name = 'insp';
   markTab(document.querySelector('[data-tabs="right"]'), name);
   $('#panelInsp').hidden = name !== 'insp';
   $('#panelAI').hidden = name !== 'ai';
+  $('#panelReview').hidden = name !== 'review';
   $('#panelPipe').hidden = name !== 'pipe';
   prefs.set('rightTab', name);
 }
@@ -3228,6 +3230,19 @@ async function boot() {
     toast,
   });
   agentPanel.setState({ available: S.agentAvailable, running: false });
+
+  // 审阅 (WP2.5a): change sets come from the engine, not the AI panel's map.
+  // Writes stay here so the panel never fetches a write route (DESIGN.md §10).
+  review = new ReviewPanel($('#panelReview'), {
+    getProject: () => S.project,
+    toast,
+    apply: async (id) => {
+      const j = await post('/api/changesets', { action: 'apply', id, expectedRev: S.project.rev });
+      if (j.project) applyProject(j.project, 'changeset');
+      return j;
+    },
+  });
+  review.mount($('#panelReview'));
 
   logPanel = new LogPanel($('#panelLogs'), { toast });
 
@@ -4574,6 +4589,7 @@ async function boot() {
   registerCommand({ id: 'ui.toggleRight', title: '切换右栏', group: '面板', icon: 'chevron-right', keywords: 'right sidebar panel collapse', run: () => layout?.setCollapsed('right') });
   for (const [side, tab, title, ic, kw] of [
     ['right', 'insp', '属性', 'sliders', 'inspector properties'], ['right', 'ai', 'AI', 'sparkles', 'ai agent chat'],
+    ['right', 'review', '审阅', 'check', 'change set review changesets'],
     ['right', 'pipe', '渲染', 'film', 'render pipeline'], ['left', 'media', '资源', 'assets', 'media assets'],
     ['left', 'layers', '图层', 'layers', 'layers outliner'],
   ]) {
@@ -4748,7 +4764,7 @@ async function boot() {
     refreshMarks: (opts) => refreshMarks({ immediate: true, ...(opts || {}) }),
     marksFor: (records, project = S.project) => marksFor(records, project, { fps: S.project?.meta?.fps || 24 }),
     renderActions,
-    agentPanel, pipelinePanel, logPanel,
+    agentPanel, review, pipelinePanel, logPanel,
     layout,
     statusBar,
     logDrawer,

@@ -11,6 +11,7 @@
   <link rel="stylesheet" href="/app/renderer/css/shell.css">
   <link rel="stylesheet" href="/app/renderer/css/inspector.css">
   <link rel="stylesheet" href="/app/renderer/css/agent.css">
+  <link rel="stylesheet" href="/app/renderer/css/review.css">
   <link rel="stylesheet" href="/app/renderer/css/assets.css">
   <link rel="stylesheet" href="/app/renderer/css/timeline.css">
   <link rel="stylesheet" href="/app/renderer/css/dialogs.css">
@@ -215,10 +216,12 @@
         <div class="tabs" role="tablist" aria-label="右栏" data-tabs="right">
           <button role="tab" data-tab="insp" class="on" aria-selected="true" aria-controls="panelInsp">属性</button>
           <button role="tab" data-tab="ai" aria-selected="false" aria-controls="panelAI">AI</button>
+          <button role="tab" data-tab="review" aria-selected="false" aria-controls="panelReview">审阅</button>
           <button role="tab" data-tab="pipe" aria-selected="false" aria-controls="panelPipe">渲染</button>
         </div>
         <div class="panel" id="panelInsp" role="tabpanel"></div>
         <div class="panel" id="panelAI" role="tabpanel" hidden></div>
+        <div class="panel" id="panelReview" role="tabpanel" hidden></div>
         <div class="panel" id="panelPipe" role="tabpanel" hidden></div>
       </aside>
 
