@@ -1,0 +1,40 @@
+{
+  "format": "vdm.source/1",
+  "id": "glsl-noise",
+  "label": "噪声（glsl 共享夹具）",
+  "runtime": "glsl",
+  "entry": "main.frag",
+  "deterministic": true,
+  "params": [
+    {
+      "id": "speed",
+      "label": "速度",
+      "group": "motion",
+      "type": "number",
+      "unit": "",
+      "default": 0.8,
+      "range": [0, 4],
+      "step": 0.05,
+      "keyable": "frame"
+    },
+    {
+      "id": "scale",
+      "label": "纹理尺度",
+      "group": "shape",
+      "type": "number",
+      "unit": "",
+      "default": 2.4,
+      "range": [0.5, 8],
+      "step": 0.1,
+      "keyable": "frame"
+    },
+    {
+      "id": "tint",
+      "label": "颜色",
+      "group": "style",
+      "type": "color",
+      "default": "#8bd6ff",
+      "keyable": "frame"
+    }
+  ]
+}

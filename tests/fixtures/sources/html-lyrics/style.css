@@ -1,0 +1,109 @@
+/* 共享夹具 · html-lyrics —— 每行延迟 = --i × --stagger；动画只用
+   translateY / opacity（§7.1 能翻译的两类），颜色与节奏由参数控制。
+   时间轴是一条 CSS 动画：--total（默认 6 s）内从左扫到右。 */
+
+* { box-sizing: border-box; }
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+  background: #05060a;
+}
+
+body {
+  display: grid;
+  place-items: center;
+  font-family: "Source Han Serif SC", "Noto Serif CJK SC", "SimSun", system-ui, serif;
+}
+
+.stage {
+  --tint: #9fd8ff;
+  --stagger: 0.35s;
+  --total: 6s;
+  position: relative;
+  width: min(100vw, 1920px);
+  aspect-ratio: 16 / 9;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3vh;
+  padding: 0 10%;
+  overflow: hidden;
+  color: #eef4ff;
+  background:
+    radial-gradient(70% 90% at 78% 12%, rgba(159, 216, 255, 0.18), rgba(5, 6, 10, 0) 62%),
+    #05060a;
+}
+
+.kicker {
+  margin: 0;
+  font-family: ui-monospace, "Cascadia Mono", Menlo, monospace;
+  font-size: clamp(11px, 1.5vh, 19px);
+  letter-spacing: 0.32em;
+  text-transform: uppercase;
+  color: var(--tint);
+  opacity: 0;
+  animation: fade 0.6s ease-out 0.05s both;
+}
+
+.lines {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 1.6vh;
+}
+
+.line {
+  margin: 0;
+  font-size: clamp(18px, 4.2vh, 56px);
+  font-weight: 600;
+  line-height: 1.32;
+  letter-spacing: 0.02em;
+  opacity: 0;
+  transform: translateY(0.45em);
+  animation: line-in 0.6s cubic-bezier(0.2, 0.8, 0.2, 1) calc(var(--i) * var(--stagger)) both;
+}
+
+.line:nth-child(-n + 2) {
+  color: var(--tint);
+}
+
+.timeline {
+  position: relative;
+  width: 100%;
+  height: max(2px, 0.3vh);
+  background: rgba(238, 244, 255, 0.14);
+  overflow: hidden;
+}
+
+.progress {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: var(--tint);
+  transform: translateX(-100%);
+  animation: sweep var(--total) linear 0s both;
+}
+
+@keyframes line-in {
+  from { opacity: 0; transform: translateY(0.45em); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes sweep {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kicker,
+  .line { animation: none; opacity: 1; transform: none; }
+  .progress { animation: none; transform: none; }
+}

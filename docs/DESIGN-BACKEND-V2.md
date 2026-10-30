@@ -472,6 +472,304 @@ vdm.beat, vdm.volume                       // 节拍、音量（来自工程）
 
 `sourceDetach` 操作：删除 `el.source`，元素变成纯原生元素。这是显式操作，可以撤销，不会自动发生。
 
+### 7.8 冻结记录（WP4.0 交付，2026-10-30 —— 本节以下全部**冻结**，`SOURCE_SNAPSHOT_VERSION = 1`）
+
+交付（只有文档、夹具与一个常量，**不含实现**）：本节冻结 R4 内部的四个接口；`tests/fixtures/sources/`
+的前五个夹具（§10.4.6）；`tests/fixtures-sources.test.mjs`（纯文件与 schema 校验，不跑浏览器/Blender）；
+`core/version.js::SOURCE_SNAPSHOT_VERSION`。`.vdm/sources/` 的读写、`sourceMode` 的求值、写回与合并的
+**执行**分别属于 WP4.1–4.4。
+
+改本节任何一个字段或语义 = **升级 `SOURCE_SNAPSHOT_VERSION`**，并在同一个提交里同步：`core/version.js`、
+本节、`tests/fixtures/sources/` 与 `tests/fixtures-sources.test.mjs`、`application/source-service.js`（4.1/4.3/4.4）、
+`core/source-map.js` 与 `core/source-merge.js`（4.1/4.4）、`core/frame-ir.js`（仅 4.2）、
+`application/changeset-service.js`（4.4）、`docs/SPEC-PROJECT.md` 的 `el.source` / `el.sourceMode` 字段表；
+然后通知 4.1–4.6 与界面线（§12）。老版本快照**重新编译**，不静默迁移；比本节新的 `version`
+按"缺源"降级（§7.8.2），不猜字段。
+
+#### 7.8.1 源编译快照 `.vdm/sources/<id>/base.json`
+
+**谁写谁读**：`application/source-service.js::compile` 是唯一写入方（在 RenderWorkerPool 里加载源、逐帧取样、
+算哈希）；读方是 `core/frame-ir.js`（4.2，通过 `buildFrameIR` 的 `opts.sourceSnapshots`）、
+`source-service.js::writeBack`（4.3，查节点与可写回路径）、`merge`（4.4）和 `vdm_source_read`（4.3 生成的注释）。
+它**不是可删除的缓存**（§7.1）：三方合并拿它当 `base`，删掉就等于失去"上次编译"的基准。
+
+文件头五个键 + 载荷 `nodes`（不多不少，顺序无所谓）：
+
+| 键 | 类型 | 谁写 | 说明 |
+|---|---|---|---|
+| `version` | int | compile | `SOURCE_SNAPSHOT_VERSION`，现在是 `1`；不等于 1 = 整份按缺源降级 |
+| `source` | string | compile | 源 id（= 目录名，规则同 `core/code-layer.js::isSafeSourceId`） |
+| `compiler` | object | compile | `{ name, version, runtime, entry }`；诊断用，**不进哈希** |
+| `builtAt` | string | compile | ISO 8601 UTC（毫秒）；**不进哈希**，合并时不比较 |
+| `hash` | string | compile | `sha256:<64 位小写十六进制>`，口径见下 |
+| `nodes` | array | compile | 节点记录，**按 `id` 升序**；同一 `id` 只允许一条 |
+
+节点记录：
+
+```jsonc
+{ "id": "n_line_1",            // data-vdm-id；规则 ^[A-Za-z_][A-Za-z0-9_.-]{0,63}$，快照内唯一
+  "type": "text",              // text | solid | shape | image
+  "parent": null,              // 可选：最近的带 data-vdm-id 的祖先节点 id；只给 UI/合并参考，4.x 不据此建父子
+  "props": { "style.text": "第一句歌词", "style.size": 96, "transform.x": -420, "transform.opacity": 1 },
+  "tracks": [ { "t": 0,    "path": "transform.opacity", "value": 0, "ease": "easeInOut" },
+              { "t": 0.4,  "path": "transform.opacity", "value": 1, "ease": "linear" },
+              { "t": 0,    "path": "transform.y",       "value": 184, "ease": "outExpo" },
+              { "t": 0.4,  "path": "transform.y",       "value": 160, "ease": "linear" } ] }
+```
+
+- `type`：编译器只产出 `text`（文字节点）、`solid`（纯色块）、`shape`（几何/图形）、`image`
+  （`<img>`，或渐变/阴影/滤镜这类复杂样式由 worker 栅格化的结果，媒体路径写在 `props.src`）。
+  **不产出** `video` / `audio` / `camfeed` / `code`。
+- `props`：**扁平的属性路径 → 值**，路径只能取下面 `SOURCE_PATHS` 表里的名字（拼法与 `core/contracts.js`
+  的属性路径相同）。值只有 `number` / `string` / `boolean`；`props[path]` 是**基线值**，即源在自己时间轴
+  `t = 0` 时的值（没有动画的路径就是静态值）。
+- `tracks`：源动画轨，形状与 `el.keyframes` **逐字段相同**（`{ t, path, value, ease?, curve? }`），
+  所以 4.2 直接用 `core/time.js::sampleTrack(tracks, path, t, props[path])` 取样，不另写取样器。
+  `path` 必须同时出现在 `props` 里（有轨道没有基线 = 快照非法）。数组按 `(path, t)` 排序，
+  同一 `(path, t)` 只允许一个键。`parent` 可选，缺省 `null`。
+
+`SOURCE_PATHS`（源层可以驱动的**全部**属性，封闭集合；4.1 在 `core/source-map.js` 导出同名常量）：
+
+| path | 类型 | 单位 | 默认值（= 元素默认值） | 插值 |
+|---|---|---|---|---|
+| `style.text` | string | — | `''` | 步进（在键处切换） |
+| `style.font` | string | — | `SimHei` | 步进 |
+| `style.size` | number | 项目像素 | `96` | 数值 |
+| `style.weight` | number | — | `400` | 数值 |
+| `style.color` | string | 颜色 | `#ffffff` | 步进 |
+| `style.align` | string | left / center / right | `center` | 步进 |
+| `style.lineHeight` | number | 倍率 | `1.18` | 数值 |
+| `style.letterSpacing` | number | 项目像素 | `0` | 数值 |
+| `src` | string | 项目相对路径 | `''` | 步进（换图；可以只出现在 `props`） |
+| `transform.x` | number | 项目像素（相对画面中心） | `0` | 数值 |
+| `transform.y` | number | 项目像素（y 向下） | `0` | 数值 |
+| `transform.scale` | number | 倍率（**等比**） | `1` | 数值 |
+| `transform.rotation` | number | 度（**元素空间**，与 `el.transform.rotation` 同号） | `0` | 数值 |
+| `transform.opacity` | number | 倍率 | `1` | 数值 |
+
+- 默认值与 `core/schema.js::DEFAULT_STYLE` / `DEFAULT_TRANSFORM` 逐项相同；`props` 缺某个路径就用这一列，
+  不改元素已有的值。数值不做上下限夹取（与 `keyframes` 一致）。
+- 只接受**等比** `transform.scale`：CSS 的非等比 `scale: 1.2 0.8` 不进源轨道（4.1 要么栅格化成 `image`，
+  要么按 §7.2 报"这是场景运动，请改用编辑器"）。
+- 值都是**元素空间**的：`transform.x/y` 是编译后布局相对画面中心的位置（像素，y 向下），
+  `transform.rotation` 已经是元素符号（CSS `rotate()` 与元素旋转的符号差异由 4.1 换算，写回源时反向换算一次）。
+- 表外路径一律不写不读：裁切、3D 旋转、`z`、效果、混合、蒙版、父子都在编辑器层（§7.2），
+  出现在 `props` / `tracks` 里属于快照非法。
+
+**时间**：轨道 `t` 是**项目绝对秒**（和 `el.keyframes` 一样，不是元素内相对时间、不是 CSS 秒）；`t >= 0`，
+写盘时四舍五入到 3 位小数（`Math.round(t * 1000) / 1000`），取样时刻就是 `t = frame / fps`
+（IR 帧号 0 基，§4.4）。源时间轴与项目时间轴 0 点对齐：元素的 `start` / `duration` 只决定它何时可见，
+**不移动源轨道**（把元素挪到 8 s，源动画不会跟着从头播）。
+
+**插值**：完全按 `core/time.js::sampleTrack`：
+
+- 数值键：段内 `lerp`，进度用该段**起始键**的 `curve`（有则 `core/curves.js::sampleCurve`）或 `ease`
+  （`EASE_NAMES` 之一；缺省 `easeInOut`，即 `sampleTrack` 的默认，不另立默认）。CSS `cubic-bezier(...)`
+  采样成 `curve: [[u, v], …]`（3–9 点，`u` 递增、都在 0..1），有 `curve` 时忽略 `ease`。
+- 字符串 / 颜色 / 枚举 / 布尔键：步进（取 `t` 之前最后一个键的值），与 `sampleTrack` 相同。
+- 首键之前取首键值、末键之后取末键值（`sampleTrack` 的钳制）；没有轨道的路径取 `props[path]`。
+
+**哈希口径**：对**规范化后的载荷**算 SHA-256。
+
+1. 载荷 = `{ version, source, nodes }`（三个键，顺序无所谓）；**不含** `compiler` / `builtAt` / `hash`。
+2. 规范化：对象键按字典序递归排序，数组保持顺序；数字先四舍五入到 6 位小数、`-0` 归一化成 `0`
+   （与 §4.4 的数值卫生同一口径）；不加空格、不加换行。
+3. UTF-8 字节 → `sha256` → `"sha256:" + 64 位小写十六进制`。
+
+同一份源在同一台机器上重复编译必须得到同一个 `hash`；换机器可能因渲染实现不同而不同，但**快照内容相同
+⇒ hash 相同**。合并用 `hash` 判断"源是否变过"，不看 `builtAt`。
+
+**版本与降级**：`version` 不匹配、`nodes` 形状不对、节点 id / 路径 / 值类型不合法 ⇒ 整份快照视为不可用
+（拒绝加载、不改写文件），用它的元素按"缺源"处理（§7.8.2）。不部分解析、不猜字段。
+
+示例（`html-lyrics` 的一行歌词；其余节点省略）：
+
+```jsonc
+{ "version": 1, "source": "html-lyrics",
+  "compiler": { "name": "source-service", "version": 1, "runtime": "html", "entry": "index.html" },
+  "builtAt": "2026-10-30T09:41:12.345Z",
+  "hash": "sha256:0f3c…",
+  "nodes": [
+    { "id": "n_line_1", "type": "text", "parent": null,
+      "props": { "style.text": "第一句歌词", "style.font": "SimHei", "style.size": 96, "style.weight": 600,
+                 "style.color": "#e8f4ff", "style.align": "left", "style.lineHeight": 1.18,
+                 "style.letterSpacing": 2, "transform.x": -420, "transform.y": 160,
+                 "transform.scale": 1, "transform.rotation": 0, "transform.opacity": 1 },
+      "tracks": [ { "t": 0, "path": "transform.opacity", "value": 0, "ease": "easeInOut" },
+                  { "t": 0.4, "path": "transform.opacity", "value": 1, "ease": "linear" },
+                  { "t": 0, "path": "transform.y", "value": 184, "ease": "outExpo" },
+                  { "t": 0.4, "path": "transform.y", "value": 160, "ease": "linear" } ] }
+  ] }
+```
+
+#### 7.8.2 `el.source` 与 `el.sourceMode`（§7.3）
+
+字段（`core/schema.js`，WP4.2；`normalizeProject` 只**保留合法值**，不伪造、不自动创建）：
+
+| 字段 | 类型 | 默认 | 合法值 | 说明 |
+|---|---|---|---|---|
+| `el.source` | object | 缺省（不需要这个键） | `{ id, node }`，两个都是非空 string | 存在即"这个元素来自某个源节点" |
+| `el.source.id` | string | — | `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`（同 `isSafeSourceId`） | 目录名 = id |
+| `el.source.node` | string | — | `^[A-Za-z_][A-Za-z0-9_.-]{0,63}$` | 必须是 `base.json` 里存在的节点 id |
+| `el.sourceMode` | object | `{}`（缺省 = 全部走默认） | `{ "<path>": "add" \| "mul" \| "override" }` | 稀疏表：只写"不按默认"的路径 |
+| `el.sourceMode[path]` | string | 按单位：`transform.scale` / `transform.opacity` → `mul`，其余 → `add` | `add` \| `mul` \| `override` | 键必须在 `SOURCE_PATHS` 里 |
+
+- 规范化：`el.source` 缺 `id` / `node`、类型不对或 id 不合法 ⇒ **整个 `el.source` 删掉**（和 `node` 的
+  "never fabricate" 同策略）；`el.sourceMode` 里路径不在 `SOURCE_PATHS`、值不是三个之一，或对非数值路径
+  写了 `mul` ⇒ **删掉那个键**（落回默认）。都不抛错、不拦加载。`validateProject` 只报问题不修复。
+- `sourceDetach`（§7.7）删除 `el.source` 与 `el.sourceMode`，把当前帧的求值结果写进元素的本地值。
+- 界面文案"叠加"在数据里只是 `add` 或 `mul`（按单位默认），"接管"是 `override`；**没有第四个值**。
+- IR 里的 `item.source` 从 v2 起就是 `{ id, node }` 的**回声**（`core/frame-ir.js` 只搬运，不求值）。
+  WP4.2 不新增 IR 字段、不搬 `sourceMode`（IR 是求值后的结果），所以**不升 `FRAME_IR_VERSION`**。
+
+**`buildFrameIR` 里的求值顺序（固定）**：
+
+1. **本地值**：默认值 → `el.keyframes`（这一层就是"编辑器层值"，与 §7.3 的"源层值 → 合入编辑器层"同一件事）。
+2. **源层取样**：`base = node.props[path]`，`src(t) = sampleTrack(node.tracks, path, t, base)`（没轨道 = `base`）。
+3. **按模式合入**（`local` = 第 1 步的值）：
+
+| 模式 | 数值路径 | 非数值路径（string / 颜色 / 枚举） |
+|---|---|---|
+| `add`（默认） | `local + (src(t) − base)` | `local !== base ? local : src(t)`（谁改过用谁，比较用 §7.8.1 的规范化） |
+| `mul`（默认：`transform.scale`、`transform.opacity`） | `local × src(t) / base`；`abs(base) < 1e-9` 时退化成 `override`（与 `links.js` 拒绝零基准 `mul` 同一条规则） | 同 `add`（没有乘法可做） |
+| `override` | `local`（源被忽略） | `local` |
+
+4. **属性链接**：`to` 的本地值 = 第 3 步的结果。
+5. **运动预设 / 节拍 / 淡入淡出**：编辑器层的线性增量。
+6. **父子**：空间父级链最后乘上去，源合并不碰父级值。
+
+- 数值合入只用加法和乘法，因此实现上可以在 `evalElement` 之后施加（与"链接之前"等价，加法/乘法可交换），
+  但**透明度合入后要再夹一次到 0..1**（与 `evalElement` 的 clamp 同口径）。
+- **表示无关**：源轨道说的是"元素自身局部空间里的差量 / 倍率"，元素用旧 `transform` 还是 `el.node` 都成立。
+  `transform.x` 的 `Δpx` 在屏幕路径加进 `st.x`、在节点路径加进 `node.pivot.x`（`Δpx / 100` 米）；
+  `transform.y` 反向（`node.pivot.y -= Δpx / 100`，y 向上）；`transform.scale` 的倍率乘 `st.scale` 或
+  `node.scale.x` / `node.scale.y`（z 不变）；`transform.rotation` 的度加到 `st.rotation` 或 `node.roll`
+  （节点已有三轴 `rotation.*` 轨道时加到 `rotation.z`）；`transform.opacity` 的倍率乘 `opacity`。
+  4.1 的编译产物默认走旧 `transform` 路径（少一层换算，便于对拍），以后升级成节点模型时按本条照样成立。
+- **快照的传入方式**（4.2 新增的可选参数，**不是 IR 的一部分**）：`opts.sourceSnapshots` =
+  `{ [sourceId]: snapshot }` 或 `(sourceId) => snapshot | null`。core 不读文件（同 `opts.fonts` / `opts.city`），
+  预览/成片各自从 `.vdm/sources/<id>/base.json` 读。快照的 `hash` 进入 `IRCache` 的键（按 source id
+  排序拼接），重新编译后旧帧自动失效。
+
+**降级（缺源 / 缺节点）**：
+
+| 情况 | 行为 |
+|---|---|
+| 元素没有 `el.source` | 完全不进入本节逻辑；IR 与冻结前逐字段相同（WP4.2 的验收线） |
+| `opts.sourceSnapshots` 里没有这个 id，或快照 `version` / 形状不合法 | 该元素按"缺源"= 编辑器层值（`fallback: 'editor-layer'`），不抛错、不写工程 |
+| 快照里没有 `el.source.node` | 同上（整个元素降级，不是逐路径） |
+| 某 `path` 在节点里既没有 `props` 也没有轨道 | 该路径按 `override`（不猜默认值，避免把 0 当成真实值） |
+
+"降级"只影响**求值**：不写 `project.vdm.json`、不清 `el.source`，源修好后下一帧自动恢复。
+
+#### 7.8.3 写回 `writeBack(sourceId, nodeId, path, value)`
+
+`application/source-service.js`（WP4.3），**异步**（返回 `Promise`），因为要在沙箱里改 DOM 再读回文本；
+同步的只有数据校验：路径/值格式不对直接抛 `OP_INVALID`，**不返回 fallback**。
+
+```js
+// 成功：源文件的新文本已经确定，op 还没应用
+{ ok: true, changed: true, file: 'index.html', path: 'style.color', value: '#ff5c7a',
+  op: { op: 'sourceWrite', id: 'html-title-card', path: 'index.html', content: '<改过的整份文本>' } }
+// 降级：一步都没做，调用方把值写进编辑器层
+{ ok: false, fallback: 'editor-layer', reason: 'node-unwritable',
+  path: 'style.color', value: '#ff5c7a', message: '…' }
+```
+
+- `ok` **总是存在**（`true` / `false`），调用方只判这一个字段；`fallback: 'editor-layer'` + `reason`
+  只在 `ok === false` 时出现。`changed === false` 表示源里已经是这个值（`op = null`，不产生事务）。
+- 写回本身是一次事务：调用方把返回的 `op` 交给 `core/ops.js`（一个 `sourceWrite`，撤销一步），
+  **不直接写盘**。源必须登记在 `project.sources[]`（HTML/SVG 源与代码源同一张表，`manifest.runtime`
+  是 `html` / `svg`；4.1 把 runtime 白名单扩过来）。
+- 成功的完整事务（4.3）：**(1)** `sourceWrite` 改源文本 → **(2)** `set` / `keySet` 把同一个值写进元素
+  （镜像与 `base` 保持一致）→ **(3)** 重新编译该源、刷新 `base.json` 与 `hash`。第 3 步可以防抖；
+  防抖窗口里快照是旧的，允许（不写第二份真值）。
+- 失败语义：**源、元素、快照都不动**，不抛错；调用方接着写编辑器层——元素值 + `el.sourceMode[path] = 'override'`，
+  修改不丢失（§7.4 最后一行）。
+- 只有 §7.4 表里"写回源"的内容可以走这条路：`style.text`、`style.color` / `size` / `font` / `weight` /
+  `letterSpacing` / `lineHeight`（写行内样式），以及 `src`（改 `<img src>`）。`path` 必须在 `SOURCE_PATHS`；
+  表外路径（`transform.*`、`pivot.*`、效果、裁切……）一律 `reason: 'path-editor-only'`，不去看源。
+- `el.sourceMode[path] === 'override'` ⇒ **不尝试**，直接 `reason: 'path-overridden'`（用户已接管）；
+  `add` / `mul`（默认）才尝试。
+- `reason` 是封闭枚举（新增值 = 升级本节）：`source-missing`、`node-missing`、`path-editor-only`、
+  `path-overridden`、`node-unwritable`（选择器太复杂 / 样式不在可写回子集 / 没有行内样式）、
+  `source-read-only`、`worker-unavailable`。
+- 不适用于 `code` 元素：代码图层的源走 `sourceWrite` / `codeParamSet`，没有 DOM 写回。
+
+#### 7.8.4 合并 `merge(base, ours, theirs)`
+
+`core/source-merge.js`（WP4.4），**纯函数、同步、无 IO**。三份输入都是快照形状（`{ nodes }`，
+多余的头字段忽略）：
+
+| 输入 | 谁提供 | 含义 |
+|---|---|---|
+| `base` | 上次编译的 `base.json` | 上次的源侧事实 |
+| `ours` | 编辑器层（`el.source.id === sourceId` 的元素导成快照形状） | 编辑器层的当前值；缺节点 = 用户删了元素 |
+| `theirs` | 本次新编译的快照 | 源侧的新事实 |
+
+返回 `{ result, conflicts }`；`result = { version, source, nodes, hash }`（可以直接写成新的 `base.json`，
+`compiler` / `builtAt` 由调用方盖时间戳）。`merge` 不改入参、不写盘、不改 `el.sourceMode`。
+
+逐 `(nodeId, path)` 三方比较（`path` 覆盖 `props` + `tracks`；有轨道的路径**整条轨道当一个值**比较，
+不逐键拆冲突；相等用 §7.8.1 的规范化）：
+
+| base | ours | theirs | result | 冲突 |
+|---|---|---|---|---|
+| a | a | b | b | — |
+| a | c | a | c | — |
+| a | c | b | b（暂定，人决定） | `both-changed` |
+| a | c | 节点没了 | result 不含该节点 | `node-deleted` |
+| a | a | 节点没了 | 删掉 | — |
+| 节点不存在 | — | b | b | — |
+| 节点不存在 | 同 id 已有元素 | b | 保留 ours | `node-collision` |
+| a | a | b，且 `type` 变了 | 整节点取 theirs | — |
+| a | c | b，且 `type` 变了 | 整节点取 theirs | `type-changed` |
+
+- 冲突记录字段（**只有这六个**）：`{ nodeId, path, base, ours, theirs, kind }`。`path` 为 `null` 表示
+  节点级冲突（`node-deleted` / `node-collision` / `type-changed`），此时 `base/ours/theirs` 是节点摘要
+  `{ type, props, tracks }`；标量路径就是标量，轨道路径是整条键数组；缺的那一侧写 `null`。
+- `kind` 封闭枚举：`both-changed` | `node-deleted` | `node-collision` | `type-changed`。
+- **谁决定：人**。冲突汇总进一个 `needs-decision` 变更集（§8.1），UI 逐条选 `base` / `ours` / `theirs`
+  （或"保留编辑器层并脱离源码"）；4.4 只按人的选择写 op。`merge` 自己不做决定、不写报告状态。
+- 非冲突项直接落到 `result`。`type` 只按 `base` / `theirs` 判定（源侧事实），`ours.type` 不参与；
+  编辑器层独有的东西（裁切、3D、效果、蒙版、混合）不在快照里，类型变化时天然不受影响（§7.6 最后一行）。
+
+#### 7.8.5 版本常量与共享夹具
+
+- `core/version.js`：`export const SOURCE_SNAPSHOT_VERSION = 1;`（只有常量，不带逻辑；和其他版本常量一样
+  各自生命周期，编辑 `rev` 永远不是格式版本）。本节的 `version` 字段都引用它。
+- 夹具 `tests/fixtures/sources/`（本包建前五个，其余由对应包补齐，§10.4.6）：
+
+| 目录 | runtime | 入口 | 用在哪 | 内容 |
+|---|---|---|---|---|
+| `p5-rain` | `p5` | `sketch.js` | 代码图层 / 对拍 I | 雨丝下落，`density` / `speed` / `tint` |
+| `glsl-noise` | `glsl` | `main.frag` | 代码图层 / 对拍 I | 域扭曲值噪声，`speed` / `scale` / `tint` |
+| `canvas2d-bars` | `canvas2d` | `main.js` | 代码图层 / 对拍 I | 跳动条，`count` / `speed` / `tint` |
+| `html-title-card` | `html` | `index.html` | 网页编译 / 对拍 L | 标题 + 引题 + 分隔线，CSS 入场动画 |
+| `html-lyrics` | `html` | `index.html` | 网页编译 / 对拍 L | 多条歌词 + 时间轴，`script.js` 由常量数组生成 DOM |
+
+  每个夹具：`manifest.json` 用 `format: 'vdm.source/1'`、`deterministic: true`、目录名 = `id`、
+  参数有 `default`（有 `range` 时 `default` 必须在范围内）、脚本不读时钟也不用无种子随机
+  （`vdm.random` 除外）。`tests/fixtures-sources.test.mjs` 只做文件与 schema 校验：入口存在、
+  参数合法、代码夹具过 `scanSourceFiles`、`sourceFiles()` 往返一致、HTML 夹具是合法 UTF-8。
+- 其余三个（`svg-icons`、`three-orbit`、`manim-formula`）由 4.1 / 5.1 / 5.2 按同一规则补齐，不再各编一套。
+
+#### 7.8.6 本包留下的假设（4.1–4.4 直接采用；要改按本节开头的流程升版）
+
+1. **快照由调用方传进 core**（`opts.sourceSnapshots`），core 不读 `.vdm/`；缺快照 = 缺源降级。
+   `buildFrameIR` 保持纯函数，`IRCache` 用快照 `hash` 做键。
+2. **快照是绝对源值 + 基线**：`props[path]` 是 `t = 0` 的基线，`add` / `mul` 都相对它算差量
+   （与 `links.js` 的 `bindParentValue` 同一个公式）。编译产物在元素上**镜像**基线值，元素单独看也是对的，
+   `sourceDetach` 直接可用。
+3. **源轨道落在元素自身局部空间**，与元素用 `transform` 还是 `node` 表示无关（换算式见 §7.8.2）；
+   像素→米只用项目规则（100 px = 1 m、y 反向）。
+4. **非数值路径的 `add`** 退化成"谁改过用谁"（编辑器值 ≠ 基线时用编辑器值），不是字符串相加。
+5. **`mul` 的零基线**退化成 `override`（同 `links.js` 拒绝零基准 `mul`）。
+6. **写回是三件事一个事务**（源文本、元素镜像值、快照刷新）；失败时一步都不做，改走编辑器层 + `override`。
+7. **冲突整条轨道一个值**，不逐键拆；冲突项暂取 `theirs`，由人决定。
+8. **编译源的 runtime 是 `html` / `svg`**，登记在 `project.sources[]`（和代码源同表），写回用现有
+   `sourceWrite` op；4.1 需要把 runtime 白名单扩到 `core/code-layer.js` / `core/source-map.js`。
+
 ---
 
 ## 8. 人机协作核心

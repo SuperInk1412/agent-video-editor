@@ -1,0 +1,29 @@
+{
+  "format": "vdm.source/1",
+  "id": "html-title-card",
+  "label": "标题卡（网页编译共享夹具）",
+  "runtime": "html",
+  "entry": "index.html",
+  "deterministic": true,
+  "params": [
+    {
+      "id": "accent",
+      "label": "强调色",
+      "group": "style",
+      "type": "color",
+      "default": "#ff5c7a",
+      "keyable": false
+    },
+    {
+      "id": "speed",
+      "label": "节奏",
+      "group": "motion",
+      "type": "number",
+      "unit": "",
+      "default": 1,
+      "range": [0.5, 2],
+      "step": 0.05,
+      "keyable": false
+    }
+  ]
+}

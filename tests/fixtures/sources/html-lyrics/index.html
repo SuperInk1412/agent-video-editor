@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>歌词 · 共享夹具</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!--
+    共享夹具 · html-lyrics（docs/DESIGN-BACKEND-V2.md §10.4.6，WP4.0）
+
+    网页编译（WP4.1）只认带 data-vdm-id 的节点：这里编译成
+    text（n_kicker、n_line_1…n_line_6）和 solid（n_progress）。
+    data-vdm-id 只打在叶子节点上，容器（.lines / .timeline）不带 id，
+    免得编译时还要决定容器是什么元素类型。
+    歌词行由 script.js 从常量数组生成（无时钟、无随机、无定时器），
+    所以同一个页面每次加载 DOM 都相同；时间轴是 CSS 动画（0 → 6 s）。
+  -->
+  <main class="stage" style="--tint: #9fd8ff; --stagger: 0.35s; --total: 6s">
+    <p class="kicker" data-vdm-id="n_kicker">歌词 · 共享夹具</p>
+    <ol class="lines" id="lines" reversed></ol>
+    <div class="timeline">
+      <span class="progress" data-vdm-id="n_progress"></span>
+    </div>
+  </main>
+  <script src="script.js" defer></script>
+</body>
+</html>

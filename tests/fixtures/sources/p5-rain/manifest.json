@@ -1,0 +1,41 @@
+{
+  "format": "vdm.source/1",
+  "id": "p5-rain",
+  "label": "雨丝（p5 共享夹具）",
+  "runtime": "p5",
+  "entry": "sketch.js",
+  "libs": { "p5": "1.9.4" },
+  "deterministic": true,
+  "params": [
+    {
+      "id": "density",
+      "label": "雨量",
+      "group": "shape",
+      "type": "number",
+      "unit": "",
+      "default": 0.55,
+      "range": [0, 1],
+      "step": 0.01,
+      "keyable": "frame"
+    },
+    {
+      "id": "speed",
+      "label": "速度",
+      "group": "motion",
+      "type": "number",
+      "unit": "",
+      "default": 1,
+      "range": [0, 4],
+      "step": 0.05,
+      "keyable": "frame"
+    },
+    {
+      "id": "tint",
+      "label": "颜色",
+      "group": "style",
+      "type": "color",
+      "default": "#9fd8ff",
+      "keyable": "frame"
+    }
+  ]
+}

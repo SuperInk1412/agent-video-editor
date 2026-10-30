@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>标题卡 · 共享夹具</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!--
+    共享夹具 · html-title-card（docs/DESIGN-BACKEND-V2.md §10.4.6，WP4.0）
+
+    网页编译（WP4.1）只认带 data-vdm-id 的节点：这里四个节点分别编译成
+    text（n_kicker / n_title / n_subtitle）和 solid（n_rule）。
+    参数以 CSS 变量出现在 .stage 上，页面自带默认值，所以直接用浏览器打开也正确；
+    manifest 的 accent / speed 就是这两个变量的来源（注入方式由 4.1 决定）。
+  -->
+  <main class="stage" style="--accent: #ff5c7a; --speed: 1">
+    <p class="kicker" data-vdm-id="n_kicker">WP4.1 · 网页编译对拍（用例 L）</p>
+    <h1 class="title" data-vdm-id="n_title">一整个夏天都在下坠</h1>
+    <span class="rule" data-vdm-id="n_rule" aria-hidden="true"></span>
+    <p class="subtitle" data-vdm-id="n_subtitle">VedioMaker / source compile fixture</p>
+  </main>
+</body>
+</html>
