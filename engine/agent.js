@@ -1,27 +1,17 @@
-// DSH-TUI agent bridge.
+// DSH-TUI agent bridge: the tool loop and its transports.
 //
-// Two ways to drive an agent, one file:
-//
-// 1. `AgentRunner` — the legacy one-shot path. The server no longer uses it
-//    (`VDM_AGENT_LEGACY=1` is the rollback door until WP2.5e's loop is proven;
-//    it is deleted right after). It spawns `dsh --profile headless --json
-//    <task>` in the project directory and streams its NDJSON run events; the
-//    headless profile can read files but cannot run shell commands, so the
-//    agent reads project.vdm.json and replies with one ops object
-//    ({"note","ops"}), which the engine validates and applies through
-//    core/ops.js. Killing the process = interrupting the agent.
-//
-// 2. `AgentLoop` — the WP2.4 tool loop (docs/DESIGN-BACKEND-V2.md §8.4):
-//    read → plan → propose a change set → render stills → measure → correct.
-//    Every write is one change set through `application/changeset-service.js`
-//    (proposed → applied, or reverted), so it lands in the journal with its
-//    `changesetId`, can be reviewed, and can be reverted one property at a
-//    time. The agent talks to a tool surface (read / contracts / ops / plan /
-//    changeset / still / measure / report); every ops batch it wants to write
-//    is validated against `core/contracts.js` first and checked against the
-//    request's `scope` (element ids + property-path whitelist). The §8.3
-//    report is assembled by the loop from the change-set diffs and the
-//    measurements it took itself — never from the agent's own prose.
+// `AgentLoop` is the WP2.4 tool loop (docs/DESIGN-BACKEND-V2.md §8.4):
+// read → plan → propose a change set → render stills → measure → correct.
+// Every write is one change set through `application/changeset-service.js`
+// (proposed → applied, or reverted), so it lands in the journal with its
+// `changesetId`, can be reviewed, and can be reverted one property at a
+// time. The agent talks to a tool surface (read / contracts / ops / plan /
+// changeset / still / measure / report); every ops batch it wants to write
+// is validated against `core/contracts.js` first and checked against the
+// request's `scope` (element ids + property-path whitelist). The §8.3
+// report is assembled by the loop from the change-set diffs and the
+// measurements it took itself — never from the agent's own prose.
+// `cancel()` is a between-steps flag: the step in flight always finishes.
 //
 // Loop protocol (transport = `ProcessAgent`, one JSON object per line on
 // stdout, tool results back on stdin):
@@ -126,182 +116,6 @@ export function killTree(child) {
   // taskkill is asynchronous; make sure a POSIX child that ignored the tree
   // call still dies. (No-op when the process already exited.)
   try { child.kill('SIGKILL'); } catch { /* already gone */ }
-}
-
-export class AgentRunner {
-  constructor({ root, onEvent, resolveRuntime = findDsh }) {
-    this.root = root;
-    this.onEvent = onEvent;
-    this.resolveRuntime = resolveRuntime;
-    this.run = null;
-  }
-
-  get running() { return !!this.run && ['starting', 'running', 'applying', 'cancelling'].includes(this.run.status); }
-  get runId() { return this.run?.id || null; }
-
-  /** Context bundle the agent reads: selection, frames, project summary. */
-  async writeContext({ selection, frames = [], extra = {} }) {
-    const dir = path.join(this.root, '.vdm', 'agent');
-    await fs.mkdir(dir, { recursive: true });
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const file = path.join(dir, `context-${stamp}.json`);
-    const bundle = {
-      created: new Date().toISOString(),
-      projectRoot: this.root,
-      selection,
-      frames,
-      cli: `node "${CLI_PATH}" --project "${this.root}"`,
-      ...extra,
-    };
-    await fs.writeFile(file, JSON.stringify(bundle, null, 2));
-    return file;
-  }
-
-  buildTask({ task, contextFile, frames, selection, project }) {
-    const seg = selection?.segmentId ? project.segments.find((s) => s.id === selection.segmentId) : null;
-    const segEls = project.elements
-      .filter((e) => !selection?.segmentId || !e.segment || e.segment === selection.segmentId)
-      .map((e) => {
-        const text = e.type === 'text' ? `, "${String(e.style.text).slice(0, 24)}"` : '';
-        return `${e.id} (${e.type}, ${e.start.toFixed(2)}s +${e.duration.toFixed(2)}s, z${e.z}${text})`;
-      });
-    const frameList = (frames || []).map((f) => `  - ${f}`).join(NL) || '  (none)';
-    const lines = [
-      'You are the edit agent inside VedioMaker, a local video composer.',
-      'You CANNOT run shell commands. Read the project, then reply with edit operations as JSON.',
-      '',
-      `Project: ${this.root}/project.vdm.json (read it for full detail; it is the timeline document)`,
-      `Context bundle: ${contextFile} (selection, beats, frames, summary)`,
-      'Frames of the target segment (look at them if you can read images):',
-      frameList,
-      '',
-      seg
-        ? `Target segment: ${seg.id} "${seg.name}" ${seg.start.toFixed(2)}s .. ${(seg.start + seg.duration).toFixed(2)}s`
-        : 'Target: whole timeline',
-      'Elements available:',
-      segEls.map((x) => '  ' + x).join(NL) || '  (none)',
-      '',
-      'REPLY FORMAT - one JSON object, no markdown fences, no prose before/after:',
-      '{"note": "one sentence about what you changed", "ops": [ ... ]}',
-      '',
-      'Operations (same schema the UI and CLI use):',
-      '  {"op":"updateElement","id":"el_x","patch":{"style":{"text":"new caption","size":120},"transform":{"y":-40},"motion":{"type":"in","amount":0.1}}}',
-      '  {"op":"set","id":"el_x","path":"style.color","value":"#ffd400"}',
-      '  {"op":"keySet","id":"el_x","path":"transform.scale","t":4.2,"value":1.2,"ease":"outExpo"}',
-      '  {"op":"keyRemove","id":"el_x","path":"transform.scale","t":4.2}   (omit t to clear the whole track)',
-      'Keyframe times (t) are absolute project seconds, not relative to the element start.',
-      '  {"op":"addElement","element":{"type":"text","start":4.0,"duration":2.5,"z":5,"segment":"seg_2","style":{"text":"TITLE","size":140,"color":"#ffffff"},"transform":{"x":0,"y":0,"scale":1,"rotation":0,"opacity":1},"fadeIn":0.3}}',
-      '  {"op":"moveElement","id":"el_x","start":4.0,"duration":2.5}',
-      '  {"op":"removeElement","id":"el_x"}',
-      '  {"op":"setFx","fx":{"bloom":0.5,"ca":0.3,"grain":0.12,"vignette":0.5,"scanline":0.2}}',
-      '  {"op":"setMeta","path":"background","value":"#05070d"}',
-      '',
-      'Rules:',
-      '1. Stay inside the target segment unless the user explicitly asks for the whole piece.',
-      '2. Small, reversible changes; 1-6 ops is usually enough.',
-      '3. Keep text short - it is rendered at 1920x1080, font size 80-200.',
-      '4. Use only the element ids listed above, or add a new element.',
-      '5. Align times with meta.beats when it makes sense.',
-      '',
-      'TASK:',
-      task || 'Improve the selected segment.',
-    ];
-    return lines.join(NL);
-  }
-
-  async start({ task, contextFile, frames = [], selection = {}, project }) {
-    if (this.running) throw new Error('agent is already running');
-    // Reserve this run before resolving the executable; simultaneous starts
-    // cannot pass the guard, and callbacks never read the next run's state.
-    let finish;
-    const run = { id: `run-${randomUUID()}`, baseRev: project.rev, status: 'starting', cancelled: false,
-      child: null, finalText: '', text: '', startedAt: Date.now(), done: new Promise((r) => { finish = r; }) };
-    this.run = run;
-    const emit = async (ev) => this.onEvent?.({ runId: run.id, baseRev: run.baseRev, ...ev });
-    let dsh, child;
-    try {
-      dsh = await this.resolveRuntime();
-      if (run.cancelled) throw new Error('agent cancelled');
-      if (!dsh) throw new Error('DSH-TUI not found. Install it (npm i -g @deepseek-ai/dsh) or set VDM_DSH to lib/bin.js');
-      const prompt = this.buildTask({ task, contextFile, frames, selection, project });
-      const env = { ...process.env };
-      if (isElectron && dsh.node === process.execPath) env.ELECTRON_RUN_AS_NODE = '1';
-      child = spawn(dsh.node, [dsh.bin, '--profile', 'headless', '--json', prompt], { cwd: this.root, windowsHide: true, env });
-      run.child = child;
-      run.status = 'running';
-    } catch (e) {
-      run.status = run.cancelled ? 'cancelled' : 'failed';
-      finish();
-      throw e;
-    }
-    const forward = (ev) => { void emit(ev).catch(() => {}); };
-    forward({ type: 'started', bin: dsh.bin, node: dsh.node });
-
-    let buf = '';
-    const handle = (line) => {
-      const s = line.trim();
-      if (!s) return;
-      let ev;
-      try { ev = JSON.parse(s); } catch { forward({ type: 'raw', text: s }); return; }
-      if (ev.type === 'text') {
-        run.text += ev.text || '';
-        forward({ type: 'agent', event: ev });
-      } else if (ev.type === 'final') {
-        run.finalText = ev.text || run.text;
-        forward({ type: 'agent', event: ev });
-      } else {
-        forward({ type: 'agent', event: ev });
-      }
-    };
-    child.stdout.on('data', (d) => {
-      buf += String(d);
-      const parts = buf.split(NL);
-      buf = parts.pop();
-      parts.forEach(handle);
-    });
-    let errText = '';
-    child.stderr.on('data', (d) => {
-      errText += String(d);
-      if (errText.length > 20000) errText = errText.slice(-10000);
-    });
-    child.on('error', (e) => { run.failed = true; forward({ type: 'error', message: String(e) }); });
-    child.on('close', async (code) => {
-      if (buf) handle(buf);
-      run.child = null;
-      try {
-        const proposal = !run.cancelled && !run.failed && code === 0 ? extractProposal(run.finalText || run.text) : null;
-        if (proposal) {
-          run.status = 'applying';
-          await emit({ type: 'proposal', proposal });
-        }
-        run.status = run.cancelled ? 'cancelled' : code === 0 && !run.failed ? 'succeeded' : 'failed';
-        await emit({
-          type: 'exit',
-          code,
-          cancelled: run.cancelled,
-          seconds: (Date.now() - run.startedAt) / 1000,
-          stderr: errText ? errText.slice(-2000) : '',
-          hadFinal: !!run.finalText,
-        });
-      } catch (e) {
-        run.status = 'failed';
-        forward({ type: 'error', message: String(e) });
-      } finally { finish(); }
-    });
-    return { runId: run.id };
-  }
-
-  cancel() {
-    const run = this.run;
-    if (!this.running || run.cancelled || run.status === 'applying') return false;
-    run.cancelled = true;
-    run.status = 'cancelling';
-    killTree(run.child);
-    void Promise.resolve(this.onEvent?.({ runId: run.id, type: 'cancelled' })).catch(() => {});
-    return true;
-  }
-
-  async close() { this.cancel(); await this.run?.done; }
 }
 
 /** Pull {"note","ops"} out of the agent's final answer (tolerates fences / chatter). */

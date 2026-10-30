@@ -9,11 +9,8 @@
 // `ctx.agent` is the `AgentLoop` the engine creates lazily (engine/server.js
 // picks its transport), so every write the agent makes is a change set
 // (WP2.2) and a big plan stops at `awaiting-approval` until a human approves
-// it (WP2.4). `VDM_AGENT_LEGACY=1` keeps the old one-shot `AgentRunner`
-// reachable as a rollback door; both the door and the runner are deleted in
-// the follow-up commit (docs/DESIGN-BACKEND-V2.md §10.2 WP2.5e).
-import fsp from 'node:fs/promises';
-import path from 'node:path';
+// it (WP2.4). The old one-shot `AgentRunner` is gone; reverting the WP2.5e
+// deletion commit is the way back.
 import { summarizeProject } from '../storyboard.js';
 
 const isRecord = (value) => !!value && typeof value === 'object' && !Array.isArray(value);
@@ -96,7 +93,6 @@ export function errorResponse(json, res, error) {
 }
 
 export function register(router, ctx) {
-  if (ctx.agentMode === 'legacy') return registerLegacy(router, ctx);
   const { json, readBody } = ctx;
   const loop = () => ctx.agent;
 
@@ -159,67 +155,6 @@ export function register(router, ctx) {
   });
 
   // ---------------- timeline context for the agent --------------
-  router.get('/api/context', async (req, res, { url }) => {
-    const segmentId = url.searchParams.get('segment');
-    const time = Number(url.searchParams.get('time') || 0);
-    return json(res, 200, summarizeProject(ctx.getProject(), { segmentId, time }));
-  });
-}
-
-// The pre-WP2.5e one-shot path, verbatim: context bundle → dsh headless →
-// one `{note,ops}` answer → change set. Reachable only with
-// `VDM_AGENT_LEGACY=1`; commit 2 of WP2.5e deletes it (and AgentRunner).
-function registerLegacy(router, ctx) {
-  const { json, readBody, agent, jobs, paths: p } = ctx;
-
-  router.post('/api/agent', async (req, res) => {
-    if (agent.running) return json(res, 409, { error: 'agent already running' });
-    const body = await readBody(req);
-    const selection = body.selection || {};
-    const frames = [];
-    if (Array.isArray(body.frames)) {
-      const dir = path.join(p.vdm, 'agent', 'frames', `run-${Date.now()}`);
-      await fsp.mkdir(dir, { recursive: true });
-      for (const f of body.frames) {
-        const m = /^data:image\/png;base64,(.+)$/s.exec(f.dataUrl || '');
-        if (!m) continue;
-        const file = path.join(dir, `${String(f.label || frames.length).replace(/[^\w-]/g, '')}.png`);
-        await fsp.writeFile(file, Buffer.from(m[1], 'base64'));
-        frames.push(file);
-      }
-    }
-    if (body.stillFrames) {
-      for (const t of body.stillFrames) {
-        const file = path.join(p.frames, `agent-${Date.now()}-${Math.round(t * 100)}.png`);
-        const submitted = await jobs.submit({ kind: 'still', time: t, scale: 0.5, samples: 6 });
-        const completed = await jobs.wait(submitted.id);
-        if (completed.artifact) frames.push(completed.artifact.path);
-      }
-    }
-    const project = ctx.getProject();
-    const summary = summarizeProject(project, { segmentId: selection.segmentId, time: body.time ?? 0 });
-    const contextFile = await agent.writeContext({
-      project, selection, frames,
-      extra: { summary, playhead: body.time ?? 0, requestedAt: new Date().toISOString() },
-    });
-    try {
-      const r = await agent.start({ task: body.task, contextFile, frames, selection, project });
-      return json(res, 200, { ok: true, ...r, contextFile, frames });
-    } catch (e) {
-      return json(res, 400, { error: e.message });
-    }
-  });
-
-  router.post('/api/agent/cancel', async (req, res) => {
-    return json(res, 200, { ok: agent.cancel() });
-  });
-  router.post('/api/agent/approve', async (req, res) => {
-    return json(res, 404, { error: 'no plan is awaiting approval', code: 'NO_PENDING_PLAN' });
-  });
-  router.get('/api/agent/state', async (req, res) => {
-    return json(res, 200, { ok: true, running: agent.running, runId: agent.runId });
-  });
-
   router.get('/api/context', async (req, res, { url }) => {
     const segmentId = url.searchParams.get('segment');
     const time = Number(url.searchParams.get('time') || 0);

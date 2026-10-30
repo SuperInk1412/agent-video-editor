@@ -27,7 +27,7 @@ import { setup } from './helpers/http.mjs';
 
 const NL = String.fromCharCode(10);
 const AGENT_ENV = ['VDM_AGENT_SCRIPT', 'VDM_AGENT_BIN', 'VDM_AGENT_NODE', 'VDM_AGENT_MODE',
-  'VDM_AGENT_APPROVAL', 'VDM_AGENT_SCOPE', 'VDM_AGENT_LEGACY'];
+  'VDM_AGENT_APPROVAL', 'VDM_AGENT_SCOPE'];
 
 /** Set the agent environment for one test and restore it afterwards. */
 function setAgentEnv(t, values) {
@@ -261,7 +261,6 @@ test('POST /api/agent：传输不可用时返回 503 AGENT_UNAVAILABLE（不回�
   t.after(() => loop.close());
   const { router, handler } = captureRouter();
   registerAgentRoutes(router, {
-    agentMode: 'loop',
     agent: loop,
     readBody: async () => ({ task: '随便改一下' }),
     json: (res, code, body) => { res.status = code; res.body = body; },

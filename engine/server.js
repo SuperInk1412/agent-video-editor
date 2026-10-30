@@ -20,7 +20,7 @@ import { projectService } from './projects.js';
 import { errorData } from '../application/errors.js';
 import { ChangeSetService } from '../application/changeset-service.js';
 import { mimeOf, findBin } from './media.js';
-import { AgentLoop, AgentRunner, ProcessAgent, ScriptedAgent, pngSize } from './agent.js';
+import { AgentLoop, ProcessAgent, ScriptedAgent, pngSize } from './agent.js';
 import { DshAgent } from './dsh-agent.js';
 import { createLogger } from './log.js';
 import { readPath } from './path-policy.js';
@@ -243,10 +243,10 @@ async function startOwnedServer({ root, port = 47100, open = false, onReady, imp
   //   VDM_AGENT_SCRIPT  a JSON script            → ScriptedAgent (tests / offline)
   //   VDM_AGENT_BIN     an external line adapter → ProcessAgent
   //   otherwise         dsh headless, one process per step → DshAgent
+  // Scope / mode / approval are engine configuration: `VDM_AGENT_SCOPE` (JSON,
+  // default the whole project), `VDM_AGENT_MODE=create`, `VDM_AGENT_APPROVAL=manual`.
   // With no dsh on the machine the first step raises AGENT_UNAVAILABLE and
-  // POST /api/agent answers 503 — there is no silent fallback to legacy.
-  // `VDM_AGENT_LEGACY=1` is the rollback door to the old one-shot runner.
-  const agentMode = process.env.VDM_AGENT_LEGACY === '1' ? 'legacy' : 'loop';
+  // POST /api/agent answers 503 instead of pretending an agent ran.
   const agentScope = () => {
     const raw = process.env.VDM_AGENT_SCOPE;
     if (!raw) return { elements: ['*'], paths: ['*'], create: true };
@@ -308,38 +308,8 @@ async function startOwnedServer({ root, port = 47100, open = false, onReady, imp
       log.warn('agent change set could not be adopted', { error: e.message, changeset: event.record?.id });
     }
   };
-  // The legacy runner's event contract, unchanged (rollback door only).
-  const legacyOnEvent = async (ev) => {
-    if (ev.type === 'proposal') {
-      try {
-        const record = await changesets.apply({
-          ops: ev.proposal.ops, actorId: 'agent:dsh', intent: ev.proposal.note,
-          expectedRev: ev.baseRev, requestId: ev.runId,
-        });
-        const changed = record.changed?.length ?? 0;
-        adoptDisk(await projects.read(), 'agent', { transactionId: record.transactions?.[0] });
-        log.info('agent applied', { ops: ev.proposal.ops.length, changeset: record.id, rev: record.rev, note: ev.proposal.note });
-        broadcast('agent', { ...ev, applied: { changed, note: ev.proposal.note, rev: record.rev, changesetId: record.id } });
-        broadcast('changeset', { action: 'apply', record });
-        addArtifact({ kind: 'ai', label: `AI 改了 ${changed} 项`, detail: ev.proposal.note });
-        toast(`AI 已应用 ${changed} 处修改`, 'success');
-      } catch (e) {
-        log.error('agent proposal rejected', { error: e.message, ops: ev.proposal.ops });
-        broadcast('agent', { ...ev, error: e.message });
-        toast(`AI 提议应用失败: ${e.message}`, 'error');
-      }
-      return;
-    }
-    if (ev.type === 'exit') log.info('agent exit', { code: ev.code, sec: ev.seconds, stderr: ev.stderr || undefined });
-    broadcast('agent', ev);
-  };
   let agentLoop = null;
-  let legacyAgent = null;
   const getAgent = () => {
-    if (agentMode === 'legacy') {
-      legacyAgent ||= new AgentRunner({ root: projectRoot, onEvent: legacyOnEvent });
-      return legacyAgent;
-    }
     agentLoop ||= new AgentLoop({
       root: projectRoot,
       scope: agentScope(),
@@ -383,7 +353,7 @@ async function startOwnedServer({ root, port = 47100, open = false, onReady, imp
     appDir: APP_DIR,
     paths: p,
     log, json, readBody, uploadLimit,
-    projects, changesets, media, jobs, agentMode,
+    projects, changesets, media, jobs,
     // Lazy: `/api/state` and the agent routes always see the same instance,
     // and a server that never runs the agent never resolves a transport.
     get agent() { return getAgent(); },
@@ -493,7 +463,6 @@ async function startOwnedServer({ root, port = 47100, open = false, onReady, imp
       log.info('engine shutting down');
       await closeRasterPool(ctx.rasterPool);
       if (agentLoop) await agentLoop.close();
-      if (legacyAgent) await legacyAgent.close();
       await jobs.close();
       await writeChain;
       clearTimeout(pipelineTimer);

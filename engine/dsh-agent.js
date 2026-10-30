@@ -271,8 +271,8 @@ export class DshAgent {
     const runtime = await this.#runtime();
     const { cwd, env, timeoutMs, maxOutput, args } = this.options;
     const childEnv = { ...env };
-    // Electron's own binary has to be told to behave like node (same rule as
-    // `AgentRunner` had; the dsh bundle silently exits otherwise).
+    // Electron's own binary has to be told to behave like node (the dsh bundle
+    // silently exits otherwise).
     if (process.versions.electron && runtime.node === process.execPath) childEnv.ELECTRON_RUN_AS_NODE = '1';
     return await new Promise((resolve, reject) => {
       let child;
