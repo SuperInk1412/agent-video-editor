@@ -45,9 +45,17 @@ export async function blenderStill(projectDir, { buildProject, isRed, isBlue }) 
   results.push(['blender live feed shows the source picture upright', isRed(top) && isBlue(bottom)]);
 
   await buildProject(projectDir, { delay: 1 });
-  const { framesDir, from } = await renderFrames({
-    dir: projectDir, project: await loadProject(projectDir), from: 0, to: 2 / 30, scale: 0.25, samples: 4,
+  const delayProject = await loadProject(projectDir);
+  // Ask for two frames, not for a slice of seconds: `renderFrames` covers
+  // [from, to), and the project runs at 24 fps (core/schema.js), so the old
+  // hard-coded `2 / 30` was 1.6 frames — one frame, and `f_0002.png` was never
+  // written. (The `round(t * fps)` rule used to round 1.6 up to two frames; the
+  // shared `frameIndex` floor rule, same as blender/vdm_time.py, does not.)
+  const fps = Number(delayProject.meta.fps) || 24;
+  const { framesDir, from, count } = await renderFrames({
+    dir: projectDir, project: delayProject, from: 0, to: 2 / fps, scale: 0.25, samples: 4,
   });
+  if (count < 2) throw new Error(`delay-1 feed check needs 2 frames, renderFrames wrote ${count}`);
   const first = await samples(path.join(framesDir, `f_${String(from).padStart(4, '0')}.png`));
   const next = await samples(path.join(framesDir, `f_${String(from + 1).padStart(4, '0')}.png`));
   console.log(`[camfeed] blender delay: first=${first.join(' | ')} next=${next.join(' | ')}`);

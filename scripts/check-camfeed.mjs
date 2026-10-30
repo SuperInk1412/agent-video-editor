@@ -113,13 +113,23 @@ async function preview() {
     `gl.readPixels(W>>1,Math.round(H*0.25),1,1,gl.RGBA,gl.UNSIGNED_BYTE,b);`,
     `d.${name}={top:[...a],bottom:[...b]};}`,
   ].join('');
+  // The capture can land before the app module has run, and the rig needs the
+  // 3D world: `syncWorld` debounces 250 ms and then fetches /api/world, and
+  // until the city arrives the preview draws its flat 2D fallback, which paints
+  // every element full frame — the marker then shows where an empty delay-1
+  // feed should be black, and the live check passes for the same wrong reason.
+  // Wait for the world (bounded) instead of assuming it is there.
+  const ready = 'window.__vdm&&window.__vdm.preview&&window.__vdm.preview.scene3d&&window.__vdm.preview.scene3d.city';
   const evalJs = [
+    '(async()=>{',
+    `for(let i=0;i<100&&!(${ready});i++) await new Promise(r=>setTimeout(r,100));`,
+    `if(!(${ready})){window.__dbg={error:'preview has no 3D world (flat 2D fallback) after 10 s'};return;}`,
     'const p=window.__vdm.preview; const d={};',
     'p.render(0.5);', read('live'),
     "p.project.elements.find(e=>e.id==='el_feed').feed.delay=1; p._clearFeedTargets();",
     'p.render(0.6);', read('delayFirst'),
     'p.render(0.7);', read('delayNext'),
-    'window.__dbg=d;',
+    'window.__dbg=d;})()',
   ].join(' ');
   const r = await run(process.execPath, [
     path.join(HERE, 'dev.mjs'), '--project', PROJECT,
@@ -130,6 +140,10 @@ async function preview() {
   if (!d) {
     console.error('[camfeed] no capture output');
     console.error((r.err || r.out || '').slice(-2000));
+    return false;
+  }
+  if (d.error) {
+    console.error(`[camfeed] ${d.error}`);
     return false;
   }
   const show = (k) => `${k}: top=${d[k].top.join(',')} bottom=${d[k].bottom.join(',')}`;
