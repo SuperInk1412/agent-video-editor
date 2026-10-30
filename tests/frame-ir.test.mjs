@@ -102,12 +102,12 @@ test('frame IR: version, JSON shape and frame/time convention', () => {
   const p = demo();
   const ir = buildFrameIR(p, 24);
   assert.equal(ir.version, FRAME_IR_VERSION);
-  assert.equal(FRAME_IR_VERSION, 3);
+  assert.equal(FRAME_IR_VERSION, 4);
   assert.equal(ir.frame, 24);
   assert.equal(ir.fps, 24);
   assert.equal(ir.t, 1); // t = frame / fps (P5: whole frames only)
   assert.deepEqual(ir.size, [1920, 1080]);
-  for (const key of ['camera', 'cameraLayers', 'items', 'objects3d', 'screenFx', 'world', 'rev']) {
+  for (const key of ['camera', 'cameraLayers', 'items', 'meshes', 'objects3d', 'screenFx', 'world', 'rev']) {
     assert.ok(key in ir, `missing ${key}`);
   }
   // serialisable: a round trip is identical and nothing leaks an element object

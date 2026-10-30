@@ -12,6 +12,7 @@
 // frames (`f = round(t·fps) + 1`, §4.4); `frameFromShotV3(v3, f)` rebuilds the
 // IR frame the preview would build at `core/frame-ir.js` frame `f - 1`.
 import fs from 'node:fs/promises';
+import fss from 'node:fs';
 import path from 'node:path';
 import { bakeCameraTrack, cameraLayers, cameraTransform } from '../core/camera.js';
 import { FRAME_IR_VERSION, buildFrameIR } from '../core/frame-ir.js';
@@ -19,7 +20,7 @@ import { QUANTIZE, packV3, packV3Runs, unpackV3 } from './element-bake.js';
 import {
   cameraParamResolver, evalCameraWorldWithLinks, linksEvalOptions, objectWorldPoseWithLinks,
 } from '../core/link-eval.js';
-import { isPlane, isText, mediaSpec, textSpec, videoFrame } from '../core/objects-media.js';
+import { isFontFile, isPlane, isText, mediaSpec, textSpec, videoFrame } from '../core/objects-media.js';
 import { generateCity, cityHash } from './city.js';
 import { paths } from './storage.js';
 import { compileProject } from '../core/tracks.js';
@@ -30,6 +31,142 @@ import { RENDER_PLAN_VERSION } from '../core/version.js';
 
 const r3 = (v) => Math.round(Number(v) * 1000) / 1000;
 const OBJ_TYPES = new Set(['solid', 'shape', 'text', 'image', 'video', 'container']);
+
+// ---------------------------------------------------------------- fonts
+//
+// Text geometry is typeset in core/ (§4.4 v4, WP1.3) and needs the font *bytes*
+// here on the Node side — `core/glyphs.js` never reads a file. A style names
+// either a file (`media/x.ttf`, an absolute path) or a family ("Microsoft
+// YaHei"); the family is looked up in the OS font directory. Anything else is
+// simply absent: the IR then keeps `mesh: null` and the renderer falls back to
+// its old text path (the preview's canvas raster, Blender's FONT curve).
+//
+// The table is deliberately short: it resolves the families a project actually
+// uses (the default SimHei and the CJK / Latin faces around it) instead of
+// scanning 600 files on every render.
+const SYSTEM_FONT_FILES = {
+  simhei: ['simhei.ttf'],
+  'microsoft yahei': ['msyh.ttc', 'msyh.ttf'],
+  'microsoft yahei ui': ['msyh.ttc', 'msyh.ttf'],
+  simsun: ['simsun.ttc'],
+  nsimsun: ['simsun.ttc'],
+  'dengxian': ['Deng.ttf'],
+  '宋体': ['simsun.ttc'],
+  '黑体': ['simhei.ttf'],
+  '微软雅黑': ['msyh.ttc', 'msyh.ttf'],
+  arial: ['arial.ttf'],
+  'helvetica': ['arial.ttf'],
+  'times new roman': ['times.ttf'],
+  'courier new': ['cour.ttf'],
+  consolas: ['consola.ttf'],
+  'segoe ui': ['segoeui.ttf'],
+  'noto sans sc': ['NotoSansSC-VF.ttf'],
+  'noto serif sc': ['NotoSerifSC-VF.ttf'],
+};
+
+const FONT_SUFFIX = /\.(ttf|otf|ttc)$/i;
+
+/** Directories the font resolver may read from (also the `/api/font` whitelist). */
+export function fontDirs(root = null, env = process.env) {
+  const dirs = [];
+  if (env.WINDIR) dirs.push(path.join(env.WINDIR, 'Fonts'));
+  dirs.push('C:/Windows/Fonts');
+  try {
+    const home = env.LOCALAPPDATA;
+    if (home) dirs.push(path.join(home, 'Microsoft', 'Windows', 'Fonts'));
+  } catch { /* ignore */ }
+  if (env.HOME) {
+    dirs.push(path.join(env.HOME, 'Library', 'Fonts'), path.join(env.HOME, '.fonts'), '/usr/share/fonts');
+  }
+  if (root) {
+    dirs.push(path.join(root, 'media'), path.join(root, 'assets'), path.join(root, 'fonts'), root);
+  }
+  return [...new Set(dirs)];
+}
+
+/**
+ * Absolute path of the font file a style names, or null. A file path (relative
+ * to the project, or absolute) is accepted only when it really is a font; a
+ * family name is resolved through `SYSTEM_FONT_FILES` inside `fontDirs`.
+ */
+export function resolveFontFile(name, root = null) {
+  const wanted = String(name || '').trim();
+  if (!wanted) return null;
+  const dirs = fontDirs(root);
+  const inside = (file) => {
+    const absolute = path.resolve(file);
+    return dirs.some((dir) => {
+      const base = path.resolve(dir);
+      return absolute === base || absolute.startsWith(base + path.sep);
+    });
+  };
+  if (isFontFile(wanted) || path.isAbsolute(wanted)) {
+    const candidates = path.isAbsolute(wanted)
+      ? [wanted]
+      : dirs.map((dir) => path.join(dir, wanted));
+    for (const file of candidates) {
+      if (!FONT_SUFFIX.test(file) || !inside(file)) continue;
+      try {
+        if (fss.statSync(file).isFile()) return file;
+      } catch { /* not there */ }
+    }
+    return null;
+  }
+  const files = SYSTEM_FONT_FILES[wanted.toLowerCase()] || null;
+  if (!files) return null;
+  for (const dir of dirs) {
+    for (const file of files) {
+      const full = path.join(dir, file);
+      try {
+        if (fss.statSync(full).isFile()) return full;
+      } catch { /* not there */ }
+    }
+  }
+  return null;
+}
+
+/** Font names a project's 2D text elements use, deduped. */
+export function projectFontNames(project) {
+  const names = new Set();
+  for (const el of project?.elements || []) {
+    if (el.type !== 'text' || el.visible === false) continue;
+    names.add(String(el.style?.font || 'SimHei'));
+  }
+  return [...names];
+}
+
+/**
+ * `{ [fontName]: Uint8Array }` for every font the project's text uses — the
+ * `opts.fonts` map `buildFrameIR` / `buildShotV3` take. Unresolvable fonts are
+ * simply absent, which means the old picture path for those elements.
+ */
+export function loadProjectFonts(project, root = null) {
+  const out = {};
+  for (const name of projectFontNames(project)) {
+    const file = resolveFontFile(name, root);
+    if (!file) continue;
+    try {
+      out[name] = new Uint8Array(fss.readFileSync(file));
+    } catch { /* unreadable: no mesh */ }
+  }
+  return out;
+}
+
+/** A stable signature of the fonts a job needs (cache key of the shot package). */
+export function fontSignature(project, root = null) {
+  const parts = [];
+  for (const name of projectFontNames(project).sort()) {
+    const file = resolveFontFile(name, root);
+    if (!file) { parts.push(`${name}:none`); continue; }
+    try {
+      const st = fss.statSync(file);
+      parts.push(`${name}:${path.basename(file)}:${st.size}:${Math.round(st.mtimeMs)}`);
+    } catch {
+      parts.push(`${name}:unreadable`);
+    }
+  }
+  return parts.join('|');
+}
 
 /** A camera with a unified spatial parent needs the world wrapper; others keep the shipped bake. */
 // ...or a three-axis rotation offset (core/rotation.js), which only that path applies.
@@ -231,7 +368,7 @@ const pushFrame = (map, id, f, value) => {
  * grants the frozen IR matrix; the plane and camera pose to 1e-9 — every other
  * number is exact.
  */
-export function buildShotV3(project, { fps = null, from = 0, to = null, city = null } = {}) {
+export function buildShotV3(project, { fps = null, from = 0, to = null, city = null, fonts = null, root = null } = {}) {
   const frameRate = fps || project.meta?.fps || 24;
   const end = to ?? project.meta.duration;
   // 1-based render frames, `f = IR frame + 1` (§4.4). The last baked frame sits
@@ -240,16 +377,27 @@ export function buildShotV3(project, { fps = null, from = 0, to = null, city = n
   const f0 = Math.round(from * frameRate) + 1;
   const f1 = Math.max(f0, Math.round(end * frameRate) + 1);
   const citySnapshot = city || worldSnapshot(project);
+  // `fonts` wins when the caller already loaded them; otherwise the project root
+  // is enough (a caller that has neither gets the pre-v4 text path).
+  const fontMap = fonts || (root ? loadProjectFonts(project, root) : null);
   const itemFrames = new Map();
   const layerFrames = new Map();
   const objectFrames = new Map();
+  // Text geometry (§4.4 v4, WP1.3): the meshes are per-frame in the IR but
+  // mostly identical, so they are hoisted once into the package and each item
+  // only carries its `content.mesh` id. One parse / triangulation per session.
+  const textCache = { fonts: new Map(), glyphs: new Map(), meshes: new Map() };
+  const meshes = {};
   const cameraFrames = [];
   let head = null;
   for (let f = f0; f <= f1; f++) {
     // The IR is already in `drawOrder`; nothing here re-decides anything.
-    const ir = buildFrameIR(project, f - 1, { fps: frameRate, city: citySnapshot });
+    const ir = buildFrameIR(project, f - 1, {
+      fps: frameRate, city: citySnapshot, fonts: fontMap, textCache,
+    });
     if (!head) head = ir;
     cameraFrames.push({ i: f, f, value: ir.camera });
+    for (const [id, mesh] of Object.entries(ir.meshes)) if (!meshes[id]) meshes[id] = mesh;
     for (const it of ir.items) pushFrame(itemFrames, it.id, f, it);
     for (const l of ir.cameraLayers) pushFrame(layerFrames, l.id, f, l);
     for (const o of ir.objects3d) pushFrame(objectFrames, o.id, f, o);
@@ -292,6 +440,7 @@ export function buildShotV3(project, { fps = null, from = 0, to = null, city = n
       orderOf: layerOrder,
     }),
     items: pack(itemFrames, { quantize: QUANTIZE.element }),
+    meshes,
     objects: pack(objectFrames, { quantize: QUANTIZE.element, orderOf: objectOrder }),
   };
 }
@@ -327,6 +476,14 @@ export function frameFromShotV3(v3, frame) {
   }
   layers.sort((a, b) => a.order - b.order);
   objects3d.sort((a, b) => a.order - b.order);
+  const items = shotV3FrameItems(v3, f);
+  // Only the meshes this frame draws: the package holds every mesh of the whole
+  // shot, and a frame IR is the draw list of one frame.
+  const meshes = {};
+  for (const it of items) {
+    const id = it.content?.mesh;
+    if (typeof id === 'string' && v3.meshes?.[id]) meshes[id] = v3.meshes[id];
+  }
   return {
     version: v3.irVersion,
     rev: v3.rev,
@@ -336,17 +493,24 @@ export function frameFromShotV3(v3, frame) {
     size: v3.size,
     camera: unpackV3(v3.camera, f),
     cameraLayers: layers.map((l) => l.value),
-    items: shotV3FrameItems(v3, f),
+    items,
+    meshes,
     objects3d: objects3d.map((o) => o.value),
     screenFx: v3.screenFx,
     world: v3.world,
   };
 }
 
-export function buildShot(project, { from = 0, to = null, fps = null } = {}) {
+export function buildShot(project, { from = 0, to = null, fps = null, root = null } = {}) {
   compileProject(project);
   const frameRate = fps || project.meta.fps || 24;
   const end = to ?? project.meta.duration;
+  // Text geometry (§4.4 v4): the font bytes come from the project's root, never
+  // from core/ (which may not read a file). A font that cannot be found leaves
+  // `content.mesh` null and the renderer on its old text path. Without a root
+  // (a bare `buildShot(project)` in a test or a probe) no fonts are invented:
+  // the v3 package of such a call is exactly what it was before v4.
+  const fonts = root ? loadProjectFonts(project, root) : null;
   // a cut sequence renders through the single live-camera track below
   const layers = isCutSequence(project) ? [] : cameraLayers(project).map((cam) => bakeCameraLayer(project, cam, {
     fps: frameRate, from, to: end,
@@ -386,14 +550,23 @@ export function buildShot(project, { from = 0, to = null, fps = null } = {}) {
     },
     // v3 reads the same project once more through the IR; the legacy fields
     // above are untouched so vdm_build.py keeps rendering exactly as before.
-    v3: buildShotV3(project, { fps: frameRate, from, to: end, city }),
+    v3: buildShotV3(project, { fps: frameRate, from, to: end, city, fonts }),
   };
 }
 
-/** Write the shot package next to the render job; returns its path. */
+/**
+ * Write the shot package next to the render job; returns its path.
+ *
+ * The package depends on the font files too (§4.4 v4: text meshes), so the key
+ * carries a signature of them — a re-render after installing / editing a font
+ * must not reuse a package built with the old glyphs.
+ */
 export async function writeShot(dir, project, opts = {}) {
   const p = paths(dir);
-  const { signal, ...options } = opts;
+  const { signal, ...rest } = opts;
+  // `root` tells the shot worker where this project's fonts live; it is part of
+  // the key because two projects with the same elements may use different files.
+  const options = { ...rest, root: p.root, fontSignature: fontSignature(project, p.root) };
   // Blender overlay/sequence paths are derived data; hash the authored elements
   // only (the links themselves still invalidate the cache).
   const elements = (project.elements || []).map(({ _linkOverlay, _sequenceDir, ...el }) => el);

@@ -46,6 +46,8 @@ const RASTER_MAX_TEXTURES = 24;
 const RASTER_MAX_BYTES = 64 * 1024 * 1024;
 /** Raster requests in flight at once (the current frame plus next-frame prefetch). */
 const RASTER_MAX_INFLIGHT = 2;
+/** Uploaded text meshes kept on the GPU (a keystroke makes a new one). */
+const MESH_MAX_BUFFERS = 96;
 
 /** JSON with sorted keys, so one parameter set is one request key. */
 function stableParams(value) {
@@ -88,6 +90,35 @@ void main(){
     vec2 ndc = vec2(p.x / u_res.x * 2.0 - 1.0, 1.0 - p.y / u_res.y * 2.0);
     gl_Position = vec4(ndc, 0.0, 1.0);
   }
+}`;
+
+// Text meshes (docs/DESIGN-BACKEND-V2.md §4.4 v4, WP1.3): the IR carries the
+// glyph vertices of every text item, so the preview draws the same triangles
+// Blender does instead of rasterising a canvas and putting it on a quad. The
+// vertex buffer holds quad-local coordinates (`x/size[0] - 0.5`,
+// `0.5 - y/size[1]`), so this program is one `u_model` away from the world.
+const VERT_MESH = `#version 300 es
+in vec2 a_pos;
+uniform mat4 u_vp;
+uniform mat4 u_model;
+out vec2 v_pos;
+void main(){
+  gl_Position = u_vp * (u_model * vec4(a_pos, 0.0, 1.0));
+  v_pos = a_pos;
+}`;
+
+const FRAG_MESH = `#version 300 es
+precision highp float;
+in vec2 v_pos;
+out vec4 outColor;
+uniform vec3 u_color;
+uniform float u_opacity;
+uniform float u_glow;
+uniform float u_aCut;   // see FRAG_TEX: a see-through plane owns no pixel
+void main(){
+  float a = u_opacity;
+  if (a < u_aCut) discard;
+  outColor = vec4(u_color * (1.0 + u_glow * 2.4), a);
 }`;
 
 const FRAG_TEX = `#version 300 es
@@ -348,6 +379,20 @@ export class Preview {
     this.project = null;
     this.assets = new Map(); // id -> {kind, img/video, tex, key}
     this.textCache = new Map();
+    // Text meshes (§4.4 v4, WP1.3): the font bytes come from `/api/font`, the
+    // parsed fonts / triangulated glyphs / mesh records live in these three
+    // maps (`opts.textCache` of core/frame-ir.js), and the GPU buffers are
+    // created once per mesh id. Without the bytes the IR keeps `mesh: null` and
+    // text falls back to the canvas raster below (`_textTexture`).
+    this.fontBytes = new Map();     // font name -> Uint8Array
+    this.fontMap = {};              // the same bytes as `opts.fonts` of the IR
+    this.fontPending = new Map();   // font name -> Promise
+    this.fontFailed = new Set();    // font name -> 404 / 403; not asked again
+    this.fontEndpoint = '/api/font';
+    this.textGeometry = { fonts: new Map(), glyphs: new Map(), meshes: new Map() };
+    this.meshGpu = new Map();       // mesh id -> { vao, vbo, ibo, count, used }
+    this._meshTick = 0;             // LRU stamp for `meshGpu`
+    this.meshStats = { draws: 0, builds: 0 };
     // Frame IR for the current revision (core/frame-ir.js::IRCache): one
     // build per frame, shared by render() and hitTest().
     this._irCache = new IRCache();
@@ -391,6 +436,7 @@ export class Preview {
       tex: compile(gl, VERT, FRAG_TEX),
       layer: compile(gl, VERT, FRAG_LAYER),
       shape: compile(gl, VERT, FRAG_SHAPE),
+      mesh: compile(gl, VERT_MESH, FRAG_MESH),
       full: compile(gl, VERT, FRAG_FULL),
       bright: compile(gl, VERT, FRAG_BRIGHT),
       blur: compile(gl, VERT, FRAG_BLUR),
@@ -916,6 +962,7 @@ export class Preview {
     const p = this.project;
     const fps = Number(p.meta?.fps) || 24;
     const frame = Math.round((Number(t) || 0) * fps);
+    this._ensureFonts();
     return buildFrameIR(p, frame, {
       fps,
       camera: 'live',
@@ -923,7 +970,119 @@ export class Preview {
       soloCameras: this.soloCameras,
       cache: this._irCache,
       city: this.scene3d?.city || null,
+      // Text meshes (§4.4 v4, WP1.3): the bytes fetched from `/api/font` decide
+      // whether a text item gets `content.mesh`; the caches keep one parse and
+      // one triangulation per font / glyph for the whole session.
+      fonts: this.fontMap,
+      textCache: this.textGeometry,
     });
+  }
+
+  // ---------------------------------------------------------------- text meshes
+
+  /*
+   * `this.fontMap` is the `opts.fonts` map the IR reads: font name -> bytes. It
+   * is a live object (`buildFrameIR` enumerates its keys for the per-character
+   * fallback chain), so a font that lands after a frame was drawn appears on the
+   * next one — the IR cache is cleared when that happens, in `_fetchFont`.
+   */
+
+  /** Ask for every font this project's text uses that is not known yet. */
+  _ensureFonts() {
+    const p = this.project;
+    if (!p) return;
+    for (const el of p.elements || []) {
+      if (el.type !== 'text' || el.visible === false) continue;
+      const name = String(el.style?.font || 'SimHei');
+      if (this.fontBytes.has(name) || this.fontFailed.has(name) || this.fontPending.has(name)) continue;
+      this._fetchFont(name);
+    }
+  }
+
+  _fetchFont(name) {
+    // `fetch` of a font file is a plain byte request: no DOM, no canvas.
+    const url = name.includes('/') || /\.(ttf|otf|ttc)$/i.test(name)
+      ? `${this.fontEndpoint}?font=${encodeURIComponent(name)}`
+      : `${this.fontEndpoint}?font=${encodeURIComponent(name)}`;
+    const task = (async () => {
+      try {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`font ${res.status}`);
+        const buf = await res.arrayBuffer();
+        const bytes = new Uint8Array(buf);
+        this.fontBytes.set(name, bytes);
+        this.fontMap[name] = bytes;
+        // A frame built without the font is a frame with the old text path: drop
+        // it so the next render (the idle loop redraws within 100 ms) uses the
+        // mesh. `meshes` is keyed by content hash, so it can stay.
+        this._irCache.clear();
+      } catch {
+        this.fontFailed.add(name);
+      } finally {
+        this.fontPending.delete(name);
+      }
+    })();
+    this.fontPending.set(name, task);
+  }
+
+  /** True when every font this project needs has been fetched (or given up on). */
+  fontsReady() {
+    this._ensureFonts();
+    return this.fontPending.size === 0;
+  }
+
+  /** Promise that settles when the font requests in flight are done. */
+  async whenFontsReady() {
+    while (this.fontPending.size) await Promise.all([...this.fontPending.values()]);
+    return this.fontsReady();
+  }
+
+  /** GPU buffers of one IR mesh (positions in quad-local coordinates). */
+  _meshGpuFor(id, mesh) {
+    const hit = this.meshGpu.get(id);
+    if (hit) { hit.used = ++this._meshTick; return hit; }
+    const gl = this.gl;
+    const size = Array.isArray(mesh.size) ? mesh.size : [1, 1];
+    const w = Number(size[0]) || 1;
+    const h = Number(size[1]) || 1;
+    const verts = mesh.vertices || [];
+    const local = new Float32Array(verts.length);
+    for (let i = 0; i + 1 < verts.length; i += 2) {
+      local[i] = verts[i] / w - 0.5;
+      local[i + 1] = 0.5 - verts[i + 1] / h;
+    }
+    const vbo = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+    gl.bufferData(gl.ARRAY_BUFFER, local, gl.STATIC_DRAW);
+    const ibo = gl.createBuffer();
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint32Array(mesh.indices || []), gl.STATIC_DRAW);
+    const vao = gl.createVertexArray();
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 8, 0);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
+    gl.bindVertexArray(null);
+    const entry = { vao, vbo, ibo, count: (mesh.indices || []).length, used: ++this._meshTick };
+    this.meshGpu.set(id, entry);
+    this.meshStats.builds += 1;
+    // Typing changes the text, so mesh ids come and go: keep the uploaded set
+    // bounded (oldest upload first) instead of growing for the whole session.
+    if (this.meshGpu.size > MESH_MAX_BUFFERS) this._evictMeshes();
+    return entry;
+  }
+
+  _evictMeshes() {
+    const gl = this.gl;
+    const byAge = [...this.meshGpu.entries()].sort((a, b) => a[1].used - b[1].used);
+    const drop = byAge.slice(0, Math.max(1, byAge.length - MESH_MAX_BUFFERS));
+    for (const [id, entry] of drop) {
+      gl.deleteVertexArray(entry.vao);
+      gl.deleteBuffer(entry.vbo);
+      gl.deleteBuffer(entry.ibo);
+      this.meshGpu.delete(id);
+    }
   }
 
   // ---------------------------------------------------------------- code layers
@@ -1166,25 +1325,40 @@ export class Preview {
         },
       };
       if (item.kind === 'text') {
-        // Typesetting still happens here until WP1.3 moves glyph geometry into
-        // the IR (§4.4: text `size` is null and the consumer measures it).
-        const style = {
-          font: c.font,
-          weight: c.weight,
-          align: c.align,
-          lineHeight: c.lineHeight,
-          letterSpacing: c.letterSpacing,
-          shadow: c.shadow,
-          stroke: c.stroke,
-          strokeWidth: c.strokeWidth,
-        };
-        const zoom = this._textZoomFor(layer, feedCams, ir);
-        const tt = this._textTexture(el, { size: c.fontSize, text: c.text, color: c.color }, style, zoom);
-        layer.kind = 'tex';
-        layer.tex = tt.tex;
-        layer.quad = [tt.w / tt.zoom / S, tt.h / tt.zoom / S];
-        layer.w = tt.w / tt.zoom;
-        layer.h = tt.h / tt.zoom;
+        // v4: the IR carries the glyph mesh and its typeset box (§4.4, WP1.3).
+        // Draw the vertices — the same triangles Blender builds. A text item
+        // without a mesh (no font bytes, or a style the mesh path does not
+        // cover: shadow / stroke) keeps the pre-v4 canvas raster.
+        const mesh = c.mesh ? ir.meshes?.[c.mesh] : null;
+        if (mesh) {
+          layer.kind = 'mesh';
+          layer.mesh = mesh;
+          layer.meshId = c.mesh;
+          layer.color = mesh.color && mesh.color.length === 3 ? mesh.color : hexRgb(c.color);
+          layer.opacity = (Number(item.opacity) || 0) * (Number.isFinite(Number(mesh.opacity)) ? Number(mesh.opacity) : 1);
+          layer.quad = [item.size[0], item.size[1]];
+          layer.w = item.size[0] * S;
+          layer.h = item.size[1] * S;
+        } else {
+          // Typesetting for the fallback still happens here (pre-v4 behaviour).
+          const style = {
+            font: c.font,
+            weight: c.weight,
+            align: c.align,
+            lineHeight: c.lineHeight,
+            letterSpacing: c.letterSpacing,
+            shadow: c.shadow,
+            stroke: c.stroke,
+            strokeWidth: c.strokeWidth,
+          };
+          const zoom = this._textZoomFor(layer, feedCams, ir);
+          const tt = this._textTexture(el, { size: c.fontSize, text: c.text, color: c.color }, style, zoom);
+          layer.kind = 'tex';
+          layer.tex = tt.tex;
+          layer.quad = [tt.w / tt.zoom / S, tt.h / tt.zoom / S];
+          layer.w = tt.w / tt.zoom;
+          layer.h = tt.h / tt.zoom;
+        }
       } else if (item.kind === 'image' || item.kind === 'video') {
         const a = this.assets.get(item.id);
         if (!a || !a.ready || !a.tex) continue;
@@ -1372,7 +1546,7 @@ export class Preview {
     let list = layers;
     if (world) {
       list = orderLayers(layers, world.camPos);
-      for (const pr of [this.prog.tex, this.prog.shape]) {
+      for (const pr of [this.prog.tex, this.prog.shape, this.prog.mesh]) {
         gl.useProgram(pr.program);
         gl.uniformMatrix4fv(pr.u.u_vp, false, world.vp);
       }
@@ -1396,7 +1570,7 @@ export class Preview {
         // pixel: writing depth there would cut a hole into the stack behind it
         // while still blending, so it stays sorting-only (方案 §四 风险).
         const ownsDepth = !!world && !!layer.depth?.write;
-        const pr = layer.kind === 'tex' ? this.prog.tex : this.prog.shape;
+        const pr = layer.kind === 'tex' ? this.prog.tex : layer.kind === 'mesh' ? this.prog.mesh : this.prog.shape;
         if (layer.kind === 'tex') {
           gl.useProgram(pr.program);
           gl.uniform2f(pr.u.u_res, W, H);
@@ -1408,6 +1582,33 @@ export class Preview {
           gl.activeTexture(gl.TEXTURE0);
           gl.bindTexture(gl.TEXTURE_2D, layer.feed ? this._feedTexture(layer.feed) : layer.tex);
           gl.uniform1i(pr.u.u_tex, 0);
+        } else if (layer.kind === 'mesh') {
+          // The glyph triangles of a text item: one VBO per mesh id, positioned
+          // by the same `u_model` the textured quads use, so a text plane and a
+          // picture plane cannot diverge.
+          const gpu = this._meshGpuFor(layer.meshId, layer.mesh);
+          gl.useProgram(pr.program);
+          if (mode) gl.uniformMatrix4fv(pr.u.u_model, false, layer.model);
+          gl.uniform3f(pr.u.u_color, layer.color[0], layer.color[1], layer.color[2]);
+          gl.uniform1f(pr.u.u_opacity, layer.opacity);
+          gl.uniform1f(pr.u.u_glow, layer.glow);
+          if (ownsDepth) {
+            // Same two-pass recipe as a textured plane: the depth-only pass
+            // claims the pixel, the colour pass at u_aCut 0 draws it.
+            gl.colorMask(false, false, false, false);
+            gl.depthMask(true);
+            gl.uniform1f(pr.u.u_aCut, layer.depth.cut);
+            gl.bindVertexArray(gpu.vao);
+            gl.drawElements(gl.TRIANGLES, gpu.count, gl.UNSIGNED_INT, 0);
+            gl.colorMask(true, true, true, true);
+            gl.depthMask(false);
+          }
+          gl.uniform1f(pr.u.u_aCut, 0);
+          gl.bindVertexArray(gpu.vao);
+          gl.drawElements(gl.TRIANGLES, gpu.count, gl.UNSIGNED_INT, 0);
+          gl.bindVertexArray(this.vao);
+          this.meshStats.draws += 1;
+          continue;
         } else {
           // Solid/shape keeps the existing SDF fragment shader (rect / rounded
           // rect / ellipse) — only its quad placement comes from the IR.

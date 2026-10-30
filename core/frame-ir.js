@@ -51,9 +51,10 @@ import { basisFromDir } from './scene.js';
 import { mediaSpec, textSpec, videoFrame } from './objects-media.js';
 import { LAYER_DEPTH_M, nodePlaneModel, orderLayers, planeOfFrame } from './layers.js';
 import { codeLayerPlan } from './code-layer.js';
+import { parseFont, textMesh, textMeshId } from './glyphs.js';
 
 /** Bump when the shape of a FrameIR changes (frozen key, §4 / §12). */
-export const FRAME_IR_VERSION = 3;
+export const FRAME_IR_VERSION = 4;
 
 /** One project pixel in metres (unified space, docs/DESIGN-UNIFIED-SPACE.md). */
 export const PIXEL_M = 0.01;
@@ -297,6 +298,110 @@ export function mediaUVOf(fit, iw, ih, frame) {
 /** 3D object types that draw something (same set engine/shot.js::bakeObjects bakes). */
 const DRAWABLE_OBJECTS = new Set(['solid', 'shape', 'text', 'image', 'video', 'container']);
 
+/** Font bytes for a text style: `opts.fonts` is a map or a resolver, else null. */
+export function fontBytesOf(fonts, name) {
+  if (!fonts) return null;
+  const key = String(name || 'SimHei');
+  if (typeof fonts === 'function') {
+    const got = fonts(key);
+    return got || null;
+  }
+  const got = fonts[key];
+  return got || null;
+}
+
+/** Mesh vertices are rounded to a thousandth of a pixel (JSON size, §4.4 v4). */
+const r3 = (v) => Math.round(Number(v) * 1e3) / 1e3 + 0;
+
+/**
+ * The glyph geometry of one text item (§4.4 v4, WP1.3): typeset here, in core/,
+ * so both backends draw the same vertices instead of each measuring the text.
+ *
+ * Returns `null` — the pre-v4 path — when
+ *
+ *   * the caller gave no fonts (`opts.fonts`), or the font's bytes are missing;
+ *   * the format is not one the parser reads (CFF/OTF reports UNSUPPORTED_FONT);
+ *   * the style uses a feature the mesh path does not draw (`shadow`, `stroke`).
+ *
+ * `content.mesh` stays null and `content`'s consumer keeps its old picture.
+ *
+ * `cache` = `{ fonts, glyphs, meshes }` (three Maps) lets a caller that builds
+ * the IR every frame parse a font once and triangulate a glyph once.
+ */
+export function textGeometryOf(content, fonts, cache = null) {
+  if (!fonts) return null;
+  if (num(content?.shadow) > 0) return null;
+  if (content?.stroke && num(content?.strokeWidth) > 0) return null;
+  // The parsed font is cached by the *style's* font name: hashing 20 MB of bytes
+  // per frame would cost more than the geometry itself.
+  const fontName = String(content?.font || 'SimHei');
+  let font = cache?.fonts?.get(fontName) || null;
+  if (!font) {
+    const bytes = fontBytesOf(fonts, fontName);
+    if (!bytes) return null;
+    try {
+      font = parseFont(bytes);
+    } catch {
+      // UNSUPPORTED_FONT / BAD_FONT: the consumer falls back to its own path.
+      return null;
+    }
+    if (cache?.fonts) cache.fonts.set(fontName, font);
+  }
+  // Per-character fallback: the other fonts this project resolved, in a stable
+  // order, so a CJK glyph inside an Arial line is drawn (the canvas raster this
+  // replaces had the browser's own fallback chain). A resolver function cannot
+  // be enumerated, so such a caller gets the primary font only.
+  const chain = [font];
+  if (fonts && typeof fonts !== 'function') {
+    for (const name of Object.keys(fonts).filter((n) => n !== fontName).sort()) {
+      let other = cache?.fonts?.get(name) || null;
+      if (!other) {
+        const bytes = fontBytesOf(fonts, name);
+        if (!bytes) continue;
+        try {
+          other = parseFont(bytes);
+        } catch {
+          continue;
+        }
+        if (cache?.fonts) cache.fonts.set(name, other);
+      }
+      chain.push(other);
+    }
+  }
+  const style = {
+    fontSize: num(content.fontSize),
+    lineHeight: num(content.lineHeight),
+    letterSpacing: num(content.letterSpacing),
+    align: content.align,
+  };
+  // The id names the whole chain: the same text in the same size is a different
+  // mesh when a fallback font (and so a glyph) changes.
+  const id = textMeshId(chain.map((f) => f.hash).join('+'), content.text, style);
+  const cached = cache?.meshes?.get(id);
+  if (cached) return cached;
+  const built = textMesh(chain, content.text, style, cache?.glyphs ? { cache: cache.glyphs } : {});
+  // A character no font of the chain can draw: keep the consumer's own path
+  // (the pre-v4 picture) rather than rendering a hole.
+  if (!built.indices.length || built.missing.length) return null;
+  const size = [Math.max(1, r3(built.size[0])), Math.max(1, r3(built.size[1]))];
+  const vertices = new Array(built.vertices.length);
+  for (let i = 0; i < built.vertices.length; i++) vertices[i] = r3(built.vertices[i]);
+  const rec = {
+    id,
+    size,
+    mesh: {
+      vertices,
+      indices: built.indices,
+      color: colorOf(content.color),
+      // The mesh's own flat alpha; a fade lives on the item's `opacity` (§4.4).
+      opacity: 1,
+      size,
+    },
+  };
+  if (cache?.meshes) cache.meshes.set(id, rec);
+  return rec;
+}
+
 /**
  * 3D objects live on this frame, in the same shape engine/shot.js::bakeObjects
  * bakes them: a unit-basis world matrix, `size` = geometry × |scale|, plus the
@@ -382,6 +487,12 @@ export function buildFrameIR(project, frame, opts = {}) {
 
   const eye = eyeOf(project, t, opts);
   const nodeOpts = linksEvalOptions(project);
+  // Text geometry (§4.4 v4): `opts.fonts` carries the font bytes, the caches
+  // keep a per-frame IR build from re-parsing a 20 MB font or re-triangulating
+  // a glyph. `meshes` is this frame's self-contained mesh map.
+  const fonts = opts.fonts || null;
+  const textCache = opts.textCache || null;
+  const meshes = {};
   const layers = [];
   const ids = [];
   const elements = Array.isArray(project.elements) ? project.elements : [];
@@ -406,8 +517,12 @@ export function buildFrameIR(project, frame, opts = {}) {
     let quad = null;
     if (el.type === 'text') {
       kind = 'text';
-      // The box is the typesetting result; until WP1.3 owns glyph geometry the
-      // consumer measures it and passes the size to itemModelMatrix().
+      // Text geometry is typeset in core/ (§4.4 v4, WP1.3): the mesh is the
+      // glyph outlines of this exact text, its `size` is the typeset box, and
+      // both backends draw the same vertices. Without font bytes — or for a
+      // style the mesh path does not cover (shadow / stroke) — `mesh` and `size`
+      // stay null and the consumer falls back to its own picture path, exactly
+      // as before v4.
       content = {
         text: String(st.text ?? ''),
         fontSize: num(st.size, 96) || 96,
@@ -421,7 +536,14 @@ export function buildFrameIR(project, frame, opts = {}) {
         stroke: style.stroke || '',
         strokeWidth: num(style.strokeWidth),
         uv: [0, 0, 1, 1],
+        mesh: null,
       };
+      const built = textGeometryOf(content, fonts, textCache);
+      if (built) {
+        content.mesh = built.id;
+        if (!meshes[built.id]) meshes[built.id] = built.mesh;
+        quad = built.size;
+      }
     } else if (el.type === 'image' || el.type === 'video') {
       kind = el.type;
       content = {
@@ -578,6 +700,7 @@ export function buildFrameIR(project, frame, opts = {}) {
     camera,
     cameraLayers: stack,
     items,
+    meshes,
     objects3d,
     screenFx: screenFxOf(meta),
     world: {

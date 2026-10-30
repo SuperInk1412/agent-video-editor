@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { normalizeProject } from '../core/schema.js';
 import {
-  bakeObjects, buildShot, buildShotV3, frameFromShotV3, shotV3FrameItems, worldSnapshot,
+  bakeObjects, buildShot, buildShotV3, frameFromShotV3, loadProjectFonts, shotV3FrameItems, worldSnapshot,
 } from '../engine/shot.js';
 import { elementV3, unpackV3 } from '../engine/element-bake.js';
 import { FRAME_IR_VERSION, buildFrameIR } from '../core/frame-ir.js';
@@ -447,3 +447,87 @@ test('shot v3: the whole miku-swiss copy round-trips (optional real data)', (t) 
   assert.ok(worstWorld <= 1e-6 && worstOther <= 1e-9);
 });
 
+
+// ---------------------------------------------------------------- text meshes
+
+/**
+ * Text geometry (§4.4 v4, WP1.3): `buildShotV3` typesets the text in JS and the
+ * package carries the glyph meshes, so Blender only builds a mesh from the same
+ * vertices. The font is copied into the project's media so the test does not
+ * depend on a system font being installed under the name it looks for.
+ */
+function textProjectWithFont() {
+  const system = ['C:/Windows/Fonts/arial.ttf', '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf']
+    .find((f) => fs.existsSync(f));
+  if (!system) return null;
+  const dir = fs.mkdtempSync(path.join(root, '.scratch', 'shot-text-'));
+  fs.mkdirSync(path.join(dir, 'media'), { recursive: true });
+  fs.copyFileSync(system, path.join(dir, 'media', 'face.ttf'));
+  const p = normalizeProject({
+    schema: 'vdm.project/1', rev: 3,
+    meta: { title: 'text', fps: 12, width: 640, height: 360, duration: 1.5, background: '#000' },
+    segments: [], elements: [],
+    cameras: [{ id: 'cam_a', name: 'A', visible: true, start: 0, duration: 1.5,
+      path: [{ t: 0, pos: [0, 5, 18], look: [0, 5, 0] }] }],
+    cameraOrder: ['cam_a'],
+    activeCameraId: 'cam_a',
+    world: { source: 'none' },
+  });
+  applyOp(p, {
+    op: 'addElement',
+    element: {
+      id: 'el_text', type: 'text', start: 0, duration: 1.5, z: 1,
+      transform: { x: 0, y: 0 },
+      // ASCII only: the chain has this one face, and a character no font of the
+      // chain maps keeps the old path on purpose (see the glyphs test).
+      style: { text: 'Hi 42', font: 'media/face.ttf', size: 48, color: '#ffffff', align: 'center', lineHeight: 1.2 },
+    },
+  });
+  return { p, dir };
+}
+
+test('shot v3: text meshes travel in the package and rebuild the same frame IR', (t) => {
+  const made = textProjectWithFont();
+  if (!made) { t.diagnostic?.('skipped: no system font to copy'); return; }
+  const { p, dir } = made;
+  try {
+    const v3 = buildShotV3(p, { fps: 12, from: 0, to: 1.5, root: dir });
+    const ids = Object.keys(v3.meshes);
+    assert.ok(ids.length > 0, 'the package carries the glyph meshes');
+    assert.equal(ids.length, 1, 'one geometry for one text / size / spacing / align');
+    const record = v3.meshes[ids[0]];
+    assert.ok(record.vertices.length > 0 && record.indices.length > 0);
+    assert.ok(record.vertices.every(Number.isFinite));
+    assert.ok(Array.isArray(record.size) && record.size[0] > 0);
+    const frame = frameFromShotV3(v3, v3.f0 + 2);
+    const item = frame.items.find((it) => it.id === 'el_text');
+    assert.equal(item.content.mesh, ids[0], 'the item names its mesh');
+    assert.deepEqual(item.size, record.size, 'the item box is the mesh box');
+    assert.deepEqual(frame.meshes[ids[0]], record, 'the frame carries only the meshes it draws');
+    // the package is plain JSON and survives a round trip
+    const copy = JSON.parse(JSON.stringify(v3));
+    assert.deepEqual(copy.meshes, v3.meshes);
+    // the same IR built from the project alone produces the same mesh record
+    const fonts = loadProjectFonts(p, dir);
+    const want = buildFrameIR(p, v3.f0 + 1, { fps: 12, city: { hash: v3.world.hash }, fonts });
+    assert.deepEqual(want.items.find((it) => it.id === 'el_text').content.mesh, item.content.mesh);
+    assert.deepEqual(want.meshes[ids[0]], record, 'the package mesh is the IR mesh');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('shot v3: without the project root a text item keeps the v3 shape', (t) => {
+  const made = textProjectWithFont();
+  if (!made) { t.diagnostic?.('skipped: no system font to copy'); return; }
+  const { p, dir } = made;
+  try {
+    const v3 = buildShotV3(p, { fps: 12, from: 0, to: 1.5 });
+    assert.deepEqual(v3.meshes, {}, 'no fonts, no meshes');
+    const [rec] = v3.items.filter((r) => r.id === 'el_text');
+    assert.equal(rec.static.size, null, 'the consumer still typesets the box');
+    assert.equal(rec.static.content.mesh, null, 'and its mesh is null');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

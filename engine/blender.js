@@ -11,7 +11,7 @@ import { paths } from './storage.js';
 import { audioElements } from '../core/audio.js';
 import { elementLinkOverlayTable } from '../core/link-eval.js';
 import { encodeSequence, extractSequence, fileExists, hashOf, hashFile } from './media.js';
-import { buildShotV3, is3D, writeShot } from './shot.js';
+import { buildShotV3, is3D, loadProjectFonts, writeShot } from './shot.js';
 import { prepareObjectSequences } from './media-objects.js';
 import { jobFrames, prepareFeeds } from './camfeed-render.js';
 import { bakeElementPlacements } from './element-bake.js';
@@ -123,7 +123,7 @@ export async function prepareSequences(dir, project, { onLog, signal } = {}) {
  * No city snapshot is needed: a job on this path has no 3D world to draw
  * (`world.hash` stays null).
  */
-function shotV3ForJob(project, job) {
+function shotV3ForJob(project, job, fonts = null) {
   const fps = Number(project.meta?.fps) || 24;
   const duration = Number(project.meta?.duration) || 0;
   let [f0, f1] = jobFrames(job, fps, duration);
@@ -139,6 +139,7 @@ function shotV3ForJob(project, job) {
     from: (Math.max(1, f0 - 1) - 1) / fps,
     to: (f1 + 1 - 1) / fps,
     city: { hash: null },
+    fonts,
   });
 }
 
@@ -172,7 +173,11 @@ export async function runJob(dir, job, { onProgress, onLog, signal } = {}) {
     // it unless the Python builder is on the v3 path.
     seqProject.v3 = shot.v3;
   } else {
-    seqProject.v3 = shotV3ForJob(seqProject, job);
+    // Text geometry (§4.4 v4): the meshes are typeset here, in JS, from the
+    // project's font files — Blender only draws the vertices, so it needs no
+    // font of its own. A font that cannot be found leaves the old FONT-curve
+    // path in place for that element.
+    seqProject.v3 = shotV3ForJob(seqProject, job, loadProjectFonts(seqProject, p.root));
   }
   await fs.writeFile(projFile, JSON.stringify(seqProject, null, 2));
   await fs.writeFile(jobFile, JSON.stringify(payload, null, 2));

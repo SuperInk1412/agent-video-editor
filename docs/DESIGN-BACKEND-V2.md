@@ -189,7 +189,7 @@ miku-swiss（138 元素、8 相机）：`buildFrameIR` 单帧 ≤ 3 ms（播放�
 |---|---|---|
 | `world` | 列主序 4×4，把「四边形的**项目像素**坐标」映射到世界米。有 node / 父级的元素与 `elementPixelMatrix` 逐位相同（不取整）；旧屏幕路径的元素由同一套屏幕数据推出等价矩阵 | WP0.1 验收要求两者相同；两种元素走同一个绘制路径 |
 | 四边形局部坐标 | lx, ly ∈ [-0.5, 0.5]，图片**上边**在 ly = +0.5，采样 `uv = (lx+0.5, 0.5-ly)`；`itemModelMatrix(item, size)` 是唯一的「IR → 顶点矩阵」转换 | 后端不再各自决定翻转；文字/图形/图片同一约定 |
-| `size` | 项目像素；`null` = 内容自己排版（**只有 text**，WP1.3 之前测量在消费方） | 文字几何统一是 WP1.3；在那之前 IR 不假装会量字 |
+| `size` | 项目像素；`null` = 内容自己排版（**只有 text**，WP1.3 之前测量在消费方） | 文字几何统一是 WP1.3；在那之前 IR 不假装会量字。**v4**：有字体时文字在 core/ 排版，`size` 就是排版框（见本节末尾 v4 段） |
 | `content.uv` | **图片空间**（0,0 = 内容自己的左上）；`null` = 素材固有尺寸不在工程里，后端用 `mediaUVOf(fit, iw, ih, size)`（唯一实现）。`stretch` 用整张图，其余（含 `contain`）按 **cover** 裁——2D 元素是全幅平面，没有黑边。相机投屏的目标纹理是自下而上，翻转是后端的事 | 工程不存素材尺寸；避免第三个 coverUV 实现；WP4.1 编译时写入固有尺寸后再带 uv |
 | `content`（v3 新增 `raster` 项） | `code` 元素产出一个 `kind: "raster"` 的 item，`content = { source: { id, runtime }, params（**这一帧**求好的值，来自 `core/code-layer.js::codeLayerPlan`）, seed, size（光栅像素尺寸 = `code.size`，缺省项目尺寸）, mode: "live" \| "bake"（= `code.cache`） }`。四边形 `size` 仍是整幅项目画布（与 image / video 同义），光栅铺满四边形（uv 全幅，故不带 `uv`）。`drawOrder` / `plane` / `src` / `z` / `opacity` / `blend` / `crop` / `effects` / `source` / `content.glow` 与普通 2D 项完全相同 | 光栅只有一份实现（渲染池，§5）；IR 只带请求、不带像素；参数在 core 一次算完，消费方不再求值（P2） |
 | `depth` | `{ write, cut, bias }`；`write = 有 node/父级 && opacity ≥ 0.5`（原 `preview.js::DEPTH_ALPHA`），`cut` 是深度专用遍的 `u_aCut`（同一个 0.5），`bias = LAYER_DEPTH_M·el.z` 米，沿法线。写深度的后端必须画两遍：先 `cut`  discard 的深度遍，再 `u_aCut = 0` 的颜色遍，否则文字框会在背后挖洞 | 问题四的规则原样搬进来；两遍配方不能靠后端猜 |
@@ -201,6 +201,7 @@ miku-swiss（138 元素、8 相机）：`buildFrameIR` 单帧 ≤ 3 ms（播放�
 | `objects3d` | 只放这一帧活着的**可画**对象（`solid/shape/text/image/video/container`，`empty/camera/audio` 不画）：`{ id, type, world（单位基，含 pivot 与父级）, size（geom × |scale|）, opacity, color, emissive, media/text, frame（视频） }` | 与 `engine/shot.js::bakeObjects` 同形；`world` 与 `size` 不重复乘 scale |
 | `world` | `{ source, background, hash }`；城市几何按 hash 取快照（`opts.city` 传进来，`hash` 来自它），IR 不装几何；工程没有 world 时 `source = 'none'` | 城市生成在引擎侧（只有 node 能用），core 不能生成；清屏色是画一帧需要的 |
 | `effects` | 预留；本轮渲染器只用 `content.glow` | 画面效果与预设是 WP3.5 |
+| `meshes`（v4 新增） | `{ id: { vertices, indices, color, opacity, size } }`，顶点是四边形局部像素（原点左上、y 向下，0..size）；文字 item 用 `content.mesh` 引用。没有字体 / 格式不支持 / 样式走旧路径时整条为空 | 文字几何只做一次（§8.5、WP1.3），两个后端画同一份三角形；`size` 让记录自解释，`color/opacity` 只是生成时刻的样式 |
 | `viewport` | 不参与 IR（IR 的单位是项目像素），只用于后端自己的帧缓冲 | 分辨率无关 |
 | 数值卫生 | 矩阵里的 `-0` 归一化成 `0` | JSON 不能表示 -0，冻结的 IR 必须能原样往返 |
 
@@ -263,7 +264,45 @@ WP0.3 `cfa151c`——全部合入 master，§4 冻结。**R1、R2、WP3.1 可以
    `> 300 ms` 或请求失败退到同通道最近一次成功的帧，纹理按该键复用并按上限淘汰（不每帧新建、不漏显存）。
 3. Blender 侧见 WP3.4（`raster` 项按图像序列平面处理，复用视频平面路径）；本轮 `blender/*` 未改。
 
+**v4 变更（WP1.3，2026-10-30）**：`FRAME_IR_VERSION = 4`。文字几何统一到 core/：**排版和三角化只做一次**，
+两个后端画同一份网格（DESIGN-PRESETS §8.5，消除预览与成片之间约 20 px 的竖直偏差）。
+没有改任何已有字段的语义，只新增三个东西：
+
+1. **item 上**：`kind: "text"` 的 item 多一个 `content.mesh`（网格 id 字符串，如 `h_ab12cd…`）和
+   `size = [w, h]`（`core/glyphs.js::layoutText` 排出来的框，项目像素）。**没有字体时这两个字段是 `null`**：
+   消费方照旧自己量字（v3 行为），这条是回落路径，不是降级。
+2. **顶层 `meshes`**（自包含，IR 仍可整体 JSON 化）：
+   `{ "<id>": { "vertices": [x0,y0,…], "indices": [i0,i1,i2,…], "color": [r,g,b], "opacity": 1, "size": [w,h] } }`。
+   顶点是**四边形局部像素，原点左上、y 向下**，范围 0..size；消费方按本节的贴图约定映射：
+   `lx = x/size[0] - 0.5`、`ly = 0.5 - y/size[1]`，再乘自己的 `itemModelMatrix` / `world × size`。
+   `indices` 是三角形列表（三角形不需要绕序约定：两个后端都不做背面剔除）。
+   `size` 让记录自解释（顶点要以什么框为基准居中），`color` / `opacity` 是**生成时刻的样式**——
+   逐帧可变的是 item 自己的 `content.color` 与 `opacity`（淡入淡出不产生新网格）。
+3. **去重键** = 字体内容哈希 + 文本 + 字号 + 字距 + 行高 + 对齐（`core/glyphs.js::textMeshId`）。
+   颜色 / 不透明度**不进键**：它们逐帧可变，进键会让每一次淡入淡出都生成一条网格。
+   同一个键在一帧的 `meshes` 里只出现一次，多帧相同的网格在 v3 包里只存一份。
+
+`buildFrameIR(project, frame, opts)` 新增两个可选参数（不是 IR 的一部分）：
+`opts.fonts`（`{ [字体名]: Uint8Array }` 或 `name -> Uint8Array | null` 的解析器）和
+`opts.textCache = { fonts, glyphs, meshes }`（三张 Map：解析后的字体、字形模板、网格记录）。
+**core 不读文件**：预览通过 `GET /api/font?font=<家族名或项目内路径>` 取字节（只读路由，白名单目录 +
+`.ttf/.otf/.ttc`，其余 403），成片在 `engine/shot.js` 里按项目根取字节。字体格式：TrueType
+（`glyf`/`loca`，含复合字形，`cmap` 4/12，`ttcf` 取第一个 face）已实现；CFF/OTF 抛 `UNSUPPORTED_FONT`，
+调用方回落旧路径。逐字回退：item 的字体缺某个字时，按本项目其他字体（稳定排序）找一个有的；全都没有
+⇒ 整条回落到旧路径（不画空洞）。`shadow > 0` 或 `stroke` + `strokeWidth > 0` 的样式同样留在旧路径。
+
+消费方：预览按 mesh id 缓存一个 VBO/VAO（顶点预换算成 `lx, ly`），纯色 + `u_opacity` + `u_glow`；
+Blender 用 `from_pydata` 建同一个三角形列表（顶点换成 `(x - w/2, h/2 - y)`），材质颜色 = `color`，
+不再建 FONT 曲线。v3 包把 `meshes` 一起带走（`buildShotV3` 顶层 `meshes`、`frameFromShotV3` 只还原
+这一帧用到的那些），Blender 端不需要字体文件。
+
+**验收数字**（2026-10-30，WP1.3 见下文状态）：文字对拍用例 H（两种字体、3 行、中英日混排，1920×1080
+逐像素）预览 vs 成片差 **0.43 %**（阈值 >24 灰阶，允许 1 %）；A–G 仍 PASS（144 格差 1 格，允许 4）；
+miku-swiss 副本 0–450 帧：**隐藏文字后新旧预览 452 帧逐像素相同（0 个不同像素）**，文字框内的差异
+只是边缘抗锯齿；成片文字竖直位置从比预览高 24–27 px 移到**与预览完全相同**（0 px）。
+
 ---
+
 
 ## 5. RenderWorkerPool：单一光栅渲染器
 

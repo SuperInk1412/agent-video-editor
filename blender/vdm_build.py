@@ -174,6 +174,10 @@ class ShotV3:
         self.payload = payload if isinstance(payload, dict) else None
         self.records = {}
         self.spans = {}
+        # Text geometry (§4.4 v4, WP1.3): the package carries the glyph meshes
+        # core/glyphs.js triangulated, once per mesh id; an item only says which
+        # one it draws. This side never typesets and needs no font file.
+        self.meshes = (self.payload or {}).get('meshes') or {}
         for record in (self.payload or {}).get('items') or []:
             ident = record.get('id') if isinstance(record, dict) else None
             if not isinstance(ident, str):
@@ -201,6 +205,23 @@ class ShotV3:
             if value is not None:
                 return value
         return None
+
+    def mesh_ids(self, ident):
+        """Mesh ids a text item can draw over its whole span (content.mesh)."""
+        found = []
+        for record in self.records.get(ident) or []:
+            if not isinstance(record, dict):
+                continue
+            static = (record.get('static') or {}).get('content') or {}
+            mid = static.get('mesh')
+            if isinstance(mid, str) and mid not in found:
+                found.append(mid)
+            track = (record.get('tracks') or {}).get('content.mesh')
+            if isinstance(track, dict):
+                for value in track.get('values') or []:
+                    if isinstance(value, str) and value not in found:
+                        found.append(value)
+        return [mid for mid in found if isinstance(self.meshes.get(mid), dict)]
 
 
 def load_shot_v3(project, opts=None):
@@ -845,6 +866,37 @@ class SceneBuilder:
             pass
         return obj, nodes
 
+    def build_text_mesh(self, el, style, st0, mesh):
+        """One text mesh from the IR's glyph triangles (§4.4 v4, WP1.3).
+
+        `mesh.vertices` are quad-local project pixels, origin top-left, y down
+        (core/glyphs.js); Blender's pixel scene has y up and its origin at the
+        quad centre, so a vertex becomes `(x - w/2, h/2 - y)`. The quad's world
+        placement comes from `item_matrix`, exactly like a textured plane, which
+        is what makes preview and Blender draw the same picture.
+        """
+        size = mesh.get('size') or [1, 1]
+        w = _num(size[0], 1.0) or 1.0
+        h = _num(size[1], 1.0) or 1.0
+        verts = mesh.get('vertices') or []
+        idx = mesh.get('indices') or []
+        points = []
+        for i in range(0, len(verts) - 1, 2):
+            points.append((_num(verts[i]) - w / 2.0, h / 2.0 - _num(verts[i + 1]), 0.0))
+        faces = []
+        for i in range(0, len(idx) - 2, 3):
+            faces.append((int(idx[i]), int(idx[i + 1]), int(idx[i + 2])))
+        me = bpy.data.meshes.new(f"{el['id']}_mesh")
+        if points and faces:
+            me.from_pydata(points, [], faces)
+        me.update()
+        # `mesh.color` is the sRGB triple the preview draws with; the IR's
+        # content colour is the fallback (they only differ if the mesh is shared)
+        color = mesh.get('color') if isinstance(mesh.get('color'), (list, tuple)) else st0.get('color')
+        mat, nodes = flat_material(f"{el['id']}_mat", color, st0['opacity'])
+        obj = self.add_object(me, mat, el['id'])
+        return obj, nodes
+
     def build_media(self, el, style, st0, src_path, sequence=None):
         if sequence:
             # Image.frame_duration is read-only (Blender 5.2+); the frame count
@@ -986,6 +1038,21 @@ class SceneBuilder:
             tex = None
 
             if el['type'] == 'text':
+                # v4: the frame IR carries the glyph mesh (§4.4, WP1.3), so the
+                # text is a plain mesh built from those vertices. The text an
+                # element shows can change over its span (typing), so every mesh
+                # id it uses gets an object and the updater shows the right one.
+                meshes = self.v3.mesh_ids(el.get('id'))
+                if meshes:
+                    built = {}
+                    for mid in meshes:
+                        obj, nodes = self.build_text_mesh(el, style, st0, self.v3.meshes[mid])
+                        obj.hide_render = True
+                        built[mid] = (obj, nodes)
+                    self.updaters.append(self._v3_update_text_mesh(el, built, style))
+                    continue
+                # no mesh (no font on the JS side, shadow/stroke): the pre-v4
+                # FONT curve, typeset by Blender
                 obj, nodes = self.build_text(el, style, st0)
             elif el['type'] == 'camfeed':
                 obj, nodes, tex = self.build_feed(el, style, st0)
@@ -1024,6 +1091,41 @@ class SceneBuilder:
     # -- per frame ---------------------------------------------------------
     def make_updater(self, el, obj, nodes, tex, style):
         return self._v3_update(el, obj, nodes, tex, style)
+
+    def _v3_update_text_mesh(self, el, objects, style):
+        """Per-frame Blender state of a text drawn as IR meshes.
+
+        One object per mesh id the element uses over its span; the item of the
+        frame says which one is on screen. No curve, no `body`, no typesetting:
+        the vertices came from core/glyphs.js and only the placement, the colour
+        and the alpha change here.
+        """
+        identity = Matrix.Identity(4)
+
+        def update(t, frame):
+            item = self.v3.item(el['id'], frame)
+            if item is None:
+                for obj, _nodes in objects.values():
+                    obj.hide_render = True
+                return
+            content = item.get('content') or {}
+            mid = content.get('mesh')
+            matrix = self.item_matrix(item)
+            opacity = _num(item.get('opacity'), 0.0)
+            for key, (obj, nodes) in objects.items():
+                show = key == mid
+                obj.hide_render = not show
+                if not show:
+                    continue
+                if matrix is not None:
+                    parent = obj.parent.matrix_basis if obj.parent else identity
+                    obj.matrix_basis = parent.inverted() @ matrix
+                if 'alpha' in nodes:
+                    nodes['alpha'].default_value = opacity
+                if 'em' in nodes:
+                    nodes['em'].inputs['Strength'].default_value = 1.0 + 6.0 * _num(content.get('glow'), 0.0)
+
+        return update
 
     def _make_shadow(self, el, obj):
         """A black copy slightly offset behind the text."""
