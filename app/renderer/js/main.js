@@ -5,6 +5,9 @@ import { PathGizmo } from './pathgizmo.js';
 import { Timeline } from './timeline.js';
 import { CurvePanel, curvePathLabel } from './curvepanel.js';
 import { Inspector } from './inspector.js';
+// The code-layer section registers itself (docs/DESIGN-WP3.6-4.6-UI.md §2.1):
+// imported for that side effect only, before the panel is constructed.
+import './inspector-code.js';
 import { AgentPanel } from './ai.js';
 import { ReviewPanel } from './review.js';
 import { ReportDraftPanel } from './report.js';
@@ -1329,6 +1332,7 @@ function beginViewportMarquee(ev, additive = additiveEvent(ev)) {
 }
 
 function updateOverlay() {
+  updateCodeMarks();
   const box = $('#selBox');
   const poly = $('#selPoly');
   const label = $('#selLabel');
@@ -1454,6 +1458,64 @@ function updateFeedHints() {
     const cam = cams.get(feed.camera);
     text.textContent = `投屏 · ${cam?.name || feed.camera || '未指定来源'}${delay ? ' · 上一帧' : ''}`;
     frag.appendChild(text);
+  }
+  svg.replaceChildren(frag);
+  svg.toggleAttribute('hidden', !svg.childNodes.length);
+}
+
+/**
+ * Render-state marks over code layers (docs/DESIGN-WP3.6-4.6-UI.md §2.3,
+ * WP3.6a): a 12×12 `--warn` dot while a layer waits for its first frame and a
+ * `--text-3` square while it shows the previous one, at the element's top-left
+ * corner. Only in the **edit viewport** and only while paused — the shot view,
+ * playback and export never gain marks, and the marks live in an SVG overlay,
+ * so they cannot reach the pixels any probe compares.
+ */
+function updateCodeMarks() {
+  const svg = document.getElementById('codeMarks');
+  if (!svg) return;
+  const clear = () => {
+    if (svg.childNodes.length) svg.replaceChildren();
+    svg.toggleAttribute('hidden', true);
+  };
+  if (!preview?.rasterStateOf || !S.project || !S.editMode || S.playing) { clear(); return; }
+  const box = document.getElementById('stageBox');
+  const W = preview.canvas.width;
+  const H = preview.canvas.height;
+  if (!box || !W || !H) { clear(); return; }
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  // Marks are 12 CSS px whatever the canvas resolution is.
+  const scale = box.clientWidth / Math.max(1, W);
+  const size = 12 / Math.max(0.05, scale);
+  const at = S.time;
+  const frag = document.createDocumentFragment();
+  for (const el of S.project.elements || []) {
+    if (el.type !== 'code' || el.visible === false) continue;
+    const state = preview.rasterStateOf(el.id, at);
+    if (!state?.quad?.length) continue;
+    if (state.status !== 'waiting' && state.status !== 'fallback') continue;
+    const xs = state.quad.map((p) => p[0]);
+    const ys = state.quad.map((p) => p[1]);
+    if (Math.max(...xs) < 0 || Math.min(...xs) > W || Math.max(...ys) < 0 || Math.min(...ys) > H) continue;
+    const x = Math.max(0, Math.min(...xs)) + size * 0.5;
+    const y = Math.max(0, Math.min(...ys)) + size * 0.5;
+    const node = document.createElementNS('http://www.w3.org/2000/svg', state.status === 'waiting' ? 'circle' : 'rect');
+    if (state.status === 'waiting') {
+      node.setAttribute('cx', String(x));
+      node.setAttribute('cy', String(y));
+      node.setAttribute('r', String(size / 2));
+      node.setAttribute('class', 'code-mark waiting');
+      node.dataset.tip = '等待代码图层的首帧';
+    } else {
+      node.setAttribute('x', String(x - size / 2));
+      node.setAttribute('y', String(y - size / 2));
+      node.setAttribute('width', String(size));
+      node.setAttribute('height', String(size));
+      node.setAttribute('class', 'code-mark fallback');
+      node.dataset.tip = '正在显示上一帧';
+    }
+    node.dataset.code = el.id;
+    frag.appendChild(node);
   }
   svg.replaceChildren(frag);
   svg.toggleAttribute('hidden', !svg.childNodes.length);
@@ -3381,6 +3443,8 @@ async function boot() {
     canGoBack: () => canGoBackLink(),
     onBack: () => goBackLink(),
     onToast: (msg, level = 'info') => toast(msg, level),
+    // 代码图层的渲染状态行（WP3.6a §2.1）：读预览的 raster 状态，读不到就是 —。
+    rasterState: (el, t) => preview?.rasterStateOf?.(el?.id, t) ?? null,
     onFollowCamera: (id) => followCamera(id, { selectHost: true }),
     onFlyToFeed: (id) => flyToFeed(id),
     // ◆ records what the property is at the playhead (its keyed value, or the base)
@@ -5054,6 +5118,9 @@ async function boot() {
       preview.render(S.time);
       gizmo?.draw();
       updateOverlay();
+      // Rows whose value is the machine, not the project (§2.1): a raster that
+      // arrives while the playhead stands still has to reach the panel.
+      inspector?.syncLive?.();
       updateSelectionInfo();
     }
     requestAnimationFrame(loop);

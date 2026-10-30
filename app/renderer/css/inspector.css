@@ -282,3 +282,50 @@ button.insp-name:hover { background: var(--surface-2); border-color: var(--borde
   0%, 45% { background: var(--accent-bg); box-shadow: inset 2px 0 0 var(--accent); }
   100% { background: transparent; box-shadow: inset 2px 0 0 transparent; }
 }
+
+/* ---------------- code layers (WP3.6a §2.1) ---------------- */
+/* 源 row: name · runtime badge · 查看源码 */
+.insp .code-src { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.insp .code-src-name {
+  flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--text-1); font-family: var(--font-mono); font-size: var(--fs-sm);
+}
+.insp .code-src-name.dim { color: var(--text-3); }
+.insp .code-rt {
+  flex: 0 0 auto; height: 16px; padding: 0 4px; line-height: 15px;
+  color: var(--text-2); background: var(--surface-3); border: 1px solid var(--border);
+  border-radius: var(--r-sm); font-family: var(--font-mono); font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+.insp .code-src .btn { flex: 0 0 auto; margin-left: auto; }
+/* 源检查失败：一行 --danger + 查看详情 */
+.insp .code-check {
+  display: flex; align-items: center; gap: 6px; min-width: 0;
+  margin: 4px 0 6px; padding: 3px 6px;
+  color: var(--danger); background: var(--danger-bg); border: 1px solid var(--danger-border);
+  border-radius: var(--r-sm); font-size: var(--fs-xs);
+}
+.insp .code-check-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.insp .code-check .btn { flex: 0 0 auto; height: var(--h-sm); }
+/* number +滑杆：一次拖动只落一个 op */
+.insp .code-num { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.insp .code-range {
+  flex: 1 1 auto; width: 100%; min-width: 36px; height: 14px; margin: 0;
+  accent-color: var(--accent); background: transparent; cursor: pointer;
+}
+.insp .code-num .nbox { flex: 0 0 68px; width: 68px; }
+/* 渲染 row: 实时 / 烘焙 / 等待首帧 / 上一帧 · 耗时 · 缓存命中 */
+.insp .code-run {
+  display: flex; align-items: center; gap: 5px; min-width: 0;
+  font-size: var(--fs-xs); color: var(--text-3);
+  overflow: hidden; white-space: nowrap;
+}
+.insp .code-run-state { flex: 0 0 auto; color: var(--text-1); }
+.insp .code-run-state.warn { color: var(--warn); }
+.insp .code-run-state.muted { color: var(--text-3); }
+.insp .code-run-sep { flex: 0 0 auto; color: var(--text-3); }
+.insp .code-run-num {
+  flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+}
+.insp .code-note { margin: 2px 0 6px; }

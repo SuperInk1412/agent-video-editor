@@ -102,6 +102,7 @@ export class Inspector {
     this.debounce = new Map();
     this.lastRenderKey = '';
     this._kfSync = [];
+    this._live = [];
     this._kind = 'project';
     this.readOnly = false; // change-set preview (WP2.5a): fields never write
   }
@@ -178,6 +179,7 @@ export class Inspector {
     this.lastRenderKey = key;
     this.root.innerHTML = '';
     this._kfSync = [];
+    this._live = [];
     this._elId = null;
     this.root.classList.add('insp');
     // The back chip belongs to the sticky header so a scrolled panel cannot hide
@@ -223,6 +225,18 @@ export class Inspector {
   /** Repaint ◆ states / current-key rows for the playhead without rebuilding the panel. */
   _syncKeys() {
     for (const fn of this._kfSync) {
+      try { fn(); } catch { /* stale node */ }
+    }
+  }
+
+  /**
+   * Repaint the rows whose value is not the project but the machine under it —
+   * today the code layer's render state (WP3.6a), which changes when a raster
+   * arrives, not when a revision does. Called by the render loop while paused;
+   * a section registers a painter with `insp._live.push(paint)`.
+   */
+  syncLive() {
+    for (const fn of this._live) {
       try { fn(); } catch { /* stale node */ }
     }
   }

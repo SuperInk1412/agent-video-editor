@@ -166,6 +166,16 @@ body.look-mode #stageBox { box-shadow: 0 0 0 2px var(--edit); }
   paint-order: stroke fill;
 }
 #feedHints .feed-hint-label.delay { fill: var(--edit); }
+/* Render state of code layers (WP3.6a §2.3): waiting for the first frame, or
+   the previous frame standing in. Edit viewport + paused only; 12 CSS px. */
+#codeMarks {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  pointer-events: none; z-index: 4; overflow: hidden;
+}
+#codeMarks[hidden] { display: none; }
+#codeMarks .code-mark { stroke: var(--canvas-bg); stroke-width: 1; pointer-events: auto; }
+#codeMarks .code-mark.waiting { fill: var(--warn); }
+#codeMarks .code-mark.fallback { fill: var(--text-3); }
 #followHint {
   border-color: var(--edit-border); background: var(--edit-bg); color: var(--edit);
   white-space: nowrap;

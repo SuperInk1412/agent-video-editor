@@ -321,6 +321,10 @@ export class Preview {
     this.rasterPending = new Map();    // request key -> { startedAt, channel, url }
     this.rasterFailed = new Set();     // request keys that will not be asked again
     this.rasterRequests = 0;
+    // What one frame of a channel cost to arrive, for the inspector's render
+    // row (WP3.6a). Measured here because `/api/raster` answers with a bare
+    // PNG: the round trip is the only number this side can honestly report.
+    this.rasterTiming = new Map();     // channel -> { ms, frame }
     this._rasterTick = 0;              // LRU stamp for the texture map
     this._rasterGen = 0;               // bumped when a new revision lands
     this._hasCodeLayers = false;
@@ -1073,7 +1077,10 @@ export class Preview {
     if (prefetch) {
       if (this.rasterPending.size >= RASTER_MAX_INFLIGHT) return null;
     }
-    const entry = { startedAt: performance.now(), channel: this._rasterChannel(item), url: this._rasterUrl(item, frame), gen: this._rasterGen };
+    const entry = {
+      startedAt: performance.now(), frame,
+      channel: this._rasterChannel(item), url: this._rasterUrl(item, frame), gen: this._rasterGen,
+    };
     this.rasterPending.set(key, entry);
     this.rasterRequests += 1;
     fetch(entry.url, { cache: 'no-store' })
@@ -1112,10 +1119,18 @@ export class Preview {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    const record = { tex, w: bitmap.width, h: bitmap.height, channel: entry.channel, used: ++this._rasterTick };
+    const ms = Math.round((performance.now() - entry.startedAt) * 10) / 10;
+    const record = {
+      tex, w: bitmap.width, h: bitmap.height,
+      channel: entry.channel, used: ++this._rasterTick, frame: entry.frame,
+    };
     if (typeof bitmap.close === 'function') bitmap.close();
     this.rasterTextures.set(key, record);
     this.rasterLast.set(entry.channel, key);
+    // §WP3.6a: one number for the inspector — what the last arrived frame of
+    // this channel cost. A new frame replaces it, so the row never shows a
+    // number that belongs to a different picture.
+    this.rasterTiming.set(entry.channel, { ms, frame: entry.frame });
     this._trimRasterTextures();
     return record;
   }
@@ -1191,6 +1206,62 @@ export class Preview {
     this.rasterLast.clear();
     this.rasterPending.clear();
     this.rasterFailed.clear();
+    this.rasterTiming.clear();
+  }
+
+  /**
+   * What one code layer's picture is doing at time `t` (WP3.6a: the inspector's
+   * render row and the stage mark, docs/DESIGN-WP3.6-4.6-UI.md §2.1/§2.3).
+   *
+   * Read-only on purpose: it never asks for a frame, so a panel repaint (or the
+   * paused stage repainting at 10 fps) cannot flood the rasteriser — the render
+   * loop stays the one place that requests.
+   *
+   *   status 'live'     the frame on screen is this frame, rendered on demand
+   *          'bake'     cache-only layer (`code.cache: "bake"`); it only ever
+   *                     shows cached frames, so nothing is "late" here
+   *          'waiting'  nothing honest to draw yet: no first frame, or the
+   *                     request failed and there is no earlier frame to stand in
+   *          'fallback' the last good frame of this channel stands in
+   *          'none'     the element is not in this frame's picture at all
+   *
+   * `quad` is the item's four corners in canvas pixels even when it has no
+   * layer entry yet (a waiting item is dropped from the draw list, which is
+   * exactly when the stage mark needs the corner).
+   */
+  rasterStateOf(elementId, t) {
+    if (!this.project) return null;
+    const id = String(elementId ?? '');
+    if (!id) return null;
+    const at = Number.isFinite(Number(t)) ? Number(t) : 0;
+    const ir = this._frameIR(at);
+    const item = ir.items.find((it) => it.kind === 'raster' && String(it.id) === id) || null;
+    if (!item) return { status: 'none', mode: null, frame: ir.frame, quad: null, ms: null, shownFrame: null };
+    const mode = item.content?.mode === 'bake' ? 'bake' : 'live';
+    const size = Array.isArray(item.size) && item.size.length >= 2 ? item.size : null;
+    const quad = size ? this._layerCorners({ model: itemModelMatrix(item, [size[0], size[1]]) }) : null;
+    const key = this._rasterKey(item, ir.frame);
+    const channel = this._rasterChannel(item);
+    const timing = this.rasterTiming.get(channel) || null;
+    const out = {
+      status: mode === 'bake' ? 'bake' : 'live',
+      mode, frame: ir.frame, quad,
+      ms: Number.isFinite(timing?.ms) ? timing.ms : null,
+      shownFrame: null,
+      stale: false,
+    };
+    if (this.rasterTextures.has(key)) return { ...out, shownFrame: ir.frame };
+    // A bake layer reads the disk cache and nothing else (§6.1): a miss is the
+    // mode working as asked, not a layer that is late.
+    if (mode === 'bake') return out;
+    const pending = this.rasterPending.get(key);
+    const late = !pending || performance.now() - pending.startedAt > RASTER_BUDGET_MS;
+    const lastKey = this.rasterLast.get(channel);
+    const last = lastKey ? this.rasterTextures.get(lastKey) : null;
+    if (last && (late || this.rasterFailed.has(key))) {
+      return { ...out, status: 'fallback', stale: true, shownFrame: Number.isFinite(last.frame) ? last.frame : null };
+    }
+    return { ...out, status: 'waiting' };
   }
 
   /** Diagnostics for probes: how much raster state is live right now. */
