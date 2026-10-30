@@ -109,6 +109,17 @@ export function register(router, ctx) {
     let blender = null;
     try { blender = await blenderVersion(); } catch { /* not installed */ }
     const dsh = await findDsh();
+    // The agent loop is created lazily; a broken transport configuration must
+    // not take the whole status bar down with it.
+    const agentState = { available: !!dsh, running: false, runId: null };
+    try {
+      const agent = ctx.agent;
+      agentState.running = agent.running;
+      agentState.runId = agent.runId;
+      agentState.transport = agent.agent?.name ?? null;
+    } catch (error) {
+      agentState.error = error.message;
+    }
     // ffmpeg availability for the status bar; probed once per engine process
     return json(res, 200, {
       root: ctx.root,
@@ -117,7 +128,7 @@ export function register(router, ctx) {
       cli: CLI_PATH,
       blender,
       ffmpeg: await ctx.ffmpegAvailable(),
-      agent: { available: !!dsh, running: ctx.agent.running, runId: ctx.agent.runId },
+      agent: agentState,
       render: ctx.renderState,
       pipeline: ctx.pipeline,
       styles: Object.keys(STYLE_PRESETS),

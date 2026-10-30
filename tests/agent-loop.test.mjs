@@ -800,3 +800,86 @@ test('agent loop: 被拒之后在同一轮里修正，再提交就通过（读 �
   assert.equal(result.report.mismatch, null);
   assert.equal(result.report.steps.filter((step) => step.step === 'propose').length, 1);
 });
+
+// ------------------------------------------------------- cancel + close
+
+test('agent loop: cancel 在步间生效，状态 cancelled，close 幂等', { timeout: 30000 }, async (t) => {
+  const { root } = await fixture(t);
+  const events = [];
+  const loop = new AgentLoop({
+    root, scope: SCOPE,
+    onEvent: (event) => events.push(event),
+    agent: new ScriptedAgent({
+      script: [
+        // The step in flight is allowed to finish; the flag is checked after it.
+        () => new Promise((resolve) => setTimeout(() => resolve({ tool: 'read', args: { what: 'project' } }), 80)),
+        { tool: 'read', args: { what: 'elements' } },
+        { type: 'final', text: '不该走到这里' },
+      ],
+    }),
+    renderStill: fakeStill(),
+  });
+  const run = loop.run({ task: '慢慢读一下工程' });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(loop.running, true, 'the slow first step is still in flight');
+  assert.equal(loop.cancel('用户打断'), true);
+  const result = await run;
+  assert.equal(result.status, 'cancelled');
+  assert.equal(loop.state.status, 'cancelled');
+  assert.equal(loop.running, false);
+  assert.equal(loop.cancel(), false, 'nothing left to cancel');
+  assert.equal(loop.state.steps.at(-1).step, 'cancel');
+  assert.equal(result.report.status, 'cancelled');
+  assert.ok(events.some((event) => event.type === 'loop' && event.phase === 'cancelled'));
+  // The in-flight step ran, the next one did not (cancel lands between steps).
+  const toolCalls = events.filter((event) => event.type === 'tool').map((event) => `${event.name}:${event.args?.what}`);
+  assert.deepEqual(toolCalls, ['read:project']);
+  assert.ok(!events.some((event) => event.type === 'loop' && event.phase === 'done'), 'a cancelled run is not "done"');
+  // close() after a finished run is a no-op, and safe to call twice.
+  await loop.close();
+  await loop.close();
+});
+
+test('agent loop: 等待批准时 cancel 收成 cancelled，approve 不再可用', { timeout: 30000 }, async (t) => {
+  const { root, rev } = await fixture(t);
+  const events = [];
+  const loop = new AgentLoop({
+    root, scope: SCOPE,
+    onEvent: (event) => events.push(event),
+    agent: new ScriptedAgent({
+      script: [{ tool: 'changeset', args: { action: 'propose', ops: [{ op: 'set', id: 's1_w2', path: 'style.size', value: 150 }] } }],
+    }),
+    renderStill: fakeStill(),
+  });
+  t.after(() => loop.close());
+  const planned = await loop.run({ task: '改字号', planOnly: true });
+  assert.equal(planned.status, 'awaiting-approval');
+  assert.equal(loop.state.status, 'awaiting-approval');
+  assert.equal(loop.cancel('不要了'), true);
+  assert.equal(loop.state.status, 'cancelled');
+  assert.ok(events.some((event) => event.type === 'loop' && event.phase === 'cancelled'));
+  await assert.rejects(loop.approve({ planId: planned.plan?.id }),
+    (error) => error.code === 'INVALID_ARGUMENT' && /awaiting approval/.test(error.message));
+  assert.equal((await loop.service.read()).rev, rev, 'cancelling the plan wrote nothing');
+});
+
+test('agent loop: close() 打断正在跑的运行并等它结束', { timeout: 30000 }, async (t) => {
+  const { root } = await fixture(t);
+  const loop = new AgentLoop({
+    root, scope: SCOPE,
+    agent: new ScriptedAgent({
+      script: [
+        () => new Promise((resolve) => setTimeout(() => resolve({ tool: 'read', args: { what: 'project' } }), 80)),
+        { type: 'final', text: '不该走到这里' },
+      ],
+    }),
+    renderStill: fakeStill(),
+  });
+  const run = loop.run({ task: '慢慢读一下工程' });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await loop.close();
+  const result = await run;
+  assert.equal(result.status, 'cancelled');
+  assert.equal(loop.running, false);
+});
+

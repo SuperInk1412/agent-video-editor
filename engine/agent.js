@@ -2,13 +2,14 @@
 //
 // Two ways to drive an agent, one file:
 //
-// 1. `AgentRunner` — the legacy one-shot path (kept while the renderer still
-//    posts /api/agent). It spawns `dsh --profile headless --json <task>` in the
-//    project directory and streams its NDJSON run events; the headless profile
-//    can read files but cannot run shell commands, so the agent reads
-//    project.vdm.json and replies with one ops object ({"note","ops"}), which
-//    the engine validates and applies through core/ops.js. Killing the process
-//    = interrupting the agent. Nothing about this path changed in WP2.4.
+// 1. `AgentRunner` — the legacy one-shot path. The server no longer uses it
+//    (`VDM_AGENT_LEGACY=1` is the rollback door until WP2.5e's loop is proven;
+//    it is deleted right after). It spawns `dsh --profile headless --json
+//    <task>` in the project directory and streams its NDJSON run events; the
+//    headless profile can read files but cannot run shell commands, so the
+//    agent reads project.vdm.json and replies with one ops object
+//    ({"note","ops"}), which the engine validates and applies through
+//    core/ops.js. Killing the process = interrupting the agent.
 //
 // 2. `AgentLoop` — the WP2.4 tool loop (docs/DESIGN-BACKEND-V2.md §8.4):
 //    read → plan → propose a change set → render stills → measure → correct.
@@ -31,9 +32,10 @@
 //   engine → {"type":"user","text":"任务…"}            (first line, before t1)
 //
 // `ScriptedAgent` speaks the same interface in-process (tests, offline runs),
-// so a run never needs dsh or the network. The real dsh adapter is not wired
-// yet: the headless CLI is one-shot, so `ProcessAgent` is the seam a later WP
-// plugs into. See docs/AGENT-PROTOCOL.md for the ops/property contracts.
+// so a run never needs dsh or the network. `DshAgent` (engine/dsh-agent.js)
+// adapts the one-shot headless CLI to this step protocol — one dsh process per
+// step, conversation kept on the engine side (WP2.5e). See
+// docs/AGENT-PROTOCOL.md for the ops/property contracts.
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import fss from 'node:fs';
@@ -112,7 +114,7 @@ export async function findDsh() {
   return null;
 }
 
-function killTree(child) {
+export function killTree(child) {
   if (!child || child.killed || !child.pid) return;
   try {
     if (process.platform === 'win32') {
@@ -121,6 +123,9 @@ function killTree(child) {
       child.kill('SIGKILL');
     }
   } catch { /* ignore */ }
+  // taskkill is asynchronous; make sure a POSIX child that ignored the tree
+  // call still dies. (No-op when the process already exited.)
+  try { child.kill('SIGKILL'); } catch { /* already gone */ }
 }
 
 export class AgentRunner {
@@ -1014,10 +1019,16 @@ export class AgentLoop {
     this._beats = null;
     this._running = false;
     this._stepNo = 0;
+    // A cancel is a flag checked between steps (docs/DESIGN-BACKEND-V2.md §8.4:
+    // the transport cannot be interrupted mid-step without losing its answer).
+    this._cancelRequested = false;
+    this.cancelReason = null;
+    this._done = null;
   }
 
   get running() { return this._running; }
   get runId() { return this.state?.runId ?? null; }
+  get cancelled() { return this._cancelRequested; }
 
   // --------------------------------------------------------------- utilities
 
@@ -1130,6 +1141,7 @@ export class AgentLoop {
       tools: LOOP_TOOLS,
       scope: this.#scopeSummary(),
       mode: this.mode,
+      context: this.state.context ?? null,
       state: {
         rev: this.state.rev,
         plan: this.state.plan,
@@ -1613,10 +1625,33 @@ export class AgentLoop {
 
   // ------------------------------------------------------------------- drive
 
-  async run({ task, planOnly = false, approval } = {}) {
+  /**
+   * Ask the running loop to stop after the step in flight. The transport's
+   * answer is never thrown away half-read; `#drive` checks the flag at the top
+   * of every turn, marks the run `cancelled` and emits `loop phase:'cancelled'`.
+   * Returns true when there was something to cancel (a run, or a plan waiting
+   * for approval); cancelling a loop that is already done is a no-op.
+   */
+  cancel(reason = null) {
+    this._cancelRequested = true;
+    this.cancelReason = reason == null ? null : String(reason);
+    const status = this.state?.status;
+    if (!this._running && (status === 'awaiting-approval' || status === 'running')) {
+      this.state.status = 'cancelled';
+      this.state.endedAt = this.clock();
+      this.#step('cancel', '已取消', this.cancelReason || '');
+      void this.#emit({ type: 'loop', phase: 'cancelled', status: 'cancelled', reason: this.cancelReason });
+      return true;
+    }
+    return this._running;
+  }
+
+  async run({ task, planOnly = false, approval, context = null } = {}) {
     if (this._running) throw fault('INVALID_ARGUMENT', 'this loop is already running');
     if (typeof task !== 'string' || !task.trim()) throw fault('INVALID_ARGUMENT', 'run needs a task');
     this._running = true;
+    this._cancelRequested = false;
+    this.cancelReason = null;
     this.planOnly = planOnly === true;
     if (approval) this.approval = approval === 'manual' ? 'manual' : 'auto';
     this.task = task.trim();
@@ -1628,6 +1663,7 @@ export class AgentLoop {
       actorId: this.actorId,
       mode: this.mode,
       approval: this.approval,
+      context: isRecord(context) ? { ...context } : null,
       scope: this.#scopeSummary(),
       status: 'running',
       startedAt: this.clock(),
@@ -1652,11 +1688,14 @@ export class AgentLoop {
     this._stepNo = 0;
     this.#step('read', '开始：读项目', `rev ${project.rev} · ${project.meta?.title ?? ''} · ${project.meta?.width}×${project.meta?.height}`);
     this.#emit({ type: 'loop', phase: 'start', runId: this.state.runId, task: this.task, scope: this.state.scope, mode: this.mode, approval: this.approval });
+    let settle;
+    this._done = new Promise((resolve) => { settle = resolve; });
     try {
       const outcome = await this.#drive();
       return await this.#finish(outcome);
     } finally {
       this._running = false;
+      if (this._done) { this._done = null; settle(); }
     }
   }
 
@@ -1669,15 +1708,19 @@ export class AgentLoop {
       throw fault('INVALID_ARGUMENT', `plan ${planId} is not the plan awaiting approval (${this.state.plan.id})`);
     }
     this._running = true;
+    this._cancelRequested = false;
     this.state.approved = { at: this.clock(), planId: this.state.plan?.id ?? null, note: String(note ?? '') };
     this.state.status = 'running';
     this.#step('approve', '计划已批准，继续执行', this.state.approved.planId ?? '');
     this.#emit({ type: 'loop', phase: 'approved', plan: this.state.plan, approval: this.state.approved });
+    let settle;
+    this._done = new Promise((resolve) => { settle = resolve; });
     try {
       const outcome = await this.#drive();
       return await this.#finish(outcome);
     } finally {
       this._running = false;
+      if (this._done) { this._done = null; settle(); }
     }
   }
 
@@ -1699,6 +1742,13 @@ export class AgentLoop {
       return { status: 'final' };
     }
     while (turns++ < this.maxSteps) {
+      // The step in flight is never interrupted; the flag lands between steps.
+      if (this._cancelRequested) {
+        this.state.status = 'cancelled';
+        this.#step('cancel', '已取消', this.cancelReason || '');
+        await this.#emit({ type: 'loop', phase: 'cancelled', status: 'cancelled', reason: this.cancelReason });
+        return { status: 'cancelled' };
+      }
       const action = await this.agent.next(this.#transportContext());
       if (!action || action.type === 'final') {
         this.state.finalText = typeof action?.text === 'string' ? action.text : '';
@@ -1831,7 +1881,8 @@ export class AgentLoop {
   // ------------------------------------------------------------------ report
 
   async #finish(outcome) {
-    this.state.status = outcome.status === 'awaiting-approval' ? 'awaiting-approval' : 'completed';
+    const cancelled = outcome.status === 'cancelled';
+    this.state.status = cancelled ? 'cancelled' : outcome.status === 'awaiting-approval' ? 'awaiting-approval' : 'completed';
     this.state.endedAt = this.clock();
     const planPhase = this.state.planPhase;
     if (planPhase.hashAfter === null) {
@@ -1849,7 +1900,11 @@ export class AgentLoop {
     const file = await this.#writeReport(report);
     report.path = file;
     await this.#emit({ type: 'report', report });
-    await this.#emit({ type: 'loop', phase: this.state.status === 'awaiting-approval' ? 'awaiting-approval' : 'done', status: this.state.status });
+    // `#drive` already announced the cancellation when it saw the flag; a
+    // cancelled run still writes its report (evidence of what it did not do).
+    if (!cancelled) {
+      await this.#emit({ type: 'loop', phase: this.state.status === 'awaiting-approval' ? 'awaiting-approval' : 'done', status: this.state.status });
+    }
     return {
       runId: this.state.runId,
       status: this.state.status,
@@ -2144,7 +2199,14 @@ export class AgentLoop {
     return report;
   }
 
+  /**
+   * Stop the loop (between steps) and wait for the step in flight, then let the
+   * transport release its process. Safe to call twice and after a finished run.
+   */
   async close() {
+    const done = this._done;
+    this.cancel('closed');
+    if (done) await done;
     try { await this.agent?.close(); } catch { /* already gone */ }
   }
 }

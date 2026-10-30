@@ -20,7 +20,8 @@ import { projectService } from './projects.js';
 import { errorData } from '../application/errors.js';
 import { ChangeSetService } from '../application/changeset-service.js';
 import { mimeOf, findBin } from './media.js';
-import { AgentRunner } from './agent.js';
+import { AgentLoop, AgentRunner, ProcessAgent, ScriptedAgent, pngSize } from './agent.js';
+import { DshAgent } from './dsh-agent.js';
 import { createLogger } from './log.js';
 import { readPath } from './path-policy.js';
 import { pipeline as streamPipeline } from 'node:stream/promises';
@@ -236,33 +237,123 @@ async function startOwnedServer({ root, port = 47100, open = false, onReady, imp
     }
   });
 
-  const agent = new AgentRunner({
-    root: projectRoot,
-    onEvent: async (ev) => {
-      if (ev.type === 'proposal') {
-        try {
-          const record = await changesets.apply({
-            ops: ev.proposal.ops, actorId: 'agent:dsh', intent: ev.proposal.note,
-            expectedRev: ev.baseRev, requestId: ev.runId,
-          });
-          const changed = record.changed?.length ?? 0;
-          adoptDisk(await projects.read(), 'agent', { transactionId: record.transactions?.[0] });
-          log.info('agent applied', { ops: ev.proposal.ops.length, changeset: record.id, rev: record.rev, note: ev.proposal.note });
-          broadcast('agent', { ...ev, applied: { changed, note: ev.proposal.note, rev: record.rev, changesetId: record.id } });
-          broadcast('changeset', { action: 'apply', record });
-          addArtifact({ kind: 'ai', label: `AI 改了 ${changed} 项`, detail: ev.proposal.note });
-          toast(`AI 已应用 ${changed} 处修改`, 'success');
-        } catch (e) {
-          log.error('agent proposal rejected', { error: e.message, ops: ev.proposal.ops });
-          broadcast('agent', { ...ev, error: e.message });
-          toast(`AI 提议应用失败: ${e.message}`, 'error');
-        }
-        return;
+  // ---- the edit agent (WP2.5e) ----
+  // One AgentLoop, created on first use (`ctx.agent`). The transport is chosen
+  // once, in priority order:
+  //   VDM_AGENT_SCRIPT  a JSON script            → ScriptedAgent (tests / offline)
+  //   VDM_AGENT_BIN     an external line adapter → ProcessAgent
+  //   otherwise         dsh headless, one process per step → DshAgent
+  // With no dsh on the machine the first step raises AGENT_UNAVAILABLE and
+  // POST /api/agent answers 503 — there is no silent fallback to legacy.
+  // `VDM_AGENT_LEGACY=1` is the rollback door to the old one-shot runner.
+  const agentMode = process.env.VDM_AGENT_LEGACY === '1' ? 'legacy' : 'loop';
+  const agentScope = () => {
+    const raw = process.env.VDM_AGENT_SCOPE;
+    if (!raw) return { elements: ['*'], paths: ['*'], create: true };
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+    } catch { /* fall through to the default */ }
+    log.warn('could not parse VDM_AGENT_SCOPE; using the whole project', { value: String(raw).slice(0, 200) });
+    return { elements: ['*'], paths: ['*'], create: true };
+  };
+  const createAgentTransport = () => {
+    const script = process.env.VDM_AGENT_SCRIPT;
+    if (script) {
+      const parsed = JSON.parse(fs.readFileSync(script, 'utf8').replace(/^\uFEFF/, ''));
+      const steps = Array.isArray(parsed) ? parsed : parsed?.script;
+      if (!Array.isArray(steps)) throw new Error(`agent script ${script} must be a JSON array or {"script": [...]}`);
+      return new ScriptedAgent({ name: 'scripted-file', script: steps });
+    }
+    if (process.env.VDM_AGENT_BIN) {
+      return new ProcessAgent({
+        node: process.env.VDM_AGENT_NODE || process.execPath,
+        bin: process.env.VDM_AGENT_BIN,
+        cwd: projectRoot,
+        name: 'process-adapter',
+      });
+    }
+    return new DshAgent({ root: projectRoot, cwd: projectRoot, name: 'dsh' });
+  };
+  // The loop's still backend is the engine's own render queue (the same still
+  // job the UI submits), so the report quotes a real PNG with a real size.
+  const renderStillForAgent = async ({ t }) => {
+    const started = Date.now();
+    const submitted = await jobs.submit({ kind: 'still', time: t, scale: 0.5, samples: 6 });
+    const completed = await jobs.wait(submitted.id);
+    if (completed.status !== 'succeeded' || !completed.artifact?.path) {
+      throw Object.assign(new Error(completed.error?.message || `still job ${completed.status}`), {
+        code: completed.error?.code || 'STILL_FAILED',
+      });
+    }
+    const bytes = await fsp.readFile(completed.artifact.path);
+    return { path: completed.artifact.path, ...pngSize(bytes), bytes: bytes.length, ms: Date.now() - started, backend: 'job:still' };
+  };
+  // Every loop event reaches the renderer as `agent`; change sets also go out on
+  // their own SSE channel (the review panel listens there) and an applied one
+  // updates the engine's in-memory project, exactly like the legacy proposal.
+  const onAgentEvent = async (event) => {
+    broadcast('agent', event);
+    if (event.type !== 'changeset') return;
+    broadcast('changeset', { action: event.action, record: event.record });
+    if (event.action !== 'apply' && event.action !== 'revert') return;
+    try {
+      adoptDisk(await projects.read(), 'agent', { transactionId: event.record?.transactions?.[0] });
+      if (event.action === 'apply') {
+        const changed = event.record?.changed?.length ?? 0;
+        addArtifact({ kind: 'ai', label: `AI 改了 ${changed} 项`, detail: event.record?.intent || '' });
+        toast(`AI 已应用 ${changed} 处修改`, 'success');
       }
-      if (ev.type === 'exit') log.info('agent exit', { code: ev.code, sec: ev.seconds, stderr: ev.stderr || undefined });
-      broadcast('agent', ev);
-    },
-  });
+    } catch (e) {
+      log.warn('agent change set could not be adopted', { error: e.message, changeset: event.record?.id });
+    }
+  };
+  // The legacy runner's event contract, unchanged (rollback door only).
+  const legacyOnEvent = async (ev) => {
+    if (ev.type === 'proposal') {
+      try {
+        const record = await changesets.apply({
+          ops: ev.proposal.ops, actorId: 'agent:dsh', intent: ev.proposal.note,
+          expectedRev: ev.baseRev, requestId: ev.runId,
+        });
+        const changed = record.changed?.length ?? 0;
+        adoptDisk(await projects.read(), 'agent', { transactionId: record.transactions?.[0] });
+        log.info('agent applied', { ops: ev.proposal.ops.length, changeset: record.id, rev: record.rev, note: ev.proposal.note });
+        broadcast('agent', { ...ev, applied: { changed, note: ev.proposal.note, rev: record.rev, changesetId: record.id } });
+        broadcast('changeset', { action: 'apply', record });
+        addArtifact({ kind: 'ai', label: `AI 改了 ${changed} 项`, detail: ev.proposal.note });
+        toast(`AI 已应用 ${changed} 处修改`, 'success');
+      } catch (e) {
+        log.error('agent proposal rejected', { error: e.message, ops: ev.proposal.ops });
+        broadcast('agent', { ...ev, error: e.message });
+        toast(`AI 提议应用失败: ${e.message}`, 'error');
+      }
+      return;
+    }
+    if (ev.type === 'exit') log.info('agent exit', { code: ev.code, sec: ev.seconds, stderr: ev.stderr || undefined });
+    broadcast('agent', ev);
+  };
+  let agentLoop = null;
+  let legacyAgent = null;
+  const getAgent = () => {
+    if (agentMode === 'legacy') {
+      legacyAgent ||= new AgentRunner({ root: projectRoot, onEvent: legacyOnEvent });
+      return legacyAgent;
+    }
+    agentLoop ||= new AgentLoop({
+      root: projectRoot,
+      scope: agentScope(),
+      agent: createAgentTransport(),
+      service: projects,
+      changesets,
+      renderStill: renderStillForAgent,
+      actorId: 'agent:dsh',
+      mode: process.env.VDM_AGENT_MODE === 'create' ? 'create' : 'tune',
+      approval: process.env.VDM_AGENT_APPROVAL === 'manual' ? 'manual' : 'auto',
+      onEvent: onAgentEvent,
+    });
+    return agentLoop;
+  };
 
   // ---- external file changes ----
   // queued behind our own writes, so a save we just made is never mistaken for an external edit
@@ -292,7 +383,10 @@ async function startOwnedServer({ root, port = 47100, open = false, onReady, imp
     appDir: APP_DIR,
     paths: p,
     log, json, readBody, uploadLimit,
-    projects, changesets, media, jobs, agent,
+    projects, changesets, media, jobs, agentMode,
+    // Lazy: `/api/state` and the agent routes always see the same instance,
+    // and a server that never runs the agent never resolves a transport.
+    get agent() { return getAgent(); },
     transact, transactionOptions, adoptDisk,
     broadcast, toast, setStep, addArtifact,
     getProject: () => project,
@@ -398,7 +492,8 @@ async function startOwnedServer({ root, port = 47100, open = false, onReady, imp
     return closing ||= (async () => {
       log.info('engine shutting down');
       await closeRasterPool(ctx.rasterPool);
-      await agent.close();
+      if (agentLoop) await agentLoop.close();
+      if (legacyAgent) await legacyAgent.close();
       await jobs.close();
       await writeChain;
       clearTimeout(pipelineTimer);
