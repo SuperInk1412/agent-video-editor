@@ -8,7 +8,7 @@ import { linkIssues, normalizeLinks, projectLinkIssues } from './links.js';
 import { feedIssues } from './camfeed.js';
 import { dirRollFromRotation, normalizeRotation } from './rotation.js';
 import { normalizeCustomPresets } from './curves.js';
-import { codeIssues, isSafeSourceFile, isSafeSourceId, manifestIssues, normalizeCode, normalizeSources, sourceManifest, SOURCE_MANIFEST } from './code-layer.js';
+import { codeIssues, isRasterRuntime, isSafeSourceFile, isSafeSourceId, manifestIssues, normalizeCode, normalizeSources, sourceManifest, SOURCE_MANIFEST } from './code-layer.js';
 import {
   SOURCE_MODES, SOURCE_PATHS, isNumericSourcePath, isSourceNodeId, isSourcePath,
 } from './source-eval.js';
@@ -563,7 +563,15 @@ export function validateProject(p) {
     issues.push(...feedIssues(e, at));
     if (e.type === 'code') {
       if (e.code === undefined) push(`${at}.code`, 'code element needs a code block');
-      else issues.push(...codeIssues(e.code, `${at}.code`));
+      else {
+        issues.push(...codeIssues(e.code, `${at}.code`));
+        // html / svg sources compile into native elements (WP4.1); a code
+        // layer would ask the pool for a per-frame raster of a page (§7.8.6 #8).
+        const runtime = sourceManifest(p, isRecord(e.code) ? e.code.source : '')?.runtime;
+        if (runtime !== undefined && runtime !== null && !isRasterRuntime(runtime)) {
+          push(`${at}.code.source`, `${runtime} 是编译源（会编译成原生元素），不能当代码图层逐帧渲染`);
+        }
+      }
     }
     if (e.links !== undefined) issues.push(...linkIssues(e.links, `${at}.links`));
     if (e.source !== undefined) issues.push(...sourceIssues(e.source, `${at}.source`));

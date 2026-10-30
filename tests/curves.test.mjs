@@ -341,3 +341,15 @@ test('curves: custom presets are capped and survive a project save', () => {
   assert.equal(saved.meta.curvePresets.length, MAX_CUSTOM_PRESETS);
   assert.equal(saved.meta.curvePresets[0].name, 'p1');
 });
+
+test('curves: a sampled point curve (§7.8.1) is interpolated piecewise-linearly', () => {
+  // Source snapshots (WP4.1) freeze a CSS cubic-bezier as `[u, v]` points; the
+  // sampler must read them like any other curve.
+  const points = [[0, 0], [0.25, 0.6], [0.5, 0.85], [1, 1]];
+  assert.equal(sampleCurve(points, 0), 0);
+  assert.equal(sampleCurve(points, 1), 1);
+  assert.equal(sampleCurve(points, 0.125), 0.3);
+  assert.equal(sampleCurve(points, 0.5), 0.85);
+  assert.equal(sampleCurve(points, 0.75), 0.925);
+  assert.equal(sampleCurve([], 0.4), 0.4, 'an empty / broken point curve is linear');
+});

@@ -305,8 +305,34 @@ export function samplePreset(type, params, u) {
   }
 }
 
+/**
+ * A curve sampled as `[u, v]` points (§7.8.1: CSS `cubic-bezier` becomes 3–9
+ * points with increasing u in 0..1). Piecewise-linear between the points,
+ * clamped outside them.
+ */
+export function sampleCurvePoints(points, u) {
+  const list = (Array.isArray(points) ? points : [])
+    .filter((point) => Array.isArray(point) && point.length >= 2
+      && Number.isFinite(Number(point[0])) && Number.isFinite(Number(point[1])))
+    .map((point) => [clamp(Number(point[0])), Number(point[1])])
+    .sort((a, b) => a[0] - b[0]);
+  if (list.length < 2) return clamp(u);
+  const target = clamp(u);
+  if (target <= list[0][0]) return list[0][1];
+  if (target >= list[list.length - 1][0]) return list[list.length - 1][1];
+  for (let i = 1; i < list.length; i++) {
+    const [x1, y1] = list[i];
+    if (target > x1) continue;
+    const [x0, y0] = list[i - 1];
+    return x1 - x0 <= 1e-12 ? y1 : y0 + ((y1 - y0) * (target - x0)) / (x1 - x0);
+  }
+  return clamp(u);
+}
+
 /** Progress 0..1 for a curve (null curve = linear). */
 export function sampleCurve(curve, u) {
+  // A sampled curve (source snapshots, §7.8.1).
+  if (Array.isArray(curve)) return sampleCurvePoints(curve, u);
   const c = normalizeCurve(curve);
   if (!c) return clamp(u);
   const target = clamp(u);

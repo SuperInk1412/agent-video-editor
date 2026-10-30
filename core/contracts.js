@@ -628,6 +628,28 @@ const CORE_OP_DEFS = {
       t: f(time, '参数已打帧时写到这个时间的键上（秒）。', 's'),
     },
   },
+  sourceCompile: {
+    group: 'source',
+    summary: '登记网页编译的结果',
+    description: '编译 HTML / SVG 源要读源文件、算哈希并写 .vdm/sources/<id>/base.json —— 这些在 application/source-service.js；core 的 op 只校验并登记结果，不改工程。引擎/CLI 收到 { id } 时会在写入前展开（重新编译并刷新 base.json）。',
+    example: { op: 'sourceCompile', id: 'html-title-card' },
+    required: ['id'],
+    fields: {
+      id: f({ type: 'string', minLength: 1, maxLength: 64, pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$' }, '源 id（manifest.runtime 必须是 html / svg）。'),
+      compiled: f({ type: 'object' }, '编译结果 { hash, builtAt, nodes }；{ id } 形式由引擎展开时填。'),
+    },
+  },
+  sourceApply: {
+    group: 'source',
+    summary: '把编译出的元素 upsert 进工程（一次事务）',
+    description: 'elements 是编译产物（每项带 source = { id, node }）；同一个 sourceApply 里的元素在一个事务里写入。§7.8.2：编译产物走旧 transform 路径，元素上已有的空间 node 会被删掉。{ id } 形式由引擎展开（重新编译后填 elements）。',
+    example: { op: 'sourceApply', id: 'html-title-card' },
+    required: ['id'],
+    fields: {
+      id: f({ type: 'string', minLength: 1, maxLength: 64, pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$' }, '编译源 id。'),
+      elements: f({ type: 'array', minItems: 1, maxItems: 1000, items: { type: 'object' } }, '编译产物：元素 payload 数组，每项带 source.node；{ id } 形式由引擎展开时填。'),
+    },
+  },
 };
 
 // ---------------------------------------------------------------- registries
@@ -668,7 +690,7 @@ const CORE_OP_GROUPS = [
   { id: 'object', title: '3D 物体', description: '根场景里的 3D 物体（solid / shape / text / image / video / container / empty / camera / audio）。' },
   { id: 'parent', title: '父子级', description: '元素、相机、物体都能挂空间父级；旧的对象父级 op 仍然保留。' },
   { id: 'link', title: '属性链接', description: '一个宿主的数值属性跟随另一个宿主的数值属性。' },
-  { id: 'source', title: '代码图层源', description: 'sources/<id>/ 由工程文档里的源清单派生。' },
+  { id: 'source', title: '源（代码图层 / 网页编译）', description: 'sources/<id>/ 由工程文档里的源清单派生；html / svg 源的编译产物写成 .vdm/sources/<id>/base.json。' },
   { id: 'batch', title: '批量', description: '一次提交多个 op。' },
 ];
 const opGroups = [...CORE_OP_GROUPS];

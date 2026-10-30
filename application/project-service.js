@@ -5,6 +5,11 @@ import { assertSafeData, isRecord } from '../core/json.js';
 import { fault } from './errors.js';
 import { EDIT_SCHEMA } from '../core/contracts.js';
 import { validateContract } from './validate-contract.js';
+// `sourceCompile` / `sourceApply` need `.vdm/sources/<id>/base.json`, which core
+// never reads (§7.8.6 #1). Expanding them here — the one write path — is what
+// lets an agent send `{ op: 'sourceApply', id }` and still get one transaction;
+// `dryRun` compiles in memory only.
+import { expandSourceOps } from './source-service.js';
 
 export const content = (project) => {
   if (!project) return null;
@@ -80,7 +85,8 @@ export class ProjectService {
         }
         default: throw fault('INVALID_ARGUMENT', `unknown project command ${command.type}`);
       }
-      const applied = applyOps(next, ops);
+      const expanded = await expandSourceOps(ops, { project: next, root: this.repository?.root || null, dryRun });
+      const applied = applyOps(next, expanded);
       assertValidProject(next);
       normalizeProject(next); // restore runtime aliases after JSON cloning
       const didChange = JSON.stringify(content(current)) !== JSON.stringify(content(next));

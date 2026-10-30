@@ -81,9 +81,9 @@ test('registerContracts cannot replace a built-in contract or a published tool s
     opDefs: { set: { group: 'element', summary: '', description: '', required: [], fields: {} } },
   }), /contract set is built in/);
   assert.equal(Object.keys(OP_CONTRACTS).length, before);
-  assert.equal(PUBLIC_OPS.length, 52);
+  assert.equal(PUBLIC_OPS.length, 54);
   assert.equal(TOOL_SCHEMAS.vdm_project_apply_ops.properties.ops.items.$ref, '#/$defs/op');
-  assert.equal(TOOL_SCHEMAS.vdm_project_apply_ops.$defs.op.oneOf.length, 52);
+  assert.equal(TOOL_SCHEMAS.vdm_project_apply_ops.$defs.op.oneOf.length, 54);
   // The refused fragment left no trace: the same id can be registered properly later.
   assert.equal(registerContracts({ id: 'wp-p-replaces-set', propertyPaths: [] }), true);
 });

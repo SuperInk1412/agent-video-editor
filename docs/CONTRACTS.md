@@ -6,8 +6,8 @@
 这是 WP2.3「契约单一来源」的人读版本。`mcp/tools.js`、`docs/AGENT-PROTOCOL.md` 与
 `mcp/contracts.generated.json` 都来自同一个模块；改契约只改 `core/contracts.js`，然后重生成。
 
-- 公开 op：**52**（`OP_KINDS` 里除去 `restoreProject` / `replaceTimeline` 两个内部 op）
-- op 字段：**162**
+- 公开 op：**54**（`OP_KINDS` 里除去 `restoreProject` / `replaceTimeline` 两个内部 op）
+- op 字段：**166**
 - 属性路径：**122**（可打帧 17 el / 18 ob / 19 cam；
   可链接 18 el / 14 ob / 20 cam）
 
@@ -739,9 +739,9 @@ add 是加偏移，mul 是乘比例（比率单位默认 mul）。单位必须�
 | id | string | — | ✔ | 子宿主 id。 |
 | to | string | — | ✔ | 子属性路径。 |
 
-### 代码图层源
+### 源（代码图层 / 网页编译）
 
-sources/<id>/ 由工程文档里的源清单派生。
+sources/<id>/ 由工程文档里的源清单派生；html / svg 源的编译产物写成 .vdm/sources/<id>/base.json。
 
 #### `sourceAdd` — 注册 / 替换代码图层源
 
@@ -814,6 +814,38 @@ sources/<id>/ 由工程文档里的源清单派生。
   "name": "radius",
   "value": 0.5,
   "t": 1
+}
+```
+
+#### `sourceCompile` — 登记网页编译的结果
+
+编译 HTML / SVG 源要读源文件、算哈希并写 .vdm/sources/<id>/base.json —— 这些在 application/source-service.js；core 的 op 只校验并登记结果，不改工程。引擎/CLI 收到 { id } 时会在写入前展开（重新编译并刷新 base.json）。
+
+| 字段 | 类型 | 单位 | 必填 | 说明 |
+| --- | --- | --- | --- | --- |
+| id | string | — | ✔ | 源 id（manifest.runtime 必须是 html / svg）。 |
+| compiled | object | — |  | 编译结果 { hash, builtAt, nodes }；{ id } 形式由引擎展开时填。 |
+
+```json
+{
+  "op": "sourceCompile",
+  "id": "html-title-card"
+}
+```
+
+#### `sourceApply` — 把编译出的元素 upsert 进工程（一次事务）
+
+elements 是编译产物（每项带 source = { id, node }）；同一个 sourceApply 里的元素在一个事务里写入。§7.8.2：编译产物走旧 transform 路径，元素上已有的空间 node 会被删掉。{ id } 形式由引擎展开（重新编译后填 elements）。
+
+| 字段 | 类型 | 单位 | 必填 | 说明 |
+| --- | --- | --- | --- | --- |
+| id | string | — | ✔ | 编译源 id。 |
+| elements | array | — |  | 编译产物：元素 payload 数组，每项带 source.node；{ id } 形式由引擎展开时填。 |
+
+```json
+{
+  "op": "sourceApply",
+  "id": "html-title-card"
 }
 ```
 

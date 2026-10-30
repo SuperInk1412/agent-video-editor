@@ -31,7 +31,7 @@ import { createJobService } from './jobs.js';
 import { mediaService } from './media-service.js';
 import {
   createRouter, projectRoutes, mediaRoutes, jobRoutes, agentRoutes, changesetRoutes,
-  reportRoutes, measureRoutes, rasterRoutes, closeRasterPool, fontRoutes, eventRoutes,
+  reportRoutes, measureRoutes, rasterRoutes, closeRasterPool, fontRoutes, sourceRoutes, eventRoutes,
 } from './routes/index.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -379,6 +379,7 @@ async function startOwnedServer({ root, port = 47100, open = false, onReady, imp
   agentRoutes(router, ctx);
   rasterRoutes(router, ctx);
   fontRoutes(router, ctx);
+  sourceRoutes(router, ctx);
   eventRoutes(router, ctx);
 
   const server = http.createServer(async (req, res) => {

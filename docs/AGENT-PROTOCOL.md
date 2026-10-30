@@ -140,9 +140,9 @@
 | propLinkPatch | 改属性链接 | id, to, patch | host id* to* patch* t:s |
 | propUnlink | 解除属性链接 | id, to | host id* to* |
 
-### 代码图层源
+### 源（代码图层 / 网页编译）
 
-sources/<id>/ 由工程文档里的源清单派生。
+sources/<id>/ 由工程文档里的源清单派生；html / svg 源的编译产物写成 .vdm/sources/<id>/base.json。
 
 | op | 作用 | 必填 | 字段（单位） |
 | --- | --- | --- | --- |
@@ -150,6 +150,8 @@ sources/<id>/ 由工程文档里的源清单派生。
 | sourceWrite | 改写源里的一个文件 | id, path, content | id* path* content* |
 | sourceRemove | 删掉一个源 | id | id* |
 | codeParamSet | 改代码图层的参数 | id, name | id* name* value:any v:any t:s |
+| sourceCompile | 登记网页编译的结果 | id | id* compiled |
+| sourceApply | 把编译出的元素 upsert 进工程（一次事务） | id | id* elements |
 
 ### 批量
 
@@ -522,4 +524,4 @@ sources/<id>/ 由工程文档里的源清单派生。
 - 本文件由 `scripts/gen-contracts.mjs` 从 `core/contracts.js` 生成（CONTRACT_VERSION 3），**不要手改**。
 - 重生成：`node scripts/gen-contracts.mjs`；校验：`node scripts/gen-contracts.mjs --check`（不一致时非零退出并打印 diff 摘要）。
 - 同源生成物：`docs/CONTRACTS.md`（人读字段表）、`mcp/contracts.generated.json`（机读快照）。
-- 当前规模：52 个公开 op、162 个 op 字段、122 条属性路径。
+- 当前规模：54 个公开 op、166 个 op 字段、122 条属性路径。

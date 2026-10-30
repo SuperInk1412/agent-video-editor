@@ -31,6 +31,9 @@
 
 import { HIERARCHY_OP_KINDS, applyHierarchyOp, ELEMENT_PARENT_OP_KINDS, applyElementParentOp } from './hierarchy.js';
 import { LEGACY_PARENT_OP_KINDS, PARENT_STRENGTH_OP_KINDS, applyParentStrengthOp } from './parent-strength.js';
+import { DEFAULT_STYLE, DEFAULT_TRANSFORM } from './schema.js';
+import { isSourceNodeId } from './source-eval.js';
+import { isRecord } from './json.js';
 import {
   SOURCE_MANIFEST, coerceParamValue, isCodeElement, isSafeParamName, isSafeSourceFile, isSafeSourceId,
   manifestIssues, sourceParams, sourceRecord, writeCodeParam,
@@ -235,8 +238,155 @@ registerOps({
   apply: applyCodeOp,
 });
 
+// -- compiled sources (§7.8, WP4.1) ----------------------------------------
+//
+// An HTML/SVG source compiles into elements (`core/source-map.js` +
+// `application/source-service.js`). The two ops below are the write path:
+//
+//   sourceCompile { id, compiled? }  the compile happened (base.json written by
+//                                    the application layer, which is the only
+//                                    side that may touch `.vdm/`); core sees
+//                                    the result and validates the header.
+//                                    Changes nothing in the project.
+//   sourceApply { id, elements }    upsert the compiled elements, one op =
+//                                    one transaction. Elements are compiled
+//                                    payloads with `el.source = { id, node }`;
+//                                    `{ id }` alone is expanded by
+//                                    `application/source-service.js::
+//                                    expandSourceOps` at the write boundary.
+//
+// §7.8.2: "4.1 的编译产物默认走旧 transform 路径" — a compiled element carries
+// `transform` and no spatial `node`, so a stale node from an earlier migration
+// is dropped instead of overriding the baseline.
+
+export const SOURCE_COMPILE_OP_KINDS = Object.freeze(['sourceCompile', 'sourceApply']);
+
+/** Element types a compiler may produce (§7.8.1). */
+const COMPILED_ELEMENT_TYPES = Object.freeze(['text', 'solid', 'shape', 'image']);
+const SNAPSHOT_HASH_RE = /^sha256:[0-9a-f]{64}$/;
+
+/** `sourceCompile`: record + validate a compile, change nothing. */
+function sourceCompile(project, op, fail) {
+  const id = str(op.id);
+  if (!isSafeSourceId(id)) fail(`sourceCompile: id 必须是 [A-Za-z0-9][A-Za-z0-9_-]{0,63}，收到 ${JSON.stringify(op.id)}`);
+  if (!sourceRecord(project, id)) fail(`sourceCompile: 没有源 ${id}`);
+  if (op.compiled === undefined) {
+    fail('sourceCompile: 编译要读源文件、算哈希并写 .vdm/sources/<id>/base.json，由 application/source-service.js 执行'
+      + `（POST /api/sources/${id}/compile）；core 的 op 只登记并校验编译结果`);
+  }
+  if (!isRecord(op.compiled)) fail('sourceCompile: compiled 必须是对象');
+  const hash = str(op.compiled.hash);
+  if (!SNAPSHOT_HASH_RE.test(hash)) fail(`sourceCompile: compiled.hash 必须是 sha256:<64 位小写十六进制>，收到 ${JSON.stringify(op.compiled.hash)}`);
+  const nodes = Number(op.compiled.nodes);
+  if (!Number.isFinite(nodes) || nodes < 0) fail('sourceCompile: compiled.nodes 必须是非负数字');
+  return {
+    changed: [],
+    compiled: { id, hash, nodes, builtAt: str(op.compiled.builtAt) },
+  };
+}
+
+/** `sourceApply`: upsert the compiled elements in one transaction step. */
+function sourceApply(project, op, fail) {
+  const id = str(op.id);
+  if (!isSafeSourceId(id)) fail(`sourceApply: id 必须是 [A-Za-z0-9][A-Za-z0-9_-]{0,63}，收到 ${JSON.stringify(op.id)}`);
+  const payloads = op.elements;
+  if (!Array.isArray(payloads) || !payloads.length) {
+    fail('sourceApply: 需要 elements（编译产物）：由 application/source-service.js::applyCompiled 从 base.json + 编译结果生成；'
+      + `core 不读 .vdm/sources/${id}/base.json`);
+  }
+  if (payloads.length > 1000) fail('sourceApply: 一次最多 1000 个元素');
+  if (!Array.isArray(project.elements)) project.elements = [];
+  const changed = [];
+  for (const payload of payloads) {
+    if (!isRecord(payload)) fail('sourceApply: elements 里每一项必须是对象');
+    // A page-background element (solid fill / gradient band) carries no node
+    // binding; every other payload must belong to this source.
+    const bound = isRecord(payload.source);
+    const node = bound ? str(payload.source.node) : '';
+    if (bound && str(payload.source.id) !== id) fail(`sourceApply: elements 里混进了别的源（${JSON.stringify(payload.source.id)}）`);
+    if (bound && !isSourceNodeId(node)) fail(`sourceApply: 节点 id ${JSON.stringify(node)} 不合法`);
+    if (!bound && !str(payload.id)) fail('sourceApply: 没有 source 绑定的元素必须带 id（页面背景带）');
+    const type = str(payload.type);
+    if (!COMPILED_ELEMENT_TYPES.includes(type)) fail(`sourceApply: 元素类型 ${JSON.stringify(payload.type)} 不是编译产物（text/solid/shape/image）`);
+    const transform = { ...DEFAULT_TRANSFORM, ...(isRecord(payload.transform) ? payload.transform : {}) };
+    const style = { ...DEFAULT_STYLE, ...(isRecord(payload.style) ? payload.style : {}) };
+    const duration = Number(payload.duration);
+    const start = Number(payload.start);
+    const z = Number(payload.z);
+    let el = (bound
+      ? project.elements.find((entry) => isRecord(entry) && isRecord(entry.source)
+        && str(entry.source.id) === id && str(entry.source.node) === node)
+      : null)
+      || project.elements.find((entry) => isRecord(entry) && str(entry.id) === str(payload.id))
+      || null;
+    if (el) {
+      el.type = type;
+      el.name = str(payload.name) || str(el.name) || node;
+      el.src = str(payload.src, str(el.src));
+      el.transform = transform;
+      el.style = style;
+      if (bound) el.source = { id, node };
+      else delete el.source;
+      if (Number.isFinite(start) && start >= 0) el.start = start;
+      if (Number.isFinite(duration) && duration > 0) el.duration = duration;
+      if (Number.isFinite(z)) el.z = z;
+      if (isRecord(payload.sourceMode) && Object.keys(payload.sourceMode).length) el.sourceMode = { ...payload.sourceMode };
+      else delete el.sourceMode;
+      if (el.node !== undefined) delete el.node;
+      changed.push(str(el.id));
+      continue;
+    }
+    const taken = new Set(project.elements.map((entry) => str(entry?.id)));
+    let elementId = str(payload.id) || `src_${id}_${node}`;
+    for (let n = 2; taken.has(elementId); n++) elementId = `${str(payload.id) || `src_${id}_${node}`}_${n}`;
+    const created = {
+      id: elementId,
+      name: str(payload.name) || node,
+      type,
+      src: str(payload.src),
+      segment: null,
+      start: Number.isFinite(start) && start >= 0 ? start : 0,
+      duration: Number.isFinite(duration) && duration > 0 ? duration : 1,
+      z: Number.isFinite(z) ? z : 0,
+      transform,
+      style,
+      fx: { glow: 0 },
+      motion: { type: 'none', amount: 0, dir: 'in' },
+      keyframes: [],
+      visible: true,
+      loop: false,
+      fadeIn: 0,
+      fadeOut: 0,
+      punch: 0,
+      srcIn: 0,
+      meta: {},
+      ...(bound ? { source: { id, node } } : {}),
+    };
+    if (isRecord(payload.sourceMode) && Object.keys(payload.sourceMode).length) created.sourceMode = { ...payload.sourceMode };
+    project.elements.push(created);
+    changed.push(elementId);
+  }
+  project.elements.sort((a, b) => (Number(a.z) || 0) - (Number(b.z) || 0) || (Number(a.start) || 0) - (Number(b.start) || 0));
+  return { changed, elements: changed };
+}
+
+/** `apply` of the compiled-source module. */
+function applySourceCompileOp(project, op, api) {
+  const fail = typeof api?.fail === 'function' ? api.fail : (message) => {
+    throw Object.assign(new Error(message), { code: 'OP_INVALID' });
+  };
+  if (op.op === 'sourceCompile') return sourceCompile(project, op, fail);
+  return sourceApply(project, op, fail);
+}
+
+registerOps({
+  id: 'source-compile',
+  kinds: SOURCE_COMPILE_OP_KINDS,
+  dispatch: 45,
+  apply: applySourceCompileOp,
+});
+
 /**
- * @param {object} project
  * @param {object} op
  * @param {{fail:Function,deepMerge:Function,getPath:Function,setPath:Function,newId:Function,coerceValue:Function,findElement:Function,findObject:Function,findCamera:Function}} api
  * @returns {{changed: string[]}|null}

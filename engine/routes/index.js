@@ -13,5 +13,6 @@ export { register as reportRoutes } from './reports.js';
 export { register as measureRoutes } from './measure.js';
 export { register as rasterRoutes, closeRasterPool } from './raster.js';
 export { register as fontRoutes } from './font.js';
+export { register as sourceRoutes } from './sources.js';
 export { register as eventRoutes } from './events.js';
 export { createRouter } from './router.js';

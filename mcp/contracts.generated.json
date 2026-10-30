@@ -3,8 +3,8 @@
   "generatedBy": "scripts/gen-contracts.mjs",
   "source": "core/contracts.js",
   "counts": {
-    "publicOps": 52,
-    "opFields": 162,
+    "publicOps": 54,
+    "opFields": 166,
     "propertyPaths": 122,
     "keyable": {
       "el": 17,
@@ -128,8 +128,8 @@
     },
     {
       "id": "source",
-      "title": "代码图层源",
-      "description": "sources/<id>/ 由工程文档里的源清单派生。"
+      "title": "源（代码图层 / 网页编译）",
+      "description": "sources/<id>/ 由工程文档里的源清单派生；html / svg 源的编译产物写成 .vdm/sources/<id>/base.json。"
     },
     {
       "id": "batch",
@@ -2285,6 +2285,66 @@
         "name": "radius",
         "value": 0.5,
         "t": 1
+      }
+    },
+    "sourceCompile": {
+      "group": "source",
+      "summary": "登记网页编译的结果",
+      "description": "编译 HTML / SVG 源要读源文件、算哈希并写 .vdm/sources/<id>/base.json —— 这些在 application/source-service.js；core 的 op 只校验并登记结果，不改工程。引擎/CLI 收到 { id } 时会在写入前展开（重新编译并刷新 base.json）。",
+      "required": [
+        "id"
+      ],
+      "fields": [
+        {
+          "name": "id",
+          "type": "string",
+          "unit": null,
+          "required": true,
+          "enum": null,
+          "description": "源 id（manifest.runtime 必须是 html / svg）。"
+        },
+        {
+          "name": "compiled",
+          "type": "object",
+          "unit": null,
+          "required": false,
+          "enum": null,
+          "description": "编译结果 { hash, builtAt, nodes }；{ id } 形式由引擎展开时填。"
+        }
+      ],
+      "example": {
+        "op": "sourceCompile",
+        "id": "html-title-card"
+      }
+    },
+    "sourceApply": {
+      "group": "source",
+      "summary": "把编译出的元素 upsert 进工程（一次事务）",
+      "description": "elements 是编译产物（每项带 source = { id, node }）；同一个 sourceApply 里的元素在一个事务里写入。§7.8.2：编译产物走旧 transform 路径，元素上已有的空间 node 会被删掉。{ id } 形式由引擎展开（重新编译后填 elements）。",
+      "required": [
+        "id"
+      ],
+      "fields": [
+        {
+          "name": "id",
+          "type": "string",
+          "unit": null,
+          "required": true,
+          "enum": null,
+          "description": "编译源 id。"
+        },
+        {
+          "name": "elements",
+          "type": "array",
+          "unit": null,
+          "required": false,
+          "enum": null,
+          "description": "编译产物：元素 payload 数组，每项带 source.node；{ id } 形式由引擎展开时填。"
+        }
+      ],
+      "example": {
+        "op": "sourceApply",
+        "id": "html-title-card"
       }
     }
   },
@@ -5924,6 +5984,61 @@
               }
             },
             "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "op",
+              "id"
+            ],
+            "properties": {
+              "op": {
+                "const": "sourceCompile",
+                "description": "操作类型：sourceCompile"
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+                "description": "源 id（manifest.runtime 必须是 html / svg）。"
+              },
+              "compiled": {
+                "type": "object",
+                "description": "编译结果 { hash, builtAt, nodes }；{ id } 形式由引擎展开时填。"
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "op",
+              "id"
+            ],
+            "properties": {
+              "op": {
+                "const": "sourceApply",
+                "description": "操作类型：sourceApply"
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+                "description": "编译源 id。"
+              },
+              "elements": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 1000,
+                "items": {
+                  "type": "object"
+                },
+                "description": "编译产物：元素 payload 数组，每项带 source.node；{ id } 形式由引擎展开时填。"
+              }
+            },
+            "additionalProperties": false
           }
         ]
       }
@@ -7724,6 +7839,61 @@
                 "type": "number",
                 "minimum": 0,
                 "description": "参数已打帧时写到这个时间的键上（秒）。"
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "op",
+              "id"
+            ],
+            "properties": {
+              "op": {
+                "const": "sourceCompile",
+                "description": "操作类型：sourceCompile"
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+                "description": "源 id（manifest.runtime 必须是 html / svg）。"
+              },
+              "compiled": {
+                "type": "object",
+                "description": "编译结果 { hash, builtAt, nodes }；{ id } 形式由引擎展开时填。"
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "op",
+              "id"
+            ],
+            "properties": {
+              "op": {
+                "const": "sourceApply",
+                "description": "操作类型：sourceApply"
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+                "description": "编译源 id。"
+              },
+              "elements": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 1000,
+                "items": {
+                  "type": "object"
+                },
+                "description": "编译产物：元素 payload 数组，每项带 source.node；{ id } 形式由引擎展开时填。"
               }
             },
             "additionalProperties": false

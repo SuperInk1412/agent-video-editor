@@ -43,7 +43,15 @@
 // same file. The case fails when more than 2 % of the pixels differ by more than
 // TEXT_DIFF levels, and prints the per-channel means and a 16x9 grid.
 //
-//   node scripts/check-render-parity.mjs [--keep] [--only=A,B,C,D,E,F,G,H,I,J]
+// Case L (docs/DESIGN-BACKEND-V2.md §7.1 / §10.2 WP4.1) is the source compile
+// case: the shared `html-title-card` fixture is compiled into native elements,
+// applied to a throwaway project, and the preview frame is compared with the
+// same page rendered by Chromium at 1920×1080 (whole frame + text area, 2 %
+// budget), while three animation times are checked against the browser's own
+// `getBoundingClientRect` (0.5 px). Blender is not involved; the case is skipped
+// with a reason when Electron is missing.
+//
+//   node scripts/check-render-parity.mjs [--keep] [--only=A,B,C,D,E,F,G,H,I,J,L]
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -55,6 +63,11 @@ import { saveProject, loadProject } from '../engine/storage.js';
 import { findBlender, renderStill } from '../engine/blender.js';
 import { findElectron } from '../engine/render-workers/pool.js';
 import { rotationFromDirRoll } from '../core/rotation.js';
+import { evalElement } from '../core/evaluate.js';
+import { createAsNode } from '../core/rotation-ops.js';
+import { applySourceToSt, normalizeSnapshot, sourceMerge, sourceStyleValues } from '../core/source-eval.js';
+import { applyCompiled, compileSource, fontContext } from '../application/source-service.js';
+import { layoutText } from '../core/glyphs.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..');
@@ -74,7 +87,7 @@ const FRAME_I = 12;              // IR frame under T = 0.5 s at 24 fps
 const T_I = FRAME_I / 24;
 const CODE_ALLOWED = 0.02;       // 2 % of the compared pixels (WP3.4 acceptance)
 
-const only = (process.argv.find((a) => a.startsWith('--only=')) || '--only=A,B,C,D,E,F,G,H,I,J').slice(7).split(',');
+const only = (process.argv.find((a) => a.startsWith('--only=')) || '--only=A,B,C,D,E,F,G,H,I,J,L').slice(7).split(',');
 
 const run = (cmd, args, opts = {}) => new Promise((resolve, reject) => {
   const p = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, ...opts });
@@ -867,8 +880,397 @@ async function fxCase() {
   return true;
 }
 
+// ---------------------------------------------------------------- case L: HTML
+//
+// Case L (docs/DESIGN-BACKEND-V2.md §7.1 / §10.2 WP4.1) is the source compile
+// case: the shared `html-title-card` fixture is compiled by
+// application/source-service.js into native elements, applied to a throwaway
+// project, and the preview frame is compared with the same page rendered
+// natively by Chromium at 1920×1080.
+//
+//   * the whole frame and the text area are compared pixel by pixel: channel
+//     levels above PAGE_DIFF count as different, PAGE_ALLOWED of them is the
+//     budget WP4.1 states;
+//   * the CSS animations are checked at three times: the compiled element's
+//     position must follow the browser's own `getBoundingClientRect` within
+//     POSITION_EPS_PX.
+//
+// The preview does not read `.vdm/sources/` yet (that wiring is WP4.3/4.6), so
+// the compared frame bakes the snapshot's value at T into the elements with
+// core/source-eval.js::sourceMerge — the function the IR evaluates with
+// (§7.8.2). The animation check merges into the *unbaked* baseline copy, so the
+// tracks are measured rather than the bake.
+//
+// Electron is required (both pictures are Chromium); Blender is not involved,
+// and the case is skipped with a reason when Electron is missing.
+
+const PROJECT_L = path.join(WORK, 'project-l');
+const SOURCE_L = 'html-title-card';
+const FIXTURE_L = path.join(REPO, 'tests', 'fixtures', 'sources', SOURCE_L);
+const T_L = 2;                       // all four animations are done by 1.55 s
+const FRAME_L = Math.round(T_L * 24);
+const AT_L = [0.35, 0.9, 2];         // animation samples for the position check
+const PAGE_DIFF = 24;                // channel levels ignored as anti-aliasing
+const PAGE_ALLOWED = 0.02;           // 2 % of the frame (WP4.1 acceptance)
+const POSITION_EPS_PX = 0.5;         // §7.1 / WP4.1 acceptance
+
+/** The fixture as a source registry record: `{ manifest, files }`. */
+async function fixtureSourceL() {
+  const files = {};
+  let manifest = null;
+  for (const name of await fs.readdir(FIXTURE_L)) {
+    const text = await fs.readFile(path.join(FIXTURE_L, name), 'utf8');
+    if (name === 'manifest.json') manifest = JSON.parse(text);
+    else files[name] = text;
+  }
+  return { manifest, files };
+}
+
+/** The Electron main script for case L (written into the work dir, not the repo). */
+const NATIVE_CAPTURE_CJS = `const { app, BrowserWindow } = require('electron');
+const fs = require('node:fs');
+const path = require('node:path');
+const [page, outPng, outJson] = process.argv.slice(-3);
+const probePath = path.join(__dirname, 'probe-l.js');
+app.commandLine.appendSwitch('disable-lcd-text');
+app.commandLine.appendSwitch('force-device-scale-factor', '1');
+app.disableHardwareAcceleration();
+app.whenReady().then(async () => {
+  const win = new BrowserWindow({
+    width: 1920, height: 1080, useContentSize: true, show: false, frame: false,
+    webPreferences: { offscreen: true, backgroundThrottling: false, contextIsolation: false, nodeIntegration: false },
+  });
+  try {
+    await win.loadFile(page);
+    for (let i = 0; i < 8; i++) {
+      const size = await win.webContents.executeJavaScript('[window.innerWidth, window.innerHeight]');
+      if (size[0] === 1920 && size[1] === 1080) break;
+      win.setContentSize(1920, 1080);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+    await win.webContents.executeJavaScript('window.__VDM_CASE = ' + (process.env.VDM_CASE || '{}'));
+    const result = await win.webContents.executeJavaScript(fs.readFileSync(probePath, 'utf8'));
+    const image = await win.webContents.capturePage();
+    fs.writeFileSync(outPng, image.toPNG());
+    fs.writeFileSync(outJson, JSON.stringify(result));
+    console.log('[native] ok ' + JSON.stringify({ viewport: result.viewport, animations: result.animationCount }));
+  } catch (e) {
+    console.error('[native] failed', e && e.stack);
+    process.exitCode = 1;
+  } finally {
+    app.quit();
+  }
+});
+`;
+
+/**
+ * The probe executed in the page: pin the compiler's font per node (the file's
+ * font chain would resolve to something else in the browser), pause every CSS
+ * animation at each sample time, then read the geometry with
+ * `getBoundingClientRect` (a Range for the inline text box).
+ */
+const PROBE_L = `(async () => {
+  const CASE = window.__VDM_CASE || {};
+  const PIN = CASE.pin || {};
+  const TIMES = CASE.times || [];
+  const CAPTURE = CASE.time;
+  const frames = () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+  for (const [id, spec] of Object.entries(PIN)) {
+    const el = document.querySelector('[data-vdm-id="' + id + '"]');
+    if (!el) continue;
+    if (spec.family) el.style.fontFamily = '"' + spec.family + '"';
+    if (spec.weight !== undefined) el.style.fontWeight = String(spec.weight);
+    el.style.fontSynthesis = 'none';
+  }
+  await frames();
+  const read = () => Object.keys(PIN).map((id) => {
+    const el = document.querySelector('[data-vdm-id="' + id + '"]');
+    if (!el) return { id, missing: true };
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const rect = range.getBoundingClientRect();
+    const box = el.getBoundingClientRect();
+    const style = getComputedStyle(el);
+    return {
+      id,
+      range: [rect.left, rect.top, rect.width, rect.height],
+      box: [box.left, box.top, box.width, box.height],
+      fontSize: parseFloat(style.fontSize),
+      lineHeight: style.lineHeight === 'normal' ? null : parseFloat(style.lineHeight),
+      letterSpacing: style.letterSpacing === 'normal' ? 0 : parseFloat(style.letterSpacing),
+      opacity: parseFloat(style.opacity),
+      transform: style.transform,
+      color: style.color,
+      font: style.fontFamily,
+      text: el.textContent,
+    };
+  });
+  const animations = document.getAnimations();
+  const out = { viewport: [window.innerWidth, window.innerHeight], samples: [], animationCount: animations.length };
+  for (const t of TIMES) {
+    for (const animation of animations) { animation.pause(); animation.currentTime = t * 1000; }
+    await frames();
+    out.samples.push({ t, nodes: read() });
+  }
+  for (const animation of animations) { animation.pause(); animation.currentTime = CAPTURE * 1000; }
+  await frames();
+  out.capture = { t: CAPTURE, nodes: read() };
+  return out;
+})()`;
+
+/**
+ * Compile + apply the fixture into a throwaway project, then bake the snapshot's
+ * `t = T_L` value into the elements (sourceMerge, §7.8.2). The unbaked baseline
+ * is kept for the animation check.
+ */
+async function buildHtmlProject() {
+  await fs.rm(PROJECT_L, { recursive: true, force: true });
+  await fs.mkdir(path.join(PROJECT_L, 'media'), { recursive: true });
+  const { manifest, files } = await fixtureSourceL();
+  const fonts = await fontContext(PROJECT_L);
+  const p = normalizeProject(createProject({
+    title: 'parity html', width: 1920, height: 1080, duration: T_L + 1, background: '#06070c',
+  }));
+  ensureSpace(p);
+  applyOps(p, [
+    { op: 'setFx', fx: { bloom: 0, ca: 0, grain: 0, vignette: 0, scanline: 0, grade: 0, contrast: 0, saturation: 1 } },
+    { op: 'sourceAdd', id: SOURCE_L, manifest, files },
+  ]);
+  const compiled = await compileSource({ project: p, sourceId: SOURCE_L, root: PROJECT_L });
+  const applied = await applyCompiled({ project: p, sourceId: SOURCE_L, root: PROJECT_L });
+  applyOps(p, [applied.op]);
+  const snapshot = normalizeSnapshot(compiled.snapshot);
+  // The browser must use the family the compiler picked (§7.1: one concrete
+  // family, not the page's chain resolved by a different font config).
+  const pin = {};
+  for (const element of p.elements) {
+    if (element.type !== 'text' || !element.source) continue;
+    pin[element.source.node] = { family: element.style.font, weight: element.style.weight };
+  }
+  const baseline = JSON.parse(JSON.stringify(p.elements));
+  // Bake the source value at T_L (see the header comment).
+  for (const element of p.elements) {
+    if (!element.source || element.source.id !== SOURCE_L) continue;
+    const st = evalElement(element, T_L, p.meta);
+    const merge = sourceMerge(element, snapshot, T_L, st);
+    if (!merge) continue;
+    applySourceToSt(st, merge.values);
+    element.transform = { x: st.x, y: st.y, scale: st.scale, rotation: st.rotation, opacity: st.opacity };
+    element.style = {
+      ...element.style,
+      ...sourceStyleValues(merge.values),
+      text: st.text, size: st.size, color: st.color,
+    };
+    // The load-time rotation migration would rebuild this anyway; doing it here
+    // keeps the baked picture the one the preview draws.
+    if (element.node !== undefined) delete element.node;
+    createAsNode(p.meta, element);
+  }
+  await saveProject(PROJECT_L, p, { by: 'check-render-parity' });
+  // The text quad the IR typesets (§4.4 v4): the position check needs it to turn
+  // a centre into the browser's inline-box left edge.
+  const quadOf = (element) => {
+    if (!element) return [0, 0];
+    const font = fonts.fonts[String(element.style.font || '').toLowerCase()] || Object.values(fonts.fonts)[0];
+    if (!font) return [0, 0];
+    const layout = layoutText([font], String(element.style.text ?? ''), {
+      fontSize: element.style.size,
+      lineHeight: element.style.lineHeight,
+      letterSpacing: element.style.letterSpacing,
+      align: element.style.align,
+    });
+    return [layout.width, layout.height];
+  };
+  const boundTo = (list, nodeId) => list.find((element) => element.source?.id === SOURCE_L && element.source.node === nodeId) || null;
+  return {
+    project: p, snapshot, pin, quadOf,
+    elementOf: (nodeId) => boundTo(p.elements, nodeId),
+    baselineOf: (nodeId) => boundTo(baseline, nodeId),
+  };
+}
+
+/** Render the fixture page in Chromium: the reference picture + its geometry. */
+async function captureNativeL({ pinJson, times, outPng, outJson }) {
+  const electron = findElectron();
+  if (!electron) throw Object.assign(new Error('Electron not found'), { code: 'DEPENDENCY_MISSING' });
+  const scriptPath = path.join(WORK, 'native-capture.cjs');
+  await fs.writeFile(scriptPath, NATIVE_CAPTURE_CJS);
+  await fs.writeFile(path.join(WORK, 'probe-l.js'), PROBE_L);
+  const env = { ...process.env, VDM_CASE: JSON.stringify({ pin: pinJson, times, time: T_L }) };
+  const r = await run(electron, [scriptPath, path.join(FIXTURE_L, 'index.html'), outPng, outJson], { cwd: REPO, env });
+  if (r.code !== 0) throw new Error(`native capture failed: ${String(r.err).slice(-800)}`);
+  const line = String(r.out).split('\n').find((entry) => entry.includes('[native] ok'));
+  if (!line) throw new Error(`native capture printed no marker: ${String(r.out).slice(-400)} ${String(r.err).slice(-400)}`);
+  return JSON.parse(await fs.readFile(outJson, 'utf8'));
+}
+
+/** The compiled value of one bound element at `t` (the §7.8.2 merge). */
+function bakedStateAt(element, snapshot, meta, t) {
+  const st = evalElement(element, t, meta);
+  const merge = sourceMerge(element, snapshot, t, st);
+  if (merge) applySourceToSt(st, merge.values);
+  return st;
+}
+
+/**
+ * Case L: compiled HTML vs the browser's own frame. Skipped, with a reason, when
+ * Electron is missing.
+ */
+async function htmlCase() {
+  const electron = findElectron();
+  if (!electron) {
+    console.log('[parity] L SKIP — Electron not found. Case L renders the same page natively in'
+      + ' Chromium and compares it with the preview (WP4.1 acceptance); Blender is not involved.');
+    return true;
+  }
+  const built = await buildHtmlProject();
+  const pagePng = path.join(WORK, 'page-l.png');
+  const nativeJson = path.join(WORK, 'page-l.json');
+  const native = await captureNativeL({
+    pinJson: built.pin, times: AT_L, outPng: pagePng, outJson: nativeJson,
+  });
+  if (native.viewport[0] !== 1920 || native.viewport[1] !== 1080) {
+    console.log(`[parity] L FAIL — the browser viewport is ${native.viewport.join('×')}, the project is 1920×1080`);
+    return false;
+  }
+  // The reference picture rides in under the project's /media/ (an --eval string
+  // cannot carry a 1920×1080 PNG on a Windows command line).
+  await fs.copyFile(pagePng, path.join(PROJECT_L, 'media', 'zz-page-l.png'));
+
+  // Text regions for the per-area number: the browser's own inline boxes.
+  const regions = native.capture.nodes
+    .filter((node) => !node.missing)
+    .map((node) => node.range)
+    .filter((rect) => rect[2] > 0 && rect[3] > 0)
+    .map(([x, y, w, h]) => [x - 2, y - 2, w + 4, h + 4]);
+  const probe = `export async function run() {
+  const app = window.__vdm;
+  const p = app.preview;
+  const W = 1920, H = 1080;
+  const REGIONS = ${JSON.stringify(regions)};
+  app.pause();
+  p.playing = false;
+  app.setTime(${T_L});
+  p.canvas.width = W;
+  p.canvas.height = H;
+  p._rebuildTargets();
+  await p.whenFontsReady();
+  // The text mesh path needs the font bytes; a canvas fallback would compare a
+  // different rasteriser (case H makes the same check).
+  for (let i = 0; i < 100 && p.fontBytes.size === 0 && p.fontPending.size > 0; i++) await new Promise((r) => setTimeout(r, 50));
+  p.render(${T_L});
+  // Read the frame back the way cases A–G sample the preview: the WebGL
+  // framebuffer, row 0 = bottom.
+  const gl = p.gl;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  const a = new Uint8Array(W * H * 4);
+  gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, a);
+  const ref = new Image();
+  ref.src = '/media/zz-page-l.png?t=' + Date.now();
+  await ref.decode();
+  const cv = document.createElement('canvas');
+  cv.width = W;
+  cv.height = H;
+  const ctx = cv.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(ref, 0, 0, W, H);
+  const b = ctx.getImageData(0, 0, W, H).data;
+  const at = (x, y) => ((H - 1 - y) * W + x) * 4; // framebuffer rows are bottom-up
+  const inRegions = (x, y) => REGIONS.some(([rx, ry, rw, rh]) => x >= rx && x < rx + rw && y >= ry && y < ry + rh);
+  let over = 0, over8 = 0, textPixels = 0, textOver = 0;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const ia = at(x, y);
+      const ib = (y * W + x) * 4;
+      const d = Math.max(Math.abs(a[ia] - b[ib]), Math.abs(a[ia + 1] - b[ib + 1]), Math.abs(a[ia + 2] - b[ib + 2]));
+      if (d > 8) over8 += 1;
+      const inside = inRegions(x, y);
+      if (inside) textPixels += 1;
+      if (d > ${PAGE_DIFF}) {
+        over += 1;
+        if (inside) textOver += 1;
+      }
+    }
+  }
+  const sample = (x, y) => {
+    const ia = at(x, y);
+    const ib = (y * W + x) * 4;
+    return [[a[ia], a[ia + 1], a[ia + 2]], [b[ib], b[ib + 1], b[ib + 2]]];
+  };
+  window.__dbg = {
+    W, H, total: W * H, over, over8, ratio: over / (W * H),
+    text: { pixels: textPixels, over: textOver, ratio: textPixels ? textOver / textPixels : 0 },
+    fonts: p.fontBytes.size, fontFailed: [...p.fontFailed],
+    meshDraws: p.meshStats.draws, meshBuilds: p.meshStats.builds,
+    layers: (p.layers || []).length,
+    samples: [sample(0, 0), sample(W >> 1, H >> 1), sample(W - 1, H - 1)],
+  };
+}`;
+  await fs.writeFile(path.join(PROJECT_L, 'media', 'parity-l.js'), probe);
+  const evalJs = `(async () => {
+  for (let i = 0; i < 150 && !(window.__vdm && window.__vdm.preview); i++) await new Promise((r) => setTimeout(r, 100));
+  if (!(window.__vdm && window.__vdm.preview)) throw new Error('the editor never booted');
+  const mod = await import('/media/parity-l.js?t=' + Date.now());
+  await mod.run();
+})().catch((e) => { window.__dbg = { errors: [String((e && e.stack) || e)] }; })`;
+  const r = await run(process.execPath, [path.join(HERE, 'dev.mjs'), '--project', PROJECT_L,
+    `--capture=${path.join(WORK, 'preview-l.png')}`, `--at=${T_L}`, '--delay=2600', '--hold=2500', `--eval=${evalJs}`], { cwd: REPO });
+  const line = String(r.out).split('\n').find((entry) => entry.includes('[capture]'));
+  if (!line) throw new Error(`no preview capture for case L: ${String(r.err).slice(-1200)}`);
+  const dbg = captureDbg(line);
+  if (!dbg) throw new Error(`could not parse case L: ${line.slice(0, 400)}`);
+  if (dbg.errors && dbg.errors.length) {
+    console.log(`[parity] L FAIL — the probe threw: ${dbg.errors[0].split('\n')[0]}`);
+    return false;
+  }
+
+  // ---- CSS animation: compiled position vs getBoundingClientRect ----
+  const failures = [];
+  const rows = [];
+  let worst = 0;
+  for (const nodeId of Object.keys(built.pin)) {
+    const element = built.elementOf(nodeId);
+    const baseline = built.baselineOf(nodeId);
+    if (!element || !baseline) continue;
+    const [width] = built.quadOf(element);
+    for (const sample of native.samples) {
+      const browser = sample.nodes.find((entry) => entry.id === nodeId);
+      if (!browser || browser.missing) continue;
+      const st = bakedStateAt(baseline, built.snapshot, built.project.meta, sample.t);
+      // §7.8.1: `transform.x` is the element centre in project pixels (y down);
+      // the compiled text quad's left edge is the browser's inline-box start.
+      const left = st.x + 1920 / 2 - width / 2;
+      const centreY = st.y + 1080 / 2;
+      const boxCentreY = browser.box[1] + browser.box[3] / 2;
+      const dx = left - browser.range[0];
+      const dy = centreY - boxCentreY;
+      const error = Math.max(Math.abs(dx), Math.abs(dy));
+      worst = Math.max(worst, error);
+      rows.push([nodeId, sample.t, dx, dy]);
+      if (error > POSITION_EPS_PX) failures.push(`${nodeId}@${sample.t}s 位置差 ${error.toFixed(3)} px`);
+    }
+  }
+
+  console.log(`[parity] L html-title-card ${native.viewport.join('×')}, frame ${FRAME_L} (t=${T_L}s):`
+    + ` frame diff ${dbg.over} px (${pct(dbg.ratio)})  [>8: ${dbg.over8}, >${PAGE_DIFF}: ${dbg.over}]`);
+  console.log(`[parity] L text area ${dbg.text.pixels} px: diff ${dbg.text.over} px (${pct(dbg.text.ratio)})`);
+  console.log(`[parity] L fonts: ${dbg.fonts} loaded${dbg.fontFailed.length ? `, failed ${JSON.stringify(dbg.fontFailed)}` : ''}`
+    + `  mesh draws ${dbg.meshDraws} builds ${dbg.meshBuilds}  layers ${dbg.layers}`);
+  console.log(`[parity] L animation: ${rows.length} samples, worst |Δ| ${worst.toFixed(3)} px (allowed ${POSITION_EPS_PX})`);
+  for (const [id, t, dx, dy] of rows) console.log(`[parity] L   ${id} @${t}s  Δx ${dx.toFixed(3)} px  Δy ${dy.toFixed(3)} px`);
+  if (!(dbg.fonts > 0)) failures.push('the preview never fetched a font, so the text mesh path was not used');
+  if (dbg.ratio > PAGE_ALLOWED) failures.push(`full frame differs by ${pct(dbg.ratio)} > ${pct(PAGE_ALLOWED)}`);
+  if (failures.length) {
+    console.log(`[parity] L pixel samples (preview | browser): ${JSON.stringify(dbg.samples)}`);
+    console.log(`[parity] L FAIL — ${failures.join('; ')}`);
+    return false;
+  }
+  console.log(`[parity] L PASS — frame diff ${pct(dbg.ratio)} (allowed ${pct(PAGE_ALLOWED)}),`
+    + ` text area ${pct(dbg.text.ratio)}, position error ≤ ${POSITION_EPS_PX} px`);
+  return true;
+}
+
 async function main() {
-  const gridCases = only.filter((k) => !['H', 'I', 'J'].includes(k));
+  const gridCases = only.filter((k) => !['H', 'I', 'J', 'L'].includes(k));
   let failed = false;
   if (!gridCases.length) {
     await fs.rm(WORK, { recursive: true, force: true });
@@ -921,6 +1323,10 @@ async function main() {
   // Case J: every screen effect on, preview vs the exported film (§5.4 / WP3.5).
   if (only.includes('J')) {
     if (!(await fxCase())) failed = true;
+  }
+  // Case L: compiled HTML vs the browser's own frame (§7.1 / WP4.1).
+  if (only.includes('L')) {
+    if (!(await htmlCase())) failed = true;
   }
   if (failed) {
     if (!process.argv.includes('--keep')) console.log('[parity] work dir kept for inspection:', WORK);

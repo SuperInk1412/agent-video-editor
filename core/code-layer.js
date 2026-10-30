@@ -32,8 +32,18 @@ import { resolveEffectiveValue } from './links.js';
 export const CODE_PARAM_PREFIX = 'code.params.';
 /** `live`: preview renders on demand. `bake`: only already-cached frames. */
 export const CODE_CACHE_MODES = Object.freeze(['live', 'bake']);
-/** Runtimes this WP ships templates for (mirror of engine/render-workers/protocol.js). */
-export const CODE_RUNTIMES = Object.freeze(['canvas2d', 'p5', 'glsl']);
+/** Every runtime a source may declare (the registry whitelist, §7.8.6 #8). */
+export const CODE_RUNTIMES = Object.freeze(['canvas2d', 'p5', 'glsl', 'html', 'svg']);
+/**
+ * The runtimes the RenderWorkerPool draws, one frame at a time (§5). `html` /
+ * `svg` are compile sources (WP4.1): they turn into native elements, so they
+ * never go through the pool and have no `code` element (§7.8.6 #8).
+ */
+export const RASTER_RUNTIMES = Object.freeze(['canvas2d', 'p5', 'glsl']);
+/** Runtimes that compile into native elements instead of rendering per frame. */
+export const COMPILE_RUNTIMES = Object.freeze(['html', 'svg']);
+/** true for a runtime the pool rasterises per frame. */
+export const isRasterRuntime = (runtime) => RASTER_RUNTIMES.includes(String(runtime ?? ''));
 /** The one file every source directory must contain. */
 export const SOURCE_MANIFEST = 'manifest.json';
 /** Budget the contract check enforces per frame (§5.3: live preview 200 ms). */
@@ -194,7 +204,7 @@ export function manifestIssues(manifest, at = 'manifest') {
   if (!isRecord(manifest)) return [{ path: at, msg: 'must be an object' }];
   const runtime = manifest.runtime;
   if (typeof runtime !== 'string' || !runtime) push(`${at}.runtime`, `must be one of ${CODE_RUNTIMES.join(' / ')}`);
-  else if (!CODE_RUNTIMES.includes(runtime)) push(`${at}.runtime`, `unsupported runtime ${runtime}（这一版支持 ${CODE_RUNTIMES.join(' / ')}）`);
+  else if (!CODE_RUNTIMES.includes(runtime)) push(`${at}.runtime`, `unsupported runtime ${runtime}（这一版支持 ${CODE_RUNTIMES.join(' / ')}；html / svg 是编译源，不是逐帧渲染）`);
   if (manifest.id !== undefined && (typeof manifest.id !== 'string' || !isSafeSourceId(manifest.id))) {
     push(`${at}.id`, 'must be a nonempty source id');
   }
@@ -515,6 +525,11 @@ export function writeCodeParam(el, name, value, t = 0) {
  */
 export function codeLayerPlan(project, el, t, { fps = 24 } = {}) {
   const meta = project?.meta || {};
+  // A compile source (html / svg) is not a per-frame raster: there is no plan,
+  // and the IR must not carry a `raster` item for it (§7.8.6 #8). A source the
+  // project does not know keeps the old behaviour (the pool reports it).
+  const runtime = codeManifest(project, el)?.runtime;
+  if (runtime !== undefined && runtime !== null && COMPILE_RUNTIMES.includes(String(runtime))) return null;
   const rate = Number.isFinite(Number(fps)) && Number(fps) > 0 ? Number(fps) : (Number(meta.fps) || 24);
   const manifest = codeManifest(project, el);
   const policy = codeCachePolicy(el, manifest);
