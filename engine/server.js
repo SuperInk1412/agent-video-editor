@@ -692,7 +692,9 @@ async function startOwnedServer({ root, port = 47100, open = false, onReady, imp
         const actorId = url.searchParams.get('actorId') || undefined;
         const limit = url.searchParams.get('limit') || undefined;
         const offset = url.searchParams.get('offset') || undefined;
-        return json(res, 200, { ok: true, ...await changesets.list({ status, actorId, limit, offset }) });
+        // detail=1 returns full records (changed[]), not just the counts.
+        const detail = url.searchParams.get('detail') === '1';
+        return json(res, 200, { ok: true, ...await changesets.list({ status, actorId, limit, offset, detail }) });
       }
       const changesetMatch = /^\/api\/changesets\/([A-Za-z0-9_.-]+)$/.exec(pathname);
       if (changesetMatch && req.method === 'GET') {

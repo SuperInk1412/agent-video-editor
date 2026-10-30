@@ -285,3 +285,24 @@ test('the approve route is honest while no agent loop is running', async (t) => 
   assert.equal(response.status, 404);
   assert.equal((await response.json()).code, 'NO_PENDING_PLAN');
 });
+
+test('the change set list is summaries by default and full records with detail=1', async (t) => {
+  const { service, post } = await setup(t);
+  const get = async (route) => {
+    const response = await fetch(service.info.url + route);
+    return { status: response.status, body: await response.json() };
+  };
+  const proposed = await (await post('api/changesets', { action: 'propose', intent: 'detail', ops: [{ op: 'set', id: 'el_1', path: 'start', value: 0.5 }] })).json();
+  const id = proposed.changeset.id;
+
+  const summaries = await get('api/changesets?status=proposed');
+  const summary = summaries.body.changesets.find((record) => record.id === id);
+  assert.equal(summary.changed, undefined, 'a summary carries counts, not the diff');
+  assert.equal(summary.counts.changed, 1);
+
+  const full = await get('api/changesets?status=proposed&detail=1');
+  const record = full.body.changesets.find((entry) => entry.id === id);
+  assert.ok(Array.isArray(record.changed));
+  assert.ok(record.changed.some((entry) => entry.path === 'start'), 'the full record names the property');
+  assert.equal(record.opsCount, 1);
+});

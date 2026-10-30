@@ -556,7 +556,12 @@ export class ChangeSetService {
   }
 
   // -------------------------------------------------------------------- reads
-  async list({ status, actorId, limit = 50, offset = 0 } = {}) {
+  /**
+   * Newest-first summaries by default. `detail: true` returns the full public
+   * records instead — the review panel and the timeline marks need `changed[]`
+   * (which property, before, after), not just the counts.
+   */
+  async list({ status, actorId, limit = 50, offset = 0, detail = false } = {}) {
     if (status !== undefined && !CHANGESET_STATUS.includes(status)) {
       throw fault('INVALID_ARGUMENT', `status must be one of ${CHANGESET_STATUS.join(', ')}`);
     }
@@ -569,7 +574,8 @@ export class ChangeSetService {
       version: CHANGESET_VERSION,
       total: matching.length,
       count: Math.max(0, Math.min(size, matching.length - start)),
-      changesets: matching.slice(start, start + size).map((record) => this.summary(record)),
+      changesets: matching.slice(start, start + size)
+        .map((record) => (detail ? this.publicRecord(record) : this.summary(record))),
     };
   }
 
