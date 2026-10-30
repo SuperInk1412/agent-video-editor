@@ -764,6 +764,8 @@ export class Timeline {
     this._paintRange();
     // A project change can move or delete a marked host: repaint after the rows.
     this._paintMarks();
+    // A hovered report chip loses its row on a rebuild; keep it painted.
+    this._paintReportHint();
   }
 
   // ------------------------------------------------------------ time range (WP2.5d)
@@ -849,6 +851,39 @@ export class Timeline {
     });
     this._rangeEl = band;
     this._rangeX = x;
+  }
+
+  // ------------------------------------------------------------ report hints (WP2.5c)
+  // docs/DESIGN-WP2.5-REVIEW.md §10.4-5: hovering a report attachment chip
+  // highlights the same thing here. Paint-only and transient — no op, no
+  // project write, and the next render() repaints it from `this.reportHint`.
+  /**
+   * `{ refs: ['el:el_1'], range: { from, to } }` — either part, or null to clear.
+   */
+  setReportHint(hint) {
+    this.reportHint = hint || null;
+    this._paintReportHint();
+  }
+
+  _paintReportHint() {
+    if (!this.inner) return;
+    for (const node of this._reportNodes || []) node.remove();
+    this._reportNodes = [];
+    for (const node of this.inner.querySelectorAll('.tl-report-hl')) node.classList.remove('tl-report-hl');
+    const hint = this.reportHint;
+    if (!hint) return;
+    for (const ref of hint.refs || []) {
+      const row = this._rowOf(ref);
+      if (row) row.classList.add('tl-report-hl');
+    }
+    if (hint.range && this.rulerTrack) {
+      const px = (this.pps || 0) / this._fps();
+      const band = el('div', 'tl-report-range');
+      band.style.left = `${hint.range.from * px}px`;
+      band.style.width = `${rangeWidth(hint.range) * px}px`;
+      this.rulerTrack.appendChild(band);
+      this._reportNodes.push(band);
+    }
   }
 
   // ------------------------------------------------------------ change-set marks (WP2.5b)

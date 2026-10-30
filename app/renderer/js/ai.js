@@ -9,6 +9,8 @@
 // panel / timeline markers is WP2.5 — nothing below adds a widget.
 import { h, icon } from './ui.js';
 import { frameStart } from './timeline-math.js';
+import { draftSummary } from '/core/report-draft.js';
+import { reportStatusLabel } from './report.js';
 
 const EXAMPLES = [
   '把标题改成「锈梦」，字号加大，加一点辉光',
@@ -35,6 +37,9 @@ export class AgentPanel {
     this.measurements = [];
     this.rejections = [];
     this.contract = null;
+    // Report cards (WP2.5c): the id set keeps one report from being drawn twice
+    // when both the POST reply and the SSE broadcast reach this panel.
+    this._reportIds = new Set();
     this._render();
   }
 
@@ -400,6 +405,23 @@ export class AgentPanel {
     this._renderLog();
   }
 
+  /**
+   * 报告 card (WP2.5c, §10.4-8). A report is a record, not a run: this never
+   * starts the agent. The same id updates its card instead of adding a second
+   * one (a re-measure arrives while the card is already in the stream).
+   */
+  pushReport(report) {
+    if (!report?.id) return false;
+    if (this._reportIds.has(report.id)) {
+      const entry = this.log.find((item) => item.kind === 'report' && item.report?.id === report.id);
+      if (entry) { entry.report = report; this._renderLog(); }
+      return false;
+    }
+    this._reportIds.add(report.id);
+    this._push({ kind: 'report', report });
+    return true;
+  }
+
   _entry(e) {
     switch (e.kind) {
       case 'task':
@@ -429,6 +451,27 @@ export class AgentPanel {
             onclick: () => this.opts.onOpenReview(e.changesetId),
           }, '审阅'));
         }
+        return card;
+      }
+      case 'report': {
+        const report = e.report || {};
+        const summary = draftSummary(report);
+        const status = report.status || 'open';
+        const card = h('div', {
+          class: 'msg msg-card msg-report', role: 'button', tabindex: '0', 'data-report-id': report.id || '',
+          'data-action': 'open-report', title: report.id || '',
+        },
+          h('div', { class: 'msg-card-head' }, icon('alert', 'ic-sm'), h('span', {}, '报告'),
+            h('span', { class: `msg-badge ${status}` }, reportStatusLabel(status))),
+          h('div', { class: 'msg-card-text msg-report-line' }, summary.line),
+        );
+        const open = () => this.opts.onOpenReport?.(report.id);
+        card.addEventListener('click', open);
+        card.addEventListener('keydown', (ev) => {
+          if (ev.key !== 'Enter' && ev.key !== ' ') return;
+          ev.preventDefault();
+          open();
+        });
         return card;
       }
       case 'error':

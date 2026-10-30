@@ -7,6 +7,7 @@ import { CurvePanel, curvePathLabel } from './curvepanel.js';
 import { Inspector } from './inspector.js';
 import { AgentPanel } from './ai.js';
 import { ReviewPanel } from './review.js';
+import { ReportDraftPanel } from './report.js';
 import { PipelinePanel } from './pipeline.js';
 import { LogPanel } from './logs.js';
 import { ProjectsPanel } from './projects.js';
@@ -72,9 +73,13 @@ const S = {
   previewShadow: null,
   previewHolding: false,
   readOnly: false,
+  // Report draft (WP2.5c): null, or `{ draft, open: true }`. The panel in
+  // report.js owns the content; this mirror is what __vdm and the probes read.
+  reportDraft: null,
 };
 
 let preview, timeline, inspector, agentPanel, review, pipelinePanel, logPanel, gizmo, projects, curvePanel;
+let reportPanel; // the 报告草稿 floating panel (WP2.5c)
 // Property-link "转到父级" navigation stack (PLAN-ui-round3 §4.3). Jumping never
 // writes the project and never touches Ctrl+Z; Alt+← / the inspector chip walks
 // back through the panels the user came from.
@@ -2583,6 +2588,71 @@ function setPreviewHold(on) {
   preview.render(S.time);
 }
 
+/**
+ * A report attachment stores the raw host id (`el_1`) because the measurement
+ * service addresses hosts that way (`core/report-draft.js` §host/path); the
+ * selection pool addresses the same host as `el:el_1`. This maps one to the
+ * other, or null when the host is gone.
+ */
+function selectionRefForHost(project, id) {
+  if (!id) return null;
+  const key = String(id);
+  if ((project?.elements || []).some((entry) => entry.id === key)) return `el:${key}`;
+  if ((project?.scene?.objects || []).some((entry) => entry.id === key)) return `ob:${key}`;
+  if ((project?.cameras || []).some((entry) => entry.id === key)) return `cam:${key}`;
+  if (project?.camera?.id === key) return `cam:${key}`;
+  return null;
+}
+
+/**
+ * Report chip click (§10.4-5): select the attachment's host (or its property /
+ * keyframe row) and seek to the frame it is about. Read-only — a report is not
+ * an edit, so nothing here goes through `op()`.
+ */
+function jumpToAttachment(attachment) {
+  if (!attachment || !S.project) return;
+  const seek = (t) => { pause(); setTime(Math.max(0, Number(t) || 0)); };
+  const kind = attachment.kind;
+  if (kind === 'range') { seek((attachment.from || 0) / projectFps()); return; }
+  if (kind === 'region') { seek((attachment.frame || 0) / projectFps()); return; }
+  if (kind === 'property' || kind === 'keyframe') {
+    const host = selectionRefForHost(S.project, attachment.host);
+    if (!host) return;
+    const ref = kind === 'keyframe'
+      ? `${host}:${attachment.path}:${attachment.t}`
+      : `${host}:${attachment.path}`;
+    select({ pool: selectOne(kind, ref) });
+    if (kind === 'keyframe') seek(attachment.t);
+    return;
+  }
+  const host = selectionRefForHost(S.project, attachment.ref);
+  const split = host ? splitRef(host) : null;
+  if (!split) return;
+  select({ pool: selectOne('element', host) });
+  if (split.type === 'el') {
+    const el = S.project.elements.find((entry) => entry.id === split.id);
+    if (el) seek(el.start || 0);
+  } else if (split.type === 'cam') {
+    const cam = cameraById(split.id);
+    if (cam) seek(cameraRange(S.project, cam).start || 0);
+  }
+}
+
+/**
+ * 报告 row click (§10.4-8): seek to the frame the report was written at and
+ * select its element. A report is read-only history, so nothing is opened for
+ * editing beyond the selection.
+ */
+function jumpToReport(report) {
+  if (!report || !S.project) return;
+  const fps = Number(report.fps) || projectFps();
+  pause();
+  setTime(Math.max(0, (Number(report.frame) || 0) / fps));
+  const attachment = (report.attachments || []).find((entry) => entry.kind === 'element');
+  const host = attachment ? selectionRefForHost(S.project, attachment.ref) : null;
+  if (host && host.startsWith('el:')) select({ pool: selectOne('element', host) });
+}
+
 /** Row click on the review page: select the host, seek, show the property. */
 function jumpToChange({ kind, id, path, frame }) {
   if (!S.project) return;
@@ -3368,6 +3438,8 @@ async function boot() {
     toast,
     // A change-set card in the conversation jumps to its rows in 审阅 (§10.1-2).
     onOpenReview: (id) => { switchRightTab('review'); review.focus(id); },
+    // A report card jumps to the 报告 section of the review page (WP2.5c).
+    onOpenReport: (id) => { switchRightTab('review'); review.focusReport(id); },
   });
   agentPanel.setState({ available: S.agentAvailable, running: false });
 
@@ -3387,8 +3459,37 @@ async function boot() {
     compare: (opts) => captureCompare(opts),
     onJump: (target) => jumpToChange(target),
     retryAI: (intent) => { switchRightTab('ai'); agentPanel.setDraft(intent); },
+    // 报告分区 (§10.4-8): re-running the same plan writes only `.vdm/reports`.
+    remeasureReport: (id) => post(`/api/reports/${encodeURIComponent(id)}/remeasure`, {}).then((j) => j.report),
+    openReport: (report) => jumpToReport(report),
   });
   review.mount($('#panelReview'));
+
+  // 报告草稿 (WP2.5c): a floating card in the viewport, not a modal (§10.4-2).
+  // The panel owns the draft; `S.reportDraft` mirrors it for __vdm and the
+  // commands, and every write goes through `post()` here (DESIGN.md §10).
+  reportPanel = new ReportDraftPanel({
+    getProject: () => S.project,
+    getTime: () => S.time,
+    getFps: () => projectFps(),
+    getSelection: () => S.selection,
+    getRange: () => timeline?.getRange?.() || null,
+    getCameraId: () => S.project?.activeCameraId || S.project?.camera?.id || null,
+    getMode: () => (S.editMode ? 'edit' : 'preview'),
+    isFlying: () => !!(S.editMode && S.viewMode === 'move'),
+    canvas: () => preview?.canvas || null,
+    stageBox: () => $('#stageBox'),
+    timeline: () => timeline,
+    toast,
+    onState: (state) => { S.reportDraft = state; },
+    onJump: (attachment) => jumpToAttachment(attachment),
+    submit: (payload) => post('/api/reports', payload).then((j) => j.report),
+    onCreated: (report) => {
+      agentPanel?.pushReport?.(report);
+      review?.refresh?.();
+    },
+  });
+  reportPanel.mount();
 
   logPanel = new LogPanel($('#panelLogs'), { toast });
 
@@ -3812,6 +3913,10 @@ async function boot() {
   canvas.addEventListener('pointerdown', (e) => {
     if (e.button !== 0 && e.button !== 2) return;
     hideContextMenu();
+    // A report draft turns Shift+drag into "frame a screen region" (§10.4-4).
+    // It is read-only, so it is checked before the preview lock below; with the
+    // draft closed this returns false and every gesture keeps its own path.
+    if (reportPanel?.beginPointer(e)) { e.preventDefault(); return; }
     // Previewing shows a project that does not exist on disk: no drag may
     // mutate it in memory (the commit would be refused anyway).
     if (S.previewShadow) return;
@@ -4721,6 +4826,20 @@ async function boot() {
     match: (e) => anyCtrl(e) && e.shiftKey && e.key.toLowerCase() === 'r',
     run: (e) => { e?.preventDefault(); projects.restart(); },
   });
+  // 报告 (WP2.5c, docs/DESIGN-WP2.5-REVIEW.md §10.4-3). Deliberately not
+  // `global`: the dispatch skips commands while a field has focus, so typing a
+  // capital R never opens the panel. The 'Shift+R' spec requires shift and
+  // rejects Ctrl/Alt/Meta, so Ctrl+Shift+R still restarts the engine.
+  registerCommand({
+    id: 'report.draft', title: '报告问题…', group: '面板', keys: 'Shift+R', icon: 'alert',
+    keywords: 'report problem bug feedback 报告 问题 草稿',
+    run: (e) => { e?.preventDefault(); reportPanel?.toggle(); },
+  });
+  registerCommand({
+    id: 'report.region', title: '报告：框选画面区域', group: '面板', icon: 'square',
+    keywords: 'report region area frame 区域 框选',
+    run: () => reportPanel?.armRegion(),
+  });
   registerCommand({
     id: 'ui.escape', title: '逐层退出', sheetTitle: '逐层退出（菜单 → 曲线面板 → 范围 → 选中 → 移动态 → 编辑视口）', group: '面板', keys: 'Escape',
     palette: false,
@@ -4844,6 +4963,14 @@ async function boot() {
     if (d.error) toast(`渲染失败: ${d.error}`, 'error');
   });
   es.addEventListener('agent', (e) => agentPanel.handleEvent(JSON.parse(e.data)));
+  // A report was written or re-measured (this window, or another one): the AI
+  // page gains a card (deduplicated by id) and 审阅 re-reads its 报告 section.
+  es.addEventListener('report', (e) => {
+    let data = null;
+    try { data = JSON.parse(e.data); } catch { return; }
+    if (data.action === 'create' && data.report) agentPanel?.pushReport?.(data.report);
+    review?.refresh?.();
+  });
   // A change set landed (agent, CLI, MCP or another window): the 审阅 list and
   // the AI card both read this one event, no polling (§10.2-1).
   es.addEventListener('changeset', (e) => {
@@ -4955,6 +5082,8 @@ async function boot() {
     marksFor: (records, project = S.project) => marksFor(records, project, { fps: S.project?.meta?.fps || 24 }),
     renderActions,
     agentPanel, review, pipelinePanel, logPanel,
+    // 报告草稿 (WP2.5c): the panel, and its mirror in `S.reportDraft`.
+    report: reportPanel,
     layout,
     statusBar,
     logDrawer,

@@ -1,0 +1,140 @@
+/* Report draft panel (docs/DESIGN-WP2.5-REVIEW.md §10.4, WP2.5c). Tokens only. */
+
+/* ---------------- the floating panel ---------------- */
+/* Bottom-right of the viewport, 320px, non-modal: it takes pointer events only
+   on itself, so the stage keeps working underneath (§10.4-2). */
+.report-draft {
+  position: absolute; right: var(--sp-3); bottom: var(--sp-3); z-index: 6;
+  display: flex; flex-direction: column;
+  width: 320px; max-width: calc(100% - 2 * var(--sp-3));
+  max-height: calc(100% - 2 * var(--sp-3));
+  background: var(--surface-3); border: 1px solid var(--border-strong);
+  border-radius: var(--r-md); box-shadow: var(--shadow-pop);
+  color: var(--text-1); font-size: var(--fs-sm); pointer-events: auto;
+}
+.report-draft[hidden] { display: none; }
+.report-draft.arming { border-color: var(--accent-border); }
+
+.rd-head {
+  display: flex; align-items: center; gap: var(--sp-1); flex: 0 0 auto;
+  height: 28px; padding: 0 var(--sp-1) 0 var(--sp-2);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.rd-head > .ic-sm { color: var(--warn); flex: 0 0 auto; }
+.report-draft.arming .rd-head > .ic-sm { color: var(--accent); }
+.rd-title { font-size: var(--fs-sm); font-weight: 600; white-space: nowrap; }
+.rd-count {
+  margin-left: auto; font-size: var(--fs-xs); color: var(--text-3);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.rd-icon {
+  display: grid; place-items: center; flex: 0 0 auto;
+  width: 22px; height: 22px; padding: 0;
+  border: 0; border-radius: var(--r-sm); background: transparent; color: var(--text-3);
+}
+.rd-icon:hover { background: var(--surface-4); color: var(--text-1); }
+.rd-icon .ic-sm { transition: transform var(--dur) var(--ease); }
+.report-draft.collapsed .rd-icon[aria-expanded="false"] { color: var(--text-1); }
+.report-draft.collapsed .rd-icon[aria-expanded="false"] .ic-sm { transform: rotate(-90deg); }
+
+.rd-body {
+  display: flex; flex-direction: column; gap: var(--sp-2);
+  min-height: 0; overflow: auto; padding: var(--sp-2);
+}
+.rd-body[hidden] { display: none; }
+
+.rd-label { font-size: var(--fs-xs); color: var(--text-3); }
+.rd-label + .rd-atts, .rd-label + .rd-syms { margin-top: -4px; }
+
+/* ---------------- attachment chips ---------------- */
+.rd-atts { display: flex; flex-direction: column; gap: 3px; max-height: 132px; overflow: auto; }
+.rd-empty { color: var(--text-3); font-size: var(--fs-xs); line-height: 1.5; padding: 2px 0; }
+.rd-chip {
+  display: flex; align-items: center; gap: 2px; min-height: var(--h-sm);
+  padding: 0 2px 0 var(--sp-2);
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-pill);
+}
+.rd-chip:hover { border-color: var(--border-strong); }
+.rd-chip-label {
+  flex: 1 1 auto; min-width: 0; height: 20px; padding: 0;
+  border: 0; background: transparent; text-align: left;
+  color: var(--text-2); font-size: var(--fs-xs);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.rd-chip-label:hover { color: var(--text-1); }
+.rd-chip-x {
+  display: grid; place-items: center; flex: 0 0 auto;
+  width: 18px; height: 18px; padding: 0;
+  border: 0; border-radius: var(--r-pill); background: transparent; color: var(--text-3);
+}
+.rd-chip-x .ic-sm { width: 12px; height: 12px; }
+.rd-chip-x:hover { background: var(--surface-4); color: var(--danger); }
+
+.rd-add {
+  align-self: flex-start; height: var(--h-sm); padding: 0 var(--sp-2);
+  border: 1px dashed var(--border-strong); border-radius: var(--r-pill);
+  background: transparent; color: var(--text-2); font-size: var(--fs-xs);
+}
+.rd-add:hover { color: var(--accent); border-color: var(--accent-border); background: var(--accent-bg); }
+
+/* ---------------- symptoms (the nine user words, multi-select) ---------------- */
+.rd-syms { display: flex; flex-wrap: wrap; gap: 4px; }
+
+.rd-note {
+  width: 100%; height: var(--h-md); padding: 0 var(--sp-2);
+  background: var(--field); border: 1px solid var(--border); border-radius: var(--r-sm);
+  color: var(--text-1); font-size: var(--fs-sm);
+}
+.rd-note:focus { outline: none; border-color: var(--accent-border); box-shadow: var(--focus-ring); }
+
+.rd-foot { display: flex; gap: var(--sp-2); }
+.rd-foot .btn { flex: 1 1 auto; justify-content: center; }
+.rd-err { color: var(--danger); font-size: var(--fs-xs); line-height: 1.5; }
+.rd-err[hidden] { display: none; }
+
+/* ---------------- screen region ---------------- */
+/* The drag in progress (dashed, §10.4-4) and the hover outline of a stored
+   region attachment. Both sit on the stage box and never take pointer events. */
+.report-region {
+  position: absolute; z-index: 5; pointer-events: none;
+  border: 1px dashed var(--accent); background: var(--accent-bg);
+  border-radius: var(--r-sm);
+}
+.report-region-hl {
+  position: absolute; z-index: 5; pointer-events: none;
+  border: 1px solid var(--accent); background: var(--accent-bg);
+  box-shadow: 0 0 0 1px var(--accent-border);
+  border-radius: var(--r-sm);
+}
+
+/* ---------------- timeline hover (the chip under the cursor) ---------------- */
+.tl-elhead.tl-report-hl, .tl-camhead.tl-report-hl, .tl-objhead.tl-report-hl {
+  box-shadow: inset 2px 0 0 var(--accent);
+  background: var(--accent-bg);
+}
+.tl-report-range {
+  position: absolute; top: 0; bottom: 0; left: 0; width: 0; z-index: 2;
+  background: var(--accent-bg-strong);
+  border-left: 1px solid var(--accent); border-right: 1px solid var(--accent);
+  pointer-events: none;
+}
+
+/* ---------------- AI page card (a report is a record, not a run) ---------------- */
+.msg-report {
+  display: block; width: 100%; text-align: left;
+  border-left: 2px solid var(--warn);
+  background: var(--surface-0); border-radius: var(--r-sm);
+  cursor: pointer;
+}
+.msg-report:hover { border-color: var(--accent-border); }
+.msg-report:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.msg-report .msg-card-head { justify-content: flex-start; }
+.msg-report .msg-badge { margin-left: auto; }
+.msg-report .msg-report-line { color: var(--text-2); }
+.msg-badge {
+  padding: 0 5px; border-radius: var(--r-sm); white-space: nowrap;
+  font-size: var(--fs-xs); font-family: var(--font-ui);
+  color: var(--warn); background: var(--warn-bg);
+}
+.msg-badge.fixed, .msg-badge.dismissed { color: var(--text-3); background: var(--surface-3); }
+.msg-badge.verified { color: var(--ok); background: var(--ok-bg); }

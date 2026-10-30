@@ -165,3 +165,32 @@
   flex: 0 0 var(--sp-2); cursor: col-resize; background: var(--accent);
   border-radius: var(--r-pill); margin: 0 2px; touch-action: none;
 }
+
+/* ---------------- 报告 (WP2.5c, DESIGN-WP2.5-REVIEW §10.4-8) ---------------- */
+/* Below the change sets: one row per report, its status and 重新测量. */
+.rv-reports {
+  display: flex; flex-direction: column; gap: 2px;
+  margin-top: var(--sp-3); padding-top: var(--sp-2);
+  border-top: 1px solid var(--border);
+}
+.rv-reports-head { display: flex; align-items: center; gap: var(--sp-2); height: 24px; padding: 0 2px; }
+.rv-reports-title { font-size: var(--fs-sm); font-weight: 600; color: var(--text-1); }
+.rv-reports-n { margin-left: auto; font-size: var(--fs-xs); color: var(--text-3); font-variant-numeric: tabular-nums; }
+
+.rv-report {
+  display: flex; align-items: center; gap: var(--sp-2); min-height: 28px;
+  padding: 1px 2px; border-radius: var(--r-sm);
+}
+.rv-report:hover { background: var(--surface-2); }
+.rv-report.hl { background: var(--accent-bg); box-shadow: inset 2px 0 0 var(--accent); }
+.rv-report-main {
+  display: flex; align-items: baseline; gap: var(--sp-2); flex: 1 1 auto; min-width: 0;
+  height: auto; padding: 0; border: 0; background: transparent;
+  color: var(--text-1); font-size: var(--fs-sm); text-align: left; cursor: pointer;
+}
+.rv-report-main:hover, .rv-report-main:focus-visible { background: transparent; color: var(--text-1); }
+.rv-report-line { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rv-report-note { flex: 0 0 auto; font-size: var(--fs-xs); color: var(--warn); white-space: nowrap; }
+.rv-status.fixed, .rv-status.dismissed { color: var(--text-3); background: var(--surface-3); }
+.rv-status.verified { color: var(--ok); background: var(--ok-bg); }
+

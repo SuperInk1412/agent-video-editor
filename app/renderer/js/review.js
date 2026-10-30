@@ -19,6 +19,8 @@
 // the viewport banner, `\` hold-to-compare and the edit lock live there.
 import { h, icon } from './ui.js';
 import { PROPERTY_PATHS_BY_HOST } from '/core/contracts.js';
+import { draftSummary } from '/core/report-draft.js';
+import { reportStatusLabel } from './report.js';
 
 const STATUS = { proposed: '待审阅', applied: '已应用', reverted: '已撤回', 'needs-decision': '需决定' };
 const HOST_OF = { element: 'el', camera: 'cam', object: 'ob' };
@@ -167,6 +169,12 @@ export class ReviewPanel {
     this._again = false;
     this._cmp = null;             // { el, close }
     this._detailLoads = new Map();
+    // 报告 section (WP2.5c, §10.4-8): what a human reported, read from
+    // `/api/reports`. `remeasured` remembers which rows already show a verdict.
+    this.reports = [];
+    this.reportError = '';
+    this.remeasured = new Set();
+    this._remeasuring = new Set();
   }
 
   /** Build the page once; safe to call again after a remount. */
@@ -242,6 +250,15 @@ export class ReviewPanel {
     } catch (e) {
       this.error = e.message || '读取变更集失败';
       this.opts.toast?.(`读取变更集失败: ${this.error}`, 'error');
+    }
+    // 报告 is a separate list: a failure there must never blank the change sets
+    // (an engine without WP2.5c simply has no reports).
+    try {
+      const payload = await this._get('/api/reports?limit=20');
+      this.reports = Array.isArray(payload.reports) ? payload.reports : [];
+      this.reportError = '';
+    } catch (e) {
+      this.reportError = e.message || '读取报告失败';
     }
     this.render();
     // Load the detail of every expanded record, plus the active one (the footer
@@ -412,10 +429,12 @@ export class ReviewPanel {
     }
     if (!this.records.length) {
       this.listEl.appendChild(h('div', { class: 'rv-empty' }, '暂无待审阅的变更集'));
+      this.listEl.appendChild(this._reportsSection());
       this._renderFoot();
       return;
     }
     for (const record of this.records) this.listEl.appendChild(this._recordRow(record));
+    this.listEl.appendChild(this._reportsSection());
     this._renderFoot();
   }
 
@@ -732,6 +751,113 @@ export class ReviewPanel {
       for (const row of group.rows) if (this._rowState(detail, row) === 'stale') n += 1;
     }
     return n;
+  }
+
+  // ---------------------------------------------------------------- 报告 (WP2.5c)
+  /** The section under the change sets (§10.4-8): every report + its verdict. */
+  _reportsSection() {
+    const section = h('section', { class: 'rv-reports', 'data-section': 'reports' });
+    section.appendChild(h('div', { class: 'rv-reports-head' },
+      h('span', { class: 'rv-reports-title' }, '报告'),
+      h('span', { class: 'rv-reports-n' }, this.reports.length ? `${this.reports.length} 条` : ''),
+    ));
+    if (this.reportError) section.appendChild(h('div', { class: 'rv-err' }, this.reportError));
+    if (!this.reports.length) {
+      section.appendChild(h('div', { class: 'rv-empty' }, '还没有报告：选中对象后按 Shift+R，记一句哪里不对'));
+      return section;
+    }
+    for (const report of this.reports) section.appendChild(this._reportRow(report));
+    return section;
+  }
+
+  _reportRow(report) {
+    const status = report.status || 'open';
+    // §10.4-8 line: the frame it was written at, the words, the attachment
+    // count — "报告 f150 · 闪烁 · 2 个附件".
+    const line = `报告 f${Number(report.frame) || 0} · ${draftSummary(report).subtitle}`;
+    const main = h('button', {
+      type: 'button', class: 'rv-report-main', 'data-action': 'open-report',
+      title: report.id || '', 'data-report-id': report.id || '',
+    }, h('span', { class: 'rv-report-line' }, line));
+    const note = this._reportNote(report);
+    if (note) main.appendChild(h('span', { class: 'rv-report-note' }, note));
+    main.addEventListener('click', () => this.opts.openReport?.(report));
+    const measure = h('button', {
+      type: 'button', class: 'rv-link', 'data-action': 'remeasure-report',
+      'data-tip': '在同一组附件上重跑同一组测量',
+    }, this._remeasuring.has(report.id) ? '测量中…' : '重新测量');
+    measure.disabled = this._remeasuring.has(report.id);
+    measure.addEventListener('click', (e) => { e.stopPropagation(); this.remeasure(report.id); });
+    const row = h('div', {
+      class: 'rv-report', 'data-report-id': report.id || '', 'data-status': status, title: report.id || '',
+    },
+      main,
+      h('span', { class: `rv-status ${status}` }, reportStatusLabel(status)),
+      measure,
+    );
+    // Padding / status clicks open the report too; the buttons keep their own.
+    row.addEventListener('click', (e) => {
+      if (e.target.closest('button')) return;
+      this.opts.openReport?.(report);
+    });
+    return row;
+  }
+
+  /** The verdict line: only after a re-measure, and only when it adds a number
+   *  the status badge does not already say (a verified row just turns green). */
+  _reportNote(report) {
+    if (!this.remeasured.has(report.id) && report.status !== 'verified') return '';
+    const verification = report.verification || {};
+    const failed = (verification.failed || []).length;
+    const pending = (verification.pending || []).length;
+    if (report.status === 'verified' || verification.status === 'verified') return '';
+    if (failed) return `仍有 ${failed} 项未通过`;
+    if (pending) return `还有 ${pending} 项要等后台`;
+    return '还没有可判断的测量';
+  }
+
+  /** Run the same plan again; only a full pass verifies the report. */
+  async remeasure(id) {
+    if (!id || this._remeasuring.has(id)) return null;
+    this._remeasuring.add(id);
+    this.reportError = '';
+    this.render();
+    try {
+      const next = await this.opts.remeasureReport?.(id);
+      if (next) {
+        this.reports = this.reports.map((report) => (report.id === id ? next : report));
+        this.remeasured.add(id);
+        const failed = (next.verification?.failed || []).length;
+        const pending = (next.verification?.pending || []).length;
+        const verdict = next.status === 'verified'
+          ? { text: '已重新测量：通过', level: 'success' }
+          : failed ? { text: `已重新测量：仍有 ${failed} 项未通过`, level: 'info' }
+            : pending ? { text: '已重新测量：有项要等后台', level: 'info' }
+              : { text: '已重新测量：还没有可判断的测量', level: 'info' };
+        this.opts.toast?.(verdict.text, verdict.level);
+      }
+      return next || null;
+    } catch (e) {
+      this.reportError = e?.message ? `重新测量失败：${e.message}` : '重新测量失败';
+      this.opts.toast?.(this.reportError, 'error');
+      return null;
+    } finally {
+      this._remeasuring.delete(id);
+      this.render();
+    }
+  }
+
+  /** AI card / __vdm: jump to one report row in the 报告 section. */
+  async focusReport(id) {
+    if (!id) return false;
+    await this.refresh();
+    this.render();
+    const row = this.listEl?.querySelector(`.rv-report[data-report-id="${CSS.escape(String(id))}"]`);
+    if (!row) return false;
+    row.scrollIntoView({ block: 'nearest' });
+    row.classList.add('hl');
+    setTimeout(() => row.classList.remove('hl'), 1400);
+    return true;
   }
 
   // ---------------------------------------------------------------- data/actions
