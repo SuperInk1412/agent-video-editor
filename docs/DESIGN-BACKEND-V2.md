@@ -761,11 +761,11 @@ R1、R2 与 WP3.1 可以并行，按两到三个子代理同时推进，日历�
 
 #### 10.4.1 现状与剩余工作
 
-已完成并合入 master：R0（WP0.0–0.3）、R1（WP1.1–1.3，含静帧取帧修复 `c2bc053`）、WP2.1–2.4、WP2.5d、WP3.1–3.3。
+已完成并合入 master：R0（WP0.0–0.3）、R1（WP1.1–1.3，含静帧取帧修复 `c2bc053`）、WP2.1–2.4、WP2.5a 后端（`b50f094`）、WP2.5b（`06a9365`）、WP2.5d、WP3.1–3.3。
 
 | 阶段 | 剩余 | 估时 |
 |---|---|---|
-| R2 | 2.5a、2.5c（进行中），2.5b、2.5e | 约 6 天 |
+| R2 | 2.5a 界面、2.5c（进行中），2.5e | 约 4.5 天 |
 | R3 | 3.4、3.5、3.6 | 约 5.5 天 |
 | R4 | 4.1–4.6 | 约 12 天 |
 | R5 | 5.1、5.2、5.3 | 约 6 天 |
@@ -791,7 +791,7 @@ R1、R2 与 WP3.1 可以并行，按两到三个子代理同时推进，日历�
 `application/errors.js`、`tests/http.test.mjs`、`tests/changeset.test.mjs`。后面的 2.5e、R4、R5 还会继续往这些文件里加。
 
 - 目标：把"多个工作包都要往里加东西"的文件改为"各自登记"，之后各包只新增自己的文件。**行为零变化**。
-- 前置：2.5a、2.5c 先合入 master（避免在它们进行中改动同样的文件）。
+- 前置：2.5a、2.5c 全部合入 master（避免在它们进行中改动同样的文件）；2.5b 已合入。
 - 改动文件与做法：
   1. `engine/server.js` → 新建 `engine/routes/`，每个功能一个文件（`agent.js`、`changesets.js`、`reports.js`、`raster.js`、`font.js` 等），
      导出 `register(router, ctx)`；`server.js` 只负责组装。之后新增接口只新建一个路由文件。
@@ -822,7 +822,7 @@ R1、R2 与 WP3.1 可以并行，按两到三个子代理同时推进，日历�
 | 线 | 顺序 | 主要文件 |
 |---|---|---|
 | ① 渲染线 | 3.4 → 3.5 | `blender/vdm_build.py`、`engine/blender.js`、`engine/render-workers/post.js`、共享 GLSL |
-| ② 界面线 | 2.5a → 2.5c 界面 → 2.5b → 3.6 → 4.6 | `main.js`、`timeline.js`、`review.js`、`report.js`、检查器分区文件 |
+| ② 界面线 | 2.5a 界面 → 2.5c 界面 → 3.6 → 4.6（2.5b 已完成） | `main.js`、`timeline.js`、`review.js`、`report.js`、检查器分区文件 |
 | ③ 引擎线 | 2.5c 后端 → **WP-P** → 2.5e → 5.3 | `engine/routes/`、`engine/agent.js`、`application/` |
 | ④ 源编译线 | WP4.0 → (4.1 ∥ 4.2) → (4.3 ∥ 4.4) → 4.5；空档插 5.2、5.1 | `application/source-service.js`、`core/source-*.js`、`core/frame-ir.js`（仅 4.2） |
 
