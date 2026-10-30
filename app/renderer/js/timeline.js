@@ -40,6 +40,9 @@ import {
   xfSetAxisOps, xfUnkeyOps, xfValues, xfVectorPath, bundleOps,
 } from './xform.js';
 import { normalizeFps, frameIndex, frameStart, frameBand, planRulerTicks, frameWriteTime, frameClipEdit } from './timeline-math.js';
+import {
+  normalizeRange, rangeFromDrag, setIn, setOut, rangeWidth, clampRange,
+} from './timeline-range.js';
 
 const el = (tag, cls, html) => {
   const n = document.createElement(tag);
@@ -118,7 +121,7 @@ function elLinkRowPath(el, path) {
 export class Timeline {
   constructor(root, {
     onSeek, onSelect, onOp, onPause, onElementMenu, onCameraMenu, onClipMenu, onSplit, onTextEdit,
-    onToggleCurves, isCurvesOpen, sourceDuration, onSourceLimit, onToast, onLinkJump,
+    onToggleCurves, isCurvesOpen, sourceDuration, onSourceLimit, onToast, onLinkJump, onRangeChange,
   } = {}) {
     this.root = root;
     this.onSeek = onSeek;
@@ -138,6 +141,12 @@ export class Timeline {
     this.onLinkJump = onLinkJump;
     this.project = null;
     this.time = 0;
+    // Selected time range (WP2.5d): `{ from, to }` in integer frames or null.
+    // UI state only — never written into the project, never undoable.
+    this.range = null;
+    this.onRangeChange = onRangeChange;
+    this._rangeEl = null;
+    this._rangeX = null;
     this.pool = emptySelection();
     this.segmentId = null;
     this.elementId = null;
@@ -305,6 +314,9 @@ export class Timeline {
     this.scroll.addEventListener('scroll', () => {
       this._syncHScroll();
       this._syncPlayhead();
+      // The band moves with the track it lives in, but a zoom that happened in
+      // the same frame re-measures it from the (new) pps.
+      this._paintRange();
       // Rows that just scrolled into view were skipped while they were off
       // screen; bring their fields up to date before the next paint.
       this._scheduleValueSync();
@@ -713,12 +725,100 @@ export class Timeline {
   setProject(p) {
     const firstLoad = !this.project;
     this.project = p;
+    // A shorter project must not leave the band hanging past its end.
+    if (this.range) this.range = clampRange(this.range, this._rangeOpts());
     if (firstLoad) {
       this._fitOnce = true;
       this._layout();
     } else {
       this.render();
     }
+    this._paintRange();
+  }
+
+  // ------------------------------------------------------------ time range (WP2.5d)
+  // docs/DESIGN-WP2.5-REVIEW.md §10.6: Shift+drag on the ruler, I / O on the
+  // playhead, Esc or the band's × to clear. Interface state, not project data.
+  /** `{ from, to }` in integer frames (both ends inclusive), or null. */
+  getRange() {
+    return this.range ? { from: this.range.from, to: this.range.to } : null;
+  }
+
+  _rangeOpts() {
+    return { duration: this.project?.meta.duration, fps: this._fps() };
+  }
+
+  /** Replace the range (null clears it): normalize, repaint, tell the shell. */
+  setRange(r) {
+    this.range = normalizeRange(r, this._rangeOpts());
+    this._paintRange();
+    this.onRangeChange?.(this.range);
+    return this.range;
+  }
+
+  setRangeIn(frame) {
+    const next = setIn(this.range, frame, this._rangeOpts());
+    return next ? this.setRange(next) : this.range;
+  }
+
+  setRangeOut(frame) {
+    const next = setOut(this.range, frame, this._rangeOpts());
+    return next ? this.setRange(next) : this.range;
+  }
+
+  clearRange() {
+    if (!this.range) return false;
+    this.setRange(null);
+    return true;
+  }
+
+  /**
+   * Paint the band inside the ruler track. It is positioned in track
+   * coordinates (`frame / fps * pps`), so it scrolls with the ruler and the
+   * sticky name column never cuts it; zoom and duration changes re-measure it
+   * (render calls this on every rebuild).
+   */
+  _paintRange() {
+    if (!this.rulerTrack) return;
+    // setProject and a duration edit both land here: clamp before painting.
+    this.range = this.range ? normalizeRange(this.range, this._rangeOpts()) : null;
+    if (!this._rangeEl) this._buildRange();
+    const { _rangeEl: band, _rangeX: x } = this;
+    if (!this.range) {
+      band.remove();
+      x.remove();
+      return;
+    }
+    const px = (this.pps || 0) / this._fps();
+    const left = this.range.from * px;
+    const width = rangeWidth(this.range) * px;
+    band.style.left = `${left}px`;
+    band.style.width = `${width}px`;
+    x.style.left = `${left + width}px`;
+    // First in the track: the band is a background, the tick labels on top of it
+    // keep full contrast (the × carries its own z-index to stay clickable).
+    if (band.parentNode !== this.rulerTrack) this.rulerTrack.prepend(band, x);
+  }
+
+  /**
+   * The band and its ×. The × is a sibling, not a child: the band is 55%
+   * opaque and would dim the icon with it. Only the × takes pointer events, so
+   * a ruler gesture always reaches `_down`.
+   */
+  _buildRange() {
+    const band = el('div', 'tl-range');
+    const x = h('button', {
+      type: 'button', class: 'tl-range-x', 'aria-label': '清除范围', title: '清除范围（Esc）',
+    }, icon('x', 'ic-sm'));
+    x.addEventListener('pointerdown', (e) => e.stopPropagation());
+    x.addEventListener('dblclick', (e) => e.stopPropagation());
+    x.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.clearRange();
+    });
+    this._rangeEl = band;
+    this._rangeX = x;
   }
 
   setSelection(sel) {
@@ -1032,6 +1132,8 @@ export class Timeline {
       bt.style.left = `${b * this.pps}px`;
       this.rulerTrack.appendChild(bt);
     }
+    // The ruler was just rebuilt: put the range band back into the track.
+    this._paintRange();
 
     // camera / element rows follow; segments live in the data only. One list:
     // the saved display order is reconciled against the real 2D layer order (z)
@@ -4015,6 +4117,33 @@ export class Timeline {
   }
 
   /**
+   * Shift+drag the ruler: select an integer-frame range. This path never seeks
+   * — the playhead stays put, like Ctrl+drag keeps it as the zoom anchor. Frames
+   * are rounded, not snapped to beats (a range is not an edit).
+   */
+  _startRangeDrag(ev) {
+    this.onPause?.();
+    const fps = this._fps();
+    const frameAt = (e) => Math.round(this._timeAt(e.clientX) * fps);
+    const anchor = frameAt(ev);
+    const ruler = this.rulerTrack;
+    const oldCursor = ruler.style.cursor;
+    ruler.style.cursor = 'crosshair';
+    // A press that never moves selects the one frame under the pointer.
+    this.setRange(rangeFromDrag(anchor, anchor));
+    const move = (e) => this.setRange(rangeFromDrag(anchor, frameAt(e)));
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+      ruler.style.cursor = oldCursor;
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+  }
+
+  /**
    * Element-list marquee: press an unselected row (or Ctrl-press any row) and
    * drag across headers to select every row intersecting the band. Reordering
    * stays on an already-selected row, per the agreed gesture split.
@@ -4616,6 +4745,14 @@ export class Timeline {
     if (target.closest('.tl-ruler')) {
       if (target.closest('.tl-gutter')) return;
       ev.preventDefault();
+      // Shift+drag selects a frame range instead of seeking (WP2.5d). Ctrl is
+      // taken by the zoom drag — Ctrl+Shift keeps zooming, as it always did —
+      // and Alt must stay "no snapping", so plain Shift is the only free one.
+      if (ev.shiftKey && !ev.ctrlKey && !ev.metaKey) {
+        ev.preventDefault();
+        this._startRangeDrag(ev);
+        return;
+      }
       if (ev.ctrlKey || ev.metaKey) {
         this._startZoomDrag(ev);
         return;

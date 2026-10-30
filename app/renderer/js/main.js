@@ -2973,6 +2973,8 @@ async function boot() {
     ]);
   };
 
+  // Debounce for the range readout (a drag changes the range every frame).
+  let rangeLogTimer = 0;
   timeline = new Timeline($('#timeline'), {
     // A scrub while playing keeps the transport running from the frame it
     // lands on; S.time is the snapped picture time, so the wall clock has to
@@ -3002,6 +3004,17 @@ async function boot() {
     onTextEdit: (kind, id, ev) => openTextEditor(kind, id, ev),
     onToggleCurves: () => toggleCurvePanel(),
     isCurvesOpen: () => !!curvePanel?.isOpen(),
+    // The range is interface state (docs/DESIGN-WP2.5-REVIEW.md §10.6) and the
+    // status bar has no slot of its own for it — #projMeta belongs to the
+    // project — so it reports to the console only, debounced so a drag logs
+    // once instead of once per frame. No new UI is invented for it.
+    onRangeChange: (r) => {
+      clearTimeout(rangeLogTimer);
+      rangeLogTimer = setTimeout(() => {
+        if (r) console.info(`时间范围 f${r.from}–f${r.to}（${r.to - r.from + 1} 帧）`);
+        else console.info('时间范围已清除');
+      }, 300);
+    },
   });
   timeline.setProject(S.project);
 
@@ -4346,6 +4359,29 @@ async function boot() {
   registerCommand({
     id: 'tl.zoom', title: '缩放 / 适应', group: '时间轴', keys: 'Ctrl+滚轮 / Ctrl+拖标尺 / 双击标尺', match: false, palette: false,
   });
+  // 时间范围（WP2.5d）：界面状态，不写工程、不进撤销（docs/DESIGN-WP2.5-REVIEW.md §10.6）。
+  // I / O take the playhead's frame, like Premiere / Resolve; flying in move
+  // mode owns the single-key keys, so the range keys stay quiet there.
+  const rangeFps = () => Number(S.project?.meta.fps) || 24;
+  const rangeKeyIdle = () => !(S.editMode && S.viewMode === 'move') || '移动态下不设置范围';
+  registerCommand({
+    id: 'range.in', title: '设置范围起点', group: '时间轴', keys: 'I', keywords: 'range in start mark',
+    when: rangeKeyIdle,
+    run: (e) => {
+      if (!timeline) return false;
+      e?.preventDefault();
+      timeline.setRangeIn(Math.round(S.time * rangeFps()));
+    },
+  });
+  registerCommand({
+    id: 'range.out', title: '设置范围终点', group: '时间轴', keys: 'O', keywords: 'range out end mark',
+    when: rangeKeyIdle,
+    run: (e) => {
+      if (!timeline) return false;
+      e?.preventDefault();
+      timeline.setRangeOut(Math.round(S.time * rangeFps()));
+    },
+  });
 
   // 面板
   registerCommand({
@@ -4372,7 +4408,7 @@ async function boot() {
     run: (e) => { e?.preventDefault(); projects.restart(); },
   });
   registerCommand({
-    id: 'ui.escape', title: '逐层退出', sheetTitle: '逐层退出（菜单 → 曲线面板 → 选中 → 移动态 → 编辑视口）', group: '面板', keys: 'Escape',
+    id: 'ui.escape', title: '逐层退出', sheetTitle: '逐层退出（菜单 → 曲线面板 → 范围 → 选中 → 移动态 → 编辑视口）', group: '面板', keys: 'Escape',
     palette: false,
     match: (e) => e.key === 'Escape',
     run: (e) => {
@@ -4381,6 +4417,9 @@ async function boot() {
       if (curvePanel?.isOpen()) { curvePanel.close(); e?.preventDefault(); return; }
       const menu = $('#ctxMenu');
       if (menu && !menu.hidden) { hideContextMenu(); return; }
+      // The range clears before the selection (§10.6-3): one Escape undoes the
+      // range only, the next one goes back to the usual layering.
+      if (timeline?.getRange()) { timeline.clearRange(); e?.preventDefault(); return; }
       if (gizmo?.objSel) { clearSelection(); return; }
       if (S.editMode && S.viewMode === 'move') { setViewMode('select'); return; }
       if (S.editMode) { setEditMode(false); return; }

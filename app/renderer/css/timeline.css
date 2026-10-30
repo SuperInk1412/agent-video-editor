@@ -163,6 +163,27 @@ body.tl-gutter-resizing, body.tl-gutter-resizing * { cursor: col-resize !importa
 .handle-l { left: 0; }
 .handle-r { right: 0; }
 
+/* ---------------- time range (WP2.5d) ---------------- */
+/* The selected range sits inside the ruler's .tl-track: left / width are frame
+   numbers times pps (timeline.js _paintRange), so it scrolls and zooms with the
+   ruler. It is prepended (below the ticks, so their labels stay readable) and
+   never takes pointer events — the × is its own sibling so the 55% band opacity
+   does not dim the icon. */
+.tl-range {
+  position: absolute; top: 0; bottom: 0; left: 0; width: 0;
+  background: var(--surface-3); border-left: 1px solid var(--accent-border);
+  border-right: 1px solid var(--accent-border); opacity: .55;
+  pointer-events: none;
+}
+.tl-range-x {
+  position: absolute; top: 50%; left: 0; transform: translate(-50%, -50%);
+  width: 16px; height: 16px; padding: 0; display: grid; place-items: center;
+  border: 0; border-radius: var(--r-sm); background: transparent;
+  color: var(--text-3); cursor: pointer; pointer-events: auto; z-index: 3;
+}
+.tl-range-x .ic-sm { width: 12px; height: 12px; }
+.tl-range-x:hover { color: var(--text-1); }
+
 /* ---------------- playhead + split ---------------- */
 /* Current-frame band: the first child of every .tl-track. Above the track's own
    (often opaque) background, below the blocks and keyframe diamonds that come
