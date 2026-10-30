@@ -1000,10 +1000,10 @@ export class Preview {
   }
 
   _fetchFont(name) {
-    // `fetch` of a font file is a plain byte request: no DOM, no canvas.
-    const url = name.includes('/') || /\.(ttf|otf|ttc)$/i.test(name)
-      ? `${this.fontEndpoint}?font=${encodeURIComponent(name)}`
-      : `${this.fontEndpoint}?font=${encodeURIComponent(name)}`;
+    // `fetch` of a font file is a plain byte request: no DOM, no canvas. A
+    // family name and a project path take the same query (the server resolves
+    // both against its whitelist).
+    const url = `${this.fontEndpoint}?font=${encodeURIComponent(name)}`;
     const task = (async () => {
       try {
         const res = await fetch(url);
