@@ -874,6 +874,12 @@ WP4.3 的验收与文件记录见 `docs/CHANGELOG-presets.md`。
 - 协议单一来源：ops、属性路径、代码图层参数的 schema 放在 `core/contracts/`，由 `scripts/gen-contracts.mjs`
   生成 MCP 的 JSON Schema、`docs/AGENT-PROTOCOL.md` 和检查器字段描述。生成的文件不允许手改，有测试比对。
 - "创作模式"与"微调模式"：创作模式取消"一次 1–6 个 op"的限制，允许用生成器（一段产出 ops 的代码）批量创建。
+- 基准脚本：`scripts/bench-agent.mjs` —— 同一组固定任务（改字号卡拍 / 加一个元素 / 修一个位置）分别走变更集与
+  「无变更集、直接写盘」两条路径，记录耗时（总时长与写入本身）、工具调用数、变更集、rev、verified、失败/拒绝、
+  回退代价，输出 JSON + markdown 表。`--agent=scripted` 用 `ScriptedAgent` 的固定脚本经 MCP 工具面
+  （`mcp/tools.js::callTool` → `POST /api/rpc`）跑，可重复、用于回归；`--agent=dsh` 用真 dsh（`findDsh`，缺失时跳过并说明）。
+  用法：`node scripts/bench-agent.mjs --agent=scripted [--project <工程副本>] [--runs 3]`。源工程只读（每跑一次复制到
+  临时目录），「直接写盘」是同机模拟，报告里写明「只有本轮数字」；dsh 在变更集之外直接改工程文件时会被标成旁路写入。
 
 ---
 
