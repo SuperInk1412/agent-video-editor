@@ -441,6 +441,44 @@ export class ChangeSetService {
     return this.commit(record, { actorId, requestId: input.requestId, expectedRev: simulated.before.rev, before: simulated.before });
   }
 
+  // -------------------------------------------------------------- decisions
+  /**
+   * Turn a committed change set into `status: 'needs-decision'` and attach the
+   * decisions a human still has to make (WP4.4: source merge conflicts,
+   * §7.8.4 "谁决定：人"). Nothing is written to the project: the transaction
+   * that already ran keeps its provisional values (for a merge, `theirs`), and
+   * `merge` is stored verbatim so a UI can offer `base` / `ours` / `theirs`.
+   */
+  async needsDecision(input = {}) {
+    if (!isRecord(input)) throw fault('INVALID_ARGUMENT', 'needsDecision needs an object');
+    const id = input.id;
+    if (typeof id !== 'string' || !id) throw fault('INVALID_ARGUMENT', 'needsDecision needs a change set id');
+    if (input.decisions !== undefined && !Array.isArray(input.decisions)) {
+      throw fault('INVALID_ARGUMENT', 'decisions must be an array');
+    }
+    if (input.merge !== undefined && !isRecord(input.merge)) throw fault('INVALID_ARGUMENT', 'merge must be an object');
+    const record = await this.get(id);
+    if (record.status === 'reverted') throw fault('INVALID_ARGUMENT', `change set ${id} was already reverted`);
+    const at = this.now();
+    const decisions = (input.decisions || []).map((entry) => {
+      if (!isRecord(entry)) throw fault('INVALID_ARGUMENT', 'each decision must be an object');
+      return {
+        kind: typeof entry.kind === 'string' && entry.kind ? entry.kind : 'conflict',
+        reason: String(entry.reason ?? 'conflict'),
+        id: entry.id ?? null,
+        path: entry.path ?? null,
+        ...(entry.message ? { message: String(entry.message) } : {}),
+        at: entry.at ?? at,
+      };
+    });
+    Object.assign(record, { status: 'needs-decision', updatedAt: at });
+    record.report = record.report || {};
+    record.report.decisions = [...(record.report.decisions || []), ...decisions];
+    if (input.merge !== undefined) record.merge = input.merge;
+    await this.repository.saveChangeset(record);
+    return this.publicRecord(record);
+  }
+
   // ------------------------------------------------------------------- revert
   /** Revert the whole change set, inverting only the untouched properties. */
   async revert(input = {}) {

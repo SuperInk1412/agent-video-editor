@@ -24,13 +24,23 @@
 // the bottom of this file: `writeBack` decides, `writeBackOps` turns the answer
 // into the `sourceWrite` + mirror `set` the caller submits as one transaction.
 //
+// `mergeSource` (WP4.4, §7.8.4) is the three-way merge at the write boundary:
+// it reads the old `base.json`, exports the editor layer as a snapshot shape,
+// takes the freshly compiled snapshot as `theirs`, calls `core/source-merge.js`
+// and applies the merged snapshot with **one** `sourceApply` transaction.
+// Conflicts are not decided here: they are attached to the change set as
+// `needs-decision` (§8.1), and the provisional result already carries
+// `theirs` on every conflicting path ("冲突暂取 theirs，由人决定").
+//
 // The routes (`engine/routes/sources.js`) call the async functions here; the
 // CLI/MCP surfaces come with WP4.3.
-import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { SOURCE_SNAPSHOT_VERSION } from '../core/version.js';
-import { isNumericSourcePath, isSourceNodeId, snapshotProblems } from '../core/source-eval.js';
+import { isNumericSourcePath, isSourceNodeId, SOURCE_PATHS, snapshotProblems } from '../core/source-eval.js';
+import {
+  canonicalJson, editorSnapshotOf, editorStaticValueOf, hashPayload, merge, snapshotHash,
+} from '../core/source-merge.js';
 import { compileHtml, compileSvg, COMPILE_RUNTIMES } from '../core/source-map.js';
 import { isSafeSourceId, manifestIssues, isSafeSourceFile, scanSourceFiles, sourceRecord, SOURCE_MANIFEST } from '../core/code-layer.js';
 import { isRecord } from '../core/json.js';
@@ -265,33 +275,11 @@ export function clearFontCache() {
 // ---------------------------------------------------------------------------
 // Hashing (§7.8.1: canonical payload → sha256)
 // ---------------------------------------------------------------------------
-
-const r6 = (v) => Math.round(Number(v) * 1e6) / 1e6 + 0; // `-0` is not JSON
-
-/**
- * §7.8.1 canonicalisation: object keys sorted recursively, arrays keep their
- * order, numbers rounded to 6 decimals with `-0` folded into `0`, no spaces.
- */
-export function canonicalJson(value) {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  if (value && typeof value === 'object') {
-    const keys = Object.keys(value).sort();
-    return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
-  }
-  if (typeof value === 'number') return JSON.stringify(r6(value));
-  return JSON.stringify(value === undefined ? null : value);
-}
-
-/** The hashed payload: exactly `{ version, source, nodes }` (§7.8.1). */
-export function hashPayload({ version, source, nodes }) {
-  return { version, source, nodes };
-}
-
-/** `sha256:<64 lowercase hex>` over the canonical payload. */
-export function snapshotHash(payload) {
-  const text = canonicalJson(hashPayload(payload));
-  return `sha256:${crypto.createHash('sha256').update(text, 'utf8').digest('hex')}`;
-}
+//
+// The canonicaliser and the digest live in `core/source-merge.js`: the merge
+// needs the same recipe and `core/` must stay free of `node:*`, so there is one
+// implementation and this module re-exports it (WP4.4).
+export { canonicalJson, hashPayload, snapshotHash };
 
 // ---------------------------------------------------------------------------
 // Compile
@@ -346,8 +334,12 @@ function elementWithDefaults(payload) {
  * Compile one registered source into `{ snapshot, elements, warnings }` and
  * write `.vdm/sources/<id>/base.json` (§7.8.1). Nothing in the project changes:
  * that is `sourceApply` / `applyCompiled`.
+ *
+ * `write: false` compiles with the project's font context but touches no file —
+ * the merge needs exactly the same output as a real compile without replacing
+ * the old `base.json` before its transaction commits (§7.8.4).
  */
-export async function compileSource({ project, sourceId, root, snapshot: provided = null }) {
+export async function compileSource({ project, sourceId, root, snapshot: provided = null, write = true }) {
   if (!isRecord(project)) throw fault('INVALID_ARGUMENT', 'compileSource needs a project');
   const id = String(sourceId ?? '');
   if (!isSafeSourceId(id)) throw fault('INVALID_ARGUMENT', `sourceId 必须是合法源 id，收到 ${JSON.stringify(sourceId)}`);
@@ -407,7 +399,7 @@ export async function compileSource({ project, sourceId, root, snapshot: provide
     }
   }
   let written = null;
-  if (root) {
+  if (root && write) {
     const file = basePath(root, id);
     await fs.mkdir(path.dirname(file), { recursive: true });
     await atomicJson(file, snapshot);
@@ -678,6 +670,24 @@ function textStyleOf(props) {
   return style;
 }
 
+/** §7.8.1 path → field of a `sourceApply` element payload ([group, key]). */
+const ELEMENT_FIELD_OF_PATH = Object.freeze({
+  'style.text': ['style', 'text'],
+  'style.font': ['style', 'font'],
+  'style.size': ['style', 'size'],
+  'style.weight': ['style', 'weight'],
+  'style.color': ['style', 'color'],
+  'style.align': ['style', 'align'],
+  'style.lineHeight': ['style', 'lineHeight'],
+  'style.letterSpacing': ['style', 'letterSpacing'],
+  src: ['', 'src'],
+  'transform.x': ['transform', 'x'],
+  'transform.y': ['transform', 'y'],
+  'transform.scale': ['transform', 'scale'],
+  'transform.rotation': ['transform', 'rotation'],
+  'transform.opacity': ['transform', 'opacity'],
+});
+
 /** Geometry style the element layer owns (not a source path). */
 function geometryStyleOf(compiled) {
   if (!compiled || !isRecord(compiled.style)) return null;
@@ -823,6 +833,158 @@ export async function applyCompiled({ project, sourceId, root, snapshot = null, 
     builtAt: snap.builtAt,
     base: root ? path.relative(path.resolve(root), basePath(root, id)).split(path.sep).join('/') : null,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Three-way merge (§7.8.4, WP4.4)
+// ---------------------------------------------------------------------------
+
+/** Accept a `theirs` snapshot (`{ nodes }`) or a compile result. */
+function theirsInput(theirs) {
+  if (!isRecord(theirs)) return null;
+  if (isRecord(theirs.snapshot) && Array.isArray(theirs.snapshot.nodes)) {
+    return { snapshot: theirs.snapshot, elements: Array.isArray(theirs.elements) ? theirs.elements : [] };
+  }
+  if (Array.isArray(theirs.nodes)) return { snapshot: theirs, elements: [] };
+  return null;
+}
+
+/**
+ * Merge one source: `base.json` × the editor layer × the new compile (§7.8.4).
+ *
+ * `theirs` is optional. Without it the source is compiled **in memory**
+ * (`write: false`, no `base.json` write), so a failed merge cannot destroy the
+ * old base. A caller may pass a `{ nodes }` snapshot or the compile result
+ * `{ snapshot, elements }` (the elements carry the element-layer geometry a
+ * newly added solid / shape node needs on apply).
+ *
+ * `ours` is optional; by default it is `editorSnapshotOf(project.elements, id)`
+ * (§7.8.4 "编辑器层…导成快照形状").
+ *
+ * The merged snapshot goes into the project with one `sourceApply` transaction
+ * through `changesets` (a `ChangeSetService`, §8.1) and is written to
+ * `base.json` after that transaction commits. Conflicts are not decided here:
+ * they are attached to the change set, whose status becomes `needs-decision`;
+ * the provisional result already carries `theirs` (§7.8.4).
+ *
+ * @returns `{ result, conflicts, changesetId }`, `result` being
+ *   `{ version, source, nodes, hash }` — directly writable as a snapshot
+ *   payload (§7.8.4).
+ */
+export async function mergeSource({
+  project, sourceId, root, ours = null, theirs = null,
+  changesets = null, actorId = 'local', intent = '', expectedRev, requestId,
+} = {}) {
+  if (!isRecord(project)) throw fault('INVALID_ARGUMENT', 'mergeSource needs a project');
+  if (!changesets || typeof changesets.apply !== 'function' || typeof changesets.needsDecision !== 'function') {
+    throw fault('INVALID_ARGUMENT', 'mergeSource needs a ChangeSetService（一次事务 + needs-decision 变更集，§7.8.4 / §8.1）');
+  }
+  const id = String(sourceId ?? '');
+  if (!isSafeSourceId(id)) throw fault('INVALID_ARGUMENT', `sourceId 必须是合法源 id，收到 ${JSON.stringify(sourceId)}`);
+  if (!sourceRecord(project, id)) throw fault('SOURCE_NOT_FOUND', `没有源 ${id}`, { status: 404 });
+
+  const base = await readBase({ root, sourceId: id });
+  if (!base.ok) {
+    throw fault('SOURCE_NOT_COMPILED', `合并需要上次编译的 base.json（${base.problems[0] ?? '不可用'}）：三方合并拿它当 base`, { status: 409 });
+  }
+
+  let compiled = null;
+  if (theirs !== null && theirs !== undefined) {
+    compiled = theirsInput(theirs);
+    if (!compiled) throw fault('INVALID_ARGUMENT', 'theirs 必须是快照形状 { nodes } 或编译结果 { snapshot, elements }');
+  } else {
+    // §7.8.6 #1: core never reads `.vdm/`; and a failed merge must leave the
+    // previous base.json untouched, so this compile is memory-only (`write:
+    // false`) while still using the project root's font context.
+    compiled = await compileSource({ project, sourceId: id, root, write: false });
+  }
+
+  const oursSnapshot = ours === null || ours === undefined ? editorSnapshotOf(project.elements, id) : ours;
+  const merged = merge(base.snapshot, oursSnapshot, compiled.snapshot);
+  if (!merged.result) {
+    throw fault('INVALID_ARGUMENT', '合并输入不合法：base.json / 编辑器层快照 / 新编译快照必须是同一 source 的 §7.8.1 合法快照');
+  }
+
+  // §7.8.4: `compiler` / `builtAt` are the caller's stamp, not part of `result`.
+  const compiler = isRecord(compiled.snapshot.compiler) ? compiled.snapshot.compiler : base.snapshot.compiler;
+  const snapshot = {
+    version: merged.result.version,
+    source: id,
+    compiler: isRecord(compiler) ? { ...compiler } : { name: COMPILER_NAME, version: COMPILER_VERSION },
+    builtAt: new Date().toISOString(),
+    hash: merged.result.hash,
+    nodes: merged.result.nodes,
+  };
+  const meta = project.meta || {};
+  const duration = Number(meta.duration) > 0 ? Number(meta.duration) : 10;
+  const { op } = applyOpFor({ project, snapshot, elements: compiled.elements || [], duration });
+
+  // §7.8.2 "不猜默认值": the merged snapshot carries only the paths the source
+  // speaks about. For a path neither `base` nor `theirs` carries, the editor's
+  // own value is the only truth — `applyOpFor` would otherwise reset it to the
+  // element default and lose a non-conflicting editor edit (G4).
+  const mergedById = new Map(snapshot.nodes.map((node) => [node.id, node]));
+  const currentByNode = new Map();
+  for (const el of Array.isArray(project.elements) ? project.elements : []) {
+    if (el?.source?.id === id && typeof el.source.node === 'string') currentByNode.set(el.source.node, el);
+  }
+  for (const payload of op.elements) {
+    const node = payload.source?.node ? mergedById.get(payload.source.node) : null;
+    const current = node ? currentByNode.get(node.id) : null;
+    if (!node || !current) continue;
+    const carried = new Set([
+      ...Object.keys(node.props || {}),
+      ...(Array.isArray(node.tracks) ? node.tracks.map((key) => key.path) : []),
+    ]);
+    for (const path of SOURCE_PATHS) {
+      if (carried.has(path)) continue;
+      const field = ELEMENT_FIELD_OF_PATH[path];
+      if (!field) continue;
+      const value = editorStaticValueOf(current, path);
+      if (value === undefined) continue;
+      const [group, key] = field;
+      if (!group) payload[key] = value;
+      else if (isRecord(payload[group])) payload[group][key] = value;
+    }
+    // §7.8.4: the merge does not change `el.sourceMode` — the user's takeover
+    // decisions survive. A generated zero-baseline `add` for a new track still
+    // fills paths the editor has no opinion about.
+    const currentMode = isRecord(current.sourceMode) ? current.sourceMode : {};
+    const generatedMode = isRecord(payload.sourceMode) ? payload.sourceMode : {};
+    const mode = { ...generatedMode, ...currentMode };
+    if (Object.keys(mode).length) payload.sourceMode = mode;
+    else delete payload.sourceMode;
+  }
+
+  // One transaction for the whole merge (P6); the change set is its record.
+  const record = await changesets.apply({
+    ops: [op],
+    actorId,
+    intent: String(intent || `合并源 ${id}${merged.conflicts.length ? `（${merged.conflicts.length} 处冲突待决定）` : ''}`).slice(0, 512),
+    ...(expectedRev !== undefined ? { expectedRev } : {}),
+    ...(requestId !== undefined ? { requestId } : {}),
+  });
+
+  // Conflicts are the human's decisions (§7.8.4 "谁决定：人"). The project
+  // already has `theirs` provisionally; the record holds all three sides.
+  if (merged.conflicts.length) {
+    await changesets.needsDecision({
+      id: record.id,
+      decisions: merged.conflicts.map((conflict) => ({
+        kind: 'conflict', reason: conflict.kind, id: conflict.nodeId, path: conflict.path,
+      })),
+      merge: { sourceId: id, hash: merged.result.hash, conflicts: merged.conflicts },
+    });
+  }
+
+  // The merged payload becomes the new base: §7.8.4 says `result` is directly
+  // writable, and the transaction above already committed.
+  if (root) {
+    const file = basePath(root, id);
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await atomicJson(file, snapshot);
+  }
+  return { result: merged.result, conflicts: merged.conflicts, changesetId: record.id };
 }
 
 /**

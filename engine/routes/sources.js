@@ -1,4 +1,4 @@
-// Compiled sources over HTTP (docs/DESIGN-BACKEND-V2.md §7.1 / §7.8, WP4.1 / WP4.3;
+// Compiled sources over HTTP (docs/DESIGN-BACKEND-V2.md §7.1 / §7.8, WP4.1 / WP4.3 / WP4.4;
 // source view §2.2 and 载入外部修改 §7.1 of docs/DESIGN-WP3.6-4.6-UI.md, WP3.6b).
 //
 //   GET  /api/sources                  registry + manifest + compile status
@@ -8,11 +8,15 @@
 //   POST /api/sources/<id>/compile     compile + write base.json, change nothing
 //   POST /api/sources/<id>/apply       upsert the compiled elements, one transaction
 //   POST /api/sources/<id>/writeback   one edited value back into the source (§7.8.3)
+//   POST /api/sources/<id>/merge       three-way merge (§7.8.4), one transaction
 //
 // `compile` is deliberately *not* a project write: the snapshot lives under
-// `.vdm/sources/<id>/` and §7.8.1 makes the compiler its only writer. `apply`
-// and `writeback` go through the one op path (`ctx.transact`), so they are
-// rev-checked, logged and undoable like every other edit.
+// `.vdm/sources/<id>/` and §7.8.1 makes the compiler its only writer. `apply`,
+// `writeback` and `merge` all go through the one op path (`ctx.transact`) —
+// `merge` through a change set — so they are rev-checked, logged and undoable
+// like every other edit. `merge` accepts an optional `theirs` snapshot in the
+// body (a `{ nodes }` shape or a compile result); without it the source is
+// recompiled in memory first.
 //
 // `files` / `check` are read-only on purpose: 载入外部修改 diffs the copy and
 // then submits `sourceWrite` ops through /api/ops, so the write stays one
@@ -22,13 +26,13 @@
 // §7.8.3 returns `{ ok: false, fallback: 'editor-layer', reason }` with status
 // 200 so the caller keeps the edit in the editor layer instead of losing it.
 import {
-  applyCompiled, checkSourceFiles, compileSource, elementForNode, listSources, readBase,
-  readSourceCopy, writeBack, writeBackOps,
+  applyCompiled, checkSourceFiles, compileSource, elementForNode, listSources, mergeSource,
+  readBase, readSourceCopy, writeBack, writeBackOps,
 } from '../../application/source-service.js';
 import { sourceRecord } from '../../core/code-layer.js';
 import { isSourcePath } from '../../core/source-eval.js';
 
-const SOURCE_ROUTE = /^\/api\/sources\/([A-Za-z0-9][A-Za-z0-9_-]{0,63})\/(compile|apply|base|files|check|writeback)$/;
+const SOURCE_ROUTE = /^\/api\/sources\/([A-Za-z0-9][A-Za-z0-9_-]{0,63})\/(compile|apply|base|files|check|merge|writeback)$/;
 
 export function register(router, ctx) {
   const { json, readBody, transact, getProject, broadcast } = ctx;
@@ -68,7 +72,7 @@ export function register(router, ctx) {
       return json(res, 200, { ok: copy.ok, ...copy });
     }
     if (action !== 'base') {
-      return json(res, 405, { ok: false, code: 'METHOD_NOT_ALLOWED', error: `GET /api/sources/<id>/${action} 不支持（compile / apply / check / writeback 用 POST）` });
+      return json(res, 405, { ok: false, code: 'METHOD_NOT_ALLOWED', error: `GET /api/sources/<id>/${action} 不支持（compile / apply / check / merge / writeback 用 POST）` });
     }
     const base = await readBase({ root: ctx.root, sourceId });
     return json(res, base.ok ? 200 : 404, {
@@ -141,6 +145,35 @@ export function register(router, ctx) {
         base: applied.base,
         transaction: result,
         project: await ctx.projects.read(),
+      });
+    }
+    if (action === 'merge') {
+      const body = await readBody(req);
+      const merged = await mergeSource({
+        project: getProject(),
+        sourceId,
+        root: ctx.root,
+        theirs: body.theirs ?? null,
+        changesets: ctx.changesets,
+        actorId: typeof body.actorId === 'string' && body.actorId ? body.actorId : 'ui',
+        intent: body.intent,
+        expectedRev: body.expectedRev,
+        requestId: body.requestId,
+      });
+      const fresh = await ctx.projects.read();
+      ctx.adoptDisk(fresh, 'sources', {});
+      broadcast('sources', {
+        action: 'merge', source: sourceId, hash: merged.result.hash,
+        conflicts: merged.conflicts.length, changesetId: merged.changesetId, rev: fresh.rev,
+      });
+      return json(res, 200, {
+        ok: true,
+        source: sourceId,
+        result: merged.result,
+        conflicts: merged.conflicts,
+        changesetId: merged.changesetId,
+        rev: fresh.rev,
+        project: fresh,
       });
     }
     if (action !== 'writeback') {
