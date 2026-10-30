@@ -202,3 +202,86 @@ test('audio, timeline cuts and parenting round-trip through HTTP, history and pe
   const restored = await (await post('api/undo', { expectedRev: cut.rev })).json();
   assert.equal(restored.project.elements.filter((el) => el.type === 'audio').length, 1);
 });
+
+test('change sets over HTTP: propose, shadow preview, apply, list, show, revert', async (t) => {
+  const { root, service, post } = await setup(t);
+  const get = async (route) => {
+    const response = await fetch(service.info.url + route);
+    return { status: response.status, body: await response.json() };
+  };
+  const file = path.join(root, 'project.vdm.json');
+  const before = await fs.readFile(file, 'utf8');
+  const beforeRev = (await get('api/project')).body.project.rev;
+  const ops = [{ op: 'set', id: 'el_1', path: 'start', value: 0.5 }];
+
+  // A preview is a shadow project: same revision, nothing on disk.
+  const preview = await post('api/changesets', { action: 'preview', includeProject: true, ops });
+  assert.equal(preview.status, 200);
+  const shadow = await preview.json();
+  assert.equal(shadow.equal, false);
+  assert.equal(shadow.project.rev, beforeRev);
+  assert.equal(shadow.project.elements.find((el) => el.id === 'el_1').start, 0.5);
+  assert.equal(await fs.readFile(file, 'utf8'), before, 'a preview never writes');
+
+  // Propose keeps the record; applying it is one transaction (one undo step).
+  const proposed = await (await post('api/changesets', { action: 'propose', intent: 'http test', ops })).json();
+  assert.equal(proposed.changeset.status, 'proposed');
+  const byId = await post('api/changesets', { action: 'preview', id: proposed.changeset.id, includeProject: true });
+  assert.equal(byId.status, 200);
+  assert.equal((await byId.json()).project.elements.find((el) => el.id === 'el_1').start, 0.5);
+
+  const applied = await post('api/changesets', { action: 'apply', id: proposed.changeset.id });
+  assert.equal(applied.status, 200, JSON.stringify(await applied.clone().json()));
+  const record = (await applied.json()).changeset;
+  assert.equal(record.status, 'applied');
+  assert.equal(record.rev, beforeRev + 1);
+  assert.ok(record.changed.some((entry) => entry.id === 'el_1'), 'the diff names the host');
+
+  const listed = await get('api/changesets');
+  assert.equal(listed.status, 200);
+  assert.ok(listed.body.changesets.some((entry) => entry.id === record.id));
+  const shown = await get(`api/changesets/${record.id}`);
+  assert.equal(shown.status, 200);
+  assert.equal(shown.body.changeset.status, 'applied');
+
+  const reverted = await post('api/changesets', { action: 'revert', id: record.id });
+  assert.equal(reverted.status, 200);
+  assert.equal((await reverted.json()).changeset.status, 'reverted');
+  const current = (await get('api/project')).body.project;
+  assert.equal(current.elements.find((el) => el.id === 'el_1').start, 0);
+  assert.equal(current.rev, beforeRev + 2);
+
+  const missing = await get('api/changesets/cs_missing');
+  assert.equal(missing.status, 404);
+  assert.equal(missing.body.code, 'CHANGESET_NOT_FOUND');
+});
+
+test('measure over HTTP answers the report tool and rejects unknown kinds', async (t) => {
+  const { post } = await setup(t);
+  const edges = await post('api/measure', { kind: 'cutEdges' });
+  assert.equal(edges.status, 200);
+  const edgeBody = await edges.json();
+  assert.equal(edgeBody.kind, 'cutEdges');
+  assert.ok(Array.isArray(edgeBody.result.edges));
+
+  const stack = await post('api/measure', { kind: 'stackAt', t: 0.5 });
+  assert.equal(stack.status, 200);
+  const stackBody = (await stack.json()).result;
+  assert.ok(Array.isArray(stackBody.order), 'far -> near rows');
+  assert.equal(stackBody.items, stackBody.order.length);
+
+  const px = await post('api/measure', { kind: 'pxAt', x: 320, y: 180, frame: 12 });
+  assert.equal(px.status, 200);
+  assert.equal((await px.json()).result.readPixels, false);
+
+  const bad = await post('api/measure', { kind: 'nope' });
+  assert.equal(bad.status, 400);
+  assert.equal((await bad.json()).code, 'INVALID_ARGUMENT');
+});
+
+test('the approve route is honest while no agent loop is running', async (t) => {
+  const { post } = await setup(t);
+  const response = await post('api/agent/approve', { planId: 'plan_1' });
+  assert.equal(response.status, 404);
+  assert.equal((await response.json()).code, 'NO_PENDING_PLAN');
+});

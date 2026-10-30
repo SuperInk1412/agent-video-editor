@@ -12,7 +12,9 @@ import {
   ensureProjectDirs, projectExists, PROJECT_FILE, atomicJson,
 } from './storage.js';
 import { projectService } from './projects.js';
-import { errorData } from '../application/errors.js';
+import { errorData, fault } from '../application/errors.js';
+import { ChangeSetService } from '../application/changeset-service.js';
+import { stackAt, coverage, cutEdges, diff, pxAt, pixelCoverage } from '../application/inspect-service.js';
 import { probeMedia, mimeOf, fileExists, findBin } from './media.js';
 import { blenderVersion, findBlender } from './blender.js';
 import { analyzeBeats } from './beats.js';
@@ -134,6 +136,10 @@ async function startOwnedServer({ root, port = 47100, open = false, onReady, imp
   const log = createLogger({ dir: projectRoot });
   log.info('engine starting', { root: projectRoot, pid: process.pid, version: '0.1.0' });
   const projects = projectService(projectRoot);
+  // Change sets (WP2.2) over the one write path: the review panel and the
+  // legacy agent proposal both go through this, so every AI write is recorded,
+  // revertible and visible to the UI (WP2.5a).
+  const changesets = new ChangeSetService(projects);
   const media = mediaService(projectRoot, importRoots);
   let project = await projects.read();
   let lastRev = project.rev;
@@ -255,12 +261,17 @@ async function startOwnedServer({ root, port = 47100, open = false, onReady, imp
     onEvent: async (ev) => {
       if (ev.type === 'proposal') {
         try {
-          const tx = await transact({ ops: ev.proposal.ops, expectedRev: ev.baseRev, requestId: ev.runId }, 'ai');
-          const saved = tx.project, changed = tx.changedIds;
-          log.info('agent applied', { ops: ev.proposal.ops.length, changed, rev: saved.rev, note: ev.proposal.note });
-          broadcast('agent', { ...ev, applied: { changed, note: ev.proposal.note, rev: saved.rev } });
-          addArtifact({ kind: 'ai', label: `AI 改了 ${changed.length} 项`, detail: ev.proposal.note });
-          toast(`AI 已应用 ${changed.length} 处修改`, 'success');
+          const record = await changesets.apply({
+            ops: ev.proposal.ops, actorId: 'agent:dsh', intent: ev.proposal.note,
+            expectedRev: ev.baseRev, requestId: ev.runId,
+          });
+          const changed = record.changed?.length ?? 0;
+          adoptDisk(await projects.read(), 'agent', { transactionId: record.transactions?.[0] });
+          log.info('agent applied', { ops: ev.proposal.ops.length, changeset: record.id, rev: record.rev, note: ev.proposal.note });
+          broadcast('agent', { ...ev, applied: { changed, note: ev.proposal.note, rev: record.rev, changesetId: record.id } });
+          broadcast('changeset', { action: 'apply', record });
+          addArtifact({ kind: 'ai', label: `AI 改了 ${changed} 项`, detail: ev.proposal.note });
+          toast(`AI 已应用 ${changed} 处修改`, 'success');
         } catch (e) {
           log.error('agent proposal rejected', { error: e.message, ops: ev.proposal.ops });
           broadcast('agent', { ...ev, error: e.message });
@@ -672,6 +683,70 @@ async function startOwnedServer({ root, port = 47100, open = false, onReady, imp
         return json(res, 200, { ok: true, ...await transact({ ...transactionOptions(body), command: { type: pathname.endsWith('/undo') ? 'undo' : 'redo' } }) });
       }
 
+      // ---------------- change sets (WP2.5a) ----------------
+      // The review panel reads and writes change sets here; every write goes
+      // through ChangeSetService over the one write path, as actorId 'ui'
+      // (a human pressed the button, so a locked element does not block it).
+      if (pathname === '/api/changesets' && req.method === 'GET') {
+        const status = url.searchParams.get('status') || undefined;
+        const actorId = url.searchParams.get('actorId') || undefined;
+        const limit = url.searchParams.get('limit') || undefined;
+        const offset = url.searchParams.get('offset') || undefined;
+        return json(res, 200, { ok: true, ...await changesets.list({ status, actorId, limit, offset }) });
+      }
+      const changesetMatch = /^\/api\/changesets\/([A-Za-z0-9_.-]+)$/.exec(pathname);
+      if (changesetMatch && req.method === 'GET') {
+        return json(res, 200, { ok: true, changeset: await changesets.show(changesetMatch[1], { limit: url.searchParams.get('limit') || undefined }) });
+      }
+      if (pathname === '/api/changesets' && req.method === 'POST') {
+        const body = await readBody(req);
+        const action = String(body.action || '');
+        const actorId = 'ui';
+        if (action === 'preview') {
+          const preview = await changesets.preview({
+            id: body.id, ops: body.ops, actorId,
+            expectedRev: body.expectedRev, includeProject: body.includeProject === true,
+          });
+          return json(res, 200, { ok: true, ...preview });
+        }
+        let record;
+        if (action === 'propose') {
+          record = await changesets.propose({ ops: body.ops, actorId, intent: body.intent });
+          broadcast('changeset', { action, record });
+          return json(res, 200, { ok: true, changeset: record });
+        }
+        if (action === 'apply') {
+          record = await changesets.apply({ id: body.id, ops: body.ops, actorId, intent: body.intent, expectedRev: body.expectedRev, requestId: body.requestId });
+        } else if (action === 'revert') {
+          record = await changesets.revert({ id: body.id, actorId, expectedRev: body.expectedRev });
+        } else if (action === 'revert-one') {
+          record = await changesets.revertOne({ id: body.id, actorId, index: body.index, entityId: body.entityId, path: body.path, expectedRev: body.expectedRev });
+        } else {
+          throw fault('INVALID_ARGUMENT', 'changeset action must be propose | preview | apply | revert | revert-one');
+        }
+        const fresh = await projects.read();
+        adoptDisk(fresh, 'changeset', { transactionId: record.transactions?.[0] });
+        broadcast('changeset', { action, record });
+        return json(res, 200, { ok: true, changeset: record, project: fresh });
+      }
+
+      // ---------------- measurements (WP2.1, used by the report tool) ----------------
+      if (pathname === '/api/measure' && req.method === 'POST') {
+        const body = await readBody(req);
+        const kind = String(body.kind || '');
+        const fresh = await projects.read();
+        const pick = (...keys) => Object.fromEntries(keys.filter((key) => body[key] !== undefined).map((key) => [key, body[key]]));
+        let result;
+        if (kind === 'stackAt') result = stackAt(fresh, body.t, pick('frame', 'point', 'camera', 'measureText'));
+        else if (kind === 'coverage') result = coverage(fresh, pick('f0', 'f1', 'from', 'to', 'point', 'focus', 'camera', 'grid', 'measureText'));
+        else if (kind === 'cutEdges') result = cutEdges(fresh);
+        else if (kind === 'pxAt') result = pxAt(fresh, pick('x', 'y', 'frame', 'time', 'camera', 'measureText'));
+        else if (kind === 'diff') result = diff(body.before, body.after, pick('limit'));
+        else if (kind === 'pixelCoverage') result = await pixelCoverage(projectRoot, pick('elementId', 'element', 'f0', 'f1', 'from', 'to', 'camera'));
+        else throw fault('INVALID_ARGUMENT', 'measure kind must be stackAt | coverage | cutEdges | pxAt | diff | pixelCoverage');
+        return json(res, 200, { ok: true, kind, result });
+      }
+
       // ---------------- media ----------------
       if (pathname === '/api/media' && req.method === 'GET') {
         const result = await media.list({ limit: 500 });
@@ -832,6 +907,15 @@ async function startOwnedServer({ root, port = 47100, open = false, onReady, imp
 
       if (pathname === '/api/agent/cancel' && req.method === 'POST') {
         return json(res, 200, { ok: agent.cancel() });
+      }
+      // The plan gate of AgentLoop (WP2.4) is not reachable from this server
+      // yet: the loop transport needs a dsh adapter that speaks its tool
+      // protocol. Answer honestly instead of hanging the approve button.
+      if (pathname === '/api/agent/approve' && req.method === 'POST') {
+        return json(res, 404, { error: 'no plan is awaiting approval', code: 'NO_PENDING_PLAN' });
+      }
+      if (pathname === '/api/agent/state' && req.method === 'GET') {
+        return json(res, 200, { ok: true, running: agent.running, runId: agent.runId });
       }
 
       // ---------------- timeline context for the agent ----------

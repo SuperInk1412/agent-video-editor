@@ -385,6 +385,15 @@ export class ChangeSetService {
    * no project file, no revision, no journal entry, no change set record.
    */
   async preview(input = {}) {
+    // A stored proposal previews at its own base revision unless the caller
+    // says otherwise: "what would accepting it now do" passes expectedRev.
+    if (input?.id !== undefined) {
+      const record = await this.get(input.id);
+      const simulated = await this.simulate({
+        ops: record.ops, actorId: actorOf(input), expectedRev: input.expectedRev ?? record.baseRev,
+      });
+      return this.previewResponse(record, simulated, input);
+    }
     const simulated = await this.simulate(input);
     return this.previewResponse(null, simulated, input);
   }

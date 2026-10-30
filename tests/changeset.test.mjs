@@ -493,3 +493,27 @@ test('the MCP change set tools match their schema and their behaviour', async (t
   assert.equal(orphan.isError, true);
   assert.equal(orphan.structuredContent.error.code, 'RUNTIME_UNAVAILABLE');
 });
+
+test('preview({id}) replays a stored proposal at the requested revision and never writes', async (t) => {
+  const { root, service, changesets } = await fixture(t);
+  const base = await service.read();
+  const record = await changesets.propose({ ops: [set('el_1', 'style.size', 150)], actorId: 'agent:dsh' });
+  const file = path.join(root, 'project.vdm.json');
+  const before = await fs.readFile(file, 'utf8');
+
+  const shadow = await changesets.preview({ id: record.id, includeProject: true });
+  assert.equal(shadow.id, record.id);
+  assert.equal(shadow.equal, false);
+  assert.equal(shadow.baseRev, base.rev);
+  assert.equal(shadow.project.rev, base.rev, 'a preview never advances the revision');
+  assert.equal(shadow.project.elements[0].style.size, 150);
+  assert.equal(await fs.readFile(file, 'utf8'), before);
+
+  // A human edited the same property afterwards. Previewing at the current
+  // revision answers "what would accepting it now do" without a conflict.
+  await service.transact({ ops: [set('el_1', 'style.size', 96)] }, { actorId: 'ui' });
+  const current = await service.read();
+  const now = await changesets.preview({ id: record.id, expectedRev: current.rev, includeProject: true });
+  assert.equal(now.project.elements[0].style.size, 150);
+  assert.ok(now.changed.some((entry) => entry.path === 'style.size'), 'the preview names the property it would overwrite');
+});
