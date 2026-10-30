@@ -19,6 +19,7 @@ if HERE not in sys.path:
 
 from vdm_build import build_scene  # noqa: E402
 from vdm_city import build_shot_scene  # noqa: E402
+from vdm_time import frame_index, still_frame  # noqa: E402
 
 
 def emit(obj):
@@ -56,11 +57,13 @@ def main():
 
     if mode == 'still':
         t = float(job.get('time') or 0)
-        # The project end is a boundary, not a frame: a 5 s / 60 fps project
-        # renders frames 1..300, so `still 5` must render the last frame
-        # instead of frame 301 (which no clip covers).
-        total = max(1, int(round(float(project['meta'].get('duration') or 0) * fps)))
-        frame = min(total, max(1, int(round(t * fps)) + 1))
+        # Same frame rule as the preview (`core/keyframe-edit.js::frameIndex`):
+        # floor with a 1e-6-frame cushion, 1-based here. Python's round() used
+        # to be the rule, and its halves go to the even number, so a time
+        # exactly between two frames could render a different frame than the
+        # preview (WP1.2 worked around it with one frame of slack). vdm_time.py
+        # holds the rule; tests/still-frame.test.mjs compares it with JS.
+        frame = still_frame(t, fps, project['meta'].get('duration'))
         scene.frame_set(frame)
         out = job['out']
         os.makedirs(os.path.dirname(out), exist_ok=True)
@@ -72,8 +75,9 @@ def main():
     # ---- frames (animation) ----
     start = float(job.get('from') or 0)
     end = float(job.get('to') or project['meta']['duration'])
-    f0 = int(round(start * fps)) + 1
-    f1 = max(f0, int(round(end * fps)))
+    # Both ends use the same rule as `jobFrames` (1-based here).
+    f0 = frame_index(start, fps) + 1
+    f1 = max(f0, frame_index(end, fps))
     scene.frame_start = f0
     scene.frame_end = f1
     frames_dir = job['framesDir']

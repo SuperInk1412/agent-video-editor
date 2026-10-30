@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { paths } from './storage.js';
 import { audioElements } from '../core/audio.js';
 import { elementLinkOverlayTable } from '../core/link-eval.js';
+import { frameIndex } from '../core/keyframe-edit.js';
 import { encodeSequence, extractSequence, fileExists, hashOf, hashFile } from './media.js';
 import { buildShotV3, is3D, loadProjectFonts, writeShot } from './shot.js';
 import { prepareObjectSequences } from './media-objects.js';
@@ -116,10 +117,12 @@ export async function prepareSequences(dir, project, { onLog, signal } = {}) {
  * evaluating the project itself (WP1.2, docs/DESIGN-BACKEND-V2.md §10.2).
  *
  * The range covers what `blender/vdm_render.py` will ask for: a still is the
- * one frame it clamps to, a frame range is `[f0, f1]`. It asks for the frame
- * number with Python's `round()`, whose halves go to the even number, while
- * `jobFrames` rounds them up — a time landing exactly between two frames can
- * therefore be one frame off, so one frame of slack is baked on each side.
+ * one frame it clamps to, a frame range is `[f0, f1]`. Both sides pick the
+ * frame under a time with the same rule — `core/keyframe-edit.js::frameIndex`
+ * (floor with a 1e-6-frame cushion) on this side and `blender/vdm_time.py` on
+ * the other — so a time landing exactly between two frames names the same
+ * frame in both backends. One frame of slack is still baked on each side: it
+ * costs nothing and keeps a rounding difference from dropping the frame.
  * No city snapshot is needed: a job on this path has no 3D world to draw
  * (`world.hash` stays null).
  */
@@ -130,7 +133,7 @@ function shotV3ForJob(project, job, fonts = null) {
   if (job.mode === 'still') {
     // vdm_render.py::still clamps the frame to the last one the project covers
     const total = Math.max(1, Math.round(duration * fps));
-    const frame = Math.min(total, Math.max(1, Math.round(f0)));
+    const frame = Math.min(total, Math.max(1, f0));
     f0 = frame;
     f1 = frame;
   }
@@ -218,8 +221,9 @@ export async function renderStill({ dir, project, time = 0, out, scale = 1, samp
 export async function renderFrames({ dir, project, from = 0, to = 3, scale = 1, samples = 16, onProgress, onLog, signal }) {
   const p = paths(dir);
   const fps = project.meta.fps;
-  const f0 = Math.round(from * fps) + 1;
-  const f1 = Math.max(f0, Math.round(to * fps));
+  // Same frame rule as `jobFrames` and `vdm_time.py` (see shotV3ForJob above).
+  const f0 = frameIndex(from, fps) + 1;
+  const f1 = Math.max(f0, frameIndex(to, fps));
   const framesDir = path.join(p.cache, 'frames', `job-${Date.now()}`);
   await fs.mkdir(framesDir, { recursive: true });
   await runJob(dir, {

@@ -16,6 +16,7 @@ import path from 'node:path';
 import { paths } from './storage.js';
 import { fileExists, hashOf } from './media.js';
 import { cameraAtTime } from '../core/camera.js';
+import { frameIndex } from '../core/keyframe-edit.js';
 import {
   elementsFor, feedPlan, hiddenFeeds, isFeed, normalizeFeed, sourceProject,
 } from '../core/camfeed.js';
@@ -25,14 +26,23 @@ const PASS_VERSION = 1;
 
 const clone = (v) => JSON.parse(JSON.stringify(v));
 
-/** Frames [f0, f1] a job writes (vdm_render.py numbering: frame = round(t * fps) + 1). */
+/**
+ * Frames [f0, f1] a job writes (1-based, `vdm_render.py` numbering).
+ *
+ * The frame under `t` is `core/keyframe-edit.js::frameIndex(t, fps) + 1` — the
+ * same floor-with-epsilon rule the preview and the timeline use
+ * (`timeline-math.js::frameIndex`). It used to be `Math.round(t * fps) + 1`
+ * here and Python's banker's `round()` in `vdm_render.py`, so a time landing
+ * exactly between two frames could pick a different frame in each backend
+ * (WP1.2 hid it with one frame of slack; WP1.3's still-frame test pins it).
+ */
 export function jobFrames(job, fps, duration) {
   if (job.mode === 'still') {
-    const f = Math.round((Number(job.time) || 0) * fps) + 1;
+    const f = frameIndex(Number(job.time) || 0, fps) + 1;
     return [f, f];
   }
-  const f0 = Math.round((Number(job.from) || 0) * fps) + 1;
-  const f1 = Math.max(f0, Math.round((job.to == null ? duration : Number(job.to)) * fps));
+  const f0 = frameIndex(Number(job.from) || 0, fps) + 1;
+  const f1 = Math.max(f0, frameIndex(job.to == null ? duration : Number(job.to), fps));
   return [f0, f1];
 }
 
