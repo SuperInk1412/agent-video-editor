@@ -35,6 +35,9 @@
   --edit: #ffd166;
   --edit-bg: rgba(255, 209, 102, .07);        /* added: move-mode badge, parented rows, local-space tags */
   --edit-border: rgba(255, 209, 102, .35);    /* added: outline of --edit tags */
+  --ai: #b58cff;                              /* added: AI change-set marks (WP2.5b, DESIGN-WP2.5-REVIEW §10.3-3) */
+  --ai-bg: rgba(181, 140, 255, .12);          /* added: AI mark tint (never the selection color) */
+  --ai-border: rgba(181, 140, 255, .35);      /* added: AI row bar / clip outline / keyframe ring */
   --ok: #2fd07f;
   --ok-bg: rgba(47, 208, 127, .12);
   --warn: #f2a33c;

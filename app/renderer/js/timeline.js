@@ -51,6 +51,29 @@ const el = (tag, cls, html) => {
   return n;
 };
 
+// Change-set marks (WP2.5b): `rows` / `keys` / `ruler` are the pending marks,
+// `accepted` the applied ones (painted faintly). Empty by default so a timeline
+// that never hears from `main.js` still answers every getter.
+const emptyMarks = () => ({
+  rows: [], keys: [], ruler: [],
+  accepted: { rows: [], keys: [], ruler: [] },
+});
+const markList = (value) => (Array.isArray(value) ? value : []);
+/** Accept the `marksFor()` result (and anything older that only had arrays). */
+function normalizeMarks(marks) {
+  const accepted = marks?.accepted;
+  return {
+    rows: markList(marks?.rows),
+    keys: markList(marks?.keys),
+    ruler: markList(marks?.ruler),
+    accepted: {
+      rows: markList(accepted?.rows),
+      keys: markList(accepted?.keys),
+      ruler: markList(accepted?.ruler),
+    },
+  };
+}
+
 // Lanes hold the frame band plus keyframe diamonds; refreshing a lane must keep
 // the band (its only other child) and only replace the diamonds.
 const clearLaneKeys = (lane) => {
@@ -147,6 +170,11 @@ export class Timeline {
     this.onRangeChange = onRangeChange;
     this._rangeEl = null;
     this._rangeX = null;
+    // Change-set marks (WP2.5b, docs/DESIGN-WP2.5-REVIEW.md §10.3): rows / keys
+    // / ruler for pending change sets, `accepted` for applied ones (faint).
+    // Painted over the current rows by _paintMarks; main.js refills them.
+    this.marks = emptyMarks();
+    this._markNodes = [];
     this.pool = emptySelection();
     this.segmentId = null;
     this.elementId = null;
@@ -734,6 +762,8 @@ export class Timeline {
       this.render();
     }
     this._paintRange();
+    // A project change can move or delete a marked host: repaint after the rows.
+    this._paintMarks();
   }
 
   // ------------------------------------------------------------ time range (WP2.5d)
@@ -819,6 +849,113 @@ export class Timeline {
     });
     this._rangeEl = band;
     this._rangeX = x;
+  }
+
+  // ------------------------------------------------------------ change-set marks (WP2.5b)
+  // docs/DESIGN-WP2.5-REVIEW.md §10.3: marks are typed. A whole-segment
+  // property gets a 2px bar in the name column plus a thin outline on the clip;
+  // a keyframe gets a ring on its diamond; a moment (add / remove / start /
+  // duration / z) gets an 8×8 diamond on the ruler. `accepted` marks are the
+  // applied change sets, painted at 40% until the user edits the value.
+  /**
+   * Replace the marks (the `marksFor()` result from main.js) and repaint.
+   * Paint-only: no op, no project write, no undo entry.
+   */
+  setMarks(marks) {
+    this.marks = normalizeMarks(marks);
+    this._paintMarks();
+  }
+
+  /** Repaint every mark over the current DOM (rows and ruler are rebuilt by render). */
+  _paintMarks() {
+    if (!this.inner) return;
+    for (const node of this._markNodes) node.remove();
+    this._markNodes = [];
+    for (const node of this.inner.querySelectorAll('.tl-key-ai')) node.classList.remove('tl-key-ai', 'is-ack');
+    const marks = this.marks?.accepted ? this.marks : normalizeMarks(this.marks);
+    this._paintMarkRows(marks.rows, false);
+    this._paintMarkRows(marks.accepted.rows, true);
+    this._paintMarkKeys(marks.keys, false);
+    this._paintMarkKeys(marks.accepted.keys, true);
+    this._paintMarkRuler(marks.ruler, false);
+    this._paintMarkRuler(marks.accepted.ruler, true);
+  }
+
+  /** Header row of a marked host, or null when it is not in the list. */
+  _markRow(kind, id) {
+    const q = CSS.escape(String(id));
+    if (kind === 'camera') return this.inner.querySelector(`.tl-camhead[data-cam="${q}"]`);
+    if (kind === 'object') return this.inner.querySelector(`.tl-objhead[data-obj="${q}"]`);
+    return this.inner.querySelector(`.tl-elhead[data-el="${q}"]`);
+  }
+
+  _paintMarkRows(list, ack) {
+    for (const mark of list) {
+      const row = this._markRow(mark.kind, mark.id);
+      if (!row) continue;
+      const gutter = row.querySelector(':scope > .tl-gutter');
+      if (gutter) {
+        // First child of the sticky name column: 2px wide, never over the text.
+        const bar = el('span', `tl-ai-bar${ack ? ' is-ack' : ''}`);
+        gutter.prepend(bar);
+        this._markNodes.push(bar);
+      }
+      const clip = row.querySelector(':scope > .tl-track > .blk');
+      if (clip && mark.outline !== false) {
+        // A sibling overlay, not a class on the clip: 40% opacity of the
+        // outline must not dim the clip's own label.
+        const outline = el('span', `tl-ai-outline${ack ? ' is-ack' : ''}`);
+        outline.style.left = clip.style.left;
+        outline.style.width = clip.style.width;
+        clip.parentNode.appendChild(outline);
+        this._markNodes.push(outline);
+      }
+    }
+  }
+
+  _paintMarkKeys(list, ack) {
+    for (const mark of list) {
+      const attr = mark.kind === 'camera' ? 'cam' : mark.kind === 'object' ? 'obj' : 'el';
+      const t = round3(Number(mark.t));
+      const path = String(mark.path ?? '');
+      const q = CSS.escape(String(mark.id));
+      for (const node of this.inner.querySelectorAll(`.tl-key[data-${attr}="${q}"]`)) {
+        if (String(node.dataset.path ?? '') !== path) continue;
+        if (round3(Number(node.dataset.t)) !== t) continue;
+        node.classList.add('tl-key-ai');
+        if (ack) node.classList.add('is-ack');
+      }
+    }
+  }
+
+  _paintMarkRuler(list, ack) {
+    const fps = this._fps();
+    for (const mark of list) {
+      const frame = Number(mark.frame);
+      if (!Number.isFinite(frame)) continue;
+      const count = Math.max(1, Number(mark.count) || 1);
+      const node = el('div', `tl-ai-ruler${ack ? ' is-ack' : ''}`);
+      node.style.left = `${(frame / fps) * this.pps}px`;
+      const tip = `AI 改动 · f${frame} · ${count} 处`;
+      node.title = tip;
+      node.dataset.tip = tip;
+      node.dataset.frame = String(frame);
+      if (count > 1) node.appendChild(el('span', 'tl-ai-ruler-count', String(count)));
+      const stop = (e) => e.stopPropagation();
+      node.addEventListener('pointerdown', stop);
+      node.addEventListener('dblclick', stop);
+      node.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        // §10.3-1: the ruler mark is the way into the review page, on that
+        // frame. The review tab belongs to WP2.5a; `?.` keeps this harmless
+        // when it is not there yet.
+        window.__vdm?.switchRightTab?.('review');
+        window.__vdm?.setTime?.(frame / fps);
+      });
+      this.rulerTrack.appendChild(node);
+      this._markNodes.push(node);
+    }
   }
 
   setSelection(sel) {
@@ -1202,6 +1339,8 @@ export class Timeline {
     this._applyFilter();
     this.setTime(this.time);
     this._paintSelection();
+    // The rows and the ruler were rebuilt: put the change-set marks back.
+    this._paintMarks();
     if (this._scrollTo) {
       const id = this._scrollTo;
       this._scrollTo = null;
@@ -1679,7 +1818,7 @@ export class Timeline {
     kind.dataset.tip = camRank == null
       ? '相机'
       : `相机叠层：从上往下第 ${camRank + 1} / ${this._rankCam.size} 层；拖到另一台相机上下会改叠层（并激活），拖过其它类型只改显示`;
-    g.append(eye, this._parentButton('cam', cam), caret, dot, name, kind);
+    g.append(eye, this._parentButton('cam', cam), caret, dot, this._lockButton('cam', cam), name, kind);
     const feeds = feedElements(p).filter((e) => normalizeFeed(e.feed).camera === cam.id);
     if (feeds.length) {
       // A hint, not a switch: feeds never decide which camera reaches the
@@ -2303,7 +2442,8 @@ export class Timeline {
       kind.dataset.tip = `2D 图层：当前第 ${rank2D + 1} / ${this._rank2D.size} 个（越靠上越高；同面才看得出；拖过相机/3D/声音只改显示）`;
     }
     const parentBtn = e.type === 'audio' ? null : this._parentButton('el', e);
-    g.append(eye, parentBtn || '', caret, dot, name, kind);
+    // Order stays eye | parent | caret | dot | lock | name (DESIGN.md §4).
+    g.append(eye, parentBtn || '', caret, dot, this._lockButton('el', e), name, kind);
     if (e.type === 'camfeed') {
       // The clip has its own menu; the header should open the same one so
       // "跟随投屏来源" is reachable from the row as well.
@@ -2465,7 +2605,7 @@ export class Timeline {
     name.textContent = o.name || o.id;
     name.dataset.tip = '双击重命名';
     name.addEventListener('dblclick', () => this._inlineName(name, o));
-    g.append(eye, this._parentButton('ob', o), caret, dot, name);
+    g.append(eye, this._parentButton('ob', o), caret, dot, this._lockButton('ob', o), name);
     const kind = el('span', 'tl-objkind badge badge-object', o.type === 'empty' ? '空' : '3D');
     kind.dataset.tip = '3D 物体按深度遮挡；上下拖动只改列表显示，不影响画面';
     const kids = childrenOf(this.project, o.id).length;
@@ -3933,6 +4073,60 @@ export class Timeline {
   }
 
   /**
+   * Lock toggle in a header row, right before the name
+   * (docs/DESIGN-WP2.5-REVIEW.md §10.5). A faint open lock appears on hover;
+   * a locked row keeps the closed lock visible in `--edit`. It only ever takes
+   * the name's front slot — eye / parent / caret / dot / name stay in order.
+   */
+  _lockButton(kind, host) {
+    const locked = host?.locked === true;
+    const btn = h('button', {
+      type: 'button', class: `tl-lock${locked ? ' on' : ''}`,
+      'aria-label': locked ? '解锁' : '锁定', 'aria-pressed': String(locked),
+      'data-tip': locked ? '已锁定：视口里不能点选拖动，AI 不能修改' : '锁定后 agent 不能改这个元素',
+    }, icon(locked ? 'lock' : 'lock-open', 'ic-sm'));
+    const stop = (ev) => { ev.preventDefault(); ev.stopPropagation(); };
+    btn.addEventListener('pointerdown', stop);
+    btn.addEventListener('dblclick', stop);
+    btn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      this.toggleLock(kind, host.id);
+    });
+    return btn;
+  }
+
+  /** Is one host locked? (viewport picks and the row marquee skip these) */
+  isLocked(kind, id) {
+    const host = kind === 'camera' ? this._camById(id)
+      : kind === 'object' ? this._obj(id) : this._element(id);
+    return host?.locked === true;
+  }
+
+  /** Is this pool ref ('el:' / 'cam:' / 'ob:') a locked host? */
+  _isLockedRef(ref) {
+    const r = splitRef(String(ref ?? ''));
+    if (!r) return false;
+    return this.isLocked(r.type === 'cam' ? 'camera' : r.type === 'ob' ? 'object' : 'element', r.id);
+  }
+
+  /** Lock / unlock one host. One op = one Ctrl+Z, whichever way it flips. */
+  toggleLock(kind, id) {
+    const host = kind === 'camera' ? this._camById(id)
+      : kind === 'object' ? this._obj(id) : this._element(id);
+    if (!host) return null;
+    const locked = host.locked !== true;
+    const patch = { locked };
+    const op = kind === 'camera' ? { op: 'cameraPatch', id, patch }
+      : kind === 'object' ? { op: 'objectPatch', id, patch }
+        : { op: 'updateElement', id, patch };
+    this.onToast?.(locked
+      ? '已锁定：视口里不能点选拖动，AI 不能修改'
+      : '已解锁：视口里可以点选拖动，AI 可以修改', 'info');
+    return this.onOp?.(op);
+  }
+
+  /**
    * Parent button in a header row. Every host can be a spatial child now
    * (core/spatial-parent.js::spatialParent writes `el.parent` for 2D elements,
    * `ob.frameParent` / `cam.frameParent` for 3D objects and cameras). Press and
@@ -4275,16 +4469,21 @@ export class Timeline {
     const apply = () => {
       const hits = hitRefs();
       if (scope === 'elements') {
+        // §10.5: a locked host is never swept up by a marquee. Its own row is
+        // still clickable, so the lock can be lifted from the timeline.
+        const allowed = hits.filter((ref) => !this._isLockedRef(ref));
+        const skipped = hits.length - allowed.length;
+        if (skipped) this.onToast?.(`已跳过 ${skipped} 个锁定元素`, 'info');
         const prev = additive && this.pool?.kind === 'element' ? this.pool.ids : [];
         let pool;
         if (!additive) {
-          pool = hits.length
-            ? normalizeSelection({ kind: 'element', ids: hits, primary: hits[hits.length - 1] })
+          pool = allowed.length
+            ? normalizeSelection({ kind: 'element', ids: allowed, primary: allowed[allowed.length - 1] })
             : emptySelection();
         } else {
           const before = new Set(prev);
-          const ids = [...new Set([...prev, ...hits])];
-          const primary = hits.find((ref) => !before.has(ref)) || this.pool?.primary || ids[0] || null;
+          const ids = [...new Set([...prev, ...allowed])];
+          const primary = allowed.find((ref) => !before.has(ref)) || this.pool?.primary || ids[0] || null;
           pool = normalizeSelection({ kind: 'element', ids, primary });
         }
         this.pool = pool;

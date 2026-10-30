@@ -15,6 +15,7 @@ import { showMenu, hideMenu, initTooltips, icon, prefs } from './ui.js';
 import { initLayout, markTab, Timecode, StatusBar, LogDrawer } from './shell.js';
 import { frameStep, frameStart, frameWriteTime, lastFrameTime } from './timeline-math.js';
 import { initCommands, register as registerCommand, dispatch as dispatchCommand, runCommand, openPalette, openShortcuts } from './commands.js';
+import { marksFor } from '/core/timeline-marks.js';
 import { pathPos, cameraTransform, cameraRange } from '/core/camera.js';
 import { feedPlan, hiddenFeeds, normalizeFeed } from '/core/camfeed.js';
 import { curveSegments } from '/core/curves.js';
@@ -259,7 +260,7 @@ function applyProject(p, source) {
     // disappeared (a Ctrl-mixed pool drops refs of any type).
     S.selection = { ...S.selection, ...legacyFields(S.selection.pool) };
   }
-  if (gizmo) gizmo.objSel = S.selection.objectId || null;
+  if (gizmo) gizmo.objSel = gizmoObjectId(S.selection.objectId);
   preview.setProject(p);
   warmSourceDurations(p);
   if (S.soloCameras) {
@@ -430,7 +431,8 @@ function select(sel = {}) {
   // it is open retargets the panel in place (design §3).
   if (curvePanel?.isOpen()) curvePanel.setSelection?.(pool);
   if (gizmo) {
-    gizmo.objSel = S.selection.objectId || null;
+    // §10.5: a locked 3D object shows its outline but no draggable gizmo.
+    gizmo.objSel = gizmoObjectId(S.selection.objectId);
     gizmo.objHover = null;
     gizmo.axisHover = null;
     gizmo.draw();
@@ -1037,22 +1039,30 @@ function objectScreenRect(obj) {
   return { left: Math.min(...xs), right: Math.max(...xs), top: Math.min(...ys), bottom: Math.max(...ys) };
 }
 
-/** Every 2D element / 3D object intersecting the canvas-space rect. */
+/**
+ * Every unlocked 2D element / 3D object intersecting the canvas-space rect,
+ * plus how many locked hosts were skipped (§10.5: a marquee never catches a
+ * locked host; the count is what the status toast reports).
+ */
 function viewportHitRefs(rect) {
   const refs = [];
+  let locked = 0;
   for (const poly of preview.layerPolygons(true)) {
-    if (polyRectHit(poly.points, rect)) refs.push(elementRef(poly.id));
+    if (!polyRectHit(poly.points, rect)) continue;
+    if (hostLocked('element', poly.id)) { locked += 1; continue; }
+    refs.push(elementRef(poly.id));
   }
   if (preview.scene3d?.lastVP) {
     for (const obj of sceneObjects(S.project)) {
       if (!objectVisibleAt(obj, S.time)) continue;
       const r = objectScreenRect(obj);
       if (r && r.right >= rect.left && r.left <= rect.right && r.bottom >= rect.top && r.top <= rect.bottom) {
-        refs.push(objectRef(obj.id));
+        if (obj.locked === true) locked += 1;
+        else refs.push(objectRef(obj.id));
       }
     }
   }
-  return [...new Set(refs)];
+  return { refs: [...new Set(refs)], locked };
 }
 
 /** Element refs currently in the selection (legacy single fields when no pool). */
@@ -1075,9 +1085,107 @@ function clearSelection() {
   select({ pool: emptySelection(), elementId: null, objectId: null, camera: false, segmentId: null });
 }
 
+// ---------------------------------------------------------------- locks (WP2.5b)
+// docs/DESIGN-WP2.5-REVIEW.md §10.5: locked = not pickable / not draggable in
+// the viewport, and an agent's write is refused (`LOCKED`); a human can still
+// select it from the timeline / outliner and edit it in the inspector.
+/** Is one host locked? `kind` is 'element' | 'camera' | 'object'. */
+function hostLocked(kind, id) {
+  if (!id) return false;
+  const host = kind === 'camera' ? cameraById(id)
+    : kind === 'object' ? (S.project?.scene?.objects || []).find((o) => o.id === id)
+      : S.project?.elements?.find((e) => e.id === id);
+  return host?.locked === true;
+}
+
+/** The 3D object whose move gizmo may be drawn: never a locked one (§10.5). */
+function gizmoObjectId(id) {
+  return id && !hostLocked('object', id) ? id : null;
+}
+
+/** Topmost unlocked 2D element under the cursor (a locked one is transparent). */
+function unlockedElementAt(sx, sy) {
+  return preview.hitTestAll(sx, sy, S.time).find((id) => !hostLocked('element', id)) || null;
+}
+
+/** The host a lock menu item / palette command acts on (selection primary). */
+function lockTarget() {
+  const pool = S.selection.pool;
+  const ref = pool?.kind === 'element' ? pool.primary : null;
+  if (ref) {
+    const r = splitRef(ref);
+    if (r) return { kind: r.type === 'cam' ? 'camera' : r.type === 'ob' ? 'object' : 'element', id: r.id };
+  }
+  if (S.selection.elementId) return { kind: 'element', id: S.selection.elementId };
+  if (S.selection.objectId) return { kind: 'object', id: S.selection.objectId };
+  const camId = S.selection.camera ? selectedCameraId() : null;
+  return camId ? { kind: 'camera', id: camId } : null;
+}
+
+/** Lock / unlock one host. One op = one Ctrl+Z, whichever way it flips. */
+function toggleLock(kind, id) {
+  const locked = !hostLocked(kind, id);
+  const patch = { locked };
+  const single = kind === 'camera' ? { op: 'cameraPatch', id, patch }
+    : kind === 'object' ? { op: 'objectPatch', id, patch }
+      : { op: 'updateElement', id, patch };
+  toast(locked
+    ? '已锁定：视口里不能点选拖动，AI 不能修改'
+    : '已解锁：视口里可以点选拖动，AI 可以修改', 'info');
+  return op(single);
+}
+
+/** 锁定 / 解锁 menu item; the palette command carries the same title. */
+function lockMenuItem(kind, id) {
+  const locked = hostLocked(kind, id);
+  return {
+    label: '锁定 / 解锁',
+    icon: locked ? 'lock-open' : 'lock',
+    title: locked ? '已锁定：视口里不能点选拖动，AI 不能修改' : '锁定后 agent 不能改这个元素',
+    run: () => { toggleLock(kind, id); },
+  };
+}
+
+// ---------------------------------------------------------------- change-set marks (WP2.5b)
+// docs/DESIGN-WP2.5-REVIEW.md §10.3: main.js owns the read, core/timeline-marks.js
+// the classification, the timeline only paints. Refetched after every `project`
+// / `changeset` event (debounced), because an accepted mark must disappear once
+// the user edits the value it recorded.
+let marksTimer = 0;
+let marksRequest = 0;
 /**
- * One viewport pick (docs/FIX-LAYER-ORDER-EMPTY-CLICK.md §二): the topmost 2D
- * element / 3D object under the cursor, or — on empty canvas — nothing at all.
+ * Read the last 50 change sets and hand the marks to the timeline. A failed
+ * read (an engine without the WP2.5a route, a reconnecting SSE) leaves the
+ * current marks alone instead of wiping them. Returns the marks for probes.
+ */
+function refreshMarks({ immediate = false } = {}) {
+  clearTimeout(marksTimer);
+  const run = async () => {
+    const request = ++marksRequest;
+    let payload = null;
+    try {
+      // detail=1: the marks need changed[] (which property, before, after),
+      // not the counts a summary carries.
+      const res = await fetch('/api/changesets?limit=50&detail=1');
+      if (res.ok) payload = await res.json();
+    } catch { /* engine without the route: keep what is painted */ }
+    if (request !== marksRequest) return null;
+    if (!payload) return null;
+    const records = Array.isArray(payload.changesets) ? payload.changesets : [];
+    const marks = marksFor(records, S.project, { fps: S.project?.meta?.fps || 24 });
+    timeline?.setMarks?.(marks);
+    return marks;
+  };
+  if (immediate) return run();
+  marksTimer = setTimeout(run, 200);
+  return null;
+}
+
+/**
+ * One viewport pick (docs/FIX-LAYER-ORDER-EMPTY-CLICK.md §二): the topmost
+ * unlocked 2D element / 3D object under the cursor, or — on empty canvas —
+ * nothing at all. A locked host is passed through (WP2.5b §10.5); when
+ * everything under the cursor is locked nothing gets selected.
  * Ctrl/Cmd/Shift keeps whatever is selected; a plain click clears everything
  * (`clearSelection`). There is deliberately no implicit fallback to "the
  * segment under the playhead" or "the camera": a camera is picked by clicking
@@ -1090,8 +1198,13 @@ function clearSelection() {
  */
 function selectAt(sx, sy, ev) {
   const additive = additiveEvent(ev);
-  const id = preview.hitTest(sx, sy, S.time);
-  const obj = id ? null : preview.scene3d?.pickObject(S.project, S.time, sx, sy);
+  // §10.5: a locked host is transparent to a viewport click — take the first
+  // unlocked layer below it, then a 3D object. When everything under the
+  // cursor is locked nothing gets selected (the lock is lifted in the timeline).
+  const stack = preview.hitTestAll(sx, sy, S.time);
+  const id = stack.find((candidate) => !hostLocked('element', candidate)) || null;
+  const pick = id ? null : preview.scene3d?.pickObject(S.project, S.time, sx, sy);
+  const obj = pick && !hostLocked('object', pick.id) ? pick : null;
   if (id || obj) {
     const kind = id ? 'el' : 'ob';
     const host = id || obj.id;
@@ -1105,6 +1218,9 @@ function selectAt(sx, sy, ev) {
     return;
   }
   if (additive) return; // Ctrl-click on empty space keeps the current selection
+  if (stack.length || pick) {
+    toast('这里的元素都锁定了：在时间线或大纲里选中后可以解锁', 'info');
+  }
   clearSelection();
 }
 
@@ -1164,7 +1280,9 @@ function beginViewportMarquee(ev, additive = additiveEvent(ev)) {
         (start.y - canvas.getBoundingClientRect().top) * canvas.height / Math.max(1, canvas.getBoundingClientRect().height), ev);
       return;
     }
-    const hits = viewportHitRefs(canvasRect());
+    const { refs: hits, locked } = viewportHitRefs(canvasRect());
+    // §10.5: the box never catches a locked host; say how many it passed over.
+    if (locked) toast(`已跳过 ${locked} 个锁定元素`, 'info');
     const prev = additive && S.selection.pool?.kind === 'element' ? S.selection.pool.ids : [];
     if (!additive) {
       select({ pool: hits.length ? normalizeSelection({ kind: 'element', ids: hits, primary: hits[0] }) : emptySelection() });
@@ -2746,6 +2864,8 @@ async function boot() {
       },
       { label: '复制（含关键帧）', icon: 'copy', run: () => { duplicateObject(o); } },
       { sep: true },
+      lockMenuItem('object', id),
+      { sep: true },
       {
         label: kidsCount ? `删除父级…（${kidsCount} 子级）` : '删除元素', danger: true, icon: 'trash', kbd: 'Delete',
         run: () => requestObjectDelete(o),
@@ -2906,6 +3026,9 @@ async function boot() {
         title: el.loop ? '关闭后长度最多到素材结尾' : '允许把长度拉到素材结尾之后，循环播放',
         run: () => toggleElementLoop(el),
       }] : []),
+      { sep: true },
+      lockMenuItem('element', el.id),
+      { sep: true },
       {
         label: '删除素材',
         danger: true, icon: 'trash', kbd: 'Delete',
@@ -2965,6 +3088,8 @@ async function boot() {
           run: () => splitCameraAtPlayhead(id),
         };
       })(),
+      { sep: true },
+      lockMenuItem('camera', cam.id),
       { sep: true },
       {
         label: '删除相机', danger: true, icon: 'trash',
@@ -3514,7 +3639,9 @@ async function boot() {
     const { sx, sy, cx, cy } = stageXY(e);
     if (!S.editMode) {
       if (e.button === 0) {
-        const elId = preview.hitTest(sx, sy, S.time);
+        // §10.5: a locked element is transparent — the click lands on the first
+        // unlocked one below it (or starts a marquee when there is none).
+        const elId = unlockedElementAt(sx, sy);
         if (elId) {
           if (e.ctrlKey || e.metaKey || e.shiftKey) selectAt(sx, sy, e);
           else begin2DElementDrag(elId, sx, sy, cx, cy, e);
@@ -3640,14 +3767,15 @@ async function boot() {
     }
     // 2D element in the 3D viewport: drag it on its own depth plane. The
     // screen delta is mapped to metres at the element's z, then back to pixels.
-    const elId = preview.hitTest(sx, sy, S.time);
+    // A locked element is passed through (§10.5).
+    const elId = unlockedElementAt(sx, sy);
     if (elId) {
       begin2DElementDrag(elId, sx, sy, cx, cy, e);
       return;
     }
     // timeline element in the 3D scene: pick it and start a keyed move
     const pick = preview.scene3d?.pickObject(S.project, S.time, sx, sy);
-    if (pick) {
+    if (pick && !hostLocked('object', pick.id)) {
       const obj = (S.project.scene?.objects || []).find((o) => o.id === pick.id);
       const wasSelected = S.selection.objectId === pick.id
         && !e.ctrlKey && !e.metaKey && !e.shiftKey;
@@ -3684,7 +3812,7 @@ async function boot() {
         const axHit = hit ? null : gizmo?.hitObjectAxis(sx, sy);
         const rotHit = (hit || axHit) ? null : gizmo?.hitObjectRotation(sx, sy);
         const obj = (hit || axHit || rotHit) ? null : preview.scene3d?.pickObject(S.project, S.time, sx, sy);
-        const elHit = (hit || axHit || rotHit || obj) ? null : preview.hitTest(sx, sy, S.time);
+        const elHit = (hit || axHit || rotHit || obj) ? null : unlockedElementAt(sx, sy);
         const hoverId = obj?.id || null;
         if (gizmo && (gizmo.objHover !== hoverId || gizmo.axisHover !== (axHit?.axis || null)
           || gizmo.rotHover !== (rotHit?.axis || null))) {
@@ -4003,7 +4131,7 @@ async function boot() {
       }
     }
     const { sx, sy } = stageXY(e);
-    const elId = preview.hitTest(sx, sy, S.time);
+    const elId = unlockedElementAt(sx, sy);
     const el = elId ? S.project.elements.find((x) => x.id === elId) : null;
     if (el?.type === 'text') {
       openTextEditor('element', el.id, e);
@@ -4282,6 +4410,13 @@ async function boot() {
     registerCommand({ id: `add.3d.${kind}`, title, group: '编辑', icon: ic, keywords: `new add ${kw}`, run: () => addSceneElement(kind) });
   }
   registerCommand({ id: 'edit.deselect', title: '清除选中', group: '编辑', keywords: 'deselect clear selection', when: () => hasSelection() || '没有选中的对象', run: () => clearSelection() });
+  // 锁定 / 解锁 (WP2.5b §10.5): same title as the timeline / viewport menus.
+  registerCommand({
+    id: 'edit.toggleLock', title: '锁定 / 解锁', group: '编辑', icon: 'lock',
+    keywords: 'lock unlock pin protect agent',
+    when: () => !!lockTarget() || '先选中一个元素',
+    run: () => { const target = lockTarget(); if (target) toggleLock(target.kind, target.id); },
+  });
 
   // 视口
   registerCommand({
@@ -4497,7 +4632,11 @@ async function boot() {
   es.addEventListener('project', (e) => {
     const d = JSON.parse(e.data);
     applyProject(d.project, d.source);
+    // A new revision can change (or invalidate) an accepted mark.
+    refreshMarks();
   });
+  // A change set was proposed / applied / reverted: refetch the marks (200ms).
+  es.addEventListener('changeset', () => refreshMarks());
   es.addEventListener('render', (e) => {
     const d = JSON.parse(e.data);
     S.render = d;
@@ -4530,6 +4669,9 @@ async function boot() {
   applyProject(S.project, 'boot');
   fitStage();
   setTime(0);
+  // Change-set marks for the project we just opened (no-op on an engine that
+  // does not serve /api/changesets yet: the fetch fails and paints nothing).
+  refreshMarks({ immediate: true });
   if (new URLSearchParams(location.search).get('picker') === '1') {
     setTimeout(() => projects?.open(), 350);
   }
@@ -4602,6 +4744,9 @@ async function boot() {
     addMediaFile: (m, kind, start) => addMediaFile(m, kind, start),
     pause: () => pause(),
     play: () => play(),
+    // Change-set marks (WP2.5b): probes can force a refetch or read the result.
+    refreshMarks: (opts) => refreshMarks({ immediate: true, ...(opts || {}) }),
+    marksFor: (records, project = S.project) => marksFor(records, project, { fps: S.project?.meta?.fps || 24 }),
     renderActions,
     agentPanel, pipelinePanel, logPanel,
     layout,

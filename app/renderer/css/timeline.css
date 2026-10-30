@@ -184,6 +184,57 @@ body.tl-gutter-resizing, body.tl-gutter-resizing * { cursor: col-resize !importa
 .tl-range-x .ic-sm { width: 12px; height: 12px; }
 .tl-range-x:hover { color: var(--text-1); }
 
+/* ---------------- change-set marks (WP2.5b) ---------------- */
+/* docs/DESIGN-WP2.5-REVIEW.md §10.3: a whole-segment change gets a 2px bar in
+   the name column plus a thin outline on the clip, a keyframe gets a ring and a
+   moment gets a diamond on the ruler. Only new nodes / classes: no row height
+   and no header button order changes. `is-ack` = already applied (40%). */
+.tl-ai-bar {
+  position: absolute; left: 0; top: 0; bottom: 0; width: 2px;
+  background: var(--ai); pointer-events: none; z-index: 2;
+}
+.tl-ai-bar.is-ack { opacity: .4; }
+.tl-ai-outline {
+  position: absolute; top: 4px; bottom: 4px; left: 0; width: 0;
+  border: 1px solid var(--ai-border); border-radius: var(--r-sm);
+  pointer-events: none; z-index: 2;
+}
+.tl-ai-outline.is-ack { opacity: .4; }
+/* Ring on a keyframe diamond: box-shadow only, so the 7px diamond never grows. */
+.tl-key-ai { box-shadow: 0 0 0 2px var(--ai-border); }
+.tl-key-ai.is-ack { opacity: .4; }
+.tl-key-ai:hover { box-shadow: 0 0 0 2px var(--ai); }
+/* Ruler diamond: inside .tl-ruler (z-index 6), always below the playhead layer
+   (z-index 8), so a mark never covers the playhead or its scissors. */
+.tl-ai-ruler {
+  position: absolute; top: 50%; left: 0; width: 8px; height: 8px; margin: -4px 0 0 -4px;
+  transform: rotate(45deg); background: var(--ai); border-radius: 1px;
+  cursor: pointer; z-index: 2;
+}
+.tl-ai-ruler:hover { box-shadow: 0 0 0 2px var(--ai-border); }
+.tl-ai-ruler.is-ack { opacity: .4; }
+.tl-ai-ruler-count {
+  position: absolute; top: -9px; right: -10px; transform: rotate(-45deg);
+  box-sizing: border-box; min-width: 12px; height: 12px; padding: 0 2px;
+  display: grid; place-items: center;
+  border: 1px solid var(--ai-border); border-radius: var(--r-sm);
+  background: var(--surface-3); color: var(--text-1);
+  font-size: var(--fs-xs); line-height: 1; font-variant-numeric: tabular-nums;
+}
+/* Lock toggle in a header row (§10.5): hover reveals it on an unlocked row, a
+   locked row keeps the closed lock on in --edit. 14×14 icon in the name slot. */
+.tl-lock {
+  display: grid; place-items: center; width: 16px; height: 22px; flex: 0 0 16px; padding: 0;
+  border: 0; border-radius: var(--r-sm); background: transparent; color: var(--text-3);
+  cursor: pointer; opacity: 0; transition: opacity var(--dur-fast);
+}
+.tl-lock .ic-sm { width: 14px; height: 14px; }
+.tl-elhead:hover .tl-lock, .tl-camhead:hover .tl-lock, .tl-objhead:hover .tl-lock,
+.tl-lock:focus-visible, .tl-lock.on { opacity: 1; }
+.tl-lock:hover { color: var(--text-1); background: var(--surface-3); }
+.tl-lock.on { color: var(--edit); }
+.tl-lock.on:hover { background: var(--edit-bg); }
+
 /* ---------------- playhead + split ---------------- */
 /* Current-frame band: the first child of every .tl-track. Above the track's own
    (often opaque) background, below the blocks and keyframe diamonds that come

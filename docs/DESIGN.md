@@ -150,6 +150,11 @@
   `meta.ui.timelineOrder`（`cam:/el:/ob:`），只有 2D 行的相对顺序写回 `el.z`、相机行的相对顺序写回
   `cameraOrder`；3D 与声音行只改显示，不影响画面。一次拖动 = 一次撤销；筛选框有内容时暂不拖动。
   行头按钮顺序统一为 **眼睛 | 空间父级 | 折叠 | 类型点 | 名称**（相机、2D、3D 一致）。
+  **锁图标在名称前**（类型点与名称之间，16px 位置 / 14px 图标）：未锁定的行悬停才出现淡色开锁，
+  锁定后常显闭合锁（`--edit`），点它直接切换，不触发选中 / 拖动 / 重排。
+  锁定 = 视口里点不中、拖不动，AI（`agent:*`）写不进去；时间线 / 大纲仍可选中，检查器照常可改值，
+  视口里不画可拖动的 gizmo。**锁定不向子级传递**（第一版）：锁父级不会锁住子级。
+  一次切换 = 一个 op = 一次 Ctrl+Z。
   相机行名称后另有只读的「被投屏 ×N」提示（只统计可见的投屏元素，隐藏相机照样能被投屏）；
   它不再控制相机是否出画。
 - **空间父级**：从行头的父级按钮按住拖到另一行，出现连线，目标行高亮；松手绑定，连线闪一下消失，
@@ -392,7 +397,7 @@
   search · filter · magnet · scissors · curve · zoom-in · zoom-out · fit · plus · upload · copy · trash · eye ·
   eye-off · chevron-down · chevron-right · chevron-left · x · more · command · help · film（渲染）·
   photo（预览帧）· terminal（日志）· sparkles（AI）· folder · refresh · check · alert · info · layers ·
-  assets · sliders（属性）· send · stop · keyframe。
+  assets · sliders（属性）· send · stop · keyframe · lock · lock-open。
 
 ---
 
@@ -420,6 +425,7 @@
 | | ↑ / ↓ | 上一个 / 下一个关键帧（有选中时只看选中对象，否则看全部）**新增** |
 | | L | 循环播放开关 **新增** |
 | 编辑 | Ctrl+Z / Ctrl+Shift+Z | 撤销 / 重做 |
+| | —（无默认键） | 锁定 / 解锁：属性面板头部的锁图标、时间线行右键菜单、命令面板同名命令 |
 | | Ctrl+C / Ctrl+V | 复制 / 粘贴选中元素 |
 | | Delete / Backspace | 删除选中：关键帧 > 元素 / 相机 / 3D 元素（多选一次删完，Ctrl+Z 可撤销；属性行不删） |
 | | S | 在播放头切开选中元素 / 相机（移动态下让给飞行） |

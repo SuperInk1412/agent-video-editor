@@ -147,9 +147,11 @@ export class Inspector {
   // ---------------------------------------------------------------- header
   /**
    * Sticky header: type badge · name (click to rename) · dim id · icon actions.
-   * actions: [{ icon, label, tip, danger, run }]
+   * actions: [{ icon, label, tip, danger, on, run }]
+   * `locked` tints the header (--edit-bg) and the lock action (WP2.5b §10.5);
+   * the fields below stay editable, because a human may still edit a lock.
    */
-  _header({ type, badge, name, id, onRename, actions = [], multi = 0 }) {
+  _header({ type, badge, name, id, onRename, actions = [], multi = 0, locked = false }) {
     const nameBtn = onRename
       ? h('button', { type: 'button', class: 'insp-name', 'data-tip': '单击改名', 'aria-label': `名称：${name}，单击改名` }, name || '—')
       : h('span', { class: 'insp-name static', title: name }, name || '—');
@@ -180,7 +182,7 @@ export class Inspector {
         input.select();
       });
     }
-    const head = h('div', { class: 'insp-head' },
+    const head = h('div', { class: `insp-head${locked ? ' is-locked' : ''}` },
       this._back ? h('button', {
         type: 'button', class: 'mini insp-back', 'data-tip': '返回上一个属性面板（Alt+←）',
         onclick: () => this.opts.onBack?.(),
@@ -192,12 +194,26 @@ export class Inspector {
         class: 'insp-multi', 'data-tip': '多选：面板、Delete 都只作用于最后选中的那个（primary）',
       }, `${multi} 个选中`) : null,
       actions.length ? h('div', { class: 'insp-actions' }, ...actions.map((a) => h('button', {
-        type: 'button', class: `icon-btn${a.danger ? ' danger' : ''}`,
-        'aria-label': a.label, 'data-tip': a.tip || a.label, onclick: a.run,
+        type: 'button', class: `icon-btn${a.danger ? ' danger' : ''}${a.on ? ' on' : ''}${a.lock ? ' insp-lock' : ''}`,
+        'aria-label': a.label, 'aria-pressed': a.on ? 'true' : null, 'data-tip': a.tip || a.label, onclick: a.run,
       }, icon(a.icon)))) : null,
     );
     this.root.appendChild(head);
     return head;
+  }
+
+  /** Lock action for a host header (first action, before copy / trash). */
+  _lockAction(kind, host) {
+    const locked = host?.locked === true;
+    const op = kind === 'camera' ? 'cameraPatch' : kind === 'object' ? 'objectPatch' : 'updateElement';
+    return {
+      icon: locked ? 'lock' : 'lock-open',
+      label: locked ? '解锁' : '锁定',
+      on: locked,
+      lock: true,
+      tip: locked ? '已锁定：视口里不能点选拖动，AI 不能修改' : '锁定后 agent 不能改这个元素',
+      run: () => this.opts.onOp({ op, id: host.id, patch: { locked: !locked } }),
+    };
   }
 
   // ---------------------------------------------------------------- sections
@@ -633,7 +649,10 @@ export class Inspector {
     this._header({
       type: el.type, badge: EL_LABELS[el.type] || el.type, name: el.name, id: el.id, multi,
       onRename: (v) => set('name', { name: v }),
+      locked: el.locked === true,
       actions: [
+        // The lock comes before copy / delete (docs/DESIGN-WP2.5-REVIEW.md §5).
+        this._lockAction('element', el),
         {
           icon: 'copy', label: '复制', tip: '复制\n在后面复制一份（放不下时贴着结尾）',
           run: () => {
@@ -1189,7 +1208,11 @@ export class Inspector {
     const tol = 0.5 / (project.meta?.fps || 24);
     const liveObj = () => (this._last?.project?.scene?.objects || []).find((o) => o.id === id) || obj;
 
-    this._header({ type: 'object', badge: OBJ_LABELS[obj.type] || '3D 元素', name: obj.name || id, id, multi });
+    this._header({
+      type: 'object', badge: OBJ_LABELS[obj.type] || '3D 元素', name: obj.name || id, id, multi,
+      locked: obj.locked === true,
+      actions: [this._lockAction('object', obj)],
+    });
     const linksSummary = this._linksSummary(project, obj);
     if (linksSummary) this.root.appendChild(linksSummary);
     const spatialParent = this._spatialParentSummary(project, obj);
@@ -1459,7 +1482,11 @@ export class Inspector {
     this._header({
       type: 'camera', badge: '镜头', name: cam.name || '镜头',
       id: `${(cam.path || []).length} 关键点 · FOV ${round(cam.fov, 0)}°`, multi,
-      actions: [{ icon: 'film', label: '渲染', tip: '渲染\n从头到尾渲染这个镜头', run: () => this.opts.onRenderAll?.() }],
+      locked: cam.locked === true,
+      actions: [
+        this._lockAction('camera', cam),
+        { icon: 'film', label: '渲染', tip: '渲染\n从头到尾渲染这个镜头', run: () => this.opts.onRenderAll?.() },
+      ],
     });
     const linksSummary = this._linksSummary(project, cam);
     if (linksSummary) this.root.appendChild(linksSummary);

@@ -1813,6 +1813,18 @@ export class Preview {
 
   /** canvas-space hit test -> topmost element id (the same rule as the picture) */
   hitTest(cx, cy, t) {
+    // One implementation: the top of the same stack `hitTestAll` returns. The
+    // locked-host pass-through (WP2.5b §10.5) needs the whole stack, so picking
+    // never grew a second rule.
+    return this.hitTestAll(cx, cy, t)[0] ?? null;
+  }
+
+  /**
+   * Every layer under the cursor, front to back (the order the picture draws
+   * them). Used by viewport picking to skip a locked host and take the first
+   * unlocked one below it; ids are deduped, first occurrence wins.
+   */
+  hitTestAll(cx, cy, t) {
     // Picking never asks the rasteriser for new frames (that would spend the
     // budget on a hover), it only places the items that already have pixels.
     const layers = (this.layers && this.layersAt === t) ? this.layers : this.computeLayers(t, { request: false });
@@ -1824,27 +1836,24 @@ export class Preview {
       // picking agrees with what is on screen even where the sort is wrong for
       // blending. Equal distances mean one plane, whose top `el.z` is what
       // _drawLayers filled last.
-      let best = null;
-      let bestD = Infinity;
+      const hits = [];
       for (const L of layers) {
         const poly = this._layerCorners(L);
         if (!poly || !pointInPoly(cx, cy, poly)) continue;
         const d = (ray && layerRayDepth(L, ray)) ?? layerOriginDistance(L, camPos);
-        const tie = best && Math.abs(d - bestD) <= 1e-6;
-        if (d < bestD - 1e-6 || (tie && Number(L.z) > Number(best.z))) {
-          best = L;
-          bestD = Math.min(d, bestD);
-        }
+        hits.push({ L, d });
       }
-      return best ? best.id : null;
+      hits.sort((a, b) => (a.d - b.d) || (Number(b.L.z) - Number(a.L.z)));
+      return uniqueIds(hits.map((hit) => hit.L));
     }
     // No 3D picture yet: the topmost quad under the cursor (no depth buffer).
+    const out = [];
     for (let i = layers.length - 1; i >= 0; i--) {
       const L = layers[i];
       const poly = this._layerCorners(L);
-      if (poly && pointInPoly(cx, cy, poly)) return L.id;
+      if (poly && pointInPoly(cx, cy, poly)) out.push(L);
     }
-    return null;
+    return uniqueIds(out);
   }
 
   /** select rectangle in canvas space for the current layers */
@@ -1975,6 +1984,18 @@ export class Preview {
     const offset = Number(this.project.meta.audio?.offset) || 0;
     try { a.currentTime = Math.max(0, at + offset); } catch { /* ignore */ }
   }
+}
+
+/** Ids of the layers in draw order, first occurrence wins (no duplicate rows). */
+function uniqueIds(layers) {
+  const out = [];
+  const seen = new Set();
+  for (const layer of layers) {
+    if (!layer?.id || seen.has(layer.id)) continue;
+    seen.add(layer.id);
+    out.push(layer.id);
+  }
+  return out;
 }
 
 /** Even-odd point-in-polygon test for projected layer corners. */

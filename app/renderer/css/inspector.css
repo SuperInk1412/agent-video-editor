@@ -35,6 +35,14 @@ button.insp-name:hover { background: var(--surface-2); border-color: var(--borde
   color: var(--text-3); font-family: var(--font-mono); font-size: var(--fs-xs);
 }
 .insp-actions { margin-left: auto; display: flex; gap: 2px; flex: 0 0 auto; }
+/* Locked host (WP2.5b §10.5): the header tint plus the closed lock in --edit.
+   The fields below stay editable — a human may still change a locked element,
+   only an agent's write is refused. No "Agent 只读" label (R1 removed it). */
+.insp-head.is-locked { background: var(--edit-bg); }
+.insp-actions .icon-btn.insp-lock.on,
+.insp-actions .icon-btn.insp-lock[aria-pressed="true"] {
+  color: var(--edit); background: var(--edit-bg); border-color: var(--edit-border);
+}
 .insp-multi { flex: 0 0 auto; margin-left: auto; color: var(--accent); font-size: var(--fs-xs); white-space: nowrap; }
 .insp-multi + .insp-actions { margin-left: 4px; }
 .insp-actions.wide { margin: 10px 0; }
