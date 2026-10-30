@@ -19,7 +19,7 @@ import {
   CODE_CACHE_MODES, CODE_PARAM_PREFIX, CONTRACT_CHECKS, DEFAULT_CODE,
   codeCachePolicy, codeIssues, codeLayerPlan, codeParamName, codeParamPath, codeParamsAt,
   codeParamNames, codeSeed, codeSize, codeSourceId, coerceParamValue, evaluateContractCheck,
-  isCodeParamPath, isSafeParamName, isSafeSourceFile, isSafeSourceId, manifestIssues,
+  isCodeParamPath, isSafeParamName, isSafeSourceFile, isSafeSourceId, isTimeIndependentSource, manifestIssues,
   normalizeCode, paramProbes, perturbParamValue, scanSourceFiles, scanSourceText, sourceFiles,
   sourceIds, sourceManifest, sourceRecord, stripSourceNoise, writeCodeParam,
 } from '../core/code-layer.js';
@@ -175,6 +175,14 @@ test('code-layer: manifestIssues follows the PROPERTY format', () => {
   assert.ok(paths.includes('manifest.deterministic'));
   assert.ok(manifestIssues({ runtime: 'p5', entry: 'sketch.js', params: [{ id: 'a' }, { id: 'a' }] })
     .some((i) => i.msg.includes('duplicate')));
+  // `timeIndependent` (§6.1): boolean when present, and false unless declared.
+  // Only a declaring source may bake one frame and hold it (engine/raster-bake.js).
+  assert.ok(manifestIssues({ ...MANIFEST, timeIndependent: 'yes' })
+    .some((i) => i.path === 'manifest.timeIndependent'));
+  assert.deepEqual(manifestIssues({ ...MANIFEST, timeIndependent: true }), []);
+  assert.equal(isTimeIndependentSource(MANIFEST), false);
+  assert.equal(isTimeIndependentSource({ ...MANIFEST, timeIndependent: true }), true);
+  assert.equal(isTimeIndependentSource(null), false);
 });
 
 // ---------------------------------------------------------------------------

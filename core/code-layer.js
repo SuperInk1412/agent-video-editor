@@ -203,6 +203,12 @@ export function manifestIssues(manifest, at = 'manifest') {
   if (manifest.deterministic !== undefined && typeof manifest.deterministic !== 'boolean') {
     push(`${at}.deterministic`, 'must be boolean');
   }
+  // Only a source that says its picture does not depend on the clock may have
+  // one frame baked and reused for a whole render range (engine/raster-bake.js).
+  // Default false: a sketch may animate through `vdm.t` / `vdm.frame` alone.
+  if (manifest.timeIndependent !== undefined && typeof manifest.timeIndependent !== 'boolean') {
+    push(`${at}.timeIndependent`, 'must be boolean');
+  }
   if (manifest.libs !== undefined && !isRecord(manifest.libs)) push(`${at}.libs`, 'must be an object of library versions');
   if (manifest.params !== undefined) {
     if (!Array.isArray(manifest.params)) push(`${at}.params`, 'must be an array of PROPERTY rows');
@@ -234,6 +240,15 @@ export function manifestIssues(manifest, at = 'manifest') {
   }
   return issues;
 }
+
+/**
+ * `manifest.timeIndependent` (§6.1): the source states that its picture does
+ * not depend on the clock, so one frame may be baked and held for a render
+ * range (engine/raster-bake.js). Default false — unchanged parameters are not
+ * proof that the picture stands still, because a sketch may animate through
+ * `vdm.t` / `vdm.frame` alone (§6.2).
+ */
+export const isTimeIndependentSource = (manifest) => isRecord(manifest) && manifest.timeIndependent === true;
 
 const sourceList = (project) => (Array.isArray(project?.sources) ? project.sources.filter(isRecord) : []);
 

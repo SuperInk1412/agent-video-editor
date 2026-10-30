@@ -26,7 +26,16 @@
 // agree except for edge anti-aliasing; the case fails when more than 1 % of the
 // pixels differ by more than `TEXT_DIFF` levels.
 //
-//   node scripts/check-render-parity.mjs [--keep] [--only=A,B,C,D,E,F,G]
+// Case I (docs/DESIGN-BACKEND-V2.md §6.1 / §10.2 WP3.4) is the code layer: a p5
+// source tilted in 3D with an opaque block in front of it. Both backends draw
+// the pixels of the one rasteriser (§5) — the preview through `GET /api/raster`,
+// Blender through `engine/raster-bake.js` and an image-sequence plane — so the
+// case fails when the block does not occlude the raster in both, when no pixel
+// of the code layer is drawn, or when more than `CODE_ALLOWED` of the compared
+// pixels differ by more than `TEXT_DIFF` levels (the same pixel budget as case
+// H) or more than `ALLOWED` of the 16×9 cells differ (the A–G standard).
+//
+//   node scripts/check-render-parity.mjs [--keep] [--only=A,B,C,D,E,F,G,H,I]
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -35,7 +44,8 @@ import { createProject, normalizeProject } from '../core/schema.js';
 import { applyOps } from '../core/ops.js';
 import { ensureSpace } from '../core/space.js';
 import { saveProject, loadProject } from '../engine/storage.js';
-import { renderStill } from '../engine/blender.js';
+import { findBlender, renderStill } from '../engine/blender.js';
+import { findElectron } from '../engine/render-workers/pool.js';
 import { rotationFromDirRoll } from '../core/rotation.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -49,8 +59,14 @@ const ALLOWED = 4; // edge cells may land on either side of an anti-aliased bord
 const PROJECT_H = path.join(WORK, 'project-h');
 const TEXT_DIFF = 24;        // channel levels ignored as anti-aliasing
 const TEXT_ALLOWED = 0.01;   // 1 % of the frame
+// Case I: the code-layer project, its frame and the pixel budget (WP3.4).
+const PROJECT_I = path.join(WORK, 'project-i');
+const SOURCE_I = 'src_parity_i';
+const FRAME_I = 12;              // IR frame under T = 0.5 s at 24 fps
+const T_I = FRAME_I / 24;
+const CODE_ALLOWED = 0.02;       // 2 % of the compared pixels (WP3.4 acceptance)
 
-const only = (process.argv.find((a) => a.startsWith('--only=')) || '--only=A,B,C,D,E,F,G,H').slice(7).split(',');
+const only = (process.argv.find((a) => a.startsWith('--only=')) || '--only=A,B,C,D,E,F,G,H,I').slice(7).split(',');
 
 const run = (cmd, args, opts = {}) => new Promise((resolve, reject) => {
   const p = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, ...opts });
@@ -270,26 +286,8 @@ async function textCase() {
     `--capture=${path.join(WORK, 'preview-h.png')}`, `--at=${T}`, '--delay=2600', '--hold=2500', `--eval=${evalJs}`], { cwd: REPO });
   const line = String(r.out).split('\n').find((l) => l.includes('[capture]'));
   if (!line) throw new Error(`no preview capture for case H: ${r.err.slice(-1200)}`);
-  const at = line.indexOf('"dbg":');
-  const json = at < 0 ? '' : line.slice(at + 6);
-  let depth = 0;
-  let end = -1;
-  let inStr = false;
-  let esc = false;
-  for (let i = 0; i < json.length; i++) {
-    const ch = json[i];
-    if (inStr) {
-      if (esc) esc = false;
-      else if (ch === '\\') esc = true;
-      else if (ch === '"') inStr = false;
-      continue;
-    }
-    if (ch === '"') { inStr = true; continue; }
-    if (ch === '{') depth++;
-    else if (ch === '}') { depth--; if (depth === 0) { end = i + 1; break; } }
-  }
-  if (end < 0) throw new Error(`could not parse case H: ${line.slice(0, 400)}`);
-  const dbg = JSON.parse(json.slice(0, end));
+  const dbg = captureDbg(line);
+  if (!dbg) throw new Error(`could not parse case H: ${line.slice(0, 400)}`);
   console.log(`[parity] H text: ${dbg.W}x${dbg.H}  fonts=${dbg.fonts}  mesh draws=${dbg.meshDraws} builds=${dbg.meshBuilds}`);
   console.log(`[parity] H diff >8: ${dbg.over8} (${(dbg.over8 / dbg.total * 100).toFixed(2)}%)`
     + `  >24: ${dbg.over24} (${(dbg.ratio * 100).toFixed(2)}%)  >64: ${dbg.over64}`
@@ -306,8 +304,306 @@ async function textCase() {
   return true;
 }
 
+// --------------------------------------------------------------- case I: code
+
+const MANIFEST_I = {
+  format: 'vdm.source/1',
+  id: SOURCE_I,
+  label: 'parity code layer',
+  runtime: 'p5',
+  entry: 'sketch.js',
+  libs: { p5: '1.9.4' },
+  deterministic: true,
+  params: [
+    { id: 'density', type: 'number', default: 0.5, range: [0, 1], keyable: 'frame' },
+    { id: 'tint', type: 'color', default: '#ff8800', keyable: 'frame' },
+  ],
+};
+
+// Opaque magenta field + one orange band that moves with the frame number: "did
+// the code layer draw" is a colour test, and a wrong frame number (or the held
+// frame of a static layer) is obvious by the band's height.
+const SKETCH_I = `export default (p) => {
+  p.setup = () => {
+    const vdm = p.vdm;
+    const [w, h] = vdm ? vdm.size : [1920, 1080];
+    p.createCanvas(w, h);
+    p.pixelDensity(1);
+    p.noStroke();
+  };
+  p.draw = () => {
+    const vdm = p.vdm;
+    if (!vdm) return;
+    const density = Math.max(0.05, Math.min(1, Number(vdm.param('density')) || 0.5));
+    p.background(255, 0, 255);
+    p.fill(vdm.param('tint') || '#ff8800');
+    const bandH = p.height * 0.12 * (1 + density);
+    p.rect(0, (vdm.frame % 5) * bandH, p.width, bandH);
+  };
+};
+`;
+
+/**
+ * Case I's project: one tilted code layer (§6.1 "照常是一块 2D 节点平面") and one
+ * opaque block floating 4 m in front of it, plus the source on disk — the
+ * rasteriser reads `sources/<id>/`, never the project's registry.
+ */
+async function buildCodeLayer() {
+  const sourceDir = path.join(PROJECT_I, 'sources', SOURCE_I);
+  await fs.mkdir(sourceDir, { recursive: true });
+  await fs.mkdir(path.join(PROJECT_I, 'media'), { recursive: true });
+  await fs.writeFile(path.join(sourceDir, 'manifest.json'), `${JSON.stringify(MANIFEST_I, null, 2)}\n`);
+  await fs.writeFile(path.join(sourceDir, 'sketch.js'), SKETCH_I);
+  const p = normalizeProject(createProject({ title: 'parity code layer', background: '#000000', duration: 2 }));
+  ensureSpace(p);
+  applyOps(p, [
+    { op: 'setFx', fx: { bloom: 0, ca: 0, grain: 0, vignette: 0, scanline: 0, grade: 0, contrast: 0, saturation: 1 } },
+    { op: 'sourceAdd', id: SOURCE_I, manifest: MANIFEST_I, files: { 'sketch.js': SKETCH_I } },
+    { op: 'addElement', element: {
+      id: 'el_code', name: 'code', type: 'code', start: 0, duration: 2, z: 2,
+      node: { pivot: [-0.3, 4.2, -2], position: [0, 0, 0], rotation: [12, 24, 0], scale: [0.9, 0.9, 1] },
+      code: { source: SOURCE_I, params: { density: 0.6, tint: '#ff8800' }, seed: 7, size: [960, 540], cache: 'live' },
+    } },
+    // opaque, and a colour of its own so "the block drew" and "the raster does
+    // not show through it" are two separate measurements
+    { op: 'addElement', element: {
+      id: 'el_block', name: 'block', type: 'solid', start: 0, duration: 2, z: 4,
+      node: { pivot: [-1.6, 4.4, 2], position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+      style: { w: 700, h: 520, fill: '#00cc60' },
+    } },
+  ]);
+  await saveProject(PROJECT_I, p, { by: 'check-render-parity' });
+}
+
+/**
+ * Runs inside the editor (loaded from the throwaway project's `/media/`, so the
+ * `--eval` command line stays short). Measures the preview frame against the
+ * Blender still and pins every number the case reports in `window.__dbg`.
+ */
+const PROBE_I = `export async function run() {
+  const out = { errors: [] };
+  const W = 1920, H = 1080, T = ${T_I}, FRAME = ${FRAME_I};
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  try {
+    const app = window.__vdm;
+    const p = app.preview;
+    app.pause();
+    p.playing = false;
+    app.setTime(T);
+    p.canvas.width = W;
+    p.canvas.height = H;
+    p._rebuildTargets();
+    // The code layer's PNG is fetched asynchronously: wait until THIS frame is
+    // on screen (a stale fallback would compare the wrong picture).
+    let ready = false;
+    for (let i = 0; i < 160 && !ready; i++) {
+      p.render(T);
+      ready = (p.layers || []).some((L) => L.raster && !L.raster.stale && L.raster.frame === FRAME);
+      if (!ready) await sleep(50);
+    }
+    out.ready = ready;
+    out.stats = p.rasterStats ? p.rasterStats() : null;
+    if (!ready) throw new Error('the code layer never showed frame ' + FRAME);
+    const shot = new Image();
+    shot.src = p.canvas.toDataURL('image/png');
+    await shot.decode();
+    const ref = new Image();
+    ref.src = '/media/zz-blender-i.png?t=' + Date.now();
+    await ref.decode();
+    const grab = (img) => {
+      const cv = document.createElement('canvas');
+      cv.width = W;
+      cv.height = H;
+      const ctx = cv.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(img, 0, 0, W, H);
+      return ctx.getImageData(0, 0, W, H).data;
+    };
+    const a = grab(shot); // preview
+    const b = grab(ref);  // Blender still
+    // "the code layer drew here" = the p5 field's own colours (magenta field,
+    // orange band). The block is green, the background black.
+    const rasterAt = (d, i) => {
+      const r = d[i], g = d[i + 1], bl = d[i + 2];
+      return (r > 200 && bl > 200 && g < 90) || (r > 200 && g > 90 && g < 200 && bl < 90);
+    };
+    const polys = p.layerPolygons ? p.layerPolygons() : [];
+    const wall = polys.find((poly) => poly.id === 'el_block');
+    if (!wall) throw new Error('the block did not project (no polygon)');
+    const centre = (poly) => poly.reduce((acc, pt) => [acc[0] + pt[0] / poly.length, acc[1] + pt[1] / poly.length], [0, 0]);
+    const shrink = (poly, k) => {
+      const c = centre(poly);
+      return poly.map((pt) => [c[0] + (pt[0] - c[0]) * k, c[1] + (pt[1] - c[1]) * k]);
+    };
+    const quad = shrink(wall.points, 0.86);
+    const inPoly = (poly, x, y) => {
+      let inside = false;
+      for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const [xi, yi] = poly[i];
+        const [xj, yj] = poly[j];
+        if (((yi > y) !== (yj > y)) && (x < ((xj - xi) * (y - yi)) / (yj - yi) + xi)) inside = !inside;
+      }
+      return inside;
+    };
+    let rasterA = 0, rasterB = 0, over = 0, area = 0, areaOver = 0;
+    let quadPixels = 0, quadOver = 0, quadRaster = 0;
+    for (let i = 0; i < a.length; i += 4) {
+      const d = Math.max(Math.abs(a[i] - b[i]), Math.abs(a[i + 1] - b[i + 1]), Math.abs(a[i + 2] - b[i + 2]));
+      const ra = rasterAt(a, i), rb = rasterAt(b, i);
+      if (ra) rasterA += 1;
+      if (rb) rasterB += 1;
+      if (d > ${TEXT_DIFF}) over += 1;
+      if (ra || rb) { area += 1; if (d > ${TEXT_DIFF}) areaOver += 1; }
+      const px = (i / 4) % W, py = Math.floor((i / 4) / W);
+      if (inPoly(quad, px, py)) {
+        quadPixels += 1;
+        if (d > ${TEXT_DIFF}) quadOver += 1;
+        if (ra || rb) quadRaster += 1;
+      }
+    }
+    const total = W * H;
+    out.size = [W, H];
+    out.frame = FRAME;
+    out.time = T;
+    out.rasterPixels = rasterA;
+    out.rasterPixelsBlender = rasterB;
+    out.frameDiff = { pixels: over, ratio: over / total };
+    out.rasterDiff = { pixels: areaOver, ratio: area ? areaOver / area : 0, area };
+    out.block = { pixels: quadPixels, diff: quadOver, diffRatio: quadPixels ? quadOver / quadPixels : 0, raster: quadRaster, share: quadPixels / total };
+    // The 16x9 colour-class grid of cases A-G, with this case's palette.
+    const palette = { magenta: [255, 0, 255], orange: [255, 136, 0], green: [0, 204, 96], white: [255, 255, 255], black: [0, 0, 0] };
+    const names = Object.keys(palette);
+    const classify = (d, i) => {
+      let best = 'black', bd = Infinity;
+      for (const name of names) {
+        const c = palette[name];
+        const dd = (d[i] - c[0]) ** 2 + (d[i + 1] - c[1]) ** 2 + (d[i + 2] - c[2]) ** 2;
+        if (dd < bd) { bd = dd; best = name; }
+      }
+      return best;
+    };
+    let gridDiff = 0;
+    const cells = [];
+    for (let j = 0; j < 9; j++) {
+      for (let i = 0; i < 16; i++) {
+        const x = Math.floor(((i + 0.5) / 16) * W);
+        const y = Math.floor(((j + 0.5) / 9) * H);
+        const k = (y * W + x) * 4;
+        const ca = classify(a, k), cb = classify(b, k);
+        if (ca !== cb) { gridDiff += 1; cells.push(i + ',' + j + ' preview ' + ca + ' blender ' + cb); }
+      }
+    }
+    out.grid = { diff: gridDiff, cells };
+  } catch (e) {
+    out.errors.push(String((e && e.stack) || e));
+  }
+  window.__dbg = out;
+}
+`;
+
+// The app may still be booting when `--delay` runs out (a previous Electron
+// window can be shutting down): wait for `window.__vdm`, then load the probe
+// module from the project's `/media/` so the command line stays short.
+const EVAL_I = `(async () => {
+  for (let i = 0; i < 150 && !(window.__vdm && window.__vdm.preview); i++) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  if (!(window.__vdm && window.__vdm.preview)) throw new Error('the editor never booted');
+  const mod = await import('/media/parity-i.js?t=' + Date.now());
+  await mod.run();
+})().catch((e) => { window.__dbg = { errors: [String((e && e.stack) || e)] }; })`;
+
+/** The `dbg` object of a `[capture] <png> {...} content ...` line. */
+function captureDbg(line) {
+  const at = line.indexOf('"dbg":');
+  if (at < 0) return null;
+  const json = line.slice(at + 6);
+  let depth = 0;
+  let end = -1;
+  let inStr = false;
+  let esc = false;
+  for (let i = 0; i < json.length; i++) {
+    const ch = json[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === '\\') esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') { inStr = true; continue; }
+    if (ch === '{') depth++;
+    else if (ch === '}') { depth--; if (depth === 0) { end = i + 1; break; } }
+  }
+  if (end < 0) return null;
+  try { return JSON.parse(json.slice(0, end)); } catch { return null; }
+}
+
+const pct = (value) => `${(Number(value) * 100).toFixed(2)}%`;
+
+/**
+ * Case I: the same frame through both backends, at the project's resolution,
+ * with the code layer rendered by the one rasteriser on both sides.
+ */
+async function codeLayerCase() {
+  const blender = await findBlender().catch(() => null);
+  const electron = findElectron();
+  if (!blender || !electron) {
+    const missing = [!blender ? 'Blender' : null, !electron ? 'Electron' : null].filter(Boolean).join(' and ');
+    console.log(`[parity] I SKIP — ${missing} not found. The code layer needs Blender for the still and`
+      + ' Electron for the one rasteriser (§5); without them there is no picture to compare.');
+    return true;
+  }
+  await buildCodeLayer();
+  const logs = [];
+  const still = await renderStill({
+    dir: PROJECT_I, project: await loadProject(PROJECT_I), time: T_I, scale: 1, samples: 16,
+    out: path.join(WORK, 'blender-i.png'), onLog: (line) => logs.push(String(line)),
+  });
+  for (const line of logs.filter((entry) => entry.includes('raster'))) {
+    console.log(`[parity] I ${line.trim()}`);
+  }
+  // The page can only load what the project serves: the still and the probe
+  // module both ride in under `/media/`.
+  await fs.copyFile(still, path.join(PROJECT_I, 'media', 'zz-blender-i.png'));
+  await fs.writeFile(path.join(PROJECT_I, 'media', 'parity-i.js'), PROBE_I);
+  const r = await run(process.execPath, [path.join(HERE, 'dev.mjs'), '--project', PROJECT_I,
+    `--capture=${path.join(WORK, 'preview-i.png')}`, `--at=${T_I}`, '--delay=2600', '--hold=3000', `--eval=${EVAL_I}`], { cwd: REPO });
+  const line = String(r.out).split('\n').find((entry) => entry.includes('[capture]'));
+  if (!line) throw new Error(`no preview capture for case I: ${r.err.slice(-1200)}`);
+  const dbg = captureDbg(line);
+  if (!dbg) throw new Error(`could not parse case I: ${line.slice(0, 400)}`);
+  if (dbg.errors && dbg.errors.length) {
+    console.log(`[parity] I FAIL — the probe threw: ${dbg.errors[0].split('\n')[0]}`);
+    return false;
+  }
+  console.log(`[parity] I code layer frame ${dbg.frame} (t=${dbg.time}s) ${dbg.size[0]}x${dbg.size[1]}:`
+    + ` raster pixels preview ${dbg.rasterPixels}, Blender ${dbg.rasterPixelsBlender}`);
+  console.log(`[parity] I block quad ${dbg.block.pixels} px (${pct(dbg.block.share)} of the frame):`
+    + ` diff ${dbg.block.diff} px (${pct(dbg.block.diffRatio)} of the quad),`
+    + ` raster pixels inside ${dbg.block.raster}`);
+  console.log(`[parity] I raster area ${dbg.rasterDiff.area} px:`
+    + ` diff ${dbg.rasterDiff.pixels} px (${pct(dbg.rasterDiff.ratio)})`);
+  console.log(`[parity] I whole frame: diff ${dbg.frameDiff.pixels} px (${pct(dbg.frameDiff.ratio)})`);
+  console.log(`[parity] I grid: ${dbg.grid.diff} of 144 cells differ (allowed ${ALLOWED})`
+    + (dbg.grid.cells.length ? ` — ${dbg.grid.cells.join('; ')}` : ''));
+  const failures = [];
+  if (!(dbg.rasterPixels > 0)) failures.push('the preview drew no code-layer pixel');
+  if (!(dbg.rasterPixelsBlender > 0)) failures.push('Blender drew no code-layer pixel');
+  if (!(dbg.block.raster === 0)) failures.push(`${dbg.block.raster} code-layer pixels show through the block`);
+  if (dbg.block.diffRatio > CODE_ALLOWED) failures.push(`the block differs by ${pct(dbg.block.diffRatio)}`);
+  if (dbg.rasterDiff.ratio > CODE_ALLOWED) failures.push(`the code layer differs by ${pct(dbg.rasterDiff.ratio)}`);
+  if (dbg.frameDiff.ratio > CODE_ALLOWED) failures.push(`the frame differs by ${pct(dbg.frameDiff.ratio)}`);
+  if (dbg.grid.diff > ALLOWED) failures.push(`${dbg.grid.diff} grid cells differ (allowed ${ALLOWED})`);
+  if (failures.length) {
+    console.log(`[parity] I FAIL — ${failures.join('; ')}`);
+    return false;
+  }
+  console.log(`[parity] I PASS — the code layer is drawn and occluded by both backends`
+    + ` (${pct(CODE_ALLOWED)} of the compared pixels allowed, ${TEXT_DIFF} levels)`);
+  return true;
+}
+
 async function main() {
-  const gridCases = only.filter((k) => k !== 'H');
+  const gridCases = only.filter((k) => k !== 'H' && k !== 'I');
   let failed = false;
   if (!gridCases.length) {
     await fs.rm(WORK, { recursive: true, force: true });
@@ -350,6 +646,12 @@ async function main() {
   // Case H: text geometry, pixel diff at full resolution (§4.4 v4 / WP1.3).
   if (only.includes('H')) {
     if (!(await textCase())) failed = true;
+  }
+  // Case I: a code layer, drawn from the one rasteriser by both backends
+  // (§6.1 / §10.2 WP3.4). Skipped, with a reason, when Blender or Electron is
+  // missing — the case needs both.
+  if (only.includes('I')) {
+    if (!(await codeLayerCase())) failed = true;
   }
   if (failed) {
     if (!process.argv.includes('--keep')) console.log('[parity] work dir kept for inspection:', WORK);

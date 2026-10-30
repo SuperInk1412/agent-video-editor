@@ -22,6 +22,7 @@ import json
 import math
 import struct
 import os
+import sys
 import numpy as np
 
 # ---------------------------------------------------------------- utilities
@@ -178,6 +179,11 @@ class ShotV3:
         # core/glyphs.js triangulated, once per mesh id; an item only says which
         # one it draws. This side never typesets and needs no font file.
         self.meshes = (self.payload or {}).get('meshes') or {}
+        # Code layers (§6.1, WP3.4): `engine/raster-bake.js` rendered every
+        # `raster` item's frames through the one rasteriser (§5) and wrote down
+        # where the image sequence of each item lives. This side only samples
+        # it — no user code runs in Blender.
+        self.rasters = (self.payload or {}).get('rasters') or {}
         for record in (self.payload or {}).get('items') or []:
             ident = record.get('id') if isinstance(record, dict) else None
             if not isinstance(ident, str):
@@ -222,6 +228,19 @@ class ShotV3:
                     if isinstance(value, str) and value not in found:
                         found.append(value)
         return [mid for mid in found if isinstance(self.meshes.get(mid), dict)]
+
+    def raster(self, ident):
+        """The baked image sequence of a code layer, or None (WP3.4).
+
+        The description is `engine/raster-bake.js`'s: `dir` holds
+        `f_00000.png ... f_<count-1>.png`, `from` is the first IR frame it
+        covers (0 based, `core/frame-ir.js` numbering) and `pattern` is the file
+        name template. A job rendered without the pool (no Electron) has no
+        entry here; the layer then draws nothing, like the preview while its
+        PNG is missing.
+        """
+        entry = self.rasters.get(ident) if isinstance(self.rasters, dict) else None
+        return entry if isinstance(entry, dict) else None
 
 
 def load_shot_v3(project, opts=None):
@@ -767,6 +786,35 @@ def show_feed_frame(el, obj, tex, frame):
     img.reload()
 
 
+def raster_sequence(entry):
+    """The image sequence of a baked code layer, as `build_media` wants it.
+
+    `entry` is one item of `v3['rasters']` (engine/raster-bake.js): `dir` holds
+    `f_00000.png ... f_<count-1>.png`, `pattern` is the name template and
+    `frameOffset` is the index of the first file. A missing directory or a
+    count without its first file means the bake did not happen: the caller then
+    leaves the layer out instead of drawing a placeholder over other layers.
+    """
+    if not isinstance(entry, dict):
+        return None
+    folder = entry.get('dir') or ''
+    pattern = str(entry.get('pattern') or 'f_%05d.png')
+    try:
+        count = int(entry.get('count') or 0)
+        first_index = int(entry.get('frameOffset') or 0)
+    except (TypeError, ValueError):
+        return None
+    if not folder or count <= 0:
+        return None
+    try:
+        first = os.path.join(folder, pattern % first_index)
+    except (TypeError, ValueError):
+        return None
+    if not os.path.exists(first):
+        return None
+    return {'first': first, 'count': count, 'dir': folder}
+
+
 class SceneBuilder:
     def __init__(self, project, opts):
         self.p = project
@@ -899,7 +947,7 @@ class SceneBuilder:
         obj = self.add_object(me, mat, el['id'])
         return obj, nodes
 
-    def build_media(self, el, style, st0, src_path, sequence=None):
+    def build_media(self, el, style, st0, src_path, sequence=None, uv=None):
         if sequence:
             # Image.frame_duration is read-only (Blender 5.2+); the frame count
             # lives on the texture node's ImageUser, set below.
@@ -915,14 +963,16 @@ class SceneBuilder:
 
         # `content.uv` is the IR's image-space rect (null until the project knows
         # the media's intrinsic size); otherwise the IR's `mediaUVOf` rule applies.
-        uv = st0.get('uv')
-        if not (isinstance(uv, (list, tuple)) and len(uv) == 4):
+        # A caller may pin the rect: a code layer's raster fills its quad exactly
+        # (`[0, 0, 1, 1]`, the preview's rule in preview.js, WP3.4).
+        rect = uv if (isinstance(uv, (list, tuple)) and len(uv) == 4) else st0.get('uv')
+        if not (isinstance(rect, (list, tuple)) and len(rect) == 4):
             fit = style.get('fit', 'cover')
             if img.size[0] and img.size[1]:
-                uv = (0, 0, 1, 1) if fit == 'stretch' else cover_uv(img.size[0], img.size[1], self.W, self.H)
+                rect = (0, 0, 1, 1) if fit == 'stretch' else cover_uv(img.size[0], img.size[1], self.W, self.H)
             else:
-                uv = (0, 0, 1, 1)
-        mesh = plane_mesh(f'{el["id"]}_mesh', self.W, self.H, uv)
+                rect = (0, 0, 1, 1)
+        mesh = plane_mesh(f'{el["id"]}_mesh', self.W, self.H, rect)
         mat, nodes = textured_material(f'{el["id"]}_mat', img, st0['opacity'])
         if sequence:
             iu = nodes['tex'].image_user
@@ -1038,6 +1088,7 @@ class SceneBuilder:
             st0, style = v3_build_inputs(el, self.v3.item(el.get('id'), first))
             src_path = self.resolve_src(el.get('src'))
             tex = None
+            raster = None
 
             if el['type'] == 'text':
                 # v4: the frame IR carries the glyph mesh (§4.4, WP1.3), so the
@@ -1060,6 +1111,20 @@ class SceneBuilder:
                 obj, nodes, tex = self.build_feed(el, style, st0)
             elif el['type'] in ('solid', 'shape'):
                 obj, nodes = self.build_shape(el, style, st0)
+            elif el['type'] == 'code':
+                # A code layer (§6.1, WP3.4): one raster of the shared pool per
+                # frame, baked by engine/raster-bake.js and handed over as an
+                # image sequence — the video plane path, painted with
+                # `content.size` rasters onto the item's own quad. Without a
+                # sequence (no Electron, a failing sketch) the layer draws
+                # nothing, exactly like the preview before its PNG arrives.
+                raster = self.v3.raster(el.get('id'))
+                seq = raster_sequence(raster) if raster else None
+                if seq is None:
+                    sys.stderr.write(f'VDM_RASTER fallback: {el.get("id")} has no baked sequence\n')
+                    sys.stderr.flush()
+                    continue
+                obj, nodes, tex = self.build_media(el, style, st0, None, seq, uv=(0, 0, 1, 1))
             else:
                 seq = None
                 if el['type'] == 'video':
@@ -1071,7 +1136,7 @@ class SceneBuilder:
                 obj, nodes, tex = self.build_media(el, style, st0, src_path, seq)
 
             obj.hide_render = True
-            self.updaters.append(self.make_updater(el, obj, nodes, tex, style))
+            self.updaters.append(self.make_updater(el, obj, nodes, tex, style, raster))
 
         if embed is not None:
             for ob in scene.objects:
@@ -1091,8 +1156,8 @@ class SceneBuilder:
         return scene
 
     # -- per frame ---------------------------------------------------------
-    def make_updater(self, el, obj, nodes, tex, style):
-        return self._v3_update(el, obj, nodes, tex, style)
+    def make_updater(self, el, obj, nodes, tex, style, raster=None):
+        return self._v3_update(el, obj, nodes, tex, style, raster)
 
     def _v3_update_text_mesh(self, el, objects, style):
         """Per-frame Blender state of a text drawn as IR meshes.
@@ -1170,7 +1235,7 @@ class SceneBuilder:
             rows[axis][3] += normal[axis] * offset
         return Matrix(rows)
 
-    def _v3_update(self, el, obj, nodes, tex, style):
+    def _v3_update(self, el, obj, nodes, tex, style, raster=None):
         """Per-frame Blender keys from the frame IR numbers of this element."""
         fps = self.fps
         is_text = el['type'] == 'text'
@@ -1229,7 +1294,17 @@ class SceneBuilder:
                 # pin frame_start to the current frame so that is exactly the element's
                 # local frame (f_<local>.png), holding the last frame past the clip's end.
                 count = int(tex.get('vdm_frames', tex.image_user.frame_duration) or 1)
-                local = min(count - 1, max(0, int(round((t - el['start']) * fps))))
+                if raster:
+                    # A code layer is one raster per IR frame (WP3.4): the file
+                    # index is the project's own frame minus the sequence start
+                    # (`from`, 0 based, engine/raster-bake.js) — never the
+                    # element's local time. A missing mid-sequence frame was
+                    # already replaced by its predecessor when the frames were
+                    # staged, so this clamp only guards the two ends.
+                    local = int(round(frame)) - 1 - int(raster.get('from') or 0) + int(raster.get('frameOffset') or 0)
+                    local = min(count - 1, max(0, local))
+                else:
+                    local = min(count - 1, max(0, int(round((t - el['start']) * fps))))
                 tex.image_user.frame_start = frame
                 tex.image_user.frame_offset = local - 1
 

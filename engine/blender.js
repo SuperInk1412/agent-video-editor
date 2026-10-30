@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { paths } from './storage.js';
 import { audioElements } from '../core/audio.js';
+import { isTimeIndependentSource } from '../core/code-layer.js';
 import { elementLinkOverlayTable } from '../core/link-eval.js';
 import { frameIndex } from '../core/keyframe-edit.js';
 import { encodeSequence, extractSequence, fileExists, hashOf, hashFile } from './media.js';
@@ -16,6 +17,7 @@ import { buildShotV3, is3D, loadProjectFonts, writeShot } from './shot.js';
 import { prepareObjectSequences } from './media-objects.js';
 import { jobFrames, prepareFeeds } from './camfeed-render.js';
 import { bakeElementPlacements } from './element-bake.js';
+import { bakeRasterLayers } from './raster-bake.js';
 import { buildAudioMix } from './audio-mix.js';
 import { which } from './which.js';
 import { runProcess } from './process.js';
@@ -112,21 +114,15 @@ export async function prepareSequences(dir, project, { onLog, signal } = {}) {
 }
 
 /**
- * The frame IR of one job (`engine/shot.js::buildShotV3`), for a project that
- * has no 3D shot of its own. The Python builder reads these numbers instead of
- * evaluating the project itself (WP1.2, docs/DESIGN-BACKEND-V2.md §10.2).
- *
- * The range covers what `blender/vdm_render.py` will ask for: a still is the
- * one frame it clamps to, a frame range is `[f0, f1]`. Both sides pick the
- * frame under a time with the same rule — `core/keyframe-edit.js::frameIndex`
- * (floor with a 1e-6-frame cushion) on this side and `blender/vdm_time.py` on
- * the other — so a time landing exactly between two frames names the same
- * frame in both backends. One frame of slack is still baked on each side: it
- * costs nothing and keeps a rounding difference from dropping the frame.
- * No city snapshot is needed: a job on this path has no 3D world to draw
- * (`world.hash` stays null).
+ * The render frames a job covers, 1 based: the frames `blender/vdm_render.py`
+ * will actually render — a still is the one frame it clamps to
+ * (`blender/vdm_time.py::still_frame`), a frame range is `[f0, f1]` from
+ * `jobFrames`. Both sides pick the frame under a time with the same rule —
+ * `core/keyframe-edit.js::frameIndex` (floor with a 1e-6-frame cushion) on this
+ * side and `blender/vdm_time.py` on the other — so a time landing exactly
+ * between two frames names the same frame in both backends.
  */
-function shotV3ForJob(project, job, fonts = null) {
+function jobRenderRange(project, job) {
   const fps = Number(project.meta?.fps) || 24;
   const duration = Number(project.meta?.duration) || 0;
   let [f0, f1] = jobFrames(job, fps, duration);
@@ -137,6 +133,23 @@ function shotV3ForJob(project, job, fonts = null) {
     f0 = frame;
     f1 = frame;
   }
+  return [f0, f1];
+}
+
+/**
+ * The frame IR of one job (`engine/shot.js::buildShotV3`), for a project that
+ * has no 3D shot of its own. The Python builder reads these numbers instead of
+ * evaluating the project itself (WP1.2, docs/DESIGN-BACKEND-V2.md §10.2).
+ *
+ * The range covers what `blender/vdm_render.py` will ask for (`jobRenderRange`
+ * above), plus one frame of slack on each side: it costs nothing and keeps a
+ * rounding difference from dropping the frame.
+ * No city snapshot is needed: a job on this path has no 3D world to draw
+ * (`world.hash` stays null).
+ */
+function shotV3ForJob(project, job, fonts = null) {
+  const fps = Number(project.meta?.fps) || 24;
+  const [f0, f1] = jobRenderRange(project, job);
   return buildShotV3(project, {
     fps,
     from: (Math.max(1, f0 - 1) - 1) / fps,
@@ -181,6 +194,24 @@ export async function runJob(dir, job, { onProgress, onLog, signal } = {}) {
     // font of its own. A font that cannot be found leaves the old FONT-curve
     // path in place for that element.
     seqProject.v3 = shotV3ForJob(seqProject, job, loadProjectFonts(seqProject, p.root));
+  }
+  // WP3.4: a code layer (`kind: "raster"`) has no pixels of its own — they come
+  // from the one rasteriser (§5) and from nowhere else (P4). Bake the frames
+  // this job draws from the shared cache before Blender starts, and hand the
+  // Python builder one image sequence per item (`engine/raster-bake.js`).
+  // Nothing happens for a job without code layers: no pool, no Electron.
+  if (seqProject.v3) {
+    const [rf0, rf1] = jobRenderRange(seqProject, job);
+    // One baked frame may only stand for a whole range when the source itself
+    // says its picture does not depend on the clock (`manifest.timeIndependent`);
+    // a sketch can animate through `vdm.t` with unchanged params.
+    const timeIndependent = new Set((seqProject.sources || [])
+      .filter((source) => isTimeIndependentSource(source?.manifest))
+      .map((source) => source.id));
+    const rasters = await bakeRasterLayers(p.root, seqProject.v3, {
+      fps: Number(seqProject.meta?.fps) || 24, f0: rf0, f1: rf1, onLog, signal, timeIndependent,
+    });
+    if (Object.keys(rasters).length) seqProject.v3.rasters = rasters;
   }
   await fs.writeFile(projFile, JSON.stringify(seqProject, null, 2));
   await fs.writeFile(jobFile, JSON.stringify(payload, null, 2));
