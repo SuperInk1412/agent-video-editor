@@ -479,6 +479,94 @@ export class ChangeSetService {
     return this.publicRecord(record);
   }
 
+  /**
+   * Record the human's decisions on a `needs-decision` change set (§7.8.4 "谁
+   * 决定：人"; §7.3 R1 of DESIGN-WP3.6-4.6-UI). `ops` are the chosen values —
+   * the review page builds one `set` / `removeElement` per conflict — and they go
+   * through the same `transact` every edit uses, so 应用 is **one transaction**
+   * and one Ctrl+Z back to the provisional (`theirs`) state.
+   *
+   * `decisions` is `[{ index, nodeId, path, choice: 'ours' | 'theirs' }]` and is
+   * stored on `record.merge.decisions`; the conflicts themselves stay in
+   * `record.merge.conflicts` as the merge's evidence. Nothing is written when
+   * `ops` is empty (every choice already holds): the record is then only marked
+   * applied — "关掉不处理 = 保留我的、记录留在待决定" is the *not* deciding case,
+   * which never reaches this method.
+   */
+  async decide(input = {}) {
+    if (!isRecord(input)) throw fault('INVALID_ARGUMENT', 'decide needs an object');
+    const id = input.id;
+    if (typeof id !== 'string' || !id) throw fault('INVALID_ARGUMENT', 'decide needs a change set id');
+    const ops = input.ops === undefined ? [] : input.ops;
+    if (!Array.isArray(ops)) throw fault('INVALID_ARGUMENT', 'decide: ops must be an array');
+    if (input.decisions !== undefined && !Array.isArray(input.decisions)) {
+      throw fault('INVALID_ARGUMENT', 'decide: decisions must be an array');
+    }
+    const actorId = actorOf(input);
+    const record = await this.get(id);
+    if (record.status === 'reverted') throw fault('INVALID_ARGUMENT', `change set ${id} was already reverted`);
+    if (record.status === 'applied') return { ...this.publicRecord(record), alreadyApplied: true };
+    if (record.recovered) {
+      throw fault('INVALID_ARGUMENT', `change set ${record.id} lost its record; what it changed is unknown`);
+    }
+    const at = this.now();
+    const decisions = (input.decisions || []).map((entry) => {
+      if (!isRecord(entry)) throw fault('INVALID_ARGUMENT', 'decide: each decision must be an object');
+      return {
+        index: Number.isSafeInteger(entry.index) ? entry.index : null,
+        nodeId: entry.nodeId ?? null,
+        path: entry.path ?? null,
+        choice: entry.choice === 'theirs' ? 'theirs' : 'ours',
+        at: entry.at ?? at,
+      };
+    });
+    const merge = { ...(isRecord(record.merge) ? record.merge : {}), decisions };
+    const finish = async (fields = {}, response = {}) => {
+      record.merge = merge;
+      record.report = record.report || {};
+      record.report.decisions = [];
+      Object.assign(record, { status: 'applied', updatedAt: this.now(), appliedAt: this.now(), decidedAt: this.now() }, fields);
+      await this.repository.saveChangeset(record);
+      return { ...this.publicRecord(record), ...response };
+    };
+    // Every choice already holds: the decision is a status change only.
+    if (!ops.length) return finish({}, { writes: false });
+
+    const before = await this.service.read();
+    if (input.expectedRev !== undefined && input.expectedRev !== before.rev) {
+      throw fault('REV_CONFLICT', 'project changed; read the latest revision before deciding', { currentRev: before.rev });
+    }
+    let tx;
+    try {
+      tx = await withChangeSet(record.id, () => this.service.transact({
+        expectedRev: before.rev,
+        ...(input.requestId ? { requestId: input.requestId } : {}),
+        ops,
+      }, { actorId }));
+    } catch (error) {
+      Object.assign(record, { status: 'needs-decision', updatedAt: this.now() });
+      record.report = record.report || {};
+      record.report.decisions = [...(record.report.decisions || []), {
+        kind: 'conflict', reason: errorReason(error), message: error.message, id: null, path: null, at: this.now(),
+      }];
+      await this.repository.saveChangeset(record);
+      throw error;
+    }
+    const report = diff(before, tx.project, { limit: STORE_LIMIT, ignore: IGNORE_PATHS });
+    Object.assign(record, {
+      changed: report.changed,
+      added: enrich(report.added, tx.project),
+      removed: enrich(report.removed, before),
+      report: reportOf(report, { afterRev: tx.rev, decisions: [] }),
+    });
+    return finish({
+      rev: tx.rev,
+      transactions: [...(Array.isArray(record.transactions) ? record.transactions : []),
+        ...(tx.transactionId ? [tx.transactionId] : [])],
+      replayed: tx.replayed === true,
+    }, { writes: tx.didChange });
+  }
+
   // ------------------------------------------------------------------- revert
   /** Revert the whole change set, inverting only the untouched properties. */
   async revert(input = {}) {

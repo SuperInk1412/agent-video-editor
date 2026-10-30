@@ -288,6 +288,14 @@ kbd + kbd { margin-left: 2px; }
 .toast.success { border-left-color: var(--ok); }
 .toast.error { border-left-color: var(--danger); }
 .toast.warn { border-left-color: var(--warn); }
+/* An action toast (the §7.4 R1 detach's `[撤销]`): the message stays plain text,
+   the button is the only interactive part. */
+.toast-act {
+  margin-left: 8px; padding: 0 7px; height: 20px; border-radius: var(--r-sm);
+  border: 1px solid var(--accent-border); background: var(--accent-bg); color: var(--accent);
+  font-size: var(--fs-xs); cursor: pointer; vertical-align: 1px;
+}
+.toast-act:hover { background: var(--accent-bg-strong); color: var(--accent-hover); }
 .toast.out { opacity: 0; transform: translateY(-6px); transition: opacity var(--dur-slow), transform var(--dur-slow); }
 @keyframes toastIn { from { opacity: 0; transform: translateY(-6px); } }
 

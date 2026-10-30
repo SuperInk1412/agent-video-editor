@@ -113,6 +113,30 @@ export const SOURCE_DEFAULTS = Object.freeze({
 
 export const SOURCE_MODES = Object.freeze(['add', 'mul', 'override']);
 
+/**
+ * §7.8.1 path → the element field it mirrors, as `[group, key]` (`group: ''`
+ * means a top-level field). One table for every writer: `sourceApply`'s
+ * payloads, the merge's "path the source does not carry keeps the editor
+ * value" fallback, and `sourceDetach`'s freeze (§7.4 R1). A path missing here
+ * is not mirrored on the element layer.
+ */
+export const SOURCE_FIELD_OF_PATH = Object.freeze({
+  'style.text': ['style', 'text'],
+  'style.font': ['style', 'font'],
+  'style.size': ['style', 'size'],
+  'style.weight': ['style', 'weight'],
+  'style.color': ['style', 'color'],
+  'style.align': ['style', 'align'],
+  'style.lineHeight': ['style', 'lineHeight'],
+  'style.letterSpacing': ['style', 'letterSpacing'],
+  src: ['', 'src'],
+  'transform.x': ['transform', 'x'],
+  'transform.y': ['transform', 'y'],
+  'transform.scale': ['transform', 'scale'],
+  'transform.rotation': ['transform', 'rotation'],
+  'transform.opacity': ['transform', 'opacity'],
+});
+
 const NUMERIC = new Set(SOURCE_NUMERIC_PATHS);
 const PATHS = new Set(SOURCE_PATHS);
 

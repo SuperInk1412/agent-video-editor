@@ -37,7 +37,10 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { SOURCE_SNAPSHOT_VERSION } from '../core/version.js';
-import { isNumericSourcePath, isSourceNodeId, SOURCE_PATHS, snapshotProblems } from '../core/source-eval.js';
+import {
+  SOURCE_FIELD_OF_PATH, isNumericSourcePath, isSourceNodeId, SOURCE_PATHS, snapshotProblems, sourceMerge,
+  sourceNodeDelta,
+} from '../core/source-eval.js';
 import {
   canonicalJson, editorSnapshotOf, editorStaticValueOf, hashPayload, merge, snapshotHash,
 } from '../core/source-merge.js';
@@ -45,6 +48,9 @@ import { compileHtml, compileSvg, COMPILE_RUNTIMES } from '../core/source-map.js
 import { isSafeSourceId, manifestIssues, isSafeSourceFile, scanSourceFiles, sourceRecord, SOURCE_MANIFEST } from '../core/code-layer.js';
 import { isRecord } from '../core/json.js';
 import { parseFont, metricsOf, layoutText } from '../core/glyphs.js';
+import { sampleTrack } from '../core/time.js';
+import { elementLocalNode } from '../core/spatial-parent.js';
+import { PX_PER_M, basisFromDir } from '../core/scene.js';
 import { resolveFontFile } from '../engine/shot.js';
 import { atomicJson } from '../engine/storage.js';
 import { fault } from './errors.js';
@@ -671,22 +677,7 @@ function textStyleOf(props) {
 }
 
 /** §7.8.1 path → field of a `sourceApply` element payload ([group, key]). */
-const ELEMENT_FIELD_OF_PATH = Object.freeze({
-  'style.text': ['style', 'text'],
-  'style.font': ['style', 'font'],
-  'style.size': ['style', 'size'],
-  'style.weight': ['style', 'weight'],
-  'style.color': ['style', 'color'],
-  'style.align': ['style', 'align'],
-  'style.lineHeight': ['style', 'lineHeight'],
-  'style.letterSpacing': ['style', 'letterSpacing'],
-  src: ['', 'src'],
-  'transform.x': ['transform', 'x'],
-  'transform.y': ['transform', 'y'],
-  'transform.scale': ['transform', 'scale'],
-  'transform.rotation': ['transform', 'rotation'],
-  'transform.opacity': ['transform', 'opacity'],
-});
+const ELEMENT_FIELD_OF_PATH = SOURCE_FIELD_OF_PATH;
 
 /** Geometry style the element layer owns (not a source path). */
 function geometryStyleOf(compiled) {
@@ -987,19 +978,167 @@ export async function mergeSource({
   return { result: merged.result, conflicts: merged.conflicts, changesetId: record.id };
 }
 
+// ---------------------------------------------------------------------------
+// Detach from a source (§7.4 R1, WP4.6b)
+// ---------------------------------------------------------------------------
+//
+// `sourceDetach { id | ids }` / `sourceDetachSource { id }` freeze one frame and
+// drop the binding. The freeze has to keep the picture (§7.4 "当前画面已保留"),
+// so each element's values are the ones the merge would produce right now:
+//
+//   local  = the editor layer at `t` (base + this element's own keyframes),
+//            deliberately **without** motion / links — those keep driving the
+//            element after the detach and must not be baked twice;
+//   merged = `sourceMerge(el, base.json, t, local)` (§7.8.2 steps 2–3),
+//            i.e. 叠加 / 接管 applied to the local value;
+//   write  = the merged value becomes the element's local value. A path the
+//            element already animates gets a key at `t` instead (core decides,
+//            see `core/ops-ext.js::detachElement`): a baseline is unused where
+//            a track exists, and the playhead frame is what must not move.
+//
+// No `base.json` (never compiled) means the element already degrades to the
+// editor layer, so the binding can go without writing anything.
+
+/** Editor-layer values at `t` — `evalElement` without motion / link overlays. */
+function detachEditorSt(el, t) {
+  const tr = isRecord(el.transform) ? el.transform : {};
+  const style = isRecord(el.style) ? el.style : {};
+  const sample = (path, fallback) => sampleTrack(el.keyframes, path, t, fallback);
+  return {
+    x: sample('transform.x', tr.x ?? 0),
+    y: sample('transform.y', tr.y ?? 0),
+    scale: sample('transform.scale', tr.scale ?? 1),
+    rotation: sample('transform.rotation', tr.rotation ?? 0),
+    opacity: sample('transform.opacity', tr.opacity ?? 1),
+    text: sample('style.text', style.text ?? ''),
+    size: sample('style.size', style.size ?? 96),
+    color: sample('style.color', style.color ?? '#ffffff'),
+  };
+}
+
+/** One element's frozen frame: `{ id, source, values, keys, node, t }`. */
+function detachPayloadFor(el, snapshot, t, project) {
+  const values = {};
+  const keys = {};
+  const merge = snapshot ? sourceMerge(el, snapshot, t, detachEditorSt(el, t)) : null;
+  const keyed = new Set((Array.isArray(el.keyframes) ? el.keyframes : []).map((key) => key && key.path));
+  for (const [path, hit] of Object.entries(merge?.values || {})) {
+    if (!SOURCE_FIELD_OF_PATH[path]) continue;
+    if (keyed.has(path)) keys[path] = hit.value;
+    else values[path] = hit.value;
+  }
+  const node = detachNodePayload(project, el, merge, t);
+  return { id: String(el.id), source: String(el.source.id), values, keys, ...(node ? { node } : {}), t };
+}
+
 /**
- * Expand `sourceCompile` / `sourceApply` ops into what core can execute
- * (§7.8.6 #1: core never reads `.vdm/`, so the file side lives here). Called at
- * the write boundary by `ProjectService.transact`, which is why an agent may
- * send `{ op: 'sourceApply', id }` and still get one transaction.
+ * The spatial half of the freeze for an element that carries `el.node` (every
+ * 2D element does after the unified-space migration, including compiled ones).
+ * A node element does not read `st.x` / `st.scale`: `core/frame-ir.js::
+ * pixelMatrixOf` applies `sourceNodeDelta()` to the plane's model matrix
+ * instead, so the delta has to move into the node or the picture would jump
+ * when the binding goes.
  *
- * A dry run compiles in memory only (no `base.json` write, no project change).
+ * The offset is computed with the IR's own formula (basis of the frame's
+ * normal, screen y down) rather than re-derived, so the two pictures agree by
+ * construction. A path the node already animates gets a key at `t` (the frame
+ * at the playhead is what must not move); a static path takes the value in its
+ * base.
+ *
+ * A parented element is left alone: its pivot lives in the parent's space and
+ * the delta is world space, so a local fold would move the picture. A compiled
+ * source element never carries a spatial parent (the `sourceApply` payloads
+ * have none), so this only guards a hand-made binding.
+ */
+function detachNodePayload(project, el, merge, t) {
+  if (!isRecord(el.node) || !merge) return null;
+  if (isRecord(el.parent) && el.parent.id) return null;
+  const delta = sourceNodeDelta(merge.values);
+  if (!delta) return null;
+  const frame = elementLocalNode(project, el, t);
+  const basis = basisFromDir(frame.dir, frame.roll);
+  const dx = Number(delta.x || 0) / PX_PER_M;
+  const dy = -Number(delta.y || 0) / PX_PER_M;
+  const offset = [0, 1, 2].map((i) => -basis.right[i] * dx + basis.up[i] * dy);
+  const rotationPath = Array.isArray(el.node.rotation) ? 'rotation.z' : 'roll';
+  const rotation = (Array.isArray(frame.rotation) ? Number(frame.rotation[2]) : Number(frame.roll))
+    + Number(delta.rotation || 0);
+  const pairs = [
+    ['pivot.x', Number(frame.pivot[0]) + offset[0]],
+    ['pivot.y', Number(frame.pivot[1]) + offset[1]],
+    ['scale.x', Number(frame.scale[0]) * (Number(delta.scale) || 1)],
+    ['scale.y', Number(frame.scale[1]) * (Number(delta.scale) || 1)],
+    [rotationPath, rotation],
+  ];
+  const keyed = (path) => (Array.isArray(el.keyframes) ? el.keyframes.some((key) => key?.path === path) : false);
+  const spec = { base: {}, keys: {} };
+  for (const [path, value] of pairs) {
+    if (!Number.isFinite(value)) continue;
+    if (keyed(path)) spec.keys[path] = value;
+    else spec.base[path] = value;
+  }
+  return Object.keys(spec.base).length || Object.keys(spec.keys).length ? spec : null;
+}
+
+/** The ids a detach op names, or the elements one source generated. */
+function detachTargets(project, op) {
+  const elements = Array.isArray(project?.elements) ? project.elements.filter(isRecord) : [];
+  if (op.op === 'sourceDetachSource') {
+    const sourceId = String(op.id ?? '');
+    if (!isSafeSourceId(sourceId)) {
+      throw fault('INVALID_ARGUMENT', `sourceDetachSource: id 必须是源 id（不是元素 id），收到 ${JSON.stringify(op.id)}`);
+    }
+    const ids = elements.filter((el) => isRecord(el.source) && String(el.source.id) === sourceId)
+      .map((el) => String(el.id));
+    if (!ids.length) throw fault('SOURCE_NOT_FOUND', `源 ${sourceId} 没有生成任何元素：没有可脱离的元素`, { status: 404 });
+    return ids;
+  }
+  const ids = [...new Set([...(Array.isArray(op.ids) ? op.ids : []), ...(op.id ? [op.id] : [])].map(String))];
+  if (!ids.length) throw fault('INVALID_ARGUMENT', 'sourceDetach 需要 id 或 ids（要脱离的元素）');
+  return ids;
+}
+
+/**
+ * Turn `sourceDetach` / `sourceDetachSource` into the op core executes: one
+ * payload per element with the frozen values. Reads `base.json` once per source
+ * id (a multi-selection usually shares one).
+ */
+async function expandDetachOp(op, { project, root }) {
+  const t = Number.isFinite(Number(op.t)) ? Math.max(0, Number(op.t)) : 0;
+  const elements = Array.isArray(project?.elements) ? project.elements : [];
+  const bases = new Map();
+  const payloads = [];
+  for (const id of detachTargets(project, op)) {
+    const el = elements.find((entry) => isRecord(entry) && String(entry.id) === id);
+    if (!el) throw fault('INVALID_ARGUMENT', `sourceDetach: 没有元素 ${id}`);
+    if (!isRecord(el.source) || !el.source.id) throw fault('INVALID_ARGUMENT', `sourceDetach: 元素 ${id} 没有源（已经是本地元素）`);
+    const sourceId = String(el.source.id);
+    if (!bases.has(sourceId)) bases.set(sourceId, await readBase({ root, sourceId }));
+    const base = bases.get(sourceId);
+    payloads.push(detachPayloadFor(el, base.ok ? base.snapshot : null, t, project));
+  }
+  return { op: op.op, ...(op.id !== undefined ? { id: op.id } : {}), elements: payloads };
+}
+
+/**
+ * Expand `sourceCompile` / `sourceApply` / `sourceDetach` ops into what core can
+ * execute (§7.8.6 #1: core never reads `.vdm/`, so the file side lives here).
+ * Called at the write boundary by `ProjectService.transact`, which is why an
+ * agent may send `{ op: 'sourceApply', id }` and still get one transaction.
+ *
+ * A dry run compiles in memory only (no `base.json` write, no project change);
+ * `sourceDetach` only ever reads `base.json`, so a dry run freezes the same
+ * values and writes nothing either way.
  */
 export async function expandSourceOps(ops, { project, root = null, dryRun = false } = {}) {
   if (!Array.isArray(ops)) return ops;
   const out = [];
   for (const op of ops) {
     if (!isRecord(op)) { out.push(op); continue; }
+    if (op.op === 'sourceDetach' || op.op === 'sourceDetachSource') {
+      out.push(await expandDetachOp(op, { project, root }));
+      continue;
+    }
     if (op.op === 'sourceCompile') {
       const compiled = await compileSource({ project, sourceId: op.id, root: dryRun ? null : root });
       out.push({

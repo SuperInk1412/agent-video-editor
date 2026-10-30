@@ -18,7 +18,7 @@ import { LogPanel } from './logs.js';
 import { ProjectsPanel } from './projects.js';
 import { AssetsPanel, MEDIA_MIME } from './assets.js';
 import { Outliner } from './outliner.js';
-import { setSourceSnapshots as applySourceSnapshots, sourceSnapshots as readSourceSnapshots } from './source-badge.js';
+import { hasSource, setSourceSnapshots as applySourceSnapshots, sourceSnapshots as readSourceSnapshots } from './source-badge.js';
 import { showMenu, hideMenu, initTooltips, icon, prefs } from './ui.js';
 import { initLayout, markTab, Timecode, StatusBar, LogDrawer } from './shell.js';
 import { frameStep, frameStart, frameWriteTime, lastFrameTime } from './timeline-math.js';
@@ -151,12 +151,25 @@ function op(...ops) {
 }
 
 let toastTimer = [];
-function toast(msg, level = 'info') {
+/**
+ * One transient line. `action` is an optional `{ label, run }` button — the
+ * §7.4 R1 detach toast's `[撤销]`, so a one-way door still has a way back.
+ */
+function toast(msg, level = 'info', action = null) {
   const t = document.createElement('div');
   t.className = `toast ${level}`;
   t.textContent = msg;
+  if (action?.label && typeof action.run === 'function') {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'toast-act';
+    b.textContent = action.label;
+    b.addEventListener('click', () => { t.remove(); action.run(); });
+    t.appendChild(b);
+  }
   $('#toasts').appendChild(t);
-  toastTimer.push(setTimeout(() => { t.classList.add('out'); setTimeout(() => t.remove(), 260); }, level === 'error' ? 5200 : 2600));
+  const ms = action ? 5200 : (level === 'error' ? 5200 : 2600);
+  toastTimer.push(setTimeout(() => { t.classList.add('out'); setTimeout(() => t.remove(), 260); }, ms));
   if (toastTimer.length > 8) toastTimer.shift();
 }
 
@@ -2595,6 +2608,17 @@ async function revertChangesetEntry(id, selector) {
   return j;
 }
 
+/**
+ * §7.3 R1: 应用 the review page's conflict choices. The chosen values are the
+ * caller's ops; `decide` runs them as one transaction and marks the merge change
+ * set `applied`, so one Ctrl+Z is back to the provisional (`theirs`) picture.
+ */
+async function decideMerge(id, ops, decisions, expectedRev = S.project?.rev) {
+  const j = await post('/api/changesets', { action: 'decide', id, ops, decisions, expectedRev });
+  if (j.project) applyProject(j.project, 'changeset');
+  return j;
+}
+
 /** Show one proposed change set on the stage without writing the project. */
 async function enterPreview(record) {
   if (!record?.id) return null;
@@ -3273,6 +3297,37 @@ async function boot() {
     }
     op({ op: 'updateElement', id: el.id, patch });
   };
+  // ---------------------------------------------------------------- 脱离源码 (WP4.6b)
+  // §7.4 R1: two entries (right-click + the inspector's ⋯), no confirmation box.
+  // The op freezes the current frame as local values (application/source-service
+  // .js::expandSourceOps reads base.json), so the picture stays; the toast's
+  // 撤销 is `edit.undo` — the one way back, since there is no re-attach.
+  const SOURCE_DETACH_TIP = '脱离后不再跟随源码更新，只能用撤销恢复';
+  const detachToast = () => toast('已脱离源码，当前画面已保留', 'success', {
+    label: '撤销', run: () => runCommand('edit.undo'),
+  });
+  const detachSourceElements = (ids) => {
+    const targets = [...new Set((ids || []).filter(Boolean))]
+      .filter((id) => (S.project?.elements || []).some((el) => el.id === id && hasSource(el)));
+    if (!targets.length) { toast('这个元素没有源', 'warn'); return Promise.resolve(null); }
+    return op({ op: 'sourceDetach', ids: targets, t: writeTime() }).then((j) => {
+      if (j) detachToast();
+      return j;
+    });
+  };
+  const detachWholeSource = (sourceId) => {
+    if (!sourceId) return Promise.resolve(null);
+    return op({ op: 'sourceDetachSource', id: sourceId, t: writeTime() }).then((j) => {
+      if (j) detachToast();
+      return j;
+    });
+  };
+  /** The inspector's ⋯ → 脱离源码: the selection when it is a multi-selection. */
+  const detachSelectionOr = (id) => {
+    const pool = selected2D();
+    return detachSourceElements(pool.includes(id) ? pool : [id]);
+  };
+
   const clipMenu = (id, x, y) => {
     const el = S.project?.elements?.find((e) => e.id === id);
     if (!el) return;
@@ -3310,6 +3365,17 @@ async function boot() {
       }] : []),
       { sep: true },
       lockMenuItem('element', el.id),
+      // §7.4 R1: 脱离源码 lives here (right-click) and in the inspector's ⋯.
+      // No confirmation box: the toast's 撤销 is the way back.
+      ...(hasSource(el) ? [{
+        label: '脱离源码',
+        icon: 'lock-open',
+        title: `${SOURCE_DETACH_TIP}\n当前画面会写成本地值；多选时选中的一起脱离`,
+        run: () => {
+          const pool = selected2D();
+          detachSourceElements(pool.includes(el.id) ? pool : [el.id]);
+        },
+      }] : []),
       { sep: true },
       {
         label: '删除素材',
@@ -3455,6 +3521,10 @@ async function boot() {
     onToast: (msg, level = 'info') => toast(msg, level),
     // 源码视图 (WP3.6b §2.2): the section's 查看源码 / 查看详情 entries.
     onViewSource: (payload) => sourceView?.open(payload),
+    // 脱离源码 (WP4.6b §7.4 R1): the ⋯ menu's 脱离源码 / 脱离整个源.
+    onDetach: (id) => detachSelectionOr(id),
+    onDetachSource: (sourceId) => detachWholeSource(sourceId),
+    sourceSelection: () => selected2D(),
     // 代码图层的渲染状态行（WP3.6a §2.1）：读预览的 raster 状态，读不到就是 —。
     rasterState: (el, t) => preview?.rasterStateOf?.(el?.id, t) ?? null,
     onFollowCamera: (id) => followCamera(id, { selectHost: true }),
@@ -3528,6 +3598,8 @@ async function boot() {
     apply: (id) => applyChangeset(id),
     revert: (id) => revertChangeset(id),
     revertOne: (id, selector) => revertChangesetEntry(id, selector),
+    // §7.3 R1: 应用 the conflict choices — one transaction, one Ctrl+Z.
+    decide: (id, ops, decisions) => decideMerge(id, ops, decisions),
     enterPreview: (record) => enterPreview(record),
     exitPreview: () => exitPreview(),
     isPreviewing: () => !!S.previewShadow,

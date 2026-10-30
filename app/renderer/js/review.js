@@ -21,6 +21,9 @@ import { h, icon } from './ui.js';
 import { PROPERTY_PATHS_BY_HOST } from '/core/contracts.js';
 import { draftSummary } from '/core/report-draft.js';
 import { reportStatusLabel } from './report.js';
+import {
+  OURS, THEIRS, conflictRows, conflictOps, writableConflicts,
+} from './source-conflict.js';
 
 const STATUS = { proposed: '待审阅', applied: '已应用', reverted: '已撤回', 'needs-decision': '需决定' };
 const HOST_OF = { element: 'el', camera: 'cam', object: 'ob' };
@@ -162,6 +165,7 @@ export class ReviewPanel {
     this.unchecked = new Map();   // id -> Set of row keys the user unchecked
                                   // (everything fresh is checked by default)
     this.kfOpen = new Set();      // `id:kf` merged keyframe rows that are open
+    this.conflictChoices = new Map(); // id -> Map(index -> 'ours' | 'theirs'), default 保留我的
     this.activeId = null;         // the change set the bottom bar acts on
     this.error = '';              // one --danger line at the panel bottom
     this.errorRetry = null;       // id an apply may retry (LOCKED)
@@ -494,6 +498,10 @@ export class ReviewPanel {
       body.appendChild(h('div', { class: 'rv-loading' }, '读取改动…'));
       return body;
     }
+    // 源冲突 (§7.3 R1): a merge's conflicts live here, not in a modal.
+    if (Array.isArray(detail.merge?.conflicts) && detail.merge.conflicts.length) {
+      body.appendChild(this._conflictSection(record, detail));
+    }
     if (!changedCount(detail)) {
       body.appendChild(h('div', { class: 'rv-empty' }, '这组改动没有属性差异'));
       return body;
@@ -610,6 +618,10 @@ export class ReviewPanel {
   _rowActions(record, detail, row, state) {
     const wrap = h('div', { class: `rv-row-act${state === 'fresh' || state === 'applied' ? '' : ' always'}` });
     const status = detail.status || 'proposed';
+    // A merge's rows are the merge's own diff; its conflicts are decided in the
+    // conflict section (§7.3 R1), so 保留现在的值 / 用 AI 的值 would undo the
+    // wrong thing here.
+    if (Array.isArray(detail.merge?.conflicts) && detail.merge.conflicts.length) return wrap;
     const button = (label, action, run, extra = {}) => {
       const b = h('button', { type: 'button', class: 'rv-link', 'data-action': action, ...extra }, label);
       b.addEventListener('click', (e) => { e.stopPropagation(); run(); });
@@ -707,12 +719,156 @@ export class ReviewPanel {
     return node;
   }
 
+  // ---------------------------------------------------------------- 源冲突 (WP4.6b)
+  /**
+   * §7.3 R1: conflicts are `needs-decision` rows, not a modal. One row per
+   * `merge.conflicts` entry with base / ours / theirs, the kind, and the intent
+   * of the update that caused it; the radio pair is the decision, default
+   * 保留我的. Closing the panel decides nothing — the record stays here.
+   */
+  _conflictSection(record, detail) {
+    const project = this.project || this.opts.getProject?.();
+    const merge = detail.merge;
+    const rows = conflictRows(merge, project);
+    const intent = record.intent || detail.intent || '';
+    const section = h('section', { class: 'rv-conflicts', 'data-section': 'conflicts' });
+    section.appendChild(h('div', { class: 'rv-cf-head' },
+      h('span', { class: 'rv-cf-title' }, `源冲突 ${rows.length} 处`),
+      h('span', { class: 'rv-cf-hint' }, '默认保留我的 · 关掉不处理也留在待决定'),
+    ));
+    for (const row of rows) section.appendChild(this._conflictRow(detail, row, intent));
+    return section;
+  }
+
+  _conflictRow(detail, row, intent) {
+    const conflict = row.conflict || {};
+    const project = this.project || this.opts.getProject?.();
+    const decided = (detail.status || '') !== 'needs-decision';
+    const choice = this.conflictChoice(detail, row.index);
+    const node = h('div', {
+      class: 'rv-cf', 'data-index': row.index, 'data-kind': conflict.kind || 'conflict',
+      'data-choice': choice, title: conflict.path || '',
+    });
+    const head = h('div', { class: 'rv-cf-line' },
+      h('span', { class: 'rv-cf-where' }, `节点 ${conflict.nodeId || '—'} · ${row.pathLabel}`),
+      h('span', { class: 'rv-cf-kind' }, row.kindLabel),
+    );
+    const group = h('div', { class: 'rv-cf-choice', role: 'radiogroup', 'aria-label': '这一处冲突怎么办' });
+    for (const [value, label] of [[OURS, '保留我的'], [THEIRS, '用源的']]) {
+      const input = h('input', {
+        type: 'radio', class: 'rv-cf-radio', name: `cf:${detail.id}:${row.index}`,
+        value, 'data-action': `cf-${value}`,
+      });
+      input.checked = choice === value;
+      input.disabled = decided;
+      input.addEventListener('change', () => {
+        if (!input.checked) return;
+        this.setConflictChoice(detail, row.index, value);
+      });
+      group.appendChild(h('label', { class: 'rv-cf-opt' }, input, h('span', {}, label)));
+    }
+    head.appendChild(group);
+    node.appendChild(head);
+    node.appendChild(h('div', { class: 'rv-cf-sides' },
+      this._conflictSide('原来的', row.base),
+      this._conflictSide('我的', row.ours, choice === OURS),
+      this._conflictSide('源里的', row.theirs, choice === THEIRS),
+    ));
+    const name = row.element ? hostName(project, 'element', row.element.id) : '元素已不在工程里';
+    node.appendChild(h('div', { class: 'rv-cf-meta' },
+      h('span', { class: 'rv-cf-el' }, name),
+      h('span', { class: 'rv-cf-intent', title: intent }, `这次源更新：${intent || '（无说明）'}`),
+    ));
+    return node;
+  }
+
+  _conflictSide(label, value, picked = false) {
+    return h('div', { class: `rv-cf-side${picked ? ' picked' : ''}` },
+      h('span', { class: 'rv-cf-key' }, label),
+      h('span', { class: 'rv-cf-val', title: value }, value),
+    );
+  }
+
+  /**
+   * One conflict's decision: the click the user made in this session, else the
+   * decision stored on the record (`merge.decisions`, so an applied merge shows
+   * what was chosen), else the §7.3 R1 default 保留我的.
+   */
+  conflictChoice(detail, index) {
+    const picked = this.conflictChoices.get(detail?.id)?.get(index);
+    if (picked) return picked === THEIRS ? THEIRS : OURS;
+    const stored = Array.isArray(detail?.merge?.decisions)
+      ? detail.merge.decisions.find((entry) => entry?.index === index) : null;
+    return stored?.choice === THEIRS ? THEIRS : OURS;
+  }
+
+  setConflictChoice(detail, index, choice) {
+    if (!detail?.id) return;
+    let map = this.conflictChoices.get(detail.id);
+    if (!map) { map = new Map(); this.conflictChoices.set(detail.id, map); }
+    map.set(index, choice === THEIRS ? THEIRS : OURS);
+    this.activeId = detail.id;
+    this._renderFoot();
+  }
+
+  setAllConflicts(detail, choice) {
+    if (!detail?.id) return;
+    let map = this.conflictChoices.get(detail.id);
+    if (!map) { map = new Map(); this.conflictChoices.set(detail.id, map); }
+    const count = (detail.merge?.conflicts || []).length;
+    for (let index = 0; index < count; index += 1) map.set(index, choice === THEIRS ? THEIRS : OURS);
+    this.activeId = detail.id;
+    this.render();
+  }
+
+  /**
+   * 应用: the chosen sides written as one transaction through main.js
+   * (`ChangeSetService.decide`), so one Ctrl+Z is back to the provisional
+   * `theirs` state. The merge record leaves `needs-decision`.
+   */
+  async applyConflicts(record, detail) {
+    if (!record?.id || !detail?.merge) return null;
+    if (this._busy) return null;
+    const project = this.project || this.opts.getProject?.();
+    const conflicts = detail.merge.conflicts || [];
+    const choices = conflicts.map((_, index) => this.conflictChoice(detail, index));
+    const { ops, decisions, skipped } = conflictOps(project, detail.merge, choices);
+    this._busy = true;
+    this.render();
+    let result = null;
+    try {
+      result = await this.opts.decide?.(detail.id, ops, decisions);
+      this.error = '';
+      const applied = decisions.length - skipped;
+      this.opts.toast?.(skipped
+        ? `已应用 ${applied} 处（${skipped} 处的元素已不在工程里）`
+        : `已按你的选择应用 ${applied} 处（Ctrl+Z 可退回）`, 'success');
+      this.conflictChoices.delete(detail.id);
+      this.details.delete(detail.id);
+      this.expanded.delete(detail.id);
+      this.activeId = null;
+    } catch (e) {
+      this.error = e?.message || '应用冲突失败';
+      this.opts.toast?.(`应用冲突失败: ${this.error}`, 'error');
+    } finally {
+      this._busy = false;
+    }
+    await this.refresh();
+    return result;
+  }
+
   // ---------------------------------------------------------------- footer
   _renderFoot() {
     if (!this.footEl) return;
     const record = this.records.find((entry) => entry.id === this.activeId) || null;
     const detail = record ? this.details.get(record.id) : null;
     const status = record?.status || null;
+    // §7.3 R1: a merge waiting for a human gets its own action bar — the
+    // 采纳/不要 buttons of a proposal mean nothing for it.
+    if (status === 'needs-decision' && Array.isArray(detail?.merge?.conflicts) && detail.merge.conflicts.length) {
+      this.footEl.replaceChildren(...this._conflictFoot(record, detail));
+      return;
+    }
     const checkedCount = this._checkedRows(detail).length;
     const stale = detail && status === 'proposed' ? this._staleCount(detail) : 0;
     const pending = this._busy ? 0 : 1;
@@ -751,6 +907,36 @@ export class ReviewPanel {
       for (const row of group.rows) if (this._rowState(detail, row) === 'stale') n += 1;
     }
     return n;
+  }
+
+  /** The merge record's action bar: 全部保留我的 / 全部用源的 / 应用 (§7.3 R1). */
+  _conflictFoot(record, detail) {
+    const project = this.project || this.opts.getProject?.();
+    const merge = detail.merge;
+    const rows = conflictRows(merge, project);
+    const writable = writableConflicts(merge, project);
+    const button = (label, action, run, extra = {}) => {
+      const b = h('button', { type: 'button', class: `btn${extra.primary ? ' primary' : ''}`, 'data-action': action, ...(extra.tip ? { 'data-tip': extra.tip } : {}) }, label);
+      b.disabled = extra.disabled === true;
+      b.addEventListener('click', run);
+      return b;
+    };
+    const keepAll = button('全部保留我的', 'cf-all-ours', () => this.setAllConflicts(detail, OURS), {
+      tip: '每一处都用编辑器里的值\n一次撤销可以退回',
+    });
+    const useAll = button('全部用源的', 'cf-all-theirs', () => this.setAllConflicts(detail, THEIRS), {
+      tip: '每一处都用这次源更新给的值',
+    });
+    const apply = button(`应用 (${writable})`, 'cf-apply', () => this.applyConflicts(record, detail), {
+      primary: true, disabled: this._busy || writable === 0,
+      tip: '按上面的选择写一次事务\n一次 Ctrl+Z 回到现在的画面',
+    });
+    const parts = [h('div', { class: 'rv-foot-row' }, keepAll, useAll, apply)];
+    const missing = rows.length - writable;
+    parts.push(h('div', { class: 'rv-foot-note' },
+      `这组源更新有 ${rows.length} 处冲突：默认保留我的；关掉不处理也留在待决定`
+      + (missing ? `（${missing} 处的元素已不在工程里）` : '')));
+    return parts;
   }
 
   // ---------------------------------------------------------------- 报告 (WP2.5c)

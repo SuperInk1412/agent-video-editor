@@ -650,6 +650,31 @@ const CORE_OP_DEFS = {
       elements: f({ type: 'array', minItems: 1, maxItems: 1000, items: { type: 'object' } }, '编译产物：元素 payload 数组，每项带 source.node；{ id } 形式由引擎展开时填。'),
     },
   },
+  sourceDetach: {
+    group: 'source',
+    summary: '脱离源码：把当前画面写成本地值',
+    description: '删掉元素的 source / sourceMode，并把这一帧求值后的属性（源值按叠加/接管合进本地值之后）写成元素的本地值：之后不再跟随源码更新，只能用撤销恢复（§7.4 R1，没有重新关联）。{ id } / { ids } 由引擎展开（读 .vdm/sources/<id>/base.json 算那一帧），一次事务、一次 Ctrl+Z 回退。',
+    example: { op: 'sourceDetach', ids: ['el_title', 'el_kicker'], t: 1.5 },
+    required: [],
+    fields: {
+      id: f(string, '要脱离的元素 id。'),
+      ids: f({ type: 'array', minItems: 1, maxItems: 200, items: { type: 'string', minLength: 1, maxLength: 64 } }, '一次脱离多个元素（多选）；与 id 等价。'),
+      t: f(time, '按这个时间的画面取值（秒）；省略时取 0。', 's'),
+      elements: f({ type: 'array', minItems: 1, maxItems: 200, items: { type: 'object' } }, '展开后的元素值表 { id, values, keys }；{ id } / { ids } 形式由引擎展开时填。'),
+    },
+  },
+  sourceDetachSource: {
+    group: 'source',
+    summary: '整个源脱离：这份源码生成的全部元素',
+    description: '把一个源生成的所有元素一起脱离（同 sourceDetach，每个元素都冻结当前帧的本地值），一次事务、一次撤销。§7.4 R1：检查器 ⋯ 菜单的「脱离整个源」。',
+    example: { op: 'sourceDetachSource', id: 'html-title-card', t: 1.5 },
+    required: ['id'],
+    fields: {
+      id: f({ type: 'string', minLength: 1, maxLength: 64, pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$' }, '源 id（不是元素 id）。'),
+      t: f(time, '按这个时间的画面取值（秒）；省略时取 0。', 's'),
+      elements: f({ type: 'array', minItems: 1, maxItems: 1000, items: { type: 'object' } }, '展开后的元素值表；{ id } 形式由引擎展开时填。'),
+    },
+  },
 };
 
 // ---------------------------------------------------------------- registries

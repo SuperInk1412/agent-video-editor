@@ -152,6 +152,8 @@ sources/<id>/ 由工程文档里的源清单派生；html / svg 源的编译产�
 | codeParamSet | 改代码图层的参数 | id, name | id* name* value:any v:any t:s |
 | sourceCompile | 登记网页编译的结果 | id | id* compiled |
 | sourceApply | 把编译出的元素 upsert 进工程（一次事务） | id | id* elements |
+| sourceDetach | 脱离源码：把当前画面写成本地值 | — | id ids t:s elements |
+| sourceDetachSource | 整个源脱离：这份源码生成的全部元素 | id | id* t:s elements |
 
 ### 批量
 
@@ -524,4 +526,4 @@ sources/<id>/ 由工程文档里的源清单派生；html / svg 源的编译产�
 - 本文件由 `scripts/gen-contracts.mjs` 从 `core/contracts.js` 生成（CONTRACT_VERSION 3），**不要手改**。
 - 重生成：`node scripts/gen-contracts.mjs`；校验：`node scripts/gen-contracts.mjs --check`（不一致时非零退出并打印 diff 摘要）。
 - 同源生成物：`docs/CONTRACTS.md`（人读字段表）、`mcp/contracts.generated.json`（机读快照）。
-- 当前规模：54 个公开 op、166 个 op 字段、122 条属性路径。
+- 当前规模：56 个公开 op、173 个 op 字段、122 条属性路径。

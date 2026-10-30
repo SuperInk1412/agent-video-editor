@@ -32,7 +32,7 @@
 import { HIERARCHY_OP_KINDS, applyHierarchyOp, ELEMENT_PARENT_OP_KINDS, applyElementParentOp } from './hierarchy.js';
 import { LEGACY_PARENT_OP_KINDS, PARENT_STRENGTH_OP_KINDS, applyParentStrengthOp } from './parent-strength.js';
 import { DEFAULT_STYLE, DEFAULT_TRANSFORM } from './schema.js';
-import { isSourceNodeId } from './source-eval.js';
+import { SOURCE_FIELD_OF_PATH, isSourceNodeId } from './source-eval.js';
 import { isRecord } from './json.js';
 import {
   SOURCE_MANIFEST, coerceParamValue, isCodeElement, isSafeParamName, isSafeSourceFile, isSafeSourceId,
@@ -384,6 +384,152 @@ registerOps({
   kinds: SOURCE_COMPILE_OP_KINDS,
   dispatch: 45,
   apply: applySourceCompileOp,
+});
+
+// -- detach from a source (§7.4 R1, WP4.6b) ---------------------------------
+//
+//   sourceDetach        { id } | { ids }   one element, or a multi-selection
+//   sourceDetachSource  { id }             every element one source generated
+//
+// §7.4 R1: no confirmation box — the op runs, the toast offers 撤销. "脱离后
+// 不再跟随源码更新，只能用撤销恢复", so the freeze has to keep the picture: the
+// op deletes `el.source` / `el.sourceMode` and writes the values the element
+// shows on this frame as its local values (§7.4 "把当前求值后的属性写成本地值
+// （一帧值）").
+//
+// `elements` carries those values and is filled by
+// `application/source-service.js::expandSourceOps` — the only side that reads
+// `.vdm/sources/<id>/base.json` (§7.8.6 #1: core never reads `.vdm/`). A path
+// the element already animates locally gets a key at `t` instead of a new
+// baseline: the sampled value at the playhead is what must not move, and a base
+// is unused wherever a track exists. One op = one transaction = one Ctrl+Z back
+// to the bound state.
+
+export const SOURCE_DETACH_OP_KINDS = Object.freeze(['sourceDetach', 'sourceDetachSource']);
+const MAX_DETACH = 1000;
+
+/**
+ * Node paths a detach may write. A node element (§7.8.2 "表示无关") does not
+ * read the legacy `transform.*` fields: the IR applies the source delta on top
+ * of the sampled node, so the freeze has to move that delta into the node.
+ */
+const NODE_KEY_PATHS = Object.freeze(['pivot.x', 'pivot.y', 'pivot.z', 'scale.x', 'scale.y', 'scale.z', 'rotation.z', 'roll']);
+const NODE_INDEX = Object.freeze({ x: 0, y: 1, z: 2 });
+
+/** Write (or add) one keyframe at `t` so a locally animated path keeps its frame. */
+function detachKey(el, path, t, value) {
+  const keys = Array.isArray(el.keyframes) ? el.keyframes : (el.keyframes = []);
+  const at = Math.round(Number(t) * 1000) / 1000;
+  const time = Number.isFinite(at) ? Math.max(0, at) : 0;
+  const old = keys.find((key) => isRecord(key) && key.path === path && Math.abs(Number(key.t) - time) < 1e-4);
+  if (old) { old.value = value; return; }
+  keys.push({ t: time, path, value, ease: 'easeInOut' });
+  keys.sort((a, b) => (Number(a.t) || 0) - (Number(b.t) || 0));
+}
+
+/** Write one `pivot.* / scale.* / rotation.z / roll` value into the node's base. */
+function detachNodeBase(el, path, value, fail) {
+  const node = isRecord(el.node) ? el.node : null;
+  if (!node) fail(`sourceDetach: 元素 ${el.id} 没有空间 node，写不了 ${path}`);
+  const [group, axis] = String(path).split('.');
+  if (path === 'roll') { node.roll = Number(value); return; }
+  if (group !== 'pivot' && group !== 'scale' && group !== 'rotation') fail(`sourceDetach: ${path} 不是节点路径`);
+  if (group === 'rotation' && axis !== 'z') fail(`sourceDetach: 只能写 rotation.z，收到 ${path}`);
+  if (!Array.isArray(node[group])) {
+    if (group !== 'rotation') fail(`sourceDetach: 元素的 node.${group} 不是数组`);
+    node.rotation = [0, 0, 0];
+  }
+  node[group][NODE_INDEX[axis]] = Number(value);
+}
+
+/** Freeze one element's frame values, then drop the binding. */
+function detachElement(el, payload, fail) {
+  const values = isRecord(payload.values) ? payload.values : {};
+  const keys = isRecord(payload.keys) ? payload.keys : {};
+  const t = Number.isFinite(Number(payload.t)) ? Math.max(0, Number(payload.t)) : 0;
+  for (const [path, value] of Object.entries(values)) {
+    const field = SOURCE_FIELD_OF_PATH[path];
+    if (!field) fail(`sourceDetach: ${JSON.stringify(path)} 不是 §7.8.1 的源属性`);
+    const [group, key] = field;
+    if (!group) { el[key] = value; continue; }
+    if (!isRecord(el[group])) el[group] = {};
+    el[group][key] = value;
+  }
+  for (const [path, value] of Object.entries(keys)) {
+    if (!SOURCE_FIELD_OF_PATH[path]) fail(`sourceDetach: ${JSON.stringify(path)} 不是 §7.8.1 的源属性`);
+    detachKey(el, path, t, value);
+  }
+  if (isRecord(payload.node)) {
+    for (const [path, value] of Object.entries(isRecord(payload.node.base) ? payload.node.base : {})) {
+      if (!NODE_KEY_PATHS.includes(path)) fail(`sourceDetach: ${JSON.stringify(path)} 不是节点路径`);
+      detachNodeBase(el, path, value, fail);
+    }
+    for (const [path, value] of Object.entries(isRecord(payload.node.keys) ? payload.node.keys : {})) {
+      if (!NODE_KEY_PATHS.includes(path)) fail(`sourceDetach: ${JSON.stringify(path)} 不是节点路径`);
+      detachKey(el, path, t, value);
+    }
+  }
+  // §7.4 R1: 没有「重新关联」—— source / sourceMode 是这条绑定唯一的存在形式.
+  delete el.source;
+  delete el.sourceMode;
+}
+
+/** Shared by both kinds: `elements` is the expansion, never the public shape. */
+function detachPayloads(project, op, fail, kind) {
+  const payloads = op.elements;
+  if (!Array.isArray(payloads) || !payloads.length) {
+    fail(`${kind}: 需要 elements（{ id } / { ids } 由 application/source-service.js::expandSourceOps 展开：`
+      + '读 .vdm/sources/<id>/base.json 算出这一帧的本地值）');
+  }
+  if (payloads.length > MAX_DETACH) fail(`${kind}: 一次最多 ${MAX_DETACH} 个元素`);
+  if (!Array.isArray(project.elements)) project.elements = [];
+  const changed = [];
+  for (const payload of payloads) {
+    if (!isRecord(payload)) fail(`${kind}: elements 里每一项必须是对象`);
+    const id = str(payload.id);
+    const el = project.elements.find((entry) => isRecord(entry) && str(entry.id) === id);
+    if (!el) fail(`${kind}: 没有元素 ${JSON.stringify(payload.id)}`);
+    if (!isRecord(el.source)) fail(`${kind}: 元素 ${id} 没有源（已经是本地元素）`);
+    if (payload.source !== undefined && str(payload.source) !== str(el.source.id)) {
+      fail(`${kind}: 元素 ${id} 的源是 ${JSON.stringify(el.source.id)}，不是 ${JSON.stringify(payload.source)}`);
+    }
+    detachElement(el, payload, fail);
+    changed.push(id);
+  }
+  return { changed, elements: changed };
+}
+
+/** `sourceDetach`: the element ids the caller named. */
+function sourceDetach(project, op, fail) {
+  if (op.id !== undefined && !str(op.id)) fail('sourceDetach: id 必须是非空字符串');
+  if (op.ids !== undefined && !Array.isArray(op.ids)) fail('sourceDetach: ids 必须是元素 id 数组');
+  return detachPayloads(project, op, fail, 'sourceDetach');
+}
+
+/** `sourceDetachSource`: every element that source generated, in one op. */
+function sourceDetachSource(project, op, fail) {
+  const sourceId = str(op.id);
+  if (!isSafeSourceId(sourceId)) fail(`sourceDetachSource: id 必须是源 id（不是元素 id），收到 ${JSON.stringify(op.id)}`);
+  const bound = (Array.isArray(project.elements) ? project.elements : [])
+    .filter((el) => isRecord(el) && isRecord(el.source) && str(el.source.id) === sourceId);
+  if (!bound.length) fail(`sourceDetachSource: 源 ${sourceId} 没有生成任何元素`);
+  return detachPayloads(project, op, fail, 'sourceDetachSource');
+}
+
+/** `apply` of the detach module. */
+function applySourceDetachOp(project, op, api) {
+  const fail = typeof api?.fail === 'function' ? api.fail : (message) => {
+    throw Object.assign(new Error(message), { code: 'OP_INVALID' });
+  };
+  if (op.op === 'sourceDetach') return sourceDetach(project, op, fail);
+  return sourceDetachSource(project, op, fail);
+}
+
+registerOps({
+  id: 'source-detach',
+  kinds: SOURCE_DETACH_OP_KINDS,
+  dispatch: 46,
+  apply: applySourceDetachOp,
 });
 
 /**

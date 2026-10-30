@@ -28,7 +28,7 @@
 // possible at all.
 import { defaultSourceMode, isNumericSourcePath, sourceModeOf } from '../../../core/source-eval.js';
 import { h, icon, showMenu } from './ui.js';
-import { hasSource, sourceDrivenPaths } from './source-badge.js';
+import { hasSource, sourceDrivenPaths, SOURCE_RECOVER_TIP } from './source-badge.js';
 
 /** UI state names (§3.2). The stored value of `takeover` is `'override'`. */
 export const OVERLAY = 'overlay';
@@ -184,19 +184,55 @@ export function sourceMenuItems(getEl, onOp, toast) {
 }
 
 /**
- * The inspector header's `⋯` action for a source element (§7.2 R1: the ⋯ menu
- * is the first entry, the property row's right-click menu the second).
+ * 脱离源码 / 脱离整个源 (§7.4 R1, WP4.6b). Deliberately a separate list from
+ * `sourceMenuItems`: a property row's right-click keeps its two overlay /
+ * takeover entries (the WP4.6a surface), while the element-level detach lives
+ * in the inspector's ⋯ menu and in the timeline's right-click menu.
+ *
+ * `opts.selection()` is the current element pool: a multi-selection detaches
+ * all of it in one transaction (§7.4 "支持多选一次脱离多个").
  */
-export function sourceHeaderAction(getEl, onOp, toast) {
+export function detachMenuItems(getEl, opts = {}) {
+  const el = getEl();
+  if (!hasSource(el)) return [];
+  const sourceId = el.source.id;
+  const selection = typeof opts.selection === 'function' ? opts.selection() : null;
+  const others = Array.isArray(selection) ? selection.filter((id) => id && id !== el.id) : [];
+  return [
+    {
+      label: others.length ? `脱离源码（选中 ${others.length + 1} 个）` : '脱离源码',
+      icon: 'lock-open',
+      title: `把当前画面写成本地值，之后不再跟随源码更新\n${SOURCE_RECOVER_TIP}`,
+      run: () => opts.onDetach?.(others.length ? [el.id, ...others] : [el.id]),
+    },
+    {
+      label: '脱离整个源',
+      icon: 'source',
+      title: `这份源码生成的全部元素一起脱离\n${SOURCE_RECOVER_TIP}`,
+      run: () => opts.onDetachSource?.(sourceId),
+    },
+  ];
+}
+
+/**
+ * The inspector header's `⋯` action for a source element (§7.2 R1: the ⋯ menu
+ * is the first entry, the property row's right-click menu the second; §7.4 R1
+ * adds 脱离源码 / 脱离整个源 to this one).
+ */
+export function sourceHeaderAction(getEl, onOp, toast, detachOpts = {}) {
   const el = getEl();
   if (!hasSource(el)) return null;
   return {
     icon: 'more',
     label: '源码操作',
-    tip: '源码操作：全部叠加 / 全部接管',
+    tip: '源码操作：全部叠加 / 全部接管 / 脱离源码',
     run: (ev) => {
       const rect = ev?.currentTarget?.getBoundingClientRect?.();
-      const items = sourceMenuItems(getEl, onOp, toast);
+      const items = [
+        ...sourceMenuItems(getEl, onOp, toast),
+        { sep: true },
+        ...detachMenuItems(getEl, detachOpts),
+      ];
       showMenu(rect ? rect.left : (ev?.clientX ?? 0), rect ? rect.bottom + 2 : (ev?.clientY ?? 0), items);
     },
   };

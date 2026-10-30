@@ -808,8 +808,13 @@ export class Inspector {
           run: () => { if (confirm(`删除 ${el.name}?`)) this.opts.onOp({ op: 'removeElement', id: el.id }); },
         },
         // 全部叠加 / 全部接管 (§7.2 R1, first entry; the row right-click is the
-        // second). Only a source element grows a ⋯ button.
-        sourceHeaderAction(liveEl, (op) => this.opts.onOp(op), (msg, level) => this.opts.onToast?.(msg, level)),
+        // second) + 脱离源码 / 脱离整个源 (§7.4 R1, WP4.6b). Only a source
+        // element grows a ⋯ button.
+        sourceHeaderAction(liveEl, (op) => this.opts.onOp(op), (msg, level) => this.opts.onToast?.(msg, level), {
+          onDetach: (ids) => this.opts.onDetach?.(ids),
+          onDetachSource: (sourceId) => this.opts.onDetachSource?.(sourceId),
+          selection: () => this.opts.sourceSelection?.() || null,
+        }),
       ].filter(Boolean),
     });
     const linksSummary = this._linksSummary(project, el);

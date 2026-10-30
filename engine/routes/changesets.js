@@ -2,7 +2,7 @@
 //
 //   GET  /api/changesets          list (status / actorId / limit / offset / detail=1)
 //   GET  /api/changesets/<id>     one record with its diff
-//   POST /api/changesets          { action: propose | preview | apply | revert | revert-one }
+//   POST /api/changesets          { action: propose | preview | apply | revert | revert-one | decide }
 //
 // Every write goes through ChangeSetService over the one write path, as actorId
 // 'ui' (a human pressed the button, so a locked element does not block it).
@@ -46,11 +46,19 @@ export function register(router, ctx) {
       record = await changesets.revert({ id: body.id, actorId, expectedRev: body.expectedRev });
     } else if (action === 'revert-one') {
       record = await changesets.revertOne({ id: body.id, actorId, index: body.index, entityId: body.entityId, path: body.path, expectedRev: body.expectedRev });
+    } else if (action === 'decide') {
+      // §7.3 R1: a source merge's conflicts are decided in the review page. The
+      // chosen values are the caller's ops — one transaction, one Ctrl+Z — and
+      // the merge record leaves `needs-decision` for `applied`.
+      record = await changesets.decide({
+        id: body.id, ops: body.ops, decisions: body.decisions,
+        actorId, expectedRev: body.expectedRev, requestId: body.requestId,
+      });
     } else {
-      throw fault('INVALID_ARGUMENT', 'changeset action must be propose | preview | apply | revert | revert-one');
+      throw fault('INVALID_ARGUMENT', 'changeset action must be propose | preview | apply | revert | revert-one | decide');
     }
     const fresh = await projects.read();
-    adoptDisk(fresh, 'changeset', { transactionId: record.transactions?.[0] });
+    adoptDisk(fresh, 'changeset', { transactionId: record.transactions?.[record.transactions.length - 1] });
     broadcast('changeset', { action, record });
     return json(res, 200, { ok: true, changeset: record, project: fresh });
   });

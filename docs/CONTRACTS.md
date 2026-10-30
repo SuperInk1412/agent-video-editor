@@ -6,8 +6,8 @@
 这是 WP2.3「契约单一来源」的人读版本。`mcp/tools.js`、`docs/AGENT-PROTOCOL.md` 与
 `mcp/contracts.generated.json` 都来自同一个模块；改契约只改 `core/contracts.js`，然后重生成。
 
-- 公开 op：**54**（`OP_KINDS` 里除去 `restoreProject` / `replaceTimeline` 两个内部 op）
-- op 字段：**166**
+- 公开 op：**56**（`OP_KINDS` 里除去 `restoreProject` / `replaceTimeline` 两个内部 op）
+- op 字段：**173**
 - 属性路径：**122**（可打帧 17 el / 18 ob / 19 cam；
   可链接 18 el / 14 ob / 20 cam）
 
@@ -846,6 +846,46 @@ elements 是编译产物（每项带 source = { id, node }）；同一个 source
 {
   "op": "sourceApply",
   "id": "html-title-card"
+}
+```
+
+#### `sourceDetach` — 脱离源码：把当前画面写成本地值
+
+删掉元素的 source / sourceMode，并把这一帧求值后的属性（源值按叠加/接管合进本地值之后）写成元素的本地值：之后不再跟随源码更新，只能用撤销恢复（§7.4 R1，没有重新关联）。{ id } / { ids } 由引擎展开（读 .vdm/sources/<id>/base.json 算那一帧），一次事务、一次 Ctrl+Z 回退。
+
+| 字段 | 类型 | 单位 | 必填 | 说明 |
+| --- | --- | --- | --- | --- |
+| id | string | — |  | 要脱离的元素 id。 |
+| ids | array | — |  | 一次脱离多个元素（多选）；与 id 等价。 |
+| t | number | s |  | 按这个时间的画面取值（秒）；省略时取 0。 |
+| elements | array | — |  | 展开后的元素值表 { id, values, keys }；{ id } / { ids } 形式由引擎展开时填。 |
+
+```json
+{
+  "op": "sourceDetach",
+  "ids": [
+    "el_title",
+    "el_kicker"
+  ],
+  "t": 1.5
+}
+```
+
+#### `sourceDetachSource` — 整个源脱离：这份源码生成的全部元素
+
+把一个源生成的所有元素一起脱离（同 sourceDetach，每个元素都冻结当前帧的本地值），一次事务、一次撤销。§7.4 R1：检查器 ⋯ 菜单的「脱离整个源」。
+
+| 字段 | 类型 | 单位 | 必填 | 说明 |
+| --- | --- | --- | --- | --- |
+| id | string | — | ✔ | 源 id（不是元素 id）。 |
+| t | number | s |  | 按这个时间的画面取值（秒）；省略时取 0。 |
+| elements | array | — |  | 展开后的元素值表；{ id } 形式由引擎展开时填。 |
+
+```json
+{
+  "op": "sourceDetachSource",
+  "id": "html-title-card",
+  "t": 1.5
 }
 ```
 

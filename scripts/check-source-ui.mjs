@@ -363,9 +363,13 @@ async function main() {
   check(d.undo1 && d.undoRestored && d.overlayBack,
     'one undo puts the property back to 叠加', `undo=${d.undo1} restored=${d.undoRestored} overlay=${d.overlayBack}`);
 
-  check(d.hasMore && Array.isArray(d.menuItems) && d.menuItems.length === 2
-    && d.menuItems[0].includes('全部叠加') && d.menuItems[1].includes('全部接管'),
-    'the inspector ⋯ menu offers 全部叠加 / 全部接管', `${JSON.stringify(d.menuItems)}`);
+  // WP4.6b appended 脱离源码 / 脱离整个源 (§7.4 R1): the first two entries and
+  // their order are what this probe pins.
+  check(d.hasMore && Array.isArray(d.menuItems) && d.menuItems.length >= 2
+    && d.menuItems[0].includes('全部叠加') && d.menuItems[1].includes('全部接管')
+    && d.menuItems[2] === '脱离源码' && d.menuItems[3] === '脱离整个源',
+    'the inspector ⋯ menu offers 全部叠加 / 全部接管, then 脱离源码 / 脱离整个源',
+    `${JSON.stringify(d.menuItems)}`);
   check(d.menuClickedAll && d.allTakeover && d.allOneTransaction,
     '全部接管 takes over every driven path in one transaction',
     `all=${d.allTakeover} rev+1=${d.allOneTransaction} table=${d.allTable}`);
