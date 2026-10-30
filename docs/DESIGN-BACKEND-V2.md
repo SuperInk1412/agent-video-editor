@@ -621,7 +621,12 @@ WP0.0 ─→ WP0.1(IR 规格，冻结) ─┬─→ WP0.2 ─→ WP0.3 ─┬─
 
 **WP2.5 协作界面（UI 子代理）**
 - 内容：§9 的 R2 一行。开工前界面方案先给用户批准。
-- 验收：Electron 探针脚本覆盖 接受 / 拒绝 / 单独撤回 / 前后对比 / 点选生成报告锚点。估时 7 天（R1 修订后：审阅 3 + 标记与锁定 1.5 + 报告 2 + 时间范围 0.5；含三条 HTTP 面与 server 切到 AgentLoop，见 `docs/DESIGN-WP2.5-REVIEW.md` §10.8 与 §11）。
+- 验收：Electron 探针脚本覆盖 接受 / 拒绝 / 单独撤回 / 前后对比 / 点选生成报告锚点。估时 7 天（R1 修订后：审阅 3 + 标记与锁定 1.5 + 报告 2 + 时间范围 0.5；含变更集 / 测量 / 报告三条 HTTP 面，见 `docs/DESIGN-WP2.5-REVIEW.md` §10.8 与 §11）。
+
+**WP2.5e AgentLoop 接线（待排期，不计入 R2）**
+- 现状（`1cb6bbc`）：`/api/agent` 仍跑 legacy `AgentRunner`，它的 proposal 已经走 `ChangeSetService`（每次 AI 写入都是可回退的变更集），但「计划 → 批准」还没有。
+- 缺口：`AgentLoop` 的 `ProcessAgent` 说的是工具调用 NDJSON，dsh headless 说的是「一次 prompt + 一段 JSON 回复」，中间缺一层适配；没有它，切过去会让 `/api/agent` 端到端失效。
+- 内容：写 dsh 适配层 → `engine/server.js` 切到 `AgentLoop`（`run` / `approve` / `state`，并给 `AgentLoop` 补 `cancel()`）→ 删 `AgentRunner`。估时 1.5 天。
 
 ---
 
