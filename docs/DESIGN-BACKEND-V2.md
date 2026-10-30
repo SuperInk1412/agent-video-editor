@@ -692,8 +692,9 @@ vdm.beat, vdm.volume                       // 节拍、音量（来自工程）
 - `el.sourceMode[path] === 'override'` ⇒ **不尝试**，直接 `reason: 'path-overridden'`（用户已接管）；
   `add` / `mul`（默认）才尝试。
 - `reason` 是封闭枚举（新增值 = 升级本节）：`source-missing`、`node-missing`、`path-editor-only`、
-  `path-overridden`、`node-unwritable`（选择器太复杂 / 样式不在可写回子集 / 没有行内样式）、
-  `source-read-only`、`worker-unavailable`。
+  `path-overridden`、`node-unwritable`（有歧义 / 文本节点里有子元素 / 空元素上写文字 / `src` 不在 `<img>` 上）、
+  `source-read-only`、`worker-unavailable`、`type-mismatch`（节点**类型**不能承载该路径，R2）。
+  值类型不对不在这里：那是同步校验，抛 `OP_INVALID`。
 - 不适用于 `code` 元素：代码图层的源走 `sourceWrite` / `codeParamSet`，没有 DOM 写回。
 
 #### 7.8.4 合并 `merge(base, ours, theirs)`
@@ -785,6 +786,32 @@ WP4.2 动手前对照本节与实现，发现三处冲突。按「冻结记录�
    re-export，不复制第二份常量。
 
 以上四条对 4.1–4.4 都有效；后续若再改，按本节开头的升版流程记 R2。
+
+#### 7.8.8 修订 R2（2026-10-30，WP4.3 交付时对照实现）
+
+WP4.3 落地 `writeBack` 时，§7.8.3 有四处按任务书与实现补齐（只动这一节的文字，快照格式不变，
+`SOURCE_SNAPSHOT_VERSION` 仍是 `1`）：
+
+1. **`reason` 枚举补一项 `type-mismatch`**：节点存在、但它的**类型**不能承载这条路径
+   （`solid` / `shape` / `image` 上的 `style.text`、非 `text` 节点上的文字样式、非 `image` 节点上的 `src`）。
+   §7.8.3 原先的 `node-unwritable` 括号里只写写入机制的失败（选择器太复杂 / 样式不在子集 / 没有行内样式），
+   盖不住“节点类型不对”这一类，而它又必须给调用方一个降级理由（既不静默，也不必升级成错误）。
+   **值类型不对仍然抛 `OP_INVALID`**（§7.8.3 原文的同步校验），不返回 fallback——两者不混。
+2. **“没有行内样式”不再是 `node-unwritable`**：节点没有 `style` 属性时写回**新建**一个，与
+   `el.style.color = …` 的 DOM 语义一致（§7.4“写回该节点的行内样式”）。行内样式的特异性高于任何选择器，
+   §7.8.2 的编译顺序保证下一次编译读到新值。`node-unwritable` 现在的生产者是：同一个 `data-vdm-id`
+   在源里出现多次（有歧义）、文本节点里还有子元素、`style.text` 落在空元素上、`src` 落在非 `<img>` 上。
+3. **写回是文本级操作，不是 DOM 沙箱**：`application/source-writeback.js` 用编译器的那个 tokenizer
+   （`core/source-map.js::tokenizeHtml`，WP4.3 给它加了 token 的 `start` / `end`）找到元素、只拼接变动的
+   span，其余字节原样保留——文件格式因此可读、可 diff。所以 `worker-unavailable` 没有生产者；
+   `source-read-only` 同样没有（schema 里还没有只读源）。两个值留在枚举里，是为了将来真做成沙箱 DOM
+   时不扩枚举。
+4. **第 3 步在事务之后**：调用方提交 `[sourceWrite, 元素镜像 set]` 一个事务，成功后才 `compileSource`
+   刷新 `base.json`。§7.8.3 本来允许第 3 步防抖，这样做的额外好处是事务失败时源、元素、快照**一步都没做**
+   （§7.8.6 #6）；代价是撤销后快照仍停在新值，直到下一次编译——冻结记录里“防抖窗口里快照是旧的，允许”
+   已经接受这一点。
+
+WP4.3 的验收与文件记录见 `docs/CHANGELOG-presets.md`。
 
 ---
 

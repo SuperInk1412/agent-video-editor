@@ -407,7 +407,7 @@ export function evalTime(expr) {
 // HTML tokenizer + tree
 // ---------------------------------------------------------------------------
 
-const VOID_TAGS = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr']);
+export const VOID_TAGS = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr']);
 const RAW_TEXT_TAGS = new Set(['style', 'script', 'title']);
 /** Tags the compiler knows how to lay out; anything else is reported. */
 const KNOWN_TAGS = new Set([
@@ -418,7 +418,7 @@ const KNOWN_TAGS = new Set([
 ]);
 const INLINE_TAGS = new Set(['span', 'em', 'strong', 'b', 'i', 'a', 'small', 'code', 'label', 'button', 'br', 'img']);
 
-function decodeEntities(text) {
+export function decodeEntities(text) {
   return String(text ?? '').replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (all, body) => {
     if (body[0] === '#') {
       const code = body[1] === 'x' || body[1] === 'X' ? parseInt(body.slice(2), 16) : parseInt(body.slice(1), 10);
@@ -429,7 +429,11 @@ function decodeEntities(text) {
   });
 }
 
-/** Tokenize HTML into open/close/text/comment tokens with line numbers. */
+/**
+ * Tokenize HTML into open/close/text/comment tokens with line numbers and the
+ * `start` / `end` offsets of each token in the original text (write-back, §7.8.3,
+ * splices those spans; the compiler itself does not need them).
+ */
 export function tokenizeHtml(text) {
   const src = String(text ?? '');
   const out = [];
@@ -442,30 +446,30 @@ export function tokenizeHtml(text) {
   while (i < src.length) {
     const at = src.indexOf('<', i);
     if (at < 0) {
-      out.push({ type: 'text', raw: decodeEntities(src.slice(i)), line });
+      out.push({ type: 'text', raw: decodeEntities(src.slice(i)), line, start: i, end: src.length });
       break;
     }
     if (at > i) {
-      out.push({ type: 'text', raw: decodeEntities(src.slice(i, at)), line });
+      out.push({ type: 'text', raw: decodeEntities(src.slice(i, at)), line, start: i, end: at });
       advance(at);
     }
     if (src.startsWith('<!--', i)) {
       const end = src.indexOf('-->', i + 4);
       const stop = end < 0 ? src.length : end + 3;
-      out.push({ type: 'comment', raw: src.slice(i, stop), line });
+      out.push({ type: 'comment', raw: src.slice(i, stop), line, start: i, end: stop });
       advance(stop);
       continue;
     }
     if (src.startsWith('<!', i) || src.startsWith('<?', i)) {
       const end = src.indexOf('>', i);
       const stop = end < 0 ? src.length : end + 1;
-      out.push({ type: 'doctype', raw: src.slice(i, stop), line });
+      out.push({ type: 'doctype', raw: src.slice(i, stop), line, start: i, end: stop });
       advance(stop);
       continue;
     }
     const tagMatch = src.slice(i).match(/^<\s*(\/?)\s*([A-Za-z][A-Za-z0-9:_-]*)/);
     if (!tagMatch) {
-      out.push({ type: 'text', raw: '<', line });
+      out.push({ type: 'text', raw: '<', line, start: i, end: i + 1 });
       advance(i + 1);
       continue;
     }
@@ -506,8 +510,11 @@ export function tokenizeHtml(text) {
     }
     // Advance `line` over the tag body so later tokens keep real line numbers.
     for (let k = i; k < cursor && k < src.length; k++) if (src[k] === '\n') line += 1;
+    // Tag span in the original text: write-back (§7.8.3) splices exactly the
+    // element it found instead of re-serialising the whole file.
+    const tagStart = i;
     i = cursor;
-    out.push({ type: closing ? 'close' : 'open', name, attrs, selfClosing, line: startLine });
+    out.push({ type: closing ? 'close' : 'open', name, attrs, selfClosing, line: startLine, start: tagStart, end: cursor });
     if (!closing && RAW_TEXT_TAGS.has(name)) {
       const re = new RegExp(`</\\s*${name}\\s*>`, 'i');
       const rest = src.slice(i);
@@ -515,12 +522,13 @@ export function tokenizeHtml(text) {
       const body = match ? rest.slice(0, match.index) : rest;
       if (body) {
         const holder = name === 'title' ? decodeEntities(body) : body;
-        out.push({ type: 'text', raw: holder, line });
+        out.push({ type: 'text', raw: holder, line, start: i, end: i + body.length });
         for (let k = 0; k < body.length; k++) if (body[k] === '\n') line += 1;
       }
       if (match) {
-        i += match.index + match[0].length;
-        out.push({ type: 'close', name, attrs: {}, line });
+        const closeStart = i + match.index;
+        i = closeStart + match[0].length;
+        out.push({ type: 'close', name, attrs: {}, line, start: closeStart, end: i });
       } else i = src.length;
     }
   }
@@ -566,7 +574,7 @@ export function parseHtml(text, { at = 'source.html', warnings = new Warnings() 
 // ---------------------------------------------------------------------------
 
 /** Split a declaration block on `;` while respecting quotes and parens. */
-function splitDeclarations(body) {
+export function splitDeclarations(body) {
   const out = [];
   let depth = 0;
   let quote = '';

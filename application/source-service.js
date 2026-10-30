@@ -20,13 +20,17 @@
 //                                   `expandSourceOps` in this file, because core
 //                                   never reads `.vdm/`)
 //
+// The write-back of one edited value into the source (§7.8.3, WP4.3) lives at
+// the bottom of this file: `writeBack` decides, `writeBackOps` turns the answer
+// into the `sourceWrite` + mirror `set` the caller submits as one transaction.
+//
 // The routes (`engine/routes/sources.js`) call the async functions here; the
 // CLI/MCP surfaces come with WP4.3.
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { SOURCE_SNAPSHOT_VERSION } from '../core/version.js';
-import { snapshotProblems } from '../core/source-eval.js';
+import { isNumericSourcePath, isSourceNodeId, snapshotProblems } from '../core/source-eval.js';
 import { compileHtml, compileSvg, COMPILE_RUNTIMES } from '../core/source-map.js';
 import { isSafeSourceId, manifestIssues, isSafeSourceFile, scanSourceFiles, sourceRecord, SOURCE_MANIFEST } from '../core/code-layer.js';
 import { isRecord } from '../core/json.js';
@@ -35,6 +39,7 @@ import { resolveFontFile } from '../engine/shot.js';
 import { atomicJson } from '../engine/storage.js';
 import { fault } from './errors.js';
 import { DEFAULT_STYLE, DEFAULT_TRANSFORM } from '../core/schema.js';
+import { isWriteBackPath, nodeTypeForPath, writeNodeValue } from './source-writeback.js';
 
 /** Snapshot `compiler.name` for everything this module writes (§7.8.1). */
 export const COMPILER_NAME = 'source-service';
@@ -422,6 +427,161 @@ export async function compileSource({ project, sourceId, root, snapshot: provide
     base: root ? path.relative(path.resolve(root), basePath(root, id)).split(path.sep).join('/') : null,
     path: written,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Write back: a value the user edited in the source layer (§7.8.3, WP4.3)
+// ---------------------------------------------------------------------------
+//
+// Three steps, one transaction (§7.8.6 #6) — the caller drives them:
+//
+//   (1) `writeBack` works out the new file text and returns the `sourceWrite`
+//       op; it never writes to disk itself;
+//   (2) `writeBackOps` adds the mirror `set` so the element keeps equalling the
+//       snapshot baseline (§7.8.2 "编译产物在元素上镜像基线值");
+//   (3) the caller recompiles (`compileSource`) to refresh `base.json` + `hash`.
+//
+// The caller submits (1)+(2) as one transaction (one rev, one undo step) and
+// only then runs (3). §7.8.3 allows step 3 to be debounced, and doing it after
+// the transaction is what keeps §7.8.6 #6 honest: a transaction that fails has
+// not written a new snapshot either. A snapshot that lags the project is the
+// frozen trade-off ("防抖窗口里快照是旧的，允许"); the next compile heals it.
+//
+// Failure is a *result*, not an exception: `{ ok: false, fallback: 'editor-layer',
+// reason }`, `reason` from the closed enum below. Only data validation throws
+// (§7.8.3 "路径/值格式不对直接抛 OP_INVALID，不返回 fallback").
+
+/**
+ * §7.8.3's closed reason enum. `type-mismatch` is the one addition (R2 in
+ * §7.8.8): a *node* whose type cannot carry the path (a solid's `style.text`,
+ * a non-`<img>` node's `src`). A *value* of the wrong type still throws
+ * `OP_INVALID` — that is §7.8.3's synchronous validation, not a fallback.
+ * `source-read-only` has no producer in this schema (no source is read-only
+ * yet) and `worker-unavailable` has none either: the write-back happens on the
+ * text with the compiler's tokenizer instead of a DOM sandbox, so there is no
+ * worker to be unavailable. Both stay in the enum so a future DOM/worker
+ * implementation does not widen it.
+ */
+export const WRITEBACK_REASONS = Object.freeze([
+  'source-missing',
+  'node-missing',
+  'path-editor-only',
+  'path-overridden',
+  'node-unwritable',
+  'type-mismatch',
+  'source-read-only',
+  'worker-unavailable',
+]);
+
+/** Element bound to one source node (`el.source = { id, node }`, §7.8.2). */
+export function elementForNode({ project, sourceId, nodeId }) {
+  const id = String(sourceId ?? '');
+  const node = String(nodeId ?? '');
+  for (const el of Array.isArray(project?.elements) ? project.elements : []) {
+    if (el?.source?.id === id && el?.source?.node === node) return el;
+  }
+  return null;
+}
+
+/** A `writeBack` result that degrades to the editor layer (§7.8.3). */
+function degraded(reason, { path, value, message }) {
+  return { ok: false, fallback: 'editor-layer', reason, path, value, message };
+}
+
+/**
+ * The §7.8.3 write-back: `{ ok, changed, file, path, value, op }` when the
+ * source can carry the value (`op` is the `sourceWrite` the caller submits), or
+ * `{ ok: false, fallback: 'editor-layer', reason, … }` when it cannot. Async
+ * because the frozen contract is (a real implementation edits the DOM in the
+ * sandbox); this one is a text splice, but the caller's contract must not
+ * depend on which is behind it.
+ *
+ * `root` is required: the node's type comes from `base.json` (§7.8.1 lists this
+ * function among that file's readers), and a node the snapshot does not carry
+ * is `node-missing` — we never guess what an uncompiled element is.
+ */
+export async function writeBack({ project, sourceId, nodeId, path, value, actorId = null, root = null }) {
+  if (!isRecord(project)) throw fault('INVALID_ARGUMENT', 'writeBack 需要 project');
+  const id = String(sourceId ?? '');
+  if (!isSafeSourceId(id)) throw fault('INVALID_ARGUMENT', `sourceId 必须是合法源 id，收到 ${JSON.stringify(sourceId)}`);
+  if (!isSourceNodeId(nodeId)) throw fault('OP_INVALID', `nodeId 必须是合法节点 id，收到 ${JSON.stringify(nodeId)}`);
+  if (typeof path !== 'string' || !path) throw fault('OP_INVALID', `writeBack 需要 path，收到 ${JSON.stringify(path)}`);
+  const target = { path, value };
+  // §7.4's table first: a path that is not a write-back row never looks at the
+  // source at all, not even for the `sourceMode` of the element.
+  if (!isWriteBackPath(path)) {
+    return degraded('path-editor-only', { ...target, message: `${path} 属于编辑器层（§7.4 表外），不写回源` });
+  }
+  // Value format: §7.8.3's synchronous data validation, which throws.
+  const numeric = isNumericSourcePath(path);
+  if (numeric ? !(typeof value === 'number' && Number.isFinite(value)) : typeof value !== 'string') {
+    throw fault('OP_INVALID', `${path} 需要${numeric ? '有限数字' : '字符串'}，收到 ${JSON.stringify(value)}`);
+  }
+  if (actorId !== null && typeof actorId !== 'string') throw fault('INVALID_ARGUMENT', 'actorId 必须是字符串');
+  const element = elementForNode({ project, sourceId: id, nodeId });
+  if (element?.sourceMode?.[path] === 'override') {
+    return degraded('path-overridden', {
+      ...target, message: `元素 ${element.id} 已接管 ${path}（sourceMode: override），不再写回源`,
+    });
+  }
+  const record = sourceRecord(project, id);
+  if (!record) return degraded('source-missing', { ...target, message: `没有源 ${id}（先 vdm source new / sourceAdd）` });
+  // §7.8.3 "不适用于 code 元素": a code layer has no DOM, so the runtime decides
+  // before the snapshot does — an uncompiled code source must not look like a
+  // missing node.
+  const manifest = isRecord(record.manifest) ? record.manifest : {};
+  const runtime = String(manifest.runtime ?? '');
+  if (!COMPILE_RUNTIMES.includes(runtime)) {
+    return degraded('node-unwritable', {
+      ...target, message: `源 ${id} 的 runtime 是 ${JSON.stringify(runtime)}：只有 html / svg 有 DOM 可写回（代码图层用 sourceWrite / codeParamSet）`,
+    });
+  }
+  const entry = String(manifest.entry ?? '');
+  const files = isRecord(record.files) ? record.files : {};
+  if (!entry || typeof files[entry] !== 'string') {
+    return degraded('node-unwritable', { ...target, message: `源 ${id} 的入口 ${JSON.stringify(entry)} 不在 project.sources[].files 里` });
+  }
+  if (!root) throw fault('INVALID_ARGUMENT', 'writeBack 需要 project root：节点类型来自 .vdm/sources/<id>/base.json（§7.8.1）');
+  const base = await readBase({ root, sourceId: id });
+  if (!base.ok) {
+    return degraded('node-missing', {
+      ...target, message: `源 ${id} 还没有可用的 base.json（${base.problems[0] || 'not compiled'}）：先编译，再写回`,
+    });
+  }
+  const node = base.snapshot.nodes.find((entry) => entry.id === nodeId) || null;
+  if (!node) {
+    return degraded('node-missing', { ...target, message: `上次编译的快照里没有节点 ${nodeId}（源改过？先重新编译）` });
+  }
+  const needed = nodeTypeForPath(path);
+  if (needed && node.type !== needed) {
+    return degraded('type-mismatch', { ...target, message: `节点 ${nodeId} 是 ${node.type}，${path} 只适用于 ${needed} 节点` });
+  }
+  const written = writeNodeValue({ text: files[entry], nodeId, runtime, path, value });
+  if (!written.ok) {
+    // 'missing' here means "the snapshot has it, the text does not": the source
+    // was edited without a recompile, so the node is gone as far as the text
+    // is concerned. Everything else is a §7.4 "write-back fails" case.
+    return degraded(written.code === 'missing' ? 'node-missing' : 'node-unwritable', { ...target, message: written.message });
+  }
+  if (!written.changed) return { ok: true, changed: false, file: entry, path, value, op: null };
+  return {
+    ok: true, changed: true, file: entry, path, value,
+    op: { op: 'sourceWrite', id, path: entry, content: written.text },
+  };
+}
+
+/**
+ * The caller's half of §7.8.3's transaction: the `sourceWrite` op `writeBack`
+ * computed plus the mirror `set` that puts the same value on the element bound
+ * to the node (§7.8.3 step 2: "镜像与 base 保持一致"). One `transact` call =
+ * one rev + one undo step. Step 3 (recompile) is the caller's next call.
+ */
+export function writeBackOps({ project, sourceId, nodeId, result }) {
+  if (!result?.ok || !result.op) return [];
+  const ops = [result.op];
+  const element = elementForNode({ project, sourceId, nodeId });
+  if (element) ops.push({ op: 'set', id: element.id, path: result.path, value: result.value });
+  return ops;
 }
 
 // ---------------------------------------------------------------------------
