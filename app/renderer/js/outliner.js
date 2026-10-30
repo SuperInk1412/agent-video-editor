@@ -4,6 +4,7 @@
 // timeline's own camera activation), and setSelection() only repaints.
 
 import { h, icon, prefs } from './ui.js';
+import { sourceMark } from './source-badge.js';
 import { cameraRange } from '/core/camera.js';
 import { cameraRef, objectRef, elementRef, selectOne, addSelection } from '/core/selection.js';
 
@@ -72,7 +73,7 @@ export class Outliner {
       const s = Number(e.start) || 0;
       const it = {
         ref: elementRef(e.id), id: e.id, name: e.name || e.id, icon: EL_ICON[e.type] || 'square', clip: EL_CLIP[e.type] || 'shape',
-        start: s, end: s + (Number(e.duration) || 0),
+        start: s, end: s + (Number(e.duration) || 0), el: e,
       };
       (e.type === 'audio' ? items.snd : items.el).push(it);
     }
@@ -98,10 +99,14 @@ export class Outliner {
       if (!collapsed) {
         const list = h('div', { class: 'ol-rows', role: 'listbox', 'aria-label': g.label });
         for (const it of shown) {
+          // The 12×12 source mark sits between the type icon and the name, only
+          // for an element that comes from a compiled source (WP4.6a §3.1).
+          const mark = sourceMark(p, it.el, 'ol-src');
           const node = h('div', {
             class: 'list-row ol-row', role: 'option', dataset: { ref: it.ref, tip: it.name },
           },
           h('span', { class: `ol-ic clip-${it.clip}` }, icon(it.icon, 'ic-sm')),
+          ...(mark ? [mark] : []),
           h('span', { class: 'ol-name' }, it.name),
           h('span', { class: 'ol-time' }, `${fmt(it.start)}–${fmt(it.end)}`));
           this.rows.push({ ...it, node });

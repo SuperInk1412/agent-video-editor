@@ -38,6 +38,9 @@
   --ai: #b58cff;                              /* added: AI change-set marks (WP2.5b, DESIGN-WP2.5-REVIEW §10.3-3) */
   --ai-bg: rgba(181, 140, 255, .12);          /* added: AI mark tint (never the selection color) */
   --ai-border: rgba(181, 140, 255, .35);      /* added: AI row bar / clip outline / keyframe ring */
+  --source: #7fd4c1;                          /* added: source-driven properties (WP4.6a, DESIGN-WP3.6-4.6-UI §3.1/§7.2) */
+  --source-bg: rgba(127, 212, 193, .12);      /* added: source badge / lit overlay-takeover segment */
+  --source-border: rgba(127, 212, 193, .35);  /* added: source badge outline */
   --ok: #2fd07f;
   --ok-bg: rgba(47, 208, 127, .12);
   --warn: #f2a33c;

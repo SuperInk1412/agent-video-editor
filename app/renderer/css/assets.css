@@ -136,6 +136,9 @@
 .ol-ic.clip-camera { color: var(--clip-camera); }
 .ol-ic.clip-object { color: var(--clip-object); }
 .ol-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 12×12 source mark between the type icon and the name (WP4.6a §3.1). */
+.ol-src { display: grid; place-items: center; width: 12px; height: 12px; flex: 0 0 12px; color: var(--source); }
+.ol-src .ic { width: 12px; height: 12px; stroke-width: 1.8; }
 .ol-row.off .ol-name { color: var(--text-3); }
 .ol-time {
   flex: 0 0 auto; margin-left: auto; color: var(--text-3);

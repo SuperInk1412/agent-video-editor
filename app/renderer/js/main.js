@@ -16,6 +16,7 @@ import { LogPanel } from './logs.js';
 import { ProjectsPanel } from './projects.js';
 import { AssetsPanel, MEDIA_MIME } from './assets.js';
 import { Outliner } from './outliner.js';
+import { setSourceSnapshots as applySourceSnapshots, sourceSnapshots as readSourceSnapshots } from './source-badge.js';
 import { showMenu, hideMenu, initTooltips, icon, prefs } from './ui.js';
 import { initLayout, markTab, Timecode, StatusBar, LogDrawer } from './shell.js';
 import { frameStep, frameStart, frameWriteTime, lastFrameTime } from './timeline-math.js';
@@ -5147,6 +5148,15 @@ async function boot() {
     // Change-set marks (WP2.5b): probes can force a refetch or read the result.
     refreshMarks: (opts) => refreshMarks({ immediate: true, ...(opts || {}) }),
     marksFor: (records, project = S.project) => marksFor(records, project, { fps: S.project?.meta?.fps || 24 }),
+    // Source snapshots (WP4.6a): the compiled `.vdm/sources/<id>/base.json`
+    // bodies the overlay/takeover switches read. core never reads a file and
+    // the renderer has no filesystem, so the app hands them in here — WP4.6b's
+    // `GET /api/sources` fills this seam, and the probe calls it directly.
+    setSourceSnapshots: (map) => {
+      applySourceSnapshots(map);
+      inspector?.refresh();
+    },
+    sourceSnapshots: () => readSourceSnapshots(),
     renderActions,
     agentPanel, review, pipelinePanel, logPanel,
     // 报告草稿 (WP2.5c): the panel, and its mirror in `S.reportDraft`.

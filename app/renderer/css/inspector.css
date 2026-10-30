@@ -31,7 +31,10 @@ button.insp-name:hover { background: var(--surface-2); border-color: var(--borde
 .insp-name.static { cursor: default; }
 .insp-head input.insp-rename { flex: 1 1 auto; min-width: 0; height: var(--h-sm); font-size: var(--fs-md); }
 .insp-id {
-  flex: 0 10 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  /* The id is the first thing to give way when the header is full (a source
+     badge + the ⋯ action add ~100px, WP4.6a): a huge shrink factor keeps the
+     element name and the source badge at their natural width. */
+  flex: 0 1000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   color: var(--text-3); font-family: var(--font-mono); font-size: var(--fs-xs);
 }
 .insp-actions { margin-left: auto; display: flex; gap: 2px; flex: 0 0 auto; }
@@ -329,3 +332,38 @@ button.insp-name:hover { background: var(--surface-2); border-color: var(--borde
   font-family: var(--font-mono); font-variant-numeric: tabular-nums;
 }
 .insp .code-note { margin: 2px 0 6px; }
+
+/* ---------------- source marks and overlay / takeover (WP4.6a) ---------------- */
+/* Header badge `源 · title-card`, right after the element name (§3.1). The
+   full source id / node id live in the hover tip, not in the badge. */
+.insp-src {
+  flex: 0 1 auto; min-width: 0; height: 18px; padding: 0 4px;
+  display: inline-flex; align-items: center;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--source); background: var(--source-bg);
+  border: 1px solid var(--source-border); border-radius: var(--r-sm);
+  font-size: var(--fs-xs); line-height: 16px;
+}
+/* Two-state switch at the right end of a driven property's label (§7.2 R1).
+   20px total so a 4-character label still fits the 72px label column; the
+   current state is `--source`, the other one `--text-3`. */
+.insp .prop.has-src > label { gap: 2px; }
+.insp .prop.has-src > label > .prop-name {
+  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.src-mode {
+  flex: 0 0 auto; display: inline-flex; height: 16px;
+  background: var(--field); border-radius: var(--r-sm);
+  box-shadow: inset 0 0 0 1px var(--border);
+  overflow: hidden;
+}
+.src-mode-btn {
+  display: grid; place-items: center; width: 10px; height: 100%; padding: 0;
+  border: 0; background: transparent; color: var(--text-3); cursor: pointer;
+}
+.src-mode-btn + .src-mode-btn { box-shadow: inset 1px 0 0 var(--border); }
+.src-mode-btn .ic { width: 10px; height: 10px; stroke-width: 2; }
+.src-mode-btn:hover { color: var(--text-1); background: var(--surface-3); }
+.src-mode-btn.on { color: var(--source); background: var(--source-bg); }
+.src-mode-btn:focus-visible { outline: none; box-shadow: inset var(--focus-ring); }
+.insp.ro .src-mode-btn { opacity: .4; cursor: default; }

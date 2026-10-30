@@ -23,6 +23,7 @@ import {
 } from '/core/timeline-order.js';
 import { attachNumberField, readNumber, writeNumber } from './numfield.js';
 import { h, icon, token, prefs } from './ui.js';
+import { sourceMark } from './source-badge.js';
 import {
   cameraValueWithLinks, findLinkTarget, objectPoseWithLinks, writeBackLocalValue,
 } from '/core/links.js';
@@ -2477,8 +2478,13 @@ export class Timeline {
       kind.dataset.tip = `2D 图层：当前第 ${rank2D + 1} / ${this._rank2D.size} 个（越靠上越高；同面才看得出；拖过相机/3D/声音只改显示）`;
     }
     const parentBtn = e.type === 'audio' ? null : this._parentButton('el', e);
-    // Order stays eye | parent | caret | dot | lock | name (DESIGN.md §4).
-    g.append(eye, parentBtn || '', caret, dot, this._lockButton('el', e), name, kind);
+    // Order stays eye | parent | caret | dot | lock | source | name (DESIGN.md §4).
+    // The 12×12 source mark takes the name's front slot only when the element
+    // comes from a compiled source (WP4.6a §3.1): no row height, no button
+    // order, and the full text lives in the hover tip.
+    const mark = sourceMark(this.project, e);
+    g.append(eye, parentBtn || '', caret, dot, this._lockButton('el', e),
+      ...(mark ? [mark] : []), name, kind);
     if (e.type === 'camfeed') {
       // The clip has its own menu; the header should open the same one so
       // "跟随投屏来源" is reachable from the row as well.

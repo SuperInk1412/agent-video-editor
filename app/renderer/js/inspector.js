@@ -28,6 +28,8 @@ import {
   effectiveElementRowValue, elementRowKeyPath, elementRowTarget, localElementRowValue,
   localElementRowValueAt, nodeRowPatch, rowToTarget,
 } from './element-link-value.js';
+import { sourceBadge } from './source-badge.js';
+import { decorateSourceRows, sourceHeaderAction } from './inspector-source-mode.js';
 
 const MOTIONS = ['none', 'in', 'out', 'left', 'right', 'up', 'down', 'drift', 'shake'];
 const FONTS = ['SimHei', 'Microsoft YaHei', 'Arial', 'Impact', 'Bahnschrift', 'Consolas'];
@@ -257,14 +259,26 @@ export class Inspector {
     this.render(this._last.project, this._last.sel, this._last.time);
   }
 
+  /**
+   * Rebuild the panel after state that is not part of the project changed: the
+   * compiled source snapshots (WP4.6a `setSourceSnapshots`, source-badge.js).
+   * `render()` keys on rev / selection / time, so a snapshot swap alone would
+   * leave the overlay/takeover switches showing the previous knowledge.
+   */
+  refresh() {
+    this._refresh();
+  }
+
   // ---------------------------------------------------------------- header
   /**
    * Sticky header: type badge · name (click to rename) · dim id · icon actions.
    * actions: [{ icon, label, tip, danger, on, run }]
+   * `extra` is a node placed right after the name — the source badge of a
+   * source-driven element (WP4.6a §3.1); every other host passes nothing.
    * `locked` tints the header (--edit-bg) and the lock action (WP2.5b §10.5);
    * the fields below stay editable, because a human may still edit a lock.
    */
-  _header({ type, badge, name, id, onRename, actions = [], multi = 0, locked = false }) {
+  _header({ type, badge, name, id, onRename, actions = [], multi = 0, locked = false, extra = null }) {
     const nameBtn = onRename
       ? h('button', { type: 'button', class: 'insp-name', 'data-tip': '单击改名', 'aria-label': `名称：${name}，单击改名` }, name || '—')
       : h('span', { class: 'insp-name static', title: name }, name || '—');
@@ -302,6 +316,7 @@ export class Inspector {
       }, '← 返回') : null,
       h('span', { class: `badge${type ? ` badge-${type}` : ''} insp-kind` }, badge),
       nameBtn,
+      extra,
       id ? h('span', { class: 'insp-id', title: id }, id) : null,
       multi > 1 ? h('span', {
         class: 'insp-multi', 'data-tip': '多选：面板、Delete 都只作用于最后选中的那个（primary）',
@@ -370,13 +385,21 @@ export class Inspector {
   // Label, control, `↳` property-link button and ◆ are direct children of the
   // grid; the control sits in a .ctl wrapper so the width classes (w-third /
   // w-half / w-full) can size it without touching the link / keyframe columns.
-  _row(label, control, kfNode, cls = '', linkNode = null, linked = false, path = null) {
-    return h('div', { class: `prop fld${cls ? ` ${cls}` : ''}`, 'data-path': path || null },
-      h('label', { title: label }, label,
-        linked ? h('span', { class: 'parent-mark', 'data-tip': '这个属性有属性父级' }, '父') : null),
-      h('span', { class: 'ctl' }, control),
-      h('span', { class: 'link-slot' }, linkNode),
-      kfNode || h('span', { class: 'kf-slot' }));
+  //
+  // `srcPaths` marks the source paths a row *displays* (space separated, e.g.
+  // `transform.x transform.y`): the overlay/takeover switch only appears on the
+  // rows whose paths the source really drives (WP4.6a §7.2 R1). The label text
+  // lives in its own span so the switch can sit at the right end of the label
+  // cell without pushing the control column.
+  _row(label, control, kfNode, cls = '', linkNode = null, linked = false, path = null, srcPaths = null) {
+    return h('div', {
+      class: `prop fld${cls ? ` ${cls}` : ''}`, 'data-path': path || null, 'data-source-path': srcPaths || null,
+    },
+    h('label', { title: label }, h('span', { class: 'prop-name' }, label),
+      linked ? h('span', { class: 'parent-mark', 'data-tip': '这个属性有属性父级' }, '父') : null),
+    h('span', { class: 'ctl' }, control),
+    h('span', { class: 'link-slot' }, linkNode),
+    kfNode || h('span', { class: 'kf-slot' }));
   }
 
   // ---------------------------------------------------------------- property links
@@ -540,7 +563,7 @@ export class Inspector {
 
   _field({
     label, value, type = 'number', step = 0.01, min, max, path, kf, keyer, options, onChange,
-    placeholder, percent = false, unit, w, link = null,
+    placeholder, percent = false, unit, w, link = null, srcPaths = null,
   }) {
     const kfNode = keyer ? this._kfButton(keyer.state, keyer.set, keyer.unset)
       : kf ? this._elKfButton([path]) : null;
@@ -552,9 +575,9 @@ export class Inspector {
     const cls = `w-${width}${type === 'textarea' ? ' tall' : ''}`;
     if (type === 'number') {
       const box = this._num({ value, step, min, max, percent, unit, placeholder, aria: label, onChange });
-      return this._row(label, box, kfNode, cls, linkNode, linked, path);
+      return this._row(label, box, kfNode, cls, linkNode, linked, path, srcPaths);
     }
-    if (type === 'color') return this._row(label, this._color(label, value, onChange), kfNode, cls, linkNode, linked, path);
+    if (type === 'color') return this._row(label, this._color(label, value, onChange), kfNode, cls, linkNode, linked, path, srcPaths);
     let input;
     if (type === 'select') {
       input = h('select', { 'aria-label': label }, ...options.map((o) => {
@@ -579,7 +602,7 @@ export class Inspector {
     else input.addEventListener('input', emit);
     input.addEventListener('blur', () => this._flush());
     const control = type === 'checkbox' ? h('span', { class: 'chk' }, input) : input;
-    return this._row(label, control, kfNode, cls, linkNode, linked, path);
+    return this._row(label, control, kfNode, cls, linkNode, linked, path, srcPaths);
   }
 
   /** 24×24 swatch + hex text, both editing the same value */
@@ -612,7 +635,7 @@ export class Inspector {
    * items: [{ axis | prefix, value, step, min, max, unit, percent, onChange, aria }]
    * keyPaths: element tracks keyed together by the row's ◆.
    */
-  _vec({ label, items, keyPaths, keyer, kfNode: explicitKf, rowLink = null }) {
+  _vec({ label, items, keyPaths, keyer, kfNode: explicitKf, rowLink = null, srcPaths = null }) {
     const kfNode = explicitKf !== undefined ? explicitKf
       : keyer ? this._kfButton(keyer.state, keyer.set, keyer.unset)
         : keyPaths ? this._elKfButton(keyPaths) : null;
@@ -628,7 +651,7 @@ export class Inspector {
     });
     const linked = (rowLink && this._linked(rowLink))
       || items.some((it) => it.link && this._linked(it.link));
-    return this._row(label, h('div', { class: `vec vec-${items.length}` }, ...boxes), kfNode, 'w-full', rowLinkNode, linked, keyPaths?.[0] ?? null);
+    return this._row(label, h('div', { class: `vec vec-${items.length}` }, ...boxes), kfNode, 'w-full', rowLinkNode, linked, keyPaths?.[0] ?? null, srcPaths);
   }
 
   /** read-only value row */
@@ -673,7 +696,7 @@ export class Inspector {
    */
   _xfRow(project, host, kind, rowKey, {
     step = 0.1, unit = '', readOnly = false, noKf = false,
-    dimZ = false, dimTip = '', label = '',
+    dimZ = false, dimTip = '', label = '', srcPaths = null,
   } = {}) {
     const t = this.opts.getTime();
     const vals = xfValues(project, host, kind, t)[rowKey] || [0, 0, 0];
@@ -699,6 +722,7 @@ export class Inspector {
       label: lab,
       kfNode,
       rowLink,
+      srcPaths,
       items: XF_AXES.map((ax, i) => {
         return {
           axis: ax,
@@ -723,13 +747,14 @@ export class Inspector {
   }
 
   /** Opacity row after the four transform rows (same key semantics as the timeline). */
-  _xfOpacity(project, host, kind) {
+  _xfOpacity(project, host, kind, srcPaths = null) {
     const t = this.opts.getTime();
     const tol = this._xfTol();
     const value = Math.round(Number(xfValues(project, host, kind, t).opacity) * 1000) / 1000;
     return this._field({
       label: '不透明度', value, step: 0.01, min: 0, max: 1, percent: true,
       link: { kind, id: host.id, path: 'opacity' },
+      srcPaths,
       keyer: {
         state: () => {
           const st = xfOpacityKeyState(host, kind, this.opts.getTime(), tol);
@@ -759,10 +784,15 @@ export class Inspector {
     this._elId = el.id;
     this._kind = el.type;
     const set = (path, patch) => this._commit(`${el.id}:${path}`, { op: 'updateElement', id: el.id, patch });
+    // The live element behind this render: a source switch or menu opened from
+    // here must read the project as it is now, not as it was when painted.
+    const liveEl = () => this._last?.project?.elements?.find((e) => e.id === el.id) || el;
     this._header({
       type: el.type, badge: EL_LABELS[el.type] || el.type, name: el.name, id: el.id, multi,
       onRename: (v) => set('name', { name: v }),
       locked: el.locked === true,
+      // 源 · <label> right after the name (WP4.6a §3.1); null without a source.
+      extra: sourceBadge(project, el),
       actions: [
         // The lock comes before copy / delete (docs/DESIGN-WP2.5-REVIEW.md §5).
         this._lockAction('element', el),
@@ -777,7 +807,10 @@ export class Inspector {
           icon: 'trash', label: '删除', danger: true,
           run: () => { if (confirm(`删除 ${el.name}?`)) this.opts.onOp({ op: 'removeElement', id: el.id }); },
         },
-      ],
+        // 全部叠加 / 全部接管 (§7.2 R1, first entry; the row right-click is the
+        // second). Only a source element grows a ⋯ button.
+        sourceHeaderAction(liveEl, (op) => this.opts.onOp(op), (msg, level) => this.opts.onToast?.(msg, level)),
+      ].filter(Boolean),
     });
     const linksSummary = this._linksSummary(project, el);
     if (linksSummary) this.root.appendChild(linksSummary);
@@ -894,7 +927,7 @@ export class Inspector {
     }
 
     const node = el.node ? elementNodeAt(el, project.meta, time) : null;
-    const nodeVec = (group, label, step, unit, { dimZ = false, dimTip = '', noKf = false } = {}) => {
+    const nodeVec = (group, label, step, unit, { dimZ = false, dimTip = '', noKf = false, srcPaths = null } = {}) => {
       const arr = Array.isArray(node?.[group]) ? node[group] : [0, 0, 0];
       const kf = noKf
         ? h('button', {
@@ -909,6 +942,7 @@ export class Inspector {
         kfNode: kf,
         rowLink,
         keyPaths: noKf ? undefined : paths,
+        srcPaths,
         items: ['x', 'y', 'z'].map((ax, i) => ({
           axis: ax, value: round(kv(`${group}.${ax}`, arr[i]), 3), step, unit,
           aria: `${label} ${ax.toUpperCase()}`,
@@ -958,7 +992,8 @@ export class Inspector {
     const opacityField = this._field({
       label: '不透明度', value: round(kv('transform.opacity', el.transform.opacity), 3),
       step: 0.01, min: 0, max: 1, percent: true, kf: true, path: kp('transform.opacity'),
-      link: link('transform.opacity'), onChange: edit('transform.opacity', (v) => ({ transform: { opacity: v } })),
+      link: link('transform.opacity'), srcPaths: 'transform.opacity',
+      onChange: edit('transform.opacity', (v) => ({ transform: { opacity: v } })),
     });
     const bindRows = [
       this._field({ label: '跟随节拍', value: el.punch || 0, step: 0.05, min: 0, max: 2, onChange: (v) => set('punch', { punch: v }) }),
@@ -977,10 +1012,10 @@ export class Inspector {
       // exact and linkable.
       this.root.appendChild(this._sec('变换', {},
         nodeVec('pivot', '中心点', 0.05, 'm'),
-        nodeVec('position', '位置', 0.05, 'm', { noKf: true }),
-        this._xfRow(project, el, 'el', 'rotation', { step: 0.5, unit: '°' }),
-        nodeVec('scale', '缩放', 0.01, '', { dimZ: true }),
-        this._xfOpacity(project, el, 'el'),
+        nodeVec('position', '位置', 0.05, 'm', { noKf: true, srcPaths: 'transform.x transform.y' }),
+        this._xfRow(project, el, 'el', 'rotation', { step: 0.5, unit: '°', srcPaths: 'transform.rotation' }),
+        nodeVec('scale', '缩放', 0.01, '', { dimZ: true, srcPaths: 'transform.scale' }),
+        this._xfOpacity(project, el, 'el', 'transform.opacity'),
         rotBallHost,
         ...bindRows,
       ));
@@ -988,14 +1023,15 @@ export class Inspector {
       this.root.appendChild(this._sec('变换', {},
         this._vec({
           label: '位置', keyPaths: [kp('transform.x'), kp('transform.y')],
+          srcPaths: 'transform.x transform.y',
           items: [
             { axis: 'x', value: round(kv('transform.x', el.transform.x)), unit: 'px', aria: 'X', link: link('transform.x'), onChange: edit('transform.x', (v) => ({ transform: { x: v } })) },
             { axis: 'y', value: round(kv('transform.y', el.transform.y)), unit: 'px', aria: 'Y', link: link('transform.y'), onChange: edit('transform.y', (v) => ({ transform: { y: v } })) },
           ],
         }),
         this._field({ label: '纵深 z', unit: 'm', value: round(kv('transform.z', el.transform.z ?? 0), 3), step: 0.05, kf: true, path: kp('transform.z'), link: link('transform.z'), onChange: edit('transform.z', (v) => ({ transform: { z: v } })) }),
-        this._field({ label: '缩放', value: round(kv('transform.scale', el.transform.scale), 3), step: 0.01, kf: true, path: kp('transform.scale'), link: link('transform.scale'), onChange: edit('transform.scale', (v) => ({ transform: { scale: v } })) }),
-        this._field({ label: '旋转', unit: '°', value: round(kv('transform.rotation', el.transform.rotation), 2), step: 0.5, kf: true, path: kp('transform.rotation'), link: link('transform.rotation'), onChange: edit('transform.rotation', (v) => ({ transform: { rotation: v } })) }),
+        this._field({ label: '缩放', value: round(kv('transform.scale', el.transform.scale), 3), step: 0.01, kf: true, path: kp('transform.scale'), link: link('transform.scale'), srcPaths: 'transform.scale', onChange: edit('transform.scale', (v) => ({ transform: { scale: v } })) }),
+        this._field({ label: '旋转', unit: '°', value: round(kv('transform.rotation', el.transform.rotation), 2), step: 0.5, kf: true, path: kp('transform.rotation'), link: link('transform.rotation'), srcPaths: 'transform.rotation', onChange: edit('transform.rotation', (v) => ({ transform: { rotation: v } })) }),
         opacityField,
         ...bindRows,
       ));
@@ -1005,24 +1041,25 @@ export class Inspector {
 
     if (el.type === 'text') {
       this.root.appendChild(this._sec('文字', {},
-        this._field({ label: '内容', type: 'textarea', value: el.style.text, onChange: (v) => set('style.text', { style: { text: v } }) }),
-        this._field({ label: '字体', type: 'select', value: el.style.font, options: FONTS, onChange: (v) => set('style.font', { style: { font: v } }) }),
-        this._field({ label: '字号', unit: 'px', value: round(kv('style.size', el.style.size), 1), step: 1, kf: true, path: 'style.size', onChange: edit('style.size', (v) => ({ style: { size: v } })) }),
+        this._field({ label: '内容', type: 'textarea', value: el.style.text, srcPaths: 'style.text', onChange: (v) => set('style.text', { style: { text: v } }) }),
+        this._field({ label: '字体', type: 'select', value: el.style.font, options: FONTS, srcPaths: 'style.font', onChange: (v) => set('style.font', { style: { font: v } }) }),
+        this._field({ label: '字号', unit: 'px', value: round(kv('style.size', el.style.size), 1), step: 1, kf: true, path: 'style.size', srcPaths: 'style.size', onChange: edit('style.size', (v) => ({ style: { size: v } })) }),
         // 颜色是可打帧属性：值跟着播放头走，◆ 在该帧写入一个步进颜色键
         // （design §9；颜色关键帧保持跳变）。
         this._field({
           label: '颜色', type: 'color', value: kv('style.color', el.style.color),
-          kf: true, path: kp('style.color'),
+          kf: true, path: kp('style.color'), srcPaths: 'style.color',
           onChange: edit('style.color', (v) => ({ style: { color: v } })),
         }),
         this._field({
           label: '对齐', type: 'select', value: el.style.align, options: [{ value: 'center', label: '居中' }, { value: 'left', label: '左' }, { value: 'right', label: '右' }],
+          srcPaths: 'style.align',
           onChange: (v) => set('style.align', { style: { align: v } }),
         }),
-        this._field({ label: '字距', value: el.style.letterSpacing || 0, step: 1, onChange: (v) => set('style.ls', { style: { letterSpacing: v } }) }),
-        this._field({ label: '行高', value: el.style.lineHeight || 1.18, step: 0.02, onChange: (v) => set('style.lh', { style: { lineHeight: v } }) }),
+        this._field({ label: '字距', value: el.style.letterSpacing || 0, step: 1, srcPaths: 'style.letterSpacing', onChange: (v) => set('style.ls', { style: { letterSpacing: v } }) }),
+        this._field({ label: '行高', value: el.style.lineHeight || 1.18, step: 0.02, srcPaths: 'style.lineHeight', onChange: (v) => set('style.lh', { style: { lineHeight: v } }) }),
         this._field({ label: '阴影', value: el.style.shadow || 0, step: 0.1, min: 0, max: 4, onChange: (v) => set('style.sh', { style: { shadow: v } }) }),
-        this._field({ label: '字重', value: el.style.weight || 400, step: 100, onChange: (v) => set('style.w', { style: { weight: v } }) }),
+        this._field({ label: '字重', value: el.style.weight || 400, step: 100, srcPaths: 'style.weight', onChange: (v) => set('style.w', { style: { weight: v } }) }),
       ));
     } else if (el.type === 'image' || el.type === 'video') {
       this.root.appendChild(this._sec('画面', {},
@@ -1030,7 +1067,7 @@ export class Inspector {
           label: '适配', type: 'select', value: el.style.fit, options: [{ value: 'cover', label: '填满裁剪' }, { value: 'stretch', label: '拉伸' }],
           onChange: (v) => set('style.fit', { style: { fit: v } }),
         }),
-        this._field({ label: '素材', type: 'text', value: el.src || '', w: 'full', onChange: (v) => set('src', { src: v }) }),
+        this._field({ label: '素材', type: 'text', value: el.src || '', w: 'full', srcPaths: 'src', onChange: (v) => set('src', { src: v }) }),
         this._field({ label: '源入点', unit: 's', value: el.srcIn || 0, step: 0.05, onChange: (v) => set('srcIn', { srcIn: v }) }),
       ));
     } else if (el.type === 'camfeed') {
@@ -1104,6 +1141,9 @@ export class Inspector {
 
     this._renderKeyframes(project, el, time);
     this.root.appendChild(baseSec());
+    // Overlay / takeover switches on the rows the source really drives, plus the
+    // second entry (row right-click) for 全部叠加 / 全部接管 (WP4.6a §7.2 R1).
+    decorateSourceRows(this, project, el);
   }
 
   // ---------------------------------------------------------------- 3D object: picture / video / text
