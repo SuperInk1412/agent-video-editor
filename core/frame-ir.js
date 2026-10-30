@@ -40,6 +40,10 @@ import { clamp } from './time.js';
 import { evalElement, motionDelta, parseColor } from './evaluate.js';
 import { elementOverlay } from './links.js';
 import {
+  applySourceToSt, cachedSnapshot, rawSnapshotFor, snapshotHashOf,
+  sourceMerge, sourceNodeDelta, sourceSnapshotIds, sourceSrcValue, sourceStyleValues,
+} from './source-eval.js';
+import {
   cameraParamResolver, elementWorldNodeWithLinks, evalCameraWorldWithLinks,
   linksEvalOptions, objectWorldPoseWithLinks,
 } from './link-eval.js';
@@ -53,8 +57,15 @@ import { LAYER_DEPTH_M, nodePlaneModel, orderLayers, planeOfFrame } from './laye
 import { codeLayerPlan } from './code-layer.js';
 import { parseFont, textMesh, textMeshId } from './glyphs.js';
 
-/** Bump when the shape of a FrameIR changes (frozen key, §4 / §12). */
-export const FRAME_IR_VERSION = 4;
+/**
+ * Bump when the shape of a FrameIR changes (frozen key, §4 / §12).
+ *
+ * v5 (WP4.2): `items[].source` carries `fallback: 'editor-layer'` when the
+ * element's source snapshot is missing / invalid / lacks the node (§7.8.2).
+ * Everything else that moved is the *evaluation* of source values into the
+ * item, which for a project without `el.source` is byte-identical to v4.
+ */
+export const FRAME_IR_VERSION = 5;
 
 /** One project pixel in metres (unified space, docs/DESIGN-UNIFIED-SPACE.md). */
 export const PIXEL_M = 0.01;
@@ -74,14 +85,22 @@ const r6 = (v) => Math.round(Number(v) * 1e6) / 1e6;
  * already known — the half of `elementPixelMatrix` that does not walk the
  * parent chain again. The IR builds each node once per frame and passes the
  * frame here, so a 138-element frame walks its parents once, not twice.
+ *
+ * `sourceDelta` (WP4.2) is the screen-space delta a source overlay adds
+ * (§7.8.2 "表示无关"): an element placed by `el.node` or a spatial parent never
+ * reads `st`, so its merged source values reach the matrix here, in the same
+ * units and with the same axis convention as `motionDelta` (project px, y
+ * down, degrees, scale multiplier). A legacy element applies the merge through
+ * `st` and passes nothing.
  */
-export function pixelMatrixOf(frame, el, t, meta = {}) {
+export function pixelMatrixOf(frame, el, t, meta = {}, sourceDelta = null) {
   const d = motionDelta(el, t, meta);
+  const s = sourceDelta || null;
   // Same motion placement as preview.js::_nodePlane: screen px along the
   // plane's unrolled axes, extra roll around the normal, size multiplier.
   const base = basisFromDir(frame.basis[2], 0);
-  const dx = (Number(d.x) || 0) / 100;
-  const dy = -(Number(d.y) || 0) / 100;
+  const dx = ((Number(d.x) || 0) + (s ? Number(s.x) || 0 : 0)) / 100;
+  const dy = -((Number(d.y) || 0) + (s ? Number(s.y) || 0 : 0)) / 100;
   const offset = [0, 1, 2].map((i) => -base.right[i] * dx + base.up[i] * dy);
   // Bug-compatible with preview.js::_nodePlane (`Math.abs(x || 1)`): a node
   // scale of 0 draws at full size, not as a sliver. The screen path below has
@@ -92,7 +111,12 @@ export function pixelMatrixOf(frame, el, t, meta = {}) {
     frame,
     PIXEL_M * (Math.abs(num(sc[0], 1)) || 1),
     PIXEL_M * (Math.abs(num(sc[1], 1)) || 1),
-    { offset, roll: d.rotation, scale: d.scale },
+    {
+      offset,
+      roll: (Number(d.rotation) || 0) + (s ? Number(s.rotation) || 0 : 0),
+      scale: (Number.isFinite(Number(d.scale)) ? Number(d.scale) : 1)
+        * (s && Number.isFinite(Number(s.scale)) ? Number(s.scale) : 1),
+    },
   );
   // nodePlaneModel keeps the normal at unit length; the IR is in pixels along
   // the normal too (layer offsets and Blender's pixel geometry): scale it.
@@ -456,6 +480,39 @@ function objectsOf(project, t, nodeOpts, fps) {
 }
 
 /**
+ * §7.8.2 step 2 for one element: the `item.source` echo and the merged source
+ * values, or `null` when the element has no usable `el.source` at all.
+ *
+ * Two outcomes when it does:
+ *
+ *   * `{ echo: { id, node }, values }` — the source was applied;
+ *   * `{ echo: { id, node, fallback: 'editor-layer' }, values: null }` — the
+ *     element degrades: no snapshot for the id, an invalid snapshot, or a node
+ *     the snapshot does not carry (§7.8.2 "降级"). Nothing is written, nothing
+ *     throws, and the picture is the no-source picture.
+ *
+ * A per-path miss (the node carries neither `props` nor a track) is **not** a
+ * degradation: that path keeps the editor value (§7.8.2 fallback table,
+ * "该路径按 override / 不猜默认值").
+ */
+function sourceOfElement(el, rawSources, t, st) {
+  const src = el.source;
+  const id = src && typeof src === 'object' ? src.id : null;
+  if (typeof id !== 'string' || !id) return null;
+  const node = typeof src.node === 'string' && src.node ? src.node : null;
+  const snapshot = rawSources.has(id) ? cachedSnapshot(rawSources.get(id)) : null;
+  const merge = snapshot && node ? sourceMerge(el, snapshot, t, st) : null;
+  if (!merge) return { echo: { id, node, fallback: 'editor-layer' }, values: null };
+  return { echo: { id, node }, values: merge.values };
+}
+
+/** `content.src` of an image / video: merged when the source drives `src`. */
+function mediaSrcOf(el, values) {
+  const merged = sourceSrcValue(values);
+  return merged === undefined ? (el.src || '') : String(merged ?? '');
+}
+
+/**
  * What frame `frame` looks like.
  *
  * `opts.camera`: `'live'` (the shot camera at this time — the default) or a
@@ -464,6 +521,12 @@ function objectsOf(project, t, nodeOpts, fps) {
  * for callers that size their own framebuffer; the IR itself is in project
  * pixels, so it changes nothing here. `opts.cache` (an IRCache) makes repeat
  * calls at the same revision free.
+ *
+ * `opts.sourceSnapshots` (§7.8.2, WP4.2) is `{ [sourceId]: snapshot }` or
+ * `(sourceId) => snapshot | null`. It is **not** part of the IR: the snapshots
+ * are read by the caller (core never touches `.vdm/`) and only their `hash`
+ * joins the cache key. Omitted = every source element degrades to the editor
+ * layer, exactly like a project without `el.source`.
  */
 export function buildFrameIR(project, frame, opts = {}) {
   const meta = project.meta || {};
@@ -479,7 +542,17 @@ export function buildFrameIR(project, frame, opts = {}) {
     opts.edit && opts.edit.mode ? `edit:${opts.edit.cam || ''}` : '-',
     solo ? [...solo].sort().join(',') : '-',
   ].join('|');
-  const sig = `${f}|${fps}|${viewSig}|${opts.city?.hash || '-'}`;
+  // Source snapshots the project references (§7.8.2): resolved once per frame,
+  // and their `hash` joins the cache key, so a recompile invalidates the old
+  // frames without waiting for `rev` to move.
+  const elements = Array.isArray(project.elements) ? project.elements : [];
+  const sourceIds = sourceSnapshotIds(elements);
+  const rawSources = new Map();
+  for (const id of sourceIds) rawSources.set(id, rawSnapshotFor(opts.sourceSnapshots, id));
+  const sourceSig = sourceIds.length
+    ? sourceIds.map((id) => `${id}@${snapshotHashOf(rawSources.get(id))}`).join(',')
+    : '-';
+  const sig = `${f}|${fps}|${viewSig}|${opts.city?.hash || '-'}|${sourceSig}`;
   if (cache) {
     const hit = cache.get(sig, rev);
     if (hit) return hit;
@@ -495,7 +568,6 @@ export function buildFrameIR(project, frame, opts = {}) {
   const meshes = {};
   const layers = [];
   const ids = [];
-  const elements = Array.isArray(project.elements) ? project.elements : [];
   for (let idx = 0; idx < elements.length; idx++) {
     const el = elements[idx];
     if (el.visible === false) continue;
@@ -503,8 +575,16 @@ export function buildFrameIR(project, frame, opts = {}) {
     const dur = num(el.duration);
     if (t < start - 1e-6 || t >= start + dur - 1e-6) continue;
     const st = evalElement(el, t, meta, elementOverlay(project, el, t));
+    // §7.8.2 steps 2-3: sample the source node and merge it in. With no usable
+    // snapshot this is `null` — the element keeps the editor-layer picture
+    // byte for byte and only the `source` echo below says so.
+    const source = sourceOfElement(el, rawSources, t, st);
+    const sourceValues = source ? source.values : null;
+    applySourceToSt(st, sourceValues);
     if (st.opacity <= 0.002) continue;
-    const style = el.style || {};
+    const style = sourceValues
+      ? { ...(el.style || {}), ...sourceStyleValues(sourceValues) }
+      : (el.style || {});
     // Unified space: el.node is the placement source of truth; a spatial parent
     // carries the whole chain, so a parented legacy layer enters the world-plane
     // path too, while an unparented legacy layer stays on the screen path
@@ -547,7 +627,7 @@ export function buildFrameIR(project, frame, opts = {}) {
     } else if (el.type === 'image' || el.type === 'video') {
       kind = el.type;
       content = {
-        src: el.src || '',
+        src: mediaSrcOf(el, sourceValues),
         fit: style.fit || 'cover',
         uv: mediaUVOf(style.fit || 'cover', el.meta?.width, el.meta?.height, size),
       };
@@ -602,7 +682,9 @@ export function buildFrameIR(project, frame, opts = {}) {
         kind,
         src: idx,
         z,
-        world: nodeFrame ? pixelMatrixOf(nodeFrame, el, t, meta) : screenPixelMatrix(st, meta),
+        world: nodeFrame
+          ? pixelMatrixOf(nodeFrame, el, t, meta, sourceNodeDelta(sourceValues))
+          : screenPixelMatrix(st, meta),
         size: quad,
         crop: [0, 0, 1, 1],
         opacity: st.opacity,
@@ -620,7 +702,7 @@ export function buildFrameIR(project, frame, opts = {}) {
         plane,
         content: { ...content, glow: num(st.glow) },
         effects: [],
-        source: el.source && el.source.id ? { id: el.source.id, node: el.source.node ?? null } : null,
+        source: source ? source.echo : null,
       },
     });
     ids.push(el.id);

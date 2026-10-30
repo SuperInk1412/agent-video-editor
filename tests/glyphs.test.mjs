@@ -335,7 +335,7 @@ test('frame IR v4: a text item carries the mesh id, the box and one shared mesh'
   const cache = { fonts: new Map(), glyphs: new Map(), meshes: new Map() };
   const ir = buildFrameIR(p, 0, { fonts, textCache: cache });
   assert.equal(ir.version, FRAME_IR_VERSION);
-  assert.equal(FRAME_IR_VERSION, 4);
+  assert.equal(FRAME_IR_VERSION, 5); // v5 = WP4.2 `items[].source.fallback`
   const items = ir.items.filter((it) => it.kind === 'text');
   assert.equal(items.length, 2);
   for (const item of items) {

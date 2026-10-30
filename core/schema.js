@@ -8,7 +8,10 @@ import { linkIssues, normalizeLinks, projectLinkIssues } from './links.js';
 import { feedIssues } from './camfeed.js';
 import { dirRollFromRotation, normalizeRotation } from './rotation.js';
 import { normalizeCustomPresets } from './curves.js';
-import { codeIssues, isSafeSourceFile, manifestIssues, normalizeCode, normalizeSources, sourceManifest, SOURCE_MANIFEST } from './code-layer.js';
+import { codeIssues, isSafeSourceFile, isSafeSourceId, manifestIssues, normalizeCode, normalizeSources, sourceManifest, SOURCE_MANIFEST } from './code-layer.js';
+import {
+  SOURCE_MODES, SOURCE_PATHS, isNumericSourcePath, isSourceNodeId, isSourcePath,
+} from './source-eval.js';
 // A "project" is the single source of truth on disk: <project>/project.vdm.json
 
 export const SCHEMA = PROJECT_SCHEMA;
@@ -149,6 +152,46 @@ function normalizeHostLinks(host) {
 // this; agents may not write it". Humans still can, told apart by the
 // transaction's actorId. The flag is stored only when true, so a project
 // without locks loads and saves write-free.
+// ---- source binding (§7.8.2, WP4.2) --------------------------------------
+// `el.source = { id, node }` says "this element comes from a compiled source
+// node"; `el.sourceMode` is the sparse per-path overlay table. Normalisation
+// only *keeps* legal values — it never invents a binding, and a broken one is
+// dropped whole instead of blocking the load (the "never fabricate" rule
+// `node` follows). `validateProject` reports what normalisation removes.
+function normalizeSourceMode(raw) {
+  const out = {};
+  if (!isRecord(raw)) return out;
+  for (const path of SOURCE_PATHS) {
+    const mode = raw[path];
+    if (!SOURCE_MODES.includes(mode)) continue;
+    // §7.8.2: `mul` on a string / colour / enum path has no multiplication to
+    // do, so that key falls back to the default.
+    if (mode === 'mul' && !isNumericSourcePath(path)) continue;
+    out[path] = mode;
+  }
+  return out;
+}
+
+function normalizeSourceBinding(el) {
+  if (!isRecord(el)) return;
+  if (el.source === undefined) {
+    delete el.sourceMode; // §7.8.2: no binding, no overlay table
+    return;
+  }
+  const src = isRecord(el.source) ? el.source : {};
+  const id = typeof src.id === 'string' ? src.id : '';
+  const node = typeof src.node === 'string' ? src.node : '';
+  if (!id || !node || !isSafeSourceId(id)) {
+    delete el.source;
+    delete el.sourceMode;
+    return;
+  }
+  el.source = { id, node };
+  const mode = normalizeSourceMode(el.sourceMode);
+  if (Object.keys(mode).length) el.sourceMode = mode;
+  else delete el.sourceMode;
+}
+
 function normalizeLocked(host) {
   if (!isRecord(host) || host.locked === true) return;
   if (Object.hasOwn(host, 'locked')) delete host.locked;
@@ -367,6 +410,7 @@ export function normalizeProject(p) {
     if (e.type === 'code') e.code = normalizeCode(e.code, sourceManifest(p, isRecord(e.code) ? e.code.source : ''));
     normalizeHostLinks(e);
     normalizeLocked(e);
+    normalizeSourceBinding(e);
     return e;
   });
   elIds.clear();
@@ -383,6 +427,39 @@ export function normalizeProject(p) {
   }
   p.world = normalizeWorld(p.world);
   return p;
+}
+
+/**
+ * Validation problems of an optional element `source` (§7.8.2): no repair, no
+ * mutation. The node id is checked for shape only — whether the compiled
+ * snapshot actually carries it is the snapshot's business (§7.8.2 "降级").
+ */
+export function sourceIssues(source, at = 'source') {
+  const issues = [];
+  const push = (p, msg) => issues.push({ path: p, msg });
+  if (!isRecord(source)) return [{ path: at, msg: 'must be an object' }];
+  if (typeof source.id !== 'string' || !source.id) push(`${at}.id`, 'must be a nonempty source id');
+  else if (!isSafeSourceId(source.id)) push(`${at}.id`, 'must match [A-Za-z0-9][A-Za-z0-9_-]{0,63}');
+  if (typeof source.node !== 'string' || !source.node) push(`${at}.node`, 'must be a nonempty node id');
+  else if (!isSourceNodeId(source.node)) push(`${at}.node`, 'must match ^[A-Za-z_][A-Za-z0-9_.-]{0,63}$');
+  for (const key of Object.keys(source)) {
+    if (key !== 'id' && key !== 'node') push(`${at}.${key}`, 'is not part of a source binding');
+  }
+  return issues;
+}
+
+/** Validation problems of an optional `sourceMode` table (§7.8.2). */
+export function sourceModeIssues(mode, at = 'sourceMode', source = null) {
+  const issues = [];
+  const push = (p, msg) => issues.push({ path: p, msg });
+  if (!isRecord(mode)) return [{ path: at, msg: 'must be an object' }];
+  if (source === null || source === undefined) push(at, 'needs el.source');
+  for (const [path, value] of Object.entries(mode)) {
+    if (!isSourcePath(path)) { push(`${at}.${path}`, 'is not a source path'); continue; }
+    if (!SOURCE_MODES.includes(value)) { push(`${at}.${path}`, 'must be add, mul or override'); continue; }
+    if (value === 'mul' && !isNumericSourcePath(path)) push(`${at}.${path}`, 'mul needs a numeric path');
+  }
+  return issues;
 }
 
 /** Collect validation problems without repairing or mutating the document. */
@@ -489,6 +566,8 @@ export function validateProject(p) {
       else issues.push(...codeIssues(e.code, `${at}.code`));
     }
     if (e.links !== undefined) issues.push(...linkIssues(e.links, `${at}.links`));
+    if (e.source !== undefined) issues.push(...sourceIssues(e.source, `${at}.source`));
+    if (e.sourceMode !== undefined) issues.push(...sourceModeIssues(e.sourceMode, `${at}.sourceMode`, e.source));
     if (e.style?.size !== undefined) number(e.style.size, `${at}.style.size`, { min: 0 });
     if (e.segment && !segIds.has(e.segment)) push(`elements[${i}].segment`, `unknown segment ${e.segment}`);
     array(e.keyframes, `${at}.keyframes`, true).forEach((k, j) => {

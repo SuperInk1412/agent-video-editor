@@ -102,7 +102,10 @@ test('frame IR: version, JSON shape and frame/time convention', () => {
   const p = demo();
   const ir = buildFrameIR(p, 24);
   assert.equal(ir.version, FRAME_IR_VERSION);
-  assert.equal(FRAME_IR_VERSION, 4);
+  // v5 (WP4.2): `items[].source` carries `fallback: 'editor-layer'` when the
+  // source snapshot is missing (§7.8.2). Projects without `el.source` keep
+  // exactly the v4 fields, which is what the golden snapshot below proves.
+  assert.equal(FRAME_IR_VERSION, 5);
   assert.equal(ir.frame, 24);
   assert.equal(ir.fps, 24);
   assert.equal(ir.t, 1); // t = frame / fps (P5: whole frames only)
