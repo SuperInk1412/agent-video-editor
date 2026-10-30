@@ -50,6 +50,43 @@ const PATH_LABELS = {
 };
 const KF_TIP = '打关键帧\nShift+点击 删除当前帧关键帧';
 
+// ---------------------------------------------------------------- section registry
+//
+// The panel is a list of sections and exactly one matches a selection (that is
+// the old `if (object) … else if (element) … else` chain). A work package that
+// adds a host of its own — code-layer parameters (WP3.6), source marks and
+// overlay/takeover (WP4.6) — registers a section file instead of editing
+// `render()` (docs/DESIGN-BACKEND-V2.md §10.4.3):
+//
+//   import { registerInspectorSection } from './inspector.js';
+//   registerInspectorSection({
+//     id: 'code', order: 25,
+//     when: (sel) => sel.isElement && sel.element.type === 'code',
+//     render: ({ insp, project, element, time }) => { insp.root.appendChild(insp._sec(…)); },
+//   });
+//
+// `when(sel)` receives the resolved selection (see `_selection()`):
+// { project, sel, time, multi, primary, object, element, cam, segmentId } plus
+// the mutually exclusive flags isObject / isElement / isSegment / isCamera /
+// isProject. Sections paint in `order`; the five defaults are 10…50.
+const sections = [];
+
+/** @param {{id:string, order?:number, when:(sel:object)=>boolean, render:(ctx:object)=>void}} section */
+export function registerInspectorSection(section) {
+  if (!section || typeof section.id !== 'string' || !section.id) throw new TypeError('registerInspectorSection needs an id');
+  if (typeof section.when !== 'function') throw new TypeError(`inspector section ${section.id} needs when(sel)`);
+  if (typeof section.render !== 'function') throw new TypeError(`inspector section ${section.id} needs render(ctx)`);
+  if (sections.some((entry) => entry.id === section.id)) throw new Error(`inspector section ${section.id} is already registered`);
+  sections.push({ order: 100, ...section });
+  sections.sort((a, b) => a.order - b.order);
+  return section;
+}
+
+/** Registered sections in paint order — for tests and diagnostics. */
+export function inspectorSections() {
+  return sections.map(({ id, order }) => ({ id, order }));
+}
+
 /** '#abc' / 'abc' / '#aabbcc' -> '#aabbcc' (null when not a hex colour) */
 function normHex(v) {
   const s = String(v ?? '').trim().replace(/^#/, '');
@@ -133,8 +170,9 @@ export class Inspector {
     // The pool primary is what the panel edits; legacy single-selection fields
     // stay as a fallback for callers that pass no pool. A cam / ob / el mixed
     // selection still shows only the primary entity (plus a count).
-    const primary = sel?.pool?.kind ? splitRef(sel.pool.primary) : null;
-    const multi = sel?.pool?.kind === 'element' && sel.pool.ids.length > 1 ? sel.pool.ids.length : 0;
+    const pick = this._selection(project, sel, time);
+    const primary = pick.primary;
+    const multi = pick.multi;
     const key = `${project.rev}|${primary ? `${primary.type}:${primary.id}` : (sel?.camera ? 'cam' : '')}|${sel?.elementId}|${sel?.objectId}|${sel?.segmentId}|${multi}|${Math.round(time * 10)}`;
     if (key === this.lastRenderKey) { this._syncKeys(); return; }
     this.lastRenderKey = key;
@@ -145,18 +183,41 @@ export class Inspector {
     // The back chip belongs to the sticky header so a scrolled panel cannot hide
     // it; it is only present after a "转到父级" jump.
     this._back = !!this.opts.canGoBack?.();
+    // Section registry, not an if-chain: exactly one registered section matches
+    // (see registerInspectorSection at the top of this file).
+    for (const section of sections) {
+      if (!section.when(pick)) continue;
+      section.render({ ...pick, insp: this });
+    }
+    this._applyReadOnly();
+  }
+
+  /**
+   * What the panel is looking at, resolved once per render. A mixed cam/ob/el
+   * pool keeps showing only the primary entity; the entity lookups mirror what
+   * the old if-chain did, including the "an id that is no longer in the project
+   * falls through to the next kind" behaviour.
+   */
+  _selection(project, sel, time) {
+    const primary = sel?.pool?.kind ? splitRef(sel.pool.primary) : null;
+    const multi = sel?.pool?.kind === 'element' && sel.pool.ids.length > 1 ? sel.pool.ids.length : 0;
     const objectId = primary?.type === 'ob' ? primary.id : (primary ? null : sel?.objectId);
     const elementId = primary?.type === 'el' ? primary.id : (primary ? null : sel?.elementId);
     const camera = primary ? primary.type === 'cam' : !!sel?.camera;
-    const object = (project.scene?.objects || []).find((o) => o.id === objectId);
-    const element = project.elements.find((e) => e.id === elementId);
-    const cam = camera ? ((project.cameras || []).find((c) => c.id === primary?.id) || project.camera) : null;
-    if (object) this._renderObject(project, object, time, multi);
-    else if (element) this._renderElement(project, element, time, multi);
-    else if (sel?.segmentId) this._renderSegment(project, sel.segmentId);
-    else if (cam) this._renderCamera(project, time, cam, multi);
-    else this._renderProject(project);
-    this._applyReadOnly();
+    const object = (project.scene?.objects || []).find((o) => o.id === objectId) || null;
+    const element = project.elements.find((e) => e.id === elementId) || null;
+    const cam = camera ? ((project.cameras || []).find((c) => c.id === primary?.id) || project.camera || null) : null;
+    const segmentId = sel?.segmentId || null;
+    return {
+      project, sel, time, multi, primary,
+      objectId, elementId, object, element, cam, segmentId,
+      // mutually exclusive, in the old chain's order
+      isObject: !!object,
+      isElement: !object && !!element,
+      isSegment: !object && !element && !!segmentId,
+      isCamera: !object && !element && !segmentId && !!cam,
+      isProject: !object && !element && !segmentId && !cam,
+    };
   }
 
   /** Repaint ◆ states / current-key rows for the playhead without rebuilding the panel. */
@@ -1628,6 +1689,44 @@ export class Inspector {
     this.root.appendChild(h('div', { class: 'hint pad' }, '选中元素后可以逐项编辑；点画面里的元素或时间线里的色块。'));
   }
 }
+
+// ---------------------------------------------------------------- default sections
+//
+// The five panels the inspector always had, registered in the order the old
+// if-chain ran them. Their bodies stay class methods because they share the
+// panel's helpers (`_sec`, `_row`, `_field`, `_linksSummary`, …); a new section
+// file only needs `insp.<helper>` plus its own DOM.
+
+registerInspectorSection({
+  id: 'object',
+  order: 10,
+  when: (sel) => sel.isObject,
+  render: ({ insp, project, object, time, multi }) => insp._renderObject(project, object, time, multi),
+});
+registerInspectorSection({
+  id: 'element',
+  order: 20,
+  when: (sel) => sel.isElement,
+  render: ({ insp, project, element, time, multi }) => insp._renderElement(project, element, time, multi),
+});
+registerInspectorSection({
+  id: 'segment',
+  order: 30,
+  when: (sel) => sel.isSegment,
+  render: ({ insp, project, segmentId }) => insp._renderSegment(project, segmentId),
+});
+registerInspectorSection({
+  id: 'camera',
+  order: 40,
+  when: (sel) => sel.isCamera,
+  render: ({ insp, project, time, cam, multi }) => insp._renderCamera(project, time, cam, multi),
+});
+registerInspectorSection({
+  id: 'project',
+  order: 50,
+  when: (sel) => sel.isProject,
+  render: ({ insp, project }) => insp._renderProject(project),
+});
 
 const round = (v, d = 2) => {
   const p = Math.pow(10, d);

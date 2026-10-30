@@ -111,7 +111,10 @@ const S = {
 // `description` is the paragraph an agent may need; `example` must validate
 // against the op schema (tests/contracts.test.mjs runs validateContract on it).
 
-const OP_DEFS = {
+// The built-in contracts. A feature module adds its own through
+// `registerContracts()` below instead of editing this literal
+// (docs/DESIGN-BACKEND-V2.md §10.4.3): the op's contract lives next to the op.
+const CORE_OP_DEFS = {
   addElement: {
     group: 'element',
     summary: '新建 2D 元素',
@@ -627,10 +630,21 @@ const OP_DEFS = {
   },
 };
 
-// ---------------------------------------------------------------- op schema
+// ---------------------------------------------------------------- registries
+//
+// Both tables below are built from the built-in fragments above plus whatever a
+// feature module registered through `registerContracts()`. Registration has to
+// happen while that module is evaluated, i.e. before a module that *reads* the
+// tables runs; `registerContracts` rebuilds the tables in place and the bindings
+// are `let`, so a reader that resolves them at call time sees the finished set.
+
+const OP_DEFS = { ...CORE_OP_DEFS };
+const registeredFragments = new Set();
+const registeredOpTokens = new Map(); // kind -> fragment id, for the double-register check
+let propertyRows; // the built-in rows, filled in by the property tables below
 
 /** Public ops: every OP_KINDS entry that has a contract here. */
-export const PUBLIC_OPS = Object.freeze(OP_KINDS.filter((op) => Object.hasOwn(OP_DEFS, op)));
+export let PUBLIC_OPS = Object.freeze([]);
 
 const variantOf = (op) => {
   const { fields, required } = OP_DEFS[op];
@@ -639,33 +653,13 @@ const variantOf = (op) => {
   return { type: 'object', required: ['op', ...required], properties, additionalProperties: false };
 };
 
-export const OP_SCHEMA = Object.freeze({ oneOf: PUBLIC_OPS.map(variantOf) });
+export let OP_SCHEMA = Object.freeze({ oneOf: [] });
 
 /** One contract row per public op: schema + doc metadata + field rows. */
-export const OP_CONTRACTS = Object.freeze(Object.fromEntries(PUBLIC_OPS.map((op) => {
-  const def = OP_DEFS[op];
-  const fields = Object.entries(def.fields).map(([name, entry]) => ({
-    name,
-    required: def.required.includes(name),
-    type: entry.schema.type ?? (entry.schema.enum ? 'enum' : entry.schema.anyOf ? 'mixed' : 'any'),
-    enum: entry.schema.enum ?? null,
-    unit: entry.unit,
-    description: entry.schema.description ?? '',
-  }));
-  return [op, Object.freeze({
-    op,
-    group: def.group,
-    summary: def.summary,
-    description: def.description,
-    required: Object.freeze([...def.required]),
-    fields: Object.freeze(fields),
-    example: def.example ?? null,
-    schema: Object.freeze(variantOf(op)),
-  })];
-})));
+export let OP_CONTRACTS = Object.freeze({});
 
-/** Doc sections, in order. */
-export const OP_GROUPS = Object.freeze([
+/** Doc sections, in order. A registered fragment may append more. */
+const CORE_OP_GROUPS = [
   { id: 'element', title: '元素（2D）', description: '时间线上的 2D 元素：文字、图片、视频、图形、音频、摄像机画面、代码图层。' },
   { id: 'keyframe', title: '关键帧', description: '元素/物体/相机参数都走同一套关键帧写法；t 是项目绝对时间。' },
   { id: 'segment', title: '分镜', description: '分镜是时间标注，不参与求值。' },
@@ -676,7 +670,9 @@ export const OP_GROUPS = Object.freeze([
   { id: 'link', title: '属性链接', description: '一个宿主的数值属性跟随另一个宿主的数值属性。' },
   { id: 'source', title: '代码图层源', description: 'sources/<id>/ 由工程文档里的源清单派生。' },
   { id: 'batch', title: '批量', description: '一次提交多个 op。' },
-]);
+];
+const opGroups = [...CORE_OP_GROUPS];
+export let OP_GROUPS = Object.freeze([...CORE_OP_GROUPS]);
 
 // ---------------------------------------------------------------- request schema
 
@@ -694,38 +690,18 @@ export const EDIT_OPS_ARRAY = Object.freeze({
   description: '要提交的 op 列表：原子、按顺序、任一失败整批不生效。',
 });
 
-export const EDIT_SCHEMA = Object.freeze({
-  type: 'object',
-  additionalProperties: false,
-  required: ['expectedRev', 'requestId', 'ops'],
-  properties: { ...EDIT_BASELINE, ops: EDIT_OPS_ARRAY },
-  $defs: { op: OP_SCHEMA },
-});
+// The three tool schemas embed the op union, so they are rebuilt by
+// `refreshContracts()` after a registration (see the end of this file).
+export let EDIT_SCHEMA = Object.freeze({});
 
 /**
  * `vdm_changeset_apply`: either a stored proposal (`id`) or a new one
  * (`ops`), plus the actor/intent that will be recorded.
  */
-export const CHANGESET_APPLY_SCHEMA = Object.freeze({
-  type: 'object',
-  additionalProperties: false,
-  $defs: { op: OP_SCHEMA },
-  properties: {
-    id: { type: 'string', minLength: 1, maxLength: 512, description: '已存在（dryRun 预演过）的变更集 id；与 ops 二选一。' },
-    ops: EDIT_OPS_ARRAY,
-    actorId: ACTOR_ID,
-    intent: { type: 'string', maxLength: 512, description: '一句人话说明这次改动的目的，记进变更集。' },
-    expectedRev: EXPECTED_REV,
-    requestId: REQUEST_ID,
-    dryRun: DRY_RUN,
-  },
-});
+export let CHANGESET_APPLY_SCHEMA = Object.freeze({});
 
 /** Schema of every tool that carries the op contract, by tool name. */
-export const TOOL_SCHEMAS = Object.freeze({
-  vdm_project_apply_ops: EDIT_SCHEMA,
-  vdm_changeset_apply: CHANGESET_APPLY_SCHEMA,
-});
+export let TOOL_SCHEMAS = Object.freeze({});
 
 // ---------------------------------------------------------------- property paths
 //
@@ -929,31 +905,32 @@ const CAMERA_FIELDS = [
   P('cam', 'locked', 'boolean', null, false, { label: '锁定', description: 'agent:* 身份的写入返回 LOCKED；人和 ui 仍可改。' }),
 ];
 
-/** Every addressable path, in doc order. */
-export const PROPERTY_PATHS = Object.freeze([
-  ...ELEMENT_TRACKS, ...ELEMENT_LINK_PATHS, ...ELEMENT_FIELDS, ...OBJECT_TRACKS, ...OBJECT_FIELDS, ...CAMERA_TRACKS, ...CAMERA_FIELDS,
-].map((row) => Object.freeze({
+/** Every finished row gets the same defaults, in the same order as before. */
+const completeRow = (row) => Object.freeze({
   required: false, enum: null, description: '', label: row.path, linkAlias: null, legacy: false, ...row,
-})));
+});
 
-const byHost = (host) => PROPERTY_PATHS.filter((row) => row.host === host);
-export const PROPERTY_PATHS_BY_HOST = Object.freeze({ el: byHost('el'), ob: byHost('ob'), cam: byHost('cam') });
+const CORE_PROPERTY_PATHS = [
+  ...ELEMENT_TRACKS, ...ELEMENT_LINK_PATHS, ...ELEMENT_FIELDS, ...OBJECT_TRACKS, ...OBJECT_FIELDS, ...CAMERA_TRACKS, ...CAMERA_FIELDS,
+].map(completeRow);
+propertyRows = [...CORE_PROPERTY_PATHS];
+
+/** Every addressable path, in doc order. */
+export let PROPERTY_PATHS = Object.freeze([...propertyRows]);
+
+export let PROPERTY_PATHS_BY_HOST = Object.freeze({ el: [], ob: [], cam: [] });
 
 /** Paths whose keyframes the evaluator samples, per host. */
-export const KEYABLE_PATHS = Object.freeze(Object.fromEntries(
-  ['el', 'ob', 'cam'].map((host) => [host, Object.freeze(byHost(host).filter((row) => row.keyable).map((row) => row.path))]),
-));
+export let KEYABLE_PATHS = Object.freeze({});
 
 /** Paths a property link may reference, per host. */
-export const LINKABLE_PATHS = Object.freeze(Object.fromEntries(
-  ['el', 'ob', 'cam'].map((host) => [host, Object.freeze(byHost(host).filter((row) => row.linkable).map((row) => row.path))]),
-));
+export let LINKABLE_PATHS = Object.freeze({});
 
 /** Value families a property link may connect; re-exported so the docs quote links.js. */
 export const LINK_UNIT_FAMILIES = LINK_UNITS;
 
 /** Hosts that can be locked (`locked: true` refuses `agent:*` writes). */
-export const LOCKABLE_HOSTS = Object.freeze(PROPERTY_PATHS.filter((row) => row.path === 'locked').map((row) => row.host));
+export let LOCKABLE_HOSTS = Object.freeze([]);
 
 /**
  * Old paths. `status: 'deprecated'` means new elements must not use it (the
@@ -1007,3 +984,127 @@ export const DOCUMENT_DEFAULTS = Object.freeze({
 
 /** Camera/object rows whose template entry the test can cross-check. */
 export const TEMPLATE_CHANNELS = Object.freeze(TEMPLATE_PROPERTIES);
+
+// ---------------------------------------------------------------- registration
+
+/**
+ * A feature module registers its op contracts here instead of editing the
+ * literals above (docs/DESIGN-BACKEND-V2.md §10.4.3):
+ *
+ *   registerContracts({
+ *     id: 'sources',
+ *     opDefs: { sourceAdd: { group: 'source', summary, description, required, fields } },
+ *     opGroups: [{ id: 'source', title, description }],
+ *     propertyPaths: [P('el', 'code.param.density', …)],
+ *   });
+ *
+ * Idempotent by `id`: importing the same module twice (or calling this twice
+ * with the same fragment) leaves the tables exactly as they are. Registering a
+ * kind or a path that already exists is a no-op (paths dedupe on host + path);
+ * silently replacing another module's contract would hide a merge conflict, so
+ * that throws instead.
+ */
+export function registerContracts(fragment = {}) {
+  const id = fragment.id ? String(fragment.id) : null;
+  if (id && registeredFragments.has(id)) return false;
+
+  // Validate the whole fragment first: a fragment that throws must not leave
+  // half of itself behind.
+  const defs = fragment.opDefs ? Object.entries(fragment.opDefs) : [];
+  for (const [op] of defs) {
+    if (Object.hasOwn(CORE_OP_DEFS, op)) throw new Error(`contract ${op} is built in`);
+    const owner = registeredOpTokens.get(op);
+    if (owner && owner !== id) throw new Error(`contract ${op} is already registered by ${owner}`);
+  }
+
+  if (id) registeredFragments.add(id);
+  for (const [op, def] of defs) {
+    registeredOpTokens.set(op, id);
+    OP_DEFS[op] = def;
+  }
+  if (fragment.opGroups) {
+    for (const group of fragment.opGroups) {
+      if (!opGroups.some((existing) => existing.id === group.id)) opGroups.push(group);
+    }
+  }
+  if (fragment.propertyPaths) {
+    for (const row of fragment.propertyPaths) {
+      const complete = completeRow(row);
+      if (propertyRows.some((existing) => existing.host === complete.host && existing.path === complete.path)) continue;
+      propertyRows.push(complete);
+    }
+  }
+  refreshContracts();
+  return true;
+}
+
+/**
+ * Rebuild every table that is derived from the registries. Called once when this
+ * module finishes loading (the built-in tables) and again after each
+ * `registerContracts`.
+ */
+export function refreshContracts() {
+  PROPERTY_PATHS = Object.freeze([...propertyRows]);
+  const byHost = (host) => PROPERTY_PATHS.filter((row) => row.host === host);
+  PROPERTY_PATHS_BY_HOST = Object.freeze({ el: byHost('el'), ob: byHost('ob'), cam: byHost('cam') });
+  KEYABLE_PATHS = Object.freeze(Object.fromEntries(
+    ['el', 'ob', 'cam'].map((host) => [host, Object.freeze(byHost(host).filter((row) => row.keyable).map((row) => row.path))]),
+  ));
+  LINKABLE_PATHS = Object.freeze(Object.fromEntries(
+    ['el', 'ob', 'cam'].map((host) => [host, Object.freeze(byHost(host).filter((row) => row.linkable).map((row) => row.path))]),
+  ));
+  LOCKABLE_HOSTS = Object.freeze(PROPERTY_PATHS.filter((row) => row.path === 'locked').map((row) => row.host));
+
+  OP_GROUPS = Object.freeze([...opGroups]);
+  PUBLIC_OPS = Object.freeze(OP_KINDS.filter((op) => Object.hasOwn(OP_DEFS, op)));
+  OP_SCHEMA = Object.freeze({ oneOf: PUBLIC_OPS.map(variantOf) });
+  OP_CONTRACTS = Object.freeze(Object.fromEntries(PUBLIC_OPS.map((op) => {
+    const def = OP_DEFS[op];
+    const fields = Object.entries(def.fields).map(([name, entry]) => ({
+      name,
+      required: def.required.includes(name),
+      type: entry.schema.type ?? (entry.schema.enum ? 'enum' : entry.schema.anyOf ? 'mixed' : 'any'),
+      enum: entry.schema.enum ?? null,
+      unit: entry.unit,
+      description: entry.schema.description ?? '',
+    }));
+    return [op, Object.freeze({
+      op,
+      group: def.group,
+      summary: def.summary,
+      description: def.description,
+      required: Object.freeze([...def.required]),
+      fields: Object.freeze(fields),
+      example: def.example ?? null,
+      schema: Object.freeze(variantOf(op)),
+    })];
+  })));
+
+  EDIT_SCHEMA = Object.freeze({
+    type: 'object',
+    additionalProperties: false,
+    required: ['expectedRev', 'requestId', 'ops'],
+    properties: { ...EDIT_BASELINE, ops: EDIT_OPS_ARRAY },
+    $defs: { op: OP_SCHEMA },
+  });
+  CHANGESET_APPLY_SCHEMA = Object.freeze({
+    type: 'object',
+    additionalProperties: false,
+    $defs: { op: OP_SCHEMA },
+    properties: {
+      id: { type: 'string', minLength: 1, maxLength: 512, description: '已存在（dryRun 预演过）的变更集 id；与 ops 二选一。' },
+      ops: EDIT_OPS_ARRAY,
+      actorId: ACTOR_ID,
+      intent: { type: 'string', maxLength: 512, description: '一句人话说明这次改动的目的，记进变更集。' },
+      expectedRev: EXPECTED_REV,
+      requestId: REQUEST_ID,
+      dryRun: DRY_RUN,
+    },
+  });
+  TOOL_SCHEMAS = Object.freeze({
+    vdm_project_apply_ops: EDIT_SCHEMA,
+    vdm_changeset_apply: CHANGESET_APPLY_SCHEMA,
+  });
+}
+
+refreshContracts();

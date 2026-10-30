@@ -18,7 +18,11 @@ import { LINK_OP_KINDS, applyLinkOp, normalizeLinks, pruneLinksForHost } from '.
 // declaration is hoisted, so dispatching to it is safe.
 import { applySpatialParentOp } from './spatial-parent.js';
 
-export const OP_KINDS = [
+// The op table: the kinds the switch below implements, in contract order.
+// `OP_KINDS` is this table plus `EXT_OP_KINDS` from core/ops-ext.js, so a
+// feature module registers its ops there instead of editing this file
+// (docs/DESIGN-BACKEND-V2.md §10.4.3).
+const OPS = [
   'addElement', 'updateElement', 'set', 'removeElement', 'moveElement',
   'splitElement', 'splitAt', 'duplicateElement', 'reorder', 'addSegment', 'updateSegment',
   'removeSegment', 'setMeta', 'setFx', 'keySet', 'keyRemove', 'keyCurve', 'batch',
@@ -31,6 +35,10 @@ export const OP_KINDS = [
   'spatialParent', 'spatialUnparent',
   // property links (core/links.js)
   ...LINK_OP_KINDS,
+];
+
+export const OP_KINDS = [
+  ...OPS,
   // ops added by feature modules through core/ops-ext.js
   ...EXT_OP_KINDS,
 ];
@@ -1221,7 +1229,8 @@ export function applyOp(p, op) {
 
     default: {
       // Feature modules register their ops through core/ops-ext.js instead of
-      // editing this switch. They get the same validation helpers core ops use.
+      // editing this switch. The dispatch is a registry lookup there, and the
+      // handlers get the same validation helpers core ops use.
       const ext = applyExtOp(p, op, {
         fail,
         deepMerge,

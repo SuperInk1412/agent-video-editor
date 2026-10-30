@@ -1,13 +1,26 @@
 // Extension point for operations that do not belong in the core switch.
 //
 // `core/ops.js` falls back to `applyExtOp()` when it meets an unknown op kind,
-// so feature modules (hierarchy, presets, media objects, …) can add operations
-// without editing the big switch or the existing case names.
+// so feature modules (hierarchy, presets, media objects, code layers, …) add
+// operations without editing the big switch or the existing case names.
+//
+// Registering (docs/DESIGN-BACKEND-V2.md §10.4.3):
+//
+//   import { registerOps } from './ops-ext.js';
+//   export const SOURCE_OPS = registerOps({
+//     id: 'sources',                 // stable id, so a double import is a no-op
+//     kinds: ['sourceAdd', …],       // appended to OP_KINDS, in this order
+//     apply(project, op, api) { … }, // returns { changed } or null
+//   });
 //
 // Contract:
-//   - export `EXT_OP_KINDS` (string[]) so OP_KINDS/CLI/docs stay in sync;
-//   - `applyExtOp(project, op, api)` returns `{ changed: [ids...] }` when it
-//     handled the op, or `null` to let core report "unknown op";
+//   - `kinds` are appended to `EXT_OP_KINDS`, which `core/ops.js` spreads into
+//     OP_KINDS, so OP_KINDS/CLI/docs stay in sync without touching ops.js;
+//   - `apply(project, op, api)` returns `{ changed: [ids...] }` when it handled
+//     the op, or `null` to let the next handler (or core) report "unknown op";
+//   - two modules may claim the same kind: the one with the lower `dispatch`
+//     number runs first (registration order breaks a tie), so a legacy name can
+//     keep the implementation it had;
 //   - do NOT import `core/ops.js` from here (that would be a cycle). Use the
 //     `api` helpers instead:
 //       { fail, deepMerge, getPath, setPath, newId, coerceValue,
@@ -23,9 +36,48 @@ import {
   manifestIssues, sourceParams, sourceRecord, writeCodeParam,
 } from './code-layer.js';
 
-// The old 3D parent op names (objectParent, …) now write spatial parents
-// (core/parent-strength.js); HIERARCHY_OP_KINDS keeps listing them.
+// ---------------------------------------------------------------- registry
 //
+// A kind maps to the ordered list of modules that claim it; `applyExtOp` asks
+// them in turn until one answers. The kind list OP_KINDS inherits is the
+// modules' `kinds` in registration order, deduped.
+
+const modules = [];
+const chains = new Map(); // kind -> module entries, sorted by (dispatch, index)
+let nextIndex = 0;
+
+/** Register one feature module's ops. Idempotent by `id`. */
+export function registerOps(module) {
+  const kinds = module?.kinds;
+  if (!Array.isArray(kinds) || !kinds.length) throw new TypeError('registerOps: kinds must be a non-empty array');
+  if (typeof module.apply !== 'function') throw new TypeError('registerOps: apply(project, op, api) is required');
+  const id = String(module.id || kinds[0]);
+  if (modules.some((entry) => entry.id === id)) return module;
+  const entry = {
+    id, kinds,
+    claims: Array.isArray(module.claims) ? module.claims : [],
+    dispatch: Number.isFinite(module.dispatch) ? module.dispatch : 100,
+    apply: module.apply,
+    index: nextIndex++,
+  };
+  modules.push(entry);
+  for (const kind of new Set([...entry.kinds, ...entry.claims])) {
+    const chain = chains.get(kind) || [];
+    chain.push(entry);
+    chain.sort((a, b) => a.dispatch - b.dispatch || a.index - b.index);
+    chains.set(kind, chain);
+  }
+  EXT_OP_KINDS = Object.freeze([...new Set(modules.flatMap((entry) => entry.kinds))]);
+  return module;
+}
+
+/**
+ * Every kind a feature module registered, in registration order. `core/ops.js`
+ * spreads this into OP_KINDS; the registrations below run while this module
+ * loads, i.e. before ops.js reads it.
+ */
+export let EXT_OP_KINDS = Object.freeze([]);
+
 // -- code layers (§6.1) -----------------------------------------------------
 //
 // `sources/<id>/` is a directory, so the project document owns the registry
@@ -34,10 +86,6 @@ import {
 // inside the op log: locked, rev-checked, undoable, and visible to the agent.
 
 export const CODE_OP_KINDS = Object.freeze(['sourceAdd', 'sourceWrite', 'sourceRemove', 'codeParamSet']);
-
-export const EXT_OP_KINDS = [...new Set([
-  ...HIERARCHY_OP_KINDS, ...ELEMENT_PARENT_OP_KINDS, ...PARENT_STRENGTH_OP_KINDS, ...CODE_OP_KINDS,
-])];
 
 const str = (value, d = '') => (value === undefined || value === null ? d : String(value));
 
@@ -140,6 +188,53 @@ function codeParamSet(project, op, fail, api) {
   };
 }
 
+/** `apply` of the code-layer module: its four kinds share one entry point. */
+function applyCodeOp(project, op, api) {
+  const fail = typeof api?.fail === 'function' ? api.fail : (message) => {
+    throw Object.assign(new Error(message), { code: 'OP_INVALID' });
+  };
+  if (op.op === 'sourceAdd') return sourceAdd(project, op, fail);
+  if (op.op === 'sourceWrite') return sourceWrite(project, op, fail);
+  if (op.op === 'sourceRemove') return sourceRemove(project, op, fail);
+  return codeParamSet(project, op, fail, api);
+}
+
+// ---------------------------------------------------------------- registrations
+//
+// Registration order (not dispatch order) is what OP_KINDS inherits, and it is
+// the order the old hand-written EXT_OP_KINDS array had: hierarchy, element
+// parents, parent strength, code layers. `dispatch` only decides which module
+// wins when two of them claim one kind.
+
+registerOps({
+  id: 'hierarchy',
+  kinds: HIERARCHY_OP_KINDS,
+  dispatch: 20,
+  apply: (project, op, api) => applyHierarchyOp(project, op, api),
+});
+registerOps({
+  id: 'element-parent',
+  kinds: ELEMENT_PARENT_OP_KINDS,
+  dispatch: 30,
+  apply: (project, op, api) => applyElementParentOp(project, op, api),
+});
+// The old 3D parent names (objectParent, …) now write spatial parents
+// (core/parent-strength.js) and must keep doing so even though `hierarchy`
+// lists the same names: lower dispatch wins.
+registerOps({
+  id: 'parent-strength',
+  kinds: PARENT_STRENGTH_OP_KINDS,
+  claims: LEGACY_PARENT_OP_KINDS,
+  dispatch: 10,
+  apply: (project, op, api) => applyParentStrengthOp(project, op, api),
+});
+registerOps({
+  id: 'code-layer',
+  kinds: CODE_OP_KINDS,
+  dispatch: 40,
+  apply: applyCodeOp,
+});
+
 /**
  * @param {object} project
  * @param {object} op
@@ -147,17 +242,11 @@ function codeParamSet(project, op, fail, api) {
  * @returns {{changed: string[]}|null}
  */
 export function applyExtOp(project, op, api) {
-  if (LEGACY_PARENT_OP_KINDS.includes(op?.op) || PARENT_STRENGTH_OP_KINDS.includes(op?.op)) return applyParentStrengthOp(project, op, api);
-  if (HIERARCHY_OP_KINDS.includes(op?.op)) return applyHierarchyOp(project, op, api);
-  if (ELEMENT_PARENT_OP_KINDS.includes(op?.op)) return applyElementParentOp(project, op, api);
-  if (CODE_OP_KINDS.includes(op?.op)) {
-    const fail = typeof api?.fail === 'function' ? api.fail : (message) => {
-      throw Object.assign(new Error(message), { code: 'OP_INVALID' });
-    };
-    if (op.op === 'sourceAdd') return sourceAdd(project, op, fail);
-    if (op.op === 'sourceWrite') return sourceWrite(project, op, fail);
-    if (op.op === 'sourceRemove') return sourceRemove(project, op, fail);
-    return codeParamSet(project, op, fail, api);
+  const chain = chains.get(op?.op);
+  if (!chain) return null;
+  for (const entry of chain) {
+    const result = entry.apply(project, op, api);
+    if (result) return result;
   }
   return null;
 }
