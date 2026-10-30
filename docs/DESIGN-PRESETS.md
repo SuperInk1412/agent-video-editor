@@ -125,6 +125,21 @@ presets/<id>/  preset.json · README.md · eval.js · preview.glsl? · blender.p
 - 存放位置：仓库级 `presets/` 放内置预设；项目级 `projects/<name>/presets/` 可以覆盖或新增。
 - **组合预设**：只有 `preset.json`，内容是一个预设栈，加上"提升到外层"的参数映射。
 - **AI 写的预设**：没有 README 就不能注册。`vdm preset export <id>` 把整个预设导出成一个 Markdown 文件，可以直接交给 AI 解释。
+- **画面类预设只写一份 GLSL（WP3.5，决定 D2）**：整帧效果——辉光 `bloom`、色差 `ca`、颗粒 `grain`、
+  暗角 `vignette`、扫描线 `scanline`、冷暖 `grade`、对比 `contrast`、饱和 `saturation`——的实现**只有一份**：
+  `app/renderer/shaders/post.glsl`（四段：`quad.vert` / `bright.frag` / `blur.frag` / `composite.frag`，
+  用 `// ==== <name> ====` 分隔，`core/screen-fx.js::parsePostGlsl` 解析）。规则如下：
+  - **唯一来源是这份文件**。预览（`app/renderer/js/preview.js`）用 `GET /app/renderer/shaders/post.glsl`
+    取它编译，参数规则也只有一个 `core/screen-fx.js::normalizeScreenFx`（`core/frame-ir.js` 打进 shot 包的
+    `screenFx` 与它逐字段一致，`tests/post-shaders.test.mjs` 钉住）。任何一边再写一份着色器都算回归。
+  - **Blender 不做这些效果**。`blender/vdm_build.py::build_compositor` 只做合成（雾、2D 叠加层、背景板、overlay），
+    渲染输出 16 位 PNG；`engine/blender.js` 在导出成片前用渲染池的 `pool.post`（沙箱页
+    `engine/render-workers/post.js`）把同一份 GLSL 套到帧上（16 位进出，`engine/render-workers/png16.js` 编解码），
+    再交给 ffmpeg。渲染池固定用软件光栅（SwiftShader），所以成片不随显卡漂移。
+  - 因此画面类预设的 `preview.glsl` **不另存副本**：包里的这一项留空（表示用共享文件）或只写参数映射；
+    要加新的整帧效果，改 `post.glsl`（必要时加一个 uniform）并在 `core/screen-fx.js` 里加参数——
+    预览和成片在同一次提交里一起变，这正是对拍 J 存在的意义。
+  - 验收：对拍用例 **J**（`scripts/check-render-parity.mjs`，八项效果全开）预览一帧 vs 成片同一帧，逐像素差 ≤ 2%。
 
 ### 4.3 求值语义
 ```js

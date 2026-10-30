@@ -25,7 +25,7 @@ export const DEFAULT_LOAD_TIMEOUT_MS = 4000;
 export const DEFAULT_STARTUP_TIMEOUT_MS = 20000;
 
 /** Files the `vdm-src://app/` host may serve. Anything else is a 403. */
-export const APP_FILES = ['harness.html', 'harness.js', 'sdk.js', 'post.js', 'protocol.js'];
+export const APP_FILES = ['harness.html', 'harness.js', 'sdk.js', 'post.js', 'png16.js', 'protocol.js'];
 
 /** CSP for every page in the sandbox: no network of any kind, no eval. */
 export const CSP = [

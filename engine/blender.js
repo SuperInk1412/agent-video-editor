@@ -21,6 +21,8 @@ import { bakeRasterLayers } from './raster-bake.js';
 import { buildAudioMix } from './audio-mix.js';
 import { which } from './which.js';
 import { runProcess } from './process.js';
+import { createRenderPool } from './render-workers/pool.js';
+import { isNeutralScreenFx, normalizeScreenFx } from '../core/screen-fx.js';
 
 const execFileP = promisify(execFile);
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -239,12 +241,80 @@ export async function runJob(dir, job, { onProgress, onLog, signal } = {}) {
   return result;
 }
 
+/**
+ * The screen effects, applied after Blender and before the film is encoded
+ * (docs/DESIGN-BACKEND-V2.md §5.4, WP3.5 / decision D2).
+ *
+ * Blender no longer composites bloom / CA / grain / vignette / scanline /
+ * grade / contrast / saturation: `blender/vdm_build.py::build_compositor` only
+ * does the compositing a 3D shot needs (fog, the 2D overlay, a backdrop) and
+ * writes a 16-bit PNG. The one implementation of the picture effects is
+ * `app/renderer/shaders/post.glsl`, which the preview compiles and which
+ * `pool.post` applies here — same shaders, same numbers, same picture.
+ *
+ * A machine without Electron cannot run the pool. That is not an export
+ * failure: the frames are used as Blender wrote them and the log says so.
+ * Every other error is real and propagates — a broken shader must not ship an
+ * effect-less film silently.
+ */
+async function runPost(dir, options, onLog) {
+  const pool = createRenderPool({ root: dir });
+  try {
+    return await pool.post(options);
+  } catch (error) {
+    if (error?.code !== 'DEPENDENCY_MISSING') throw error;
+    onLog?.(`post skipped (no Electron): ${error.message}`);
+    return null;
+  } finally {
+    await pool.close();
+  }
+}
+
+/**
+ * Frames: Blender wrote `f_0001.png` (1-based), so the time the grain and the
+ * scanlines need is `(frame - 1) / fps` — exactly what the preview calls `t`.
+ * Returns the directory that now holds the final frames (a new one: the raw
+ * render stays next to it for inspection).
+ */
+async function applyScreenFx(dir, project, { framesDir, fps, onLog, signal }) {
+  const fx = normalizeScreenFx(project?.meta?.fx);
+  if (isNeutralScreenFx(fx)) return framesDir;
+  signal?.throwIfAborted();
+  const outDir = `${framesDir.replace(/[\\/]+$/, '')}-post`;
+  const result = await runPost(dir, { framesDir, outDir, screenFx: fx, fps, from: 1 }, onLog);
+  if (!result) return framesDir;
+  onLog?.(`post ${result.count} frames (${result.depth}-bit) ${result.totalMs} ms -> ${outDir}`);
+  return outDir;
+}
+
 export async function renderStill({ dir, project, time = 0, out, scale = 1, samples = 16, onLog, onProgress, signal }) {
   const p = paths(dir);
   const outPath = out ? path.resolve(out) : path.join(p.frames, `still-${Date.now()}.png`);
   await runJob(dir, {
     mode: 'still', time, out: outPath, scale, samples, project,
   }, { onLog, onProgress, signal });
+  // One frame is a film too: the same effects the preview shows go on it.
+  const fx = normalizeScreenFx(project?.meta?.fx);
+  if (!isNeutralScreenFx(fx)) {
+    const stage = path.join(p.cache, 'jobs', `post-${randomUUID()}`);
+    try {
+      await fs.mkdir(path.join(stage, 'in'), { recursive: true });
+      await fs.copyFile(outPath, path.join(stage, 'in', 'still.png'));
+      const result = await runPost(dir, {
+        framesDir: path.join(stage, 'in'),
+        outDir: path.join(stage, 'out'),
+        screenFx: fx,
+        fps: Number(project.meta.fps) || 24,
+        timeOf: () => time,
+      }, onLog);
+      if (result) {
+        await fs.copyFile(path.join(stage, 'out', 'still.png'), outPath);
+        onLog?.(`post still (${result.depth}-bit) ${result.totalMs} ms -> ${outPath}`);
+      }
+    } finally {
+      await fs.rm(stage, { recursive: true, force: true });
+    }
+  }
   return outPath;
 }
 
@@ -260,7 +330,8 @@ export async function renderFrames({ dir, project, from = 0, to = 3, scale = 1, 
   await runJob(dir, {
     mode: 'frames', from, to, framesDir, scale, samples, project,
   }, { onProgress, onLog, signal });
-  return { framesDir, from: f0, to: f1, count: f1 - f0 + 1, fps };
+  const finalDir = await applyScreenFx(dir, project, { framesDir, fps, onLog, signal });
+  return { framesDir: finalDir, from: f0, to: f1, count: f1 - f0 + 1, fps };
 }
 
 /** Render a range and encode it with the project audio into an mp4. */

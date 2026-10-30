@@ -23,7 +23,6 @@ import math
 import struct
 import os
 import sys
-import numpy as np
 
 # ---------------------------------------------------------------- utilities
 
@@ -65,9 +64,6 @@ def color_rgba(value, alpha=1.0):
         return rgb_rgba(value, alpha)
     return hex_rgba(value, alpha)
 
-
-def lerp(a, b, t):
-    return a + (b - a) * t
 
 
 # ---------------------------------------------------------------- shot v3
@@ -472,87 +468,34 @@ def cover_uv(img_w, img_h, frame_w, frame_h):
 
 
 # ---------------------------------------------------------------- compositor
-
-def _noise_png(path, w, h, seed=7):
-    rng = np.random.default_rng(seed)
-    base = rng.normal(0.5, 0.16, size=(h, w))
-    base = np.clip(base, 0, 1)
-    rgba = np.ones((h, w, 4), dtype=np.float32)
-    rgba[:, :, 0] = base
-    rgba[:, :, 1] = base
-    rgba[:, :, 2] = base
-    rgba[:, :, 3] = 1.0
-    img = bpy.data.images.new('vdm_grain_src', width=w, height=h, alpha=True)
-    img.pixels.foreach_set(rgba.ravel())
-    img.filepath_raw = path
-    img.file_format = 'PNG'
-    img.save()
-    bpy.data.images.remove(img)
-    return path
+#
+# Blender composites only what it takes to make a shot *one picture*: the mist
+# pass for a 3D world, the 2D plane layer over it, a backdrop under a
+# transparent world, and an overlay scene on top.
+#
+# The screen effects are NOT here — not one node of them. Bloom, chromatic
+# aberration, grain, vignette, scanlines, grade, contrast and saturation have
+# exactly one implementation, `app/renderer/shaders/post.glsl`, which the
+# preview compiles for the viewport and which `engine/blender.js` applies to the
+# rendered frames through `pool.post` before the film is encoded (WP3.5,
+# decision D2). A second compositor copy is what drifted from the preview in the
+# first place, so this function must never grow one back.
 
 
-def _scan_png(path, w, h):
-    rgba = np.ones((h, w, 4), dtype=np.float32)
-    rows = np.arange(h)
-    val = np.where(rows % 3 == 0, 0.80, 1.0).astype(np.float32)
-    rgba[:, :, 0] = val[:, None]
-    rgba[:, :, 1] = val[:, None]
-    rgba[:, :, 2] = val[:, None]
-    img = bpy.data.images.new('vdm_scan_src', width=w, height=h, alpha=True)
-    img.pixels.foreach_set(rgba.ravel())
-    img.filepath_raw = path
-    img.file_format = 'PNG'
-    img.save()
-    bpy.data.images.remove(img)
-    return path
+def build_compositor(scene, fog=None, overlay=None, backdrop=None, planes=None):
+    """Compositing for `scene`, and nothing else.
 
+    `overlay` is an optional transparent scene (the 2D layer of a 3D shot)
+    alpha-overed after the fog. `backdrop` (linear RGB) is for a transparent film
+    (the empty world): fog only touches rendered pixels, then the picture goes
+    over this flat colour, the same as the viewport's clear colour. `planes`
+    names the view layer that holds the 2D element planes (the 3D world as
+    holdout): it goes over the fogged world, so the planes are never fogged — as
+    in the viewport, where only 3D objects get fog.
 
-
-def set_menu(sock, *vals):
-    """Menu sockets differ in casing across versions; try each spelling."""
-    for v in vals:
-        try:
-            sock.default_value = v
-            return True
-        except Exception:
-            continue
-    return False
-
-def _mix(ng, a, b, fac=1.0, blend='MIX'):
-    m = ng.nodes.new('ShaderNodeMix')
-    m.data_type = 'RGBA'
-    m.blend_type = blend
-    # RGBA sockets: Factor[0], A[6], B[7]; result RGBA = outputs[2]
-    m.inputs[0].default_value = fac
-    for src, sock in ((a, m.inputs[6]), (b, m.inputs[7])):
-        if isinstance(src, (int, float)):
-            sock.default_value = (src, src, src, 1.0)
-        elif isinstance(src, tuple):
-            sock.default_value = src
-        else:
-            ng.links.new(src, sock)
-    return m
-
-
-def _val(ng, v):
-    n = ng.nodes.new('ShaderNodeValue')
-    n.outputs[0].default_value = float(v)
-    return n.outputs[0]
-
-
-def build_compositor(scene, meta, cache_dir, fog=None, overlay=None, backdrop=None, planes=None):
-    """Post chain for `scene`. `overlay` is an optional transparent scene (the
-    2D layer of a 3D shot) alpha-overed after the fog and before the post fx.
-    `backdrop` (linear RGB) is for a transparent film (the empty world): fog only
-    touches rendered pixels, then the picture goes over this flat colour, the
-    same as the viewport's clear colour. `planes` names the view layer that
-    holds the 2D element planes (the 3D world as holdout): it goes over the
-    fogged world, so the planes are never fogged — as in the viewport, where
-    only 3D objects get fog."""
-    fx = meta.get('fx') or {}
-    w, h = scene.render.resolution_x, scene.render.resolution_y
-    os.makedirs(cache_dir, exist_ok=True)
-
+    The output is a 16-bit PNG (`_setup_scene`); the browser-side post pass
+    keeps that depth, so a grade or a bloom does not band.
+    """
     ng = bpy.data.node_groups.new('VDM_Composite', 'CompositorNodeTree')
     scene.compositing_node_group = ng
     scene.render.use_compositing = True
@@ -630,125 +573,9 @@ def build_compositor(scene, meta, cache_dir, fog=None, overlay=None, backdrop=No
         ng.links.new(orl.outputs['Image'], over.inputs['Foreground'])
         chain = over.outputs[0]
 
-    # grade ---------------------------------------------------------------
-    cb = ng.nodes.new('CompositorNodeColorBalance')
-    cb.inputs['Factor'].default_value = 1.0
-    set_menu(cb.inputs['Type'], 'Lift/Gamma/Gain', 'LIFT_GAMMA_GAIN')
-    for nm in ('Lift', 'Gamma', 'Gain'):
-        for i in cb.inputs:
-            if i.name == nm and i.type == 'RGBA':
-                i.default_value = (1, 1, 1, 1)
-    grad = float(fx.get('grade') or 0)
-    if grad:
-        warm, cool = (1.0, 0.94, 0.86), (0.88, 0.95, 1.0)
-        gain = warm if grad > 0 else cool
-        k = abs(grad)
-        for i in cb.inputs:
-            if i.name == 'Gain' and i.type == 'RGBA':
-                i.default_value = tuple(lerp(1.0, gain[j], k) for j in range(3)) + (1.0,)
-    ng.links.new(chain, cb.inputs['Image'])
-    chain = cb.outputs['Image']
-
-    hs = ng.nodes.new('CompositorNodeHueSat')
-    hs.inputs['Saturation'].default_value = float(fx.get('saturation', 1) or 1)
-    ng.links.new(chain, hs.inputs['Image'])
-    chain = hs.outputs['Image']
-
-    bc = ng.nodes.new('CompositorNodeBrightContrast')
-    bc.inputs['Contrast'].default_value = float(fx.get('contrast', 0) or 0) * 40
-    ng.links.new(chain, bc.inputs['Image'])
-    chain = bc.outputs['Image']
-
-    # chromatic aberration ------------------------------------------------
-    ca = float(fx.get('ca') or 0)
-    if ca > 0.001:
-        ld = ng.nodes.new('CompositorNodeLensdist')
-        ld.inputs['Dispersion'].default_value = ca * 0.06
-        ng.links.new(chain, ld.inputs['Image'])
-        chain = ld.outputs['Image']
-
-    # bloom ---------------------------------------------------------------
-    bloom = float(fx.get('bloom') or 0)
-    if bloom > 0.001:
-        gl = ng.nodes.new('CompositorNodeGlare')
-        set_menu(gl.inputs['Type'], 'Fog Glow', 'FOG_GLOW')
-        set_menu(gl.inputs['Quality'], 'High', 'HIGH')
-        gl.inputs['Threshold'].default_value = 0.45
-        gl.inputs['Strength'].default_value = bloom * 1.4
-        gl.inputs['Size'].default_value = 0.65
-        ng.links.new(chain, gl.inputs['Image'])
-        chain = gl.outputs['Image']
-
-    # scanlines -----------------------------------------------------------
-    scan = float(fx.get('scanline') or 0)
-    if scan > 0.001:
-        p = os.path.join(cache_dir, f'scan_{w}x{h}.png')
-        if not os.path.exists(p):
-            _scan_png(p, w, h)
-        img = bpy.data.images.load(p, check_existing=True)
-        node = ng.nodes.new('CompositorNodeImage')
-        node.image = img
-        m = _mix(ng, chain, node.outputs['Image'], scan, 'MULTIPLY')
-        chain = m.outputs[2]
-
-    # grain ---------------------------------------------------------------
-    grain = float(fx.get('grain') or 0)
-    if grain > 0.001:
-        p = os.path.join(cache_dir, f'grain_{w}x{h}.png')
-        if not os.path.exists(p):
-            _noise_png(p, w, h)
-        img = bpy.data.images.load(p, check_existing=True)
-        inode = ng.nodes.new('CompositorNodeImage')
-        inode.image = img
-        tr = ng.nodes.new('CompositorNodeTranslate')
-        set_menu(tr.inputs['Extension X'], 'Repeat', 'REPEAT')
-        set_menu(tr.inputs['Extension Y'], 'Repeat', 'REPEAT')
-        ng.links.new(inode.outputs['Image'], tr.inputs['Image'])
-        # animate the grain by scrolling it with the frame counter
-        st = ng.nodes.new('CompositorNodeSceneTime')
-        mx = ng.nodes.new('ShaderNodeMath')
-        mx.operation = 'MULTIPLY'
-        mx.inputs[1].default_value = 37.0
-        ng.links.new(st.outputs['Frame'], mx.inputs[0])
-        ng.links.new(mx.outputs[0], tr.inputs['X'])
-        my = ng.nodes.new('ShaderNodeMath')
-        my.operation = 'MULTIPLY'
-        my.inputs[1].default_value = 17.0
-        ng.links.new(st.outputs['Frame'], my.inputs[0])
-        ng.links.new(my.outputs[0], tr.inputs['Y'])
-        m = _mix(ng, chain, tr.outputs['Image'], grain * 0.9, 'OVERLAY')
-        chain = m.outputs[2]
-
-    # vignette ------------------------------------------------------------
-    vig = float(fx.get('vignette') or 0)
-    if vig > 0.001:
-        ell = ng.nodes.new('CompositorNodeEllipseMask')
-        ell.inputs['Mask'].default_value = 1.0
-        ell.inputs['Value'].default_value = 1.0
-        ell.inputs['Size'].default_value = (0.82, 0.72)
-        blur = ng.nodes.new('CompositorNodeBlur')
-        set_menu(blur.inputs['Type'], 'Gaussian', 'GAUSSIAN')
-        br = max(w, h) * 0.22
-        blur.inputs['Size'].default_value = (br, br)
-        ng.links.new(ell.outputs['Mask'], blur.inputs['Image'])
-        dark = ng.nodes.new('CompositorNodeRGB')
-        dark.outputs[0].default_value = (0, 0, 0, 1)
-        inv = ng.nodes.new('CompositorNodeInvert')
-        ng.links.new(blur.outputs['Image'], inv.inputs['Color'])
-        mul = ng.nodes.new('ShaderNodeMath')
-        mul.operation = 'MULTIPLY'
-        mul.inputs[1].default_value = vig
-        ng.links.new(inv.outputs['Color'], mul.inputs[0])
-        ao = ng.nodes.new('CompositorNodeAlphaOver')
-        ao.inputs['Factor'].default_value = 1.0
-        ng.links.new(chain, ao.inputs['Background'])
-        ng.links.new(dark.outputs[0], ao.inputs['Foreground'])
-        ng.links.new(mul.outputs[0], ao.inputs['Factor'])
-        chain = ao.outputs['Image']
-
     # The group needs a declared output socket: linking to the output node's
     # empty virtual socket leaves the group without a result, and Blender then
-    # writes the raw render (no fog, grade, bloom, grain or vignette).
+    # writes the raw render (no fog, overlay or backdrop).
     ng.interface.new_socket('Image', in_out='OUTPUT', socket_type='NodeSocketColor')
     out = ng.nodes.new('NodeGroupOutput')
     ng.links.new(chain, out.inputs['Image'])
@@ -1043,6 +870,9 @@ class SceneBuilder:
         scene.render.fps_base = 1.0
         scene.render.image_settings.file_format = 'PNG'
         scene.render.image_settings.color_mode = 'RGB'
+        # 16 bit: the screen effects are applied after this render (WP3.5, §5.4),
+        # and a browser-side grade/bloom over 8-bit output bands.
+        scene.render.image_settings.color_depth = '16'
         scene.render.image_settings.compression = 15
         scene.render.filter_size = 0.8
         scene.render.film_transparent = bool(overlay)
@@ -1152,7 +982,7 @@ class SceneBuilder:
         on_frame(scene, None)
 
         if not overlay and embed is None:
-            build_compositor(scene, self.meta, os.path.join(self.cache, 'comp'))
+            build_compositor(scene)
         return scene
 
     # -- per frame ---------------------------------------------------------

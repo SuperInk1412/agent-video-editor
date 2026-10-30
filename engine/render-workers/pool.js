@@ -4,7 +4,8 @@
 //       -> { rgba? | pngPath, hash, ms, cacheKey, cached, frame, size }
 //   pool.renderRange({ ..., f0, f1, outDir }) -> { dir, files, frames, totalMs }
 //   pool.compile({ sourceId })                -> source snapshot (§7)
-//   pool.post({ framesDir, screenFx, outDir })-> frames with screen effects (§5.4)
+//   pool.post({ framesDir, screenFx, outDir }) -> frames with screen effects (§5.4,
+//      16-bit in and out; the one GLSL implementation, app/renderer/shaders/post.glsl)
 //   pool.sandboxProbe({ sourceId })            -> sandbox diagnostics (WP3.1 item 2)
 //   pool.close()
 //
@@ -30,10 +31,25 @@ import {
   resolveParams, runtimeKey, sha256, sourceSnapshot, writeCachedFrame,
 } from './cache.js';
 import { dependencyMissing, errorFromPayload, workerFault } from './errors.js';
+import { POST_GLSL_PATH, normalizeScreenFx, parsePostGlsl } from '../../core/screen-fx.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const HOST_SCRIPT = path.join(HERE, 'host.js');
 const REPO_ROOT = path.resolve(HERE, '..', '..');
+
+/**
+ * Budget for post-processing one frame (§5.4). Not the per-frame animation
+ * budget: a 4K frame through a software GL stack is I/O-bound, and the export
+ * must not fail on a slow machine because the sketch budget is 2 s.
+ */
+const POST_FRAME_TIMEOUT_MS = 20000;
+
+/** `f_0012.png` at 24 fps starting at frame 1 -> 0.458 s (the default rule). */
+function defaultFrameTime(name, fps, from) {
+  const match = /^f_?(\d{1,6})\.png$/i.exec(String(name));
+  if (!match) return 0;
+  return (Number(match[1]) - from) / (fps || 30);
+}
 
 /** Candidate Electron binaries, same order as `scripts/dev.mjs` (§5.1: 复用本机 dist). */
 export function electronCandidates({ env = process.env, repoRoot = REPO_ROOT } = {}) {
@@ -203,8 +219,43 @@ export class RenderWorkerPool {
     };
   }
 
-  /** Apply the screen-effect stack to every PNG in `framesDir`. */
-  async post({ framesDir, screenFx = {}, outDir, fps = 30 } = {}) {
+  /**
+   * The one screen-effect implementation: `app/renderer/shaders/post.glsl`,
+   * parsed by `core/screen-fx.js` — the same file the preview compiles from
+   * (`app/renderer/js/preview.js`). Read once per pool; the page cannot read a
+   * file itself (no filesystem, and the CSP forbids every fetch), so the
+   * sources ride in with each post request.
+   */
+  async postShaders() {
+    if (this._postShaders) return this._postShaders;
+    const file = path.join(this.repoRoot, POST_GLSL_PATH);
+    let text;
+    try {
+      text = await fs.readFile(file, 'utf8');
+    } catch (error) {
+      throw workerFault('DEPENDENCY_MISSING', `读不到共享画面效果着色器 ${POST_GLSL_PATH}：${error.message}`);
+    }
+    try {
+      this._postShaders = parsePostGlsl(text);
+    } catch (error) {
+      throw workerFault('INVALID_ARGUMENT', error.message);
+    }
+    return this._postShaders;
+  }
+
+  /**
+   * Apply the screen-effect stack to every PNG in `framesDir` (WP3.5, §5.4).
+   *
+   * `timeOf(name, index)` is the frame's time in seconds (the grain and the
+   * scanlines are functions of it); without it a file named `f_0012.png` is
+   * `(12 - from) / fps`. The pool never guesses what the picture depends on:
+   * `engine/blender.js` knows the frame number and passes it in.
+   *
+   * The input may be an 8-bit or a 16-bit PNG; the result has the same bit
+   * depth when the sandbox can render into a float target, and 8-bit otherwise
+   * (`result.depth`).
+   */
+  async post({ framesDir, screenFx = {}, outDir, fps = 30, from = 0, timeOf = null } = {}) {
     if (!framesDir) throw workerFault('INVALID_ARGUMENT', 'post 需要 framesDir');
     if (!outDir) throw workerFault('INVALID_ARGUMENT', 'post 需要 outDir');
     const input = path.resolve(framesDir);
@@ -218,28 +269,35 @@ export class RenderWorkerPool {
     if (!names.length) throw workerFault('INVALID_ARGUMENT', `帧目录里没有 PNG：${input}`);
     await fs.mkdir(output, { recursive: true });
     const started = nowMs();
+    const fx = normalizeScreenFx(screenFx);
+    const shaders = await this.postShaders();
     const files = [];
-    for (const name of names) {
+    let depth = 0;
+    for (const [index, name] of names.entries()) {
       const buffer = await fs.readFile(path.join(input, name));
-      const match = /^f(\d{5})\.png$/i.exec(name);
-      const time = match ? Number(match[1]) / normalizeFps(fps) : 0;
+      const time = typeof timeOf === 'function'
+        ? Number(timeOf(name, index)) || 0
+        : defaultFrameTime(name, normalizeFps(fps), Number(from) || 0);
       const result = await this._request({
         t: 'post',
         dataUrl: `data:image/png;base64,${buffer.toString('base64')}`,
-        screenFx,
+        screenFx: fx,
         time,
-        timeoutMs: this.exportTimeoutMs,
-      }, { timeoutMs: this.exportTimeoutMs + 5000, label: 'post' });
+        shaders,
+        timeoutMs: Math.max(this.exportTimeoutMs, POST_FRAME_TIMEOUT_MS),
+      }, { timeoutMs: Math.max(this.exportTimeoutMs, POST_FRAME_TIMEOUT_MS) + 5000, label: 'post' });
       const outBuffer = decodeBase64(result.png);
       const target = path.join(output, name);
       await fs.writeFile(target, outBuffer);
+      if (result.depth) depth = result.depth;
       files.push({ name, path: target, hash: sha256(outBuffer), bytes: outBuffer.length, ms: result.ms });
     }
     return {
       dir: output,
       files,
       count: files.length,
-      screenFx,
+      screenFx: fx,
+      depth: depth || 8,
       totalMs: Math.round((nowMs() - started) * 100) / 100,
     };
   }

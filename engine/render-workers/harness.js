@@ -107,11 +107,13 @@ async function postFrame(req) {
   if (!req || typeof req.dataUrl !== 'string' || !req.dataUrl.startsWith('data:image/png;base64,')) {
     throw Object.assign(new Error('post 需要 dataUrl（data:image/png;base64,…）'), { code: 'INVALID_ARGUMENT' });
   }
-  if (!postProcessor) postProcessor = createPostProcessor();
-  const start = performance.now();
+  // The shaders ride in with the request: they are `app/renderer/shaders/post.glsl`,
+  // read and parsed on the Node side (the page cannot fetch files — CSP).
+  if (!postProcessor) postProcessor = createPostProcessor({ shaders: req.shaders });
+  // `{ png: base64, depth: 16|8, ms }`: 16-bit whenever the sandbox has a float
+  // render target, so the Blender film keeps the depth it was rendered at.
   const out = await postProcessor.post(req.dataUrl, req.screenFx || {}, { time: Number(req.time) || 0 });
-  const comma = out.indexOf(',');
-  return { png: out.slice(comma + 1), ms: Math.round((performance.now() - start) * 100) / 100 };
+  return { png: out.png, depth: out.depth, ms: out.ms };
 }
 
 // ---------------------------------------------------------------------------

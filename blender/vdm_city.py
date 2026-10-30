@@ -14,7 +14,7 @@ import os
 from mathutils import Matrix, Vector, Quaternion
 
 from vdm_build import (
-    reset_scene, hex_rgba, build_compositor, set_menu, srgb_to_linear, SceneBuilder,
+    reset_scene, hex_rgba, build_compositor, srgb_to_linear, SceneBuilder,
 )
 
 
@@ -439,7 +439,7 @@ def _copy_render_settings(src, dst):
             setattr(s, attr, getattr(r, attr))
         except Exception:
             pass
-    for attr in ('file_format', 'color_mode', 'compression'):
+    for attr in ('file_format', 'color_mode', 'color_depth', 'compression'):
         try:
             setattr(s.image_settings, attr, getattr(r.image_settings, attr))
         except Exception:
@@ -776,6 +776,9 @@ def build_shot_scene(shot, opts):
     scene.render.fps_base = 1.0
     scene.render.image_settings.file_format = 'PNG'
     scene.render.image_settings.color_mode = 'RGB'
+    # 16 bit, like the 2D path: engine/blender.js applies the one screen-effect
+    # implementation to these frames (WP3.5, §5.4).
+    scene.render.image_settings.color_depth = '16'
     scene.render.image_settings.compression = 15
     scene.render.film_transparent = False
     scene.render.use_sequencer = False
@@ -870,16 +873,15 @@ def build_shot_scene(shot, opts):
     scene.frame_end = max(cam_frames) if cam_frames else 240
     _build_camera(scene, shot, W, H)
 
-    # compositor: same post chain as the 2D path + depth fog
-    meta = {'fx': shot.get('fx') or {}}
+    # compositor: depth fog and the 2D plane layer — no screen effects (WP3.5:
+    # they live in app/renderer/shaders/post.glsl and run in engine/blender.js)
     # 2D elements: planes in the world on the screen plane (single camera); the
     # multi-camera path still lays them over the picture (see _build_overlay)
     rig = None
     if not opts.get('_no_overlay'):
         rig = _embed_elements(scene, opts, shot)
     planes = _plane_layer(scene, rig) if rig is not None and city.get('fog') else None
-    build_compositor(scene, meta, os.path.join(opts['root'], '.vdm', 'cache', 'comp'),
-                     fog=city.get('fog'),
+    build_compositor(scene, fog=city.get('fog'),
                      backdrop=city.get('sky') if city.get('empty') else None,
                      planes=planes)
     return scene

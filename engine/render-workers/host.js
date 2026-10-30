@@ -291,7 +291,14 @@ async function runRequest(request) {
       const slot = acquireSlot();
       try {
         const sandbox = await sandboxFor(slot);
-        const payload = { dataUrl: request.dataUrl, screenFx: request.screenFx || {}, time: request.time ?? 0 };
+        const payload = {
+          dataUrl: request.dataUrl,
+          screenFx: request.screenFx || {},
+          time: request.time ?? 0,
+          // `app/renderer/shaders/post.glsl`, parsed on the Node side: the page
+          // has no network (CSP) and no filesystem, so it cannot read the file.
+          shaders: request.shaders || null,
+        };
         const result = await sandbox.execute(`window.__vdmPost(${JSON.stringify(payload)})`, { timeoutMs, label: 'post' });
         return { ok: true, value: unwrap(result, 'post') };
       } finally {

@@ -27,7 +27,6 @@
 import { evalElement } from '/core/evaluate.js';
 import { elementOverlay } from '/core/links.js';
 import { cameraParamResolver, evalCameraWorldWithLinks } from '/core/link-eval.js';
-import { clamp } from '/core/time.js';
 import { cameraTransform, cameraLayers } from '/core/camera.js';
 import { audioElements, audioVolume } from '/core/audio.js';
 import { Scene3D } from './preview3d.js';
@@ -37,6 +36,20 @@ import {
   layerOriginDistance, layerRayDepth, orderLayers,
 } from './spatial-layers.js';
 import { buildFrameIR, itemModelMatrix, mediaUVOf, IRCache, PIXEL_M } from '/core/frame-ir.js';
+import { POST_GLSL_PATH, normalizeScreenFx, parsePostGlsl } from '/core/screen-fx.js';
+
+// Screen effects (§5.4, WP3.5): the bloom / CA / grain / vignette / scanline /
+// grade / contrast / saturation shaders are not written in this file. They live
+// in `app/renderer/shaders/post.glsl`, which the render pool
+// (`engine/render-workers/post.js`) compiles from as well — one implementation
+// for the preview and the Blender export (D2). This module only builds the
+// programs and feeds the passes; a change to the picture is a change to that
+// file.
+const POST_SHADERS = parsePostGlsl(await fetch(`/${POST_GLSL_PATH}`, { cache: 'no-cache' })
+  .then((response) => {
+    if (!response.ok) throw new Error(`post.glsl：HTTP ${response.status}`);
+    return response.text();
+  }));
 
 /** How long a raster frame may be outstanding before the preview shows the last one (§WP3.3). */
 const RASTER_BUDGET_MS = 300;
@@ -194,107 +207,8 @@ void main(){
   outColor = vec4(c.rgb, c.a * u_opacity);
 }`;
 
-const FRAG_BRIGHT = `#version 300 es
-precision highp float;
-in vec2 v_uv;
-out vec4 outColor;
-uniform sampler2D u_tex;
-uniform float u_threshold;
-uniform float u_flip;
-void main(){
-  vec2 uv = vec2(v_uv.x, mix(v_uv.y, 1.0 - v_uv.y, u_flip));
-  vec3 c = texture(u_tex, uv).rgb;
-  float l = max(max(c.r, c.g), c.b);
-  float k = smoothstep(u_threshold, u_threshold + 0.25, l);
-  outColor = vec4(c * k, 1.0);
-}`;
-
-const FRAG_BLUR = `#version 300 es
-precision highp float;
-in vec2 v_uv;
-out vec4 outColor;
-uniform sampler2D u_tex;
-uniform vec2 u_dir;
-void main(){
-  vec3 sum = vec3(0.0);
-  float w[5];
-  w[0] = 0.227027; w[1] = 0.194594; w[2] = 0.121621; w[3] = 0.054054; w[4] = 0.016216;
-  sum += texture(u_tex, v_uv).rgb * w[0];
-  for (int i = 1; i < 5; i++) {
-    sum += texture(u_tex, v_uv + u_dir * float(i)).rgb * w[i];
-    sum += texture(u_tex, v_uv - u_dir * float(i)).rgb * w[i];
-  }
-  outColor = vec4(sum, 1.0);
-}`;
-
-const FRAG_COMPOSITE = `#version 300 es
-precision highp float;
-in vec2 v_uv;
-out vec4 outColor;
-uniform sampler2D u_scene;
-uniform sampler2D u_bloom;
-uniform float u_bloomAmount;
-uniform float u_ca;
-uniform float u_grain;
-uniform float u_scan;
-uniform float u_vignette;
-uniform float u_grade;
-uniform float u_contrast;
-uniform float u_saturation;
-uniform float u_time;
-uniform float u_flip;
-
-float hash(vec2 p){
-  p = fract(p * vec2(123.34, 456.21));
-  p += dot(p, p + 45.32);
-  return fract(p.x * p.y);
-}
-void main(){
-  vec2 uv = vec2(v_uv.x, mix(v_uv.y, 1.0 - v_uv.y, u_flip));
-  vec2 d = uv - 0.5;
-  float r2 = dot(d, d);
-  vec3 col;
-  if (u_ca > 0.001) {
-    vec2 off = d * u_ca * 0.012 * (0.4 + r2);
-    col.r = texture(u_scene, uv + off).r;
-    col.g = texture(u_scene, uv).g;
-    col.b = texture(u_scene, uv - off).b;
-  } else {
-    col = texture(u_scene, uv).rgb;
-  }
-  vec3 bloom = texture(u_bloom, uv).rgb;
-  col += bloom * u_bloomAmount;
-
-  // grade
-  vec3 warm = col * vec3(1.06, 1.0, 0.92);
-  vec3 cool = col * vec3(0.92, 1.0, 1.07);
-  col = mix(col, u_grade >= 0.0 ? warm : cool, abs(u_grade) * 0.9);
-
-  // contrast / saturation
-  col = (col - 0.5) * (1.0 + u_contrast) + 0.5;
-  float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
-  col = mix(vec3(luma), col, u_saturation);
-
-  // scanlines
-  if (u_scan > 0.001) {
-    float line = mod(floor(uv.y * 900.0), 3.0);
-    col *= 1.0 - (line < 0.5 ? 0.18 : 0.0) * u_scan;
-  }
-
-  // film grain
-  if (u_grain > 0.001) {
-    float n = hash(uv * vec2(1920.0, 1080.0) + fract(u_time * 7.13) * 91.7) - 0.5;
-    col += n * u_grain * 0.35;
-  }
-
-  // vignette
-  if (u_vignette > 0.001) {
-    float v = smoothstep(0.95, 0.25, length(d * vec2(1.0, 1.15)) * 1.25);
-    col *= mix(1.0, v, u_vignette);
-  }
-
-  outColor = vec4(clamp(col, 0.0, 1.0), 1.0);
-}`;
+// The effect shaders (bright / blur / composite) are not here: they are the
+// sections of app/renderer/shaders/post.glsl, parsed into POST_SHADERS above.
 
 const fullscreenQuad = (gl) => {
   const buf = gl.createBuffer();
@@ -438,9 +352,9 @@ export class Preview {
       shape: compile(gl, VERT, FRAG_SHAPE),
       mesh: compile(gl, VERT_MESH, FRAG_MESH),
       full: compile(gl, VERT, FRAG_FULL),
-      bright: compile(gl, VERT, FRAG_BRIGHT),
-      blur: compile(gl, VERT, FRAG_BLUR),
-      comp: compile(gl, VERT, FRAG_COMPOSITE),
+      bright: compile(gl, VERT, POST_SHADERS.bright),
+      blur: compile(gl, VERT, POST_SHADERS.blur),
+      comp: compile(gl, VERT, POST_SHADERS.composite),
     };
     this.quad = fullscreenQuad(gl);
     // unit quad (0..1) with uv
@@ -1546,9 +1460,9 @@ export class Preview {
       this._drawLayers(layers, W, H, this._flatWorld(W, H));
     }
 
-    const fx = p.meta.fx || {};
-    const bloom = clamp(Number(fx.bloom) || 0, 0, 3);
-    this._postAndComposite(p, t, W, H, fx, bloom);
+    // Screen effects: one normalisation for the preview and the export
+    // (core/screen-fx.js), so a project cannot mean two different things.
+    this._postAndComposite(p, t, W, H, normalizeScreenFx(p.meta.fx));
   }
 
   /**
@@ -1699,8 +1613,9 @@ export class Preview {
     };
   }
 
-  _postAndComposite(p, t, W, H, fx, bloom) {
+  _postAndComposite(p, t, W, H, fx) {
     const gl = this.gl;
+    const bloom = fx.bloom;
 
     // ---- bloom chain ----
     if (bloom > 0.001) {
@@ -1745,15 +1660,17 @@ export class Preview {
     gl.bindTexture(gl.TEXTURE_2D, this.bloomFBO[0].tex);
     gl.uniform1i(pr.u.u_bloom, 1);
     gl.uniform1f(pr.u.u_bloomAmount, bloom);
-    gl.uniform1f(pr.u.u_ca, Number(fx.ca) || 0);
-    gl.uniform1f(pr.u.u_grain, Number(fx.grain) || 0);
-    gl.uniform1f(pr.u.u_scan, Number(fx.scanline) || 0);
-    gl.uniform1f(pr.u.u_vignette, Number(fx.vignette) || 0);
-    gl.uniform1f(pr.u.u_grade, Number(fx.grade) || 0);
-    gl.uniform1f(pr.u.u_contrast, Number(fx.contrast) || 0);
-    gl.uniform1f(pr.u.u_saturation, Number.isFinite(Number(fx.saturation)) ? Number(fx.saturation) : 1);
+    gl.uniform1f(pr.u.u_ca, fx.ca);
+    gl.uniform1f(pr.u.u_grain, fx.grain);
+    gl.uniform1f(pr.u.u_scan, fx.scanline);
+    gl.uniform1f(pr.u.u_vignette, fx.vignette);
+    gl.uniform1f(pr.u.u_grade, fx.grade);
+    gl.uniform1f(pr.u.u_contrast, fx.contrast);
+    gl.uniform1f(pr.u.u_saturation, fx.saturation);
     gl.uniform1f(pr.u.u_time, t);
     gl.uniform1f(pr.u.u_flip, 1.0);
+    // The preview draws to an opaque screen: alpha = 1 exactly, as before WP3.5.
+    gl.uniform1f(pr.u.u_keepAlpha, 0);
     gl.bindVertexArray(this.vao);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     gl.bindVertexArray(null);

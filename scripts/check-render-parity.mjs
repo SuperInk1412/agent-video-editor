@@ -35,7 +35,15 @@
 // pixels differ by more than `TEXT_DIFF` levels (the same pixel budget as case
 // H) or more than `ALLOWED` of the 16×9 cells differ (the A–G standard).
 //
-//   node scripts/check-render-parity.mjs [--keep] [--only=A,B,C,D,E,F,G,H,I]
+// Case J (docs/DESIGN-BACKEND-V2.md §5.4 / §10.2 WP3.5) is the screen-effect case:
+// a video, colour blocks and a line of text under every effect (bloom, CA, grain,
+// vignette, scanline, non-default grade/contrast/saturation). Blender writes a
+// 16-bit PNG and engine/blender.js applies the one shared GLSL
+// (app/renderer/shaders/post.glsl) through pool.post; the preview compiles the
+// same file. The case fails when more than 2 % of the pixels differ by more than
+// TEXT_DIFF levels, and prints the per-channel means and a 16x9 grid.
+//
+//   node scripts/check-render-parity.mjs [--keep] [--only=A,B,C,D,E,F,G,H,I,J]
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -66,7 +74,7 @@ const FRAME_I = 12;              // IR frame under T = 0.5 s at 24 fps
 const T_I = FRAME_I / 24;
 const CODE_ALLOWED = 0.02;       // 2 % of the compared pixels (WP3.4 acceptance)
 
-const only = (process.argv.find((a) => a.startsWith('--only=')) || '--only=A,B,C,D,E,F,G,H,I').slice(7).split(',');
+const only = (process.argv.find((a) => a.startsWith('--only=')) || '--only=A,B,C,D,E,F,G,H,I,J').slice(7).split(',');
 
 const run = (cmd, args, opts = {}) => new Promise((resolve, reject) => {
   const p = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, ...opts });
@@ -602,8 +610,265 @@ async function codeLayerCase() {
   return true;
 }
 
+// Case J (docs/DESIGN-BACKEND-V2.md §5.4 / §10.2 WP3.5) is the screen-effect case:
+// text + colour blocks + a video with every effect turned up (bloom 0.8, CA 0.5,
+// grain 0.3, vignette 0.6, scanline 0.2, non-default grade/contrast/saturation).
+// The preview frame and the Blender film frame are compared pixel by pixel; the
+// case fails when more than `FX_ALLOWED` of the pixels differ by more than
+// `TEXT_DIFF` levels. Grain has no RNG on either side: it is a hash of the frame
+// time and the pixel position, so the same `t` gives the same pattern in both
+// pictures (§5.4 "颗粒用固定种子" — the seed is the clock).
+const PROJECT_J = path.join(WORK, 'project-j');
+const FX_J = {
+  bloom: 0.8, ca: 0.5, grain: 0.3, vignette: 0.6, scanline: 0.2,
+  grade: 0.35, contrast: 0.2, saturation: 0.75,
+};
+const FX_ALLOWED = 0.02;   // 2 % of the frame (WP3.5 acceptance)
+
+/**
+ * Case J's project: a full-frame-ish video, two colour blocks and a line of
+ * text, all under every screen effect. The video is a flat colour on purpose —
+ * the case is about the effects, not about decoding a moving picture, and a
+ * solid frame cannot disagree about *which* frame was decoded.
+ */
+async function buildFxCase() {
+  await fs.mkdir(path.join(PROJECT_J, 'media'), { recursive: true });
+  const clip = path.join(PROJECT_J, 'media', 'fx-clip.mp4');
+  const r = await run('ffmpeg', ['-y', '-v', 'error', '-f', 'lavfi',
+    '-i', 'color=c=0x2a4a8a:s=1920x1080:r=24', '-t', '2', '-pix_fmt', 'yuv420p', clip]);
+  if (r.code !== 0) throw new Error(`ffmpeg clip failed: ${r.err.slice(-400)}`);
+  const p = normalizeProject(createProject({ title: 'parity fx', background: '#05070d', duration: 2 }));
+  ensureSpace(p);
+  applyOps(p, [
+    { op: 'setFx', fx: FX_J },
+    { op: 'addElement', element: {
+      id: 'el_fx_video', name: 'video', type: 'video', src: 'media/fx-clip.mp4',
+      start: 0, duration: 2, z: 1,
+      transform: { x: 0, y: 0, scale: 1 }, style: { fit: 'stretch', w: 1280, h: 720 },
+    } },
+    { op: 'addElement', element: {
+      id: 'el_fx_warm', name: 'warm', type: 'solid', start: 0, duration: 2, z: 2,
+      transform: { x: -560, y: 120 }, style: { w: 520, h: 320, fill: '#e04a2a' },
+    } },
+    { op: 'addElement', element: {
+      id: 'el_fx_cool', name: 'cool', type: 'solid', start: 0, duration: 2, z: 3,
+      transform: { x: 560, y: 180 }, style: { w: 380, h: 380, fill: '#20c060' },
+    } },
+    { op: 'addElement', element: {
+      id: 'tx_fx', name: 'title', type: 'text', start: 0, duration: 2, z: 4,
+      transform: { x: 0, y: -300 },
+      style: { text: 'SCREEN FX 效果', font: 'Microsoft YaHei', size: 130, color: '#ffffff',
+        align: 'center', lineHeight: 1.15, letterSpacing: 3 },
+    } },
+  ]);
+  await saveProject(PROJECT_J, p, { by: 'check-render-parity' });
+}
+
+/**
+ * Runs inside the editor: render one frame at `T`, diff it against the Blender
+ * film frame (`/media/zz-blender-j.png`) and pin every number in `window.__dbg`.
+ */
+const PROBE_J = `export async function run() {
+  const out = { errors: [] };
+  const W = 1920, H = 1080, T = ${T};
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  try {
+    const app = window.__vdm;
+    const p = app.preview;
+    app.pause();
+    p.playing = false;
+    app.setTime(T);
+    p.canvas.width = W;
+    p.canvas.height = H;
+    p._rebuildTargets();
+    await p.whenFontsReady();
+    // media (the video element) and the text meshes arrive asynchronously
+    let ready = false;
+    for (let i = 0; i < 150 && !ready; i++) {
+      const assets = Array.from((p.assets || new Map()).values());
+      ready = assets.length > 0 && assets.every((a) => a.ready);
+      if (!ready) await sleep(40);
+    }
+    out.assets = Array.from((p.assets || new Map()).values()).map((a) => a.kind + ':' + a.ready);
+    for (let i = 0; i < 3; i++) { p.render(T); await sleep(60); }
+    const shot = new Image();
+    shot.src = p.canvas.toDataURL('image/png');
+    await shot.decode();
+    const ref = new Image();
+    ref.src = '/media/zz-blender-j.png?t=' + Date.now();
+    await ref.decode();
+    const grab = (img) => {
+      const cv = document.createElement('canvas');
+      cv.width = W;
+      cv.height = H;
+      const ctx = cv.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(img, 0, 0, W, H);
+      return ctx.getImageData(0, 0, W, H).data;
+    };
+    const a = grab(shot);   // preview
+    const b = grab(ref);    // Blender film frame (post applied by pool.post)
+    const total = W * H;
+    let over8 = 0, over24 = 0, over64 = 0, maxDiff = 0;
+    let sumR = 0, sumG = 0, sumB = 0;
+    // 16x9 grid: mean absolute difference per cell, and how many of its pixels
+    // are past the budget
+    const GW = 16, GH = 9;
+    const cellSum = new Float64Array(GW * GH);
+    const cellCount = new Float64Array(GW * GH);
+    const cellOver = new Float64Array(GW * GH);
+    for (let i = 0; i < a.length; i += 4) {
+      const dr = Math.abs(a[i] - b[i]);
+      const dg = Math.abs(a[i + 1] - b[i + 1]);
+      const db = Math.abs(a[i + 2] - b[i + 2]);
+      const d = Math.max(dr, dg, db);
+      sumR += dr; sumG += dg; sumB += db;
+      if (d > maxDiff) maxDiff = d;
+      if (d > 8) over8++;
+      if (d > ${TEXT_DIFF}) over24++;
+      if (d > 64) over64++;
+      const px = (i / 4) % W, py = Math.floor((i / 4) / W);
+      const cell = Math.min(GH - 1, Math.floor(py / H * GH)) * GW + Math.min(GW - 1, Math.floor(px / W * GW));
+      cellSum[cell] += d;
+      cellCount[cell] += 1;
+      if (d > ${TEXT_DIFF}) cellOver[cell] += 1;
+    }
+    let cellMax = 0, cellMeanSum = 0, cellsOver = 0;
+    const worst = [];
+    for (let c = 0; c < cellSum.length; c++) {
+      const mean = cellSum[c] / Math.max(1, cellCount[c]);
+      cellMeanSum += mean;
+      if (mean > cellMax) cellMax = mean;
+      if (cellOver[c] > 0) cellsOver++;
+      worst.push([c, Math.round(mean * 10) / 10, Math.round(cellOver[c] / Math.max(1, cellCount[c]) * 1000) / 10]);
+    }
+    worst.sort((x, y) => y[1] - x[1]);
+    out.size = [W, H];
+    out.time = T;
+    out.assetsReady = out.assets.length > 0 && out.assets.every((s) => s.endsWith(':true'));
+    out.frame = {
+      pixels: total,
+      over8, over24, over64,
+      ratio: over24 / total,
+      maxDiff,
+      mean: { r: sumR / total, g: sumG / total, b: sumB / total },
+    };
+    out.grid = { cells: cellSum.length, maxMean: cellMax, meanMean: cellMeanSum / cellSum.length, cellsOver, worst: worst.slice(0, 6) };
+    // where the difference lives: the video plane (a yuv -> rgb conversion on
+    // each side), the flat background strip, and the rest of the frame
+    const rects = {
+      video: [320, 180, 1600, 900],
+      background: [0, 0, 320, 1080],
+    };
+    const regions = {};
+    for (const [name, [x0, y0, x1, y1]] of Object.entries(rects)) {
+      let sum = 0, n = 0, over = 0;
+      for (let y = y0; y < y1; y++) {
+        for (let x = x0; x < x1; x++) {
+          const i = (y * W + x) * 4;
+          const d = Math.max(Math.abs(a[i] - b[i]), Math.abs(a[i + 1] - b[i + 1]), Math.abs(a[i + 2] - b[i + 2]));
+          sum += d; n += 1;
+          if (d > ${TEXT_DIFF}) over += 1;
+        }
+      }
+      regions[name] = { mean: sum / Math.max(1, n), over: over / Math.max(1, n) };
+    }
+    out.regions = regions;
+    // a couple of probe pixels: the video plane and the flat background
+    const pick = (x, y) => {
+      const i = (y * W + x) * 4;
+      return { preview: [a[i], a[i + 1], a[i + 2]], film: [b[i], b[i + 1], b[i + 2]] };
+    };
+    out.samples = { video: pick(960, 540), background: pick(120, 540) };
+  } catch (e) {
+    out.errors.push(String((e && e.stack) || e));
+  }
+  window.__dbg = out;
+}
+`;
+
+const EVAL_J = `(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  for (let i = 0; i < 150 && !(window.__vdm && window.__vdm.preview); i++) await sleep(100);
+  if (!(window.__vdm && window.__vdm.preview)) throw new Error('the editor never booted');
+  const mod = await import('/media/parity-j.js?t=' + Date.now());
+  await mod.run();
+})().catch((e) => { window.__dbg = { errors: [String((e && e.stack) || e)] }; })`;
+
+/**
+ * Case J: the same frame through both backends with every screen effect on.
+ * Blender writes a 16-bit PNG, `engine/blender.js` applies the one shared
+ * implementation through `pool.post`, and the preview draws the same shaders in
+ * its canvas — so the two pictures should only differ where the two renderers
+ * disagree about the underlying frame (text anti-aliasing), not about an effect.
+ */
+async function fxCase() {
+  const blender = await findBlender().catch(() => null);
+  const electron = findElectron();
+  if (!blender || !electron) {
+    const missing = [!blender ? 'Blender' : null, !electron ? 'Electron' : null].filter(Boolean).join(' and ');
+    console.log(`[parity] J SKIP — ${missing} not found. The export applies the shared GLSL through`
+      + ' the render pool (§5.4), so the case needs both Blender and Electron.');
+    return true;
+  }
+  await buildFxCase();
+  const logs = [];
+  const still = await renderStill({
+    dir: PROJECT_J, project: await loadProject(PROJECT_J), time: T, scale: 1, samples: 16,
+    out: path.join(WORK, 'blender-j.png'), onLog: (line) => logs.push(String(line)),
+  });
+  const postLine = logs.find((line) => /(^|\s)post\b/.test(line));
+  if (postLine) console.log(`[parity] J ${postLine.trim()}`);
+  await fs.copyFile(still, path.join(PROJECT_J, 'media', 'zz-blender-j.png'));
+  await fs.writeFile(path.join(PROJECT_J, 'media', 'parity-j.js'), PROBE_J);
+  // The preview runs on the same software rasteriser the render pool forces
+  // (§13: pixels must not depend on the installed GPU). Grain is a chaotic
+  // hash of the pixel position and the frame time: two different GL
+  // implementations disagree on its last bit and the whole pattern diverges,
+  // which would measure the driver, not the shared implementation.
+  const r = await run(process.execPath, [path.join(HERE, 'dev.mjs'), '--project', PROJECT_J, '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--disable-gpu',
+    `--capture=${path.join(WORK, 'preview-j.png')}`, `--at=${T}`, '--delay=2600', '--hold=3500', `--eval=${EVAL_J}`], { cwd: REPO });
+  const line = String(r.out).split('\n').find((entry) => entry.includes('[capture]'));
+  if (!line) throw new Error(`no preview capture for case J: ${r.err.slice(-1200)}`);
+  const dbg = captureDbg(line);
+  if (!dbg) throw new Error(`could not parse case J: ${line.slice(0, 400)}`);
+  if (dbg.errors && dbg.errors.length) {
+    console.log(`[parity] J FAIL — the probe threw: ${dbg.errors[0].split('\n')[0]}`);
+    return false;
+  }
+  console.log(`[parity] J screen effects ${dbg.size[0]}x${dbg.size[1]} at t=${dbg.time}s:`
+    + ` bloom ${FX_J.bloom} ca ${FX_J.ca} grain ${FX_J.grain} vignette ${FX_J.vignette}`
+    + ` scanline ${FX_J.scanline} grade ${FX_J.grade} contrast ${FX_J.contrast} saturation ${FX_J.saturation}`);
+  console.log(`[parity] J mean |diff| per channel: R ${dbg.frame.mean.r.toFixed(2)}`
+    + ` G ${dbg.frame.mean.g.toFixed(2)} B ${dbg.frame.mean.b.toFixed(2)}`
+    + `  max ${dbg.frame.maxDiff}`);
+  console.log(`[parity] J whole frame: >8 ${dbg.frame.over8} (${pct(dbg.frame.over8 / dbg.frame.pixels)})`
+    + `  >${TEXT_DIFF} ${dbg.frame.over24} (${pct(dbg.frame.ratio)})  >64 ${dbg.frame.over64}`);
+  console.log(`[parity] J grid ${dbg.grid.cells} cells: mean ${dbg.grid.meanMean.toFixed(2)},`
+    + ` worst ${dbg.grid.maxMean.toFixed(2)}, ${dbg.grid.cellsOver} cells with a pixel over ${TEXT_DIFF}`
+    + ` — worst cells (cell, mean, %over): ${dbg.grid.worst.map((w) => `${w[0]}/${w[1]}/${w[2]}%`).join(' ')}`);
+  if (dbg.regions) {
+    const parts = Object.entries(dbg.regions).map(([name, r]) =>
+      `${name} mean ${r.mean.toFixed(2)} (${pct(r.over)} over ${TEXT_DIFF})`);
+    console.log(`[parity] J regions: ${parts.join(', ')}`);
+    const sample = dbg.samples;
+    console.log(`[parity] J samples: video preview ${sample.video.preview} film ${sample.video.film}`
+      + `; background preview ${sample.background.preview} film ${sample.background.film}`);
+  }
+  const failures = [];
+  if (!dbg.assetsReady) failures.push(`the preview never loaded its media (${JSON.stringify(dbg.assets)})`);
+  if (!(dbg.frame.ratio <= FX_ALLOWED)) failures.push(`the frame differs by ${pct(dbg.frame.ratio)} (allowed ${pct(FX_ALLOWED)})`);
+  if (!postLine) failures.push('the export log has no post line — the effects never ran on the film');
+  if (failures.length) {
+    console.log(`[parity] J FAIL — ${failures.join('; ')}`);
+    return false;
+  }
+  console.log(`[parity] J PASS — ${pct(dbg.frame.ratio)} of the pixels differ by more than ${TEXT_DIFF}`
+    + ` (allowed ${pct(FX_ALLOWED)}), one GLSL implementation on both sides`);
+  return true;
+}
+
 async function main() {
-  const gridCases = only.filter((k) => k !== 'H' && k !== 'I');
+  const gridCases = only.filter((k) => !['H', 'I', 'J'].includes(k));
   let failed = false;
   if (!gridCases.length) {
     await fs.rm(WORK, { recursive: true, force: true });
@@ -652,6 +917,10 @@ async function main() {
   // missing — the case needs both.
   if (only.includes('I')) {
     if (!(await codeLayerCase())) failed = true;
+  }
+  // Case J: every screen effect on, preview vs the exported film (§5.4 / WP3.5).
+  if (only.includes('J')) {
+    if (!(await fxCase())) failed = true;
   }
   if (failed) {
     if (!process.argv.includes('--keep')) console.log('[parity] work dir kept for inspection:', WORK);
