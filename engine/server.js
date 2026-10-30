@@ -15,6 +15,7 @@ import { projectService } from './projects.js';
 import { errorData, fault } from '../application/errors.js';
 import { ChangeSetService } from '../application/changeset-service.js';
 import { stackAt, coverage, cutEdges, diff, pxAt, pixelCoverage } from '../application/inspect-service.js';
+import { createReport, listReports, readReport, remeasureReport, saveReport } from '../application/report-service.js';
 import { probeMedia, mimeOf, fileExists, findBin } from './media.js';
 import { blenderVersion, findBlender } from './blender.js';
 import { analyzeBeats } from './beats.js';
@@ -747,6 +748,33 @@ async function startOwnedServer({ root, port = 47100, open = false, onReady, imp
         else if (kind === 'pixelCoverage') result = await pixelCoverage(projectRoot, pick('elementId', 'element', 'f0', 'f1', 'from', 'to', 'camera'));
         else throw fault('INVALID_ARGUMENT', 'measure kind must be stackAt | coverage | cutEdges | pxAt | diff | pixelCoverage');
         return json(res, 200, { ok: true, kind, result });
+      }
+
+      // ---------------- reports (WP2.5c) ----------------
+      // A report is a file under `.vdm/reports/`: never project state, never a
+      // revision, never an undo step. The measurements are the WP2.1 ones.
+      if (pathname === '/api/reports' && req.method === 'GET') {
+        return json(res, 200, { ok: true, ...await listReports(projectRoot, { limit: url.searchParams.get('limit') || undefined }) });
+      }
+      if (pathname === '/api/reports' && req.method === 'POST') {
+        const body = await readBody(req);
+        const report = createReport({
+          project: await projects.read(), draft: body.draft ?? body,
+          frame: body.frame, fps: body.fps, camera: body.camera, mode: body.mode,
+        });
+        await saveReport(projectRoot, report);
+        broadcast('report', { action: 'create', report });
+        return json(res, 200, { ok: true, report });
+      }
+      const reportRemeasure = /^\/api\/reports\/([A-Za-z0-9_.-]+)\/remeasure$/.exec(pathname);
+      if (reportRemeasure && req.method === 'POST') {
+        const report = await remeasureReport({ root: projectRoot, project: await projects.read(), id: reportRemeasure[1] });
+        broadcast('report', { action: 'remeasure', report });
+        return json(res, 200, { ok: true, report });
+      }
+      const reportMatch = /^\/api\/reports\/([A-Za-z0-9_.-]+)$/.exec(pathname);
+      if (reportMatch && req.method === 'GET') {
+        return json(res, 200, { ok: true, report: await readReport(projectRoot, reportMatch[1]) });
       }
 
       // ---------------- media ----------------
