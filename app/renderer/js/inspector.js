@@ -66,6 +66,43 @@ export class Inspector {
     this.lastRenderKey = '';
     this._kfSync = [];
     this._kind = 'project';
+    this.readOnly = false; // change-set preview (WP2.5a): fields never write
+  }
+
+  /**
+   * Change-set preview (docs/DESIGN-WP2.5-REVIEW.md §10.2-4): the panel keeps
+   * reading the real project, but every field is disabled — the picture on the
+   * stage is the shadow, so an edit here would land in a state the user cannot
+   * see. The panel rebuilds on toggle, so no stale `disabled` sticks.
+   */
+  setReadOnly(on) {
+    const next = !!on;
+    if (this.readOnly === next) return;
+    this.readOnly = next;
+    this.root?.classList.toggle('ro', next);
+    this._refresh();
+  }
+
+  _applyReadOnly() {
+    if (!this.readOnly || !this.root) return;
+    for (const field of this.root.querySelectorAll('input, select, textarea')) field.disabled = true;
+  }
+
+  /**
+   * Flash the row showing `path` (a change-set row click jumps here, §10.2-3).
+   * A path the current panel does not render is ignored: the element is still
+   * selected and the playhead still moved.
+   */
+  highlight(path) {
+    if (!path || !this.root) return false;
+    const row = [...this.root.querySelectorAll('.prop[data-path]')].find((node) => node.dataset.path === path);
+    if (!row) return false;
+    row.classList.remove('hl');
+    void row.offsetWidth;
+    row.classList.add('hl');
+    row.scrollIntoView({ block: 'nearest' });
+    setTimeout(() => row.classList.remove('hl'), 1400);
+    return true;
   }
 
   _commit(key, op, delay = 180) {
@@ -119,6 +156,7 @@ export class Inspector {
     else if (sel?.segmentId) this._renderSegment(project, sel.segmentId);
     else if (cam) this._renderCamera(project, time, cam, multi);
     else this._renderProject(project);
+    this._applyReadOnly();
   }
 
   /** Repaint ◆ states / current-key rows for the playhead without rebuilding the panel. */
@@ -257,8 +295,8 @@ export class Inspector {
   // Label, control, `↳` property-link button and ◆ are direct children of the
   // grid; the control sits in a .ctl wrapper so the width classes (w-third /
   // w-half / w-full) can size it without touching the link / keyframe columns.
-  _row(label, control, kfNode, cls = '', linkNode = null, linked = false) {
-    return h('div', { class: `prop fld${cls ? ` ${cls}` : ''}` },
+  _row(label, control, kfNode, cls = '', linkNode = null, linked = false, path = null) {
+    return h('div', { class: `prop fld${cls ? ` ${cls}` : ''}`, 'data-path': path || null },
       h('label', { title: label }, label,
         linked ? h('span', { class: 'parent-mark', 'data-tip': '这个属性有属性父级' }, '父') : null),
       h('span', { class: 'ctl' }, control),
@@ -439,9 +477,9 @@ export class Inspector {
     const cls = `w-${width}${type === 'textarea' ? ' tall' : ''}`;
     if (type === 'number') {
       const box = this._num({ value, step, min, max, percent, unit, placeholder, aria: label, onChange });
-      return this._row(label, box, kfNode, cls, linkNode, linked);
+      return this._row(label, box, kfNode, cls, linkNode, linked, path);
     }
-    if (type === 'color') return this._row(label, this._color(label, value, onChange), kfNode, cls, linkNode, linked);
+    if (type === 'color') return this._row(label, this._color(label, value, onChange), kfNode, cls, linkNode, linked, path);
     let input;
     if (type === 'select') {
       input = h('select', { 'aria-label': label }, ...options.map((o) => {
@@ -466,7 +504,7 @@ export class Inspector {
     else input.addEventListener('input', emit);
     input.addEventListener('blur', () => this._flush());
     const control = type === 'checkbox' ? h('span', { class: 'chk' }, input) : input;
-    return this._row(label, control, kfNode, cls, linkNode, linked);
+    return this._row(label, control, kfNode, cls, linkNode, linked, path);
   }
 
   /** 24×24 swatch + hex text, both editing the same value */
@@ -515,7 +553,7 @@ export class Inspector {
     });
     const linked = (rowLink && this._linked(rowLink))
       || items.some((it) => it.link && this._linked(it.link));
-    return this._row(label, h('div', { class: `vec vec-${items.length}` }, ...boxes), kfNode, 'w-full', rowLinkNode, linked);
+    return this._row(label, h('div', { class: `vec vec-${items.length}` }, ...boxes), kfNode, 'w-full', rowLinkNode, linked, keyPaths?.[0] ?? null);
   }
 
   /** read-only value row */

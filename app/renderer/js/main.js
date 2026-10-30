@@ -67,6 +67,11 @@ const S = {
   clipboard: null,
   loop: !!prefs.get('loop', false),
   safeArea: !!prefs.get('safeArea', false),
+  // Change-set preview (WP2.5a): the shadow project on the stage, and the
+  // `\` hold that temporarily points the stage back at the real project.
+  previewShadow: null,
+  previewHolding: false,
+  readOnly: false,
 };
 
 let preview, timeline, inspector, agentPanel, review, pipelinePanel, logPanel, gizmo, projects, curvePanel;
@@ -108,6 +113,12 @@ async function post(url, body) {
 // same base project and can lose one edit (or hit a Windows rename EPERM).
 let opChain = Promise.resolve();
 function op(...ops) {
+  // A change-set preview shows a picture nothing is allowed to edit: every
+  // write entry point (inspector, timeline, gizmo drag, shortcuts) ends here.
+  if (S.previewShadow || S.readOnly) {
+    toast('预览中不能编辑，先退出预览', 'warn');
+    return Promise.resolve(null);
+  }
   const run = async () => {
     try {
       const j = await post('/api/ops', { ops, expectedRev: S.project.rev, requestId: crypto.randomUUID() });
@@ -225,6 +236,9 @@ let migrationNoticeAt = '';
 
 function applyProject(p, source) {
   if (source !== 'boot' && S.project && p.rev <= S.project.rev) return;
+  // A real revision landed while previewing: the shadow is stale, so drop back
+  // to the real project before this one is installed.
+  if (S.previewShadow) exitPreview({ render: false });
   const prevDuration = S.project?.meta?.duration;
   // A fresh project (boot) invalidates every panel the back stack could restore.
   if (!S.project || source === 'boot') linkNavStack.length = 0;
@@ -275,6 +289,7 @@ function applyProject(p, source) {
   inspector.render(p, S.selection, S.time);
   curvePanel?.setProject(p);
   outliner?.render(); assetsPanel?.syncProject();
+  review?.setProject?.(p);
   updateProjectMeta(p);
   if (!p.camera && S.editMode) setEditMode(false);
   if (S.followCam && !cameraById(S.followCam)) S.followCam = null;
@@ -2479,6 +2494,129 @@ function switchLeftTab(name) {
   prefs.set('leftTab', name);
 }
 
+// ---------------------------------------------------------------- change set preview (WP2.5a)
+// Accepting a change set is one transaction; before that, the review page can
+// show the result without writing anything: `/api/changesets {preview}` returns
+// the shadow at the *current* revision and the viewport draws it through
+// `preview.setOverlay` (textures / audio players are shared, §11.3). Everything
+// editable keeps reading S.project and refuses writes while the shadow is on.
+async function applyChangeset(id, expectedRev = S.project?.rev) {
+  const j = await post('/api/changesets', { action: 'apply', id, expectedRev });
+  if (j.project) applyProject(j.project, 'changeset');
+  return j;
+}
+
+async function revertChangeset(id, expectedRev = S.project?.rev) {
+  const j = await post('/api/changesets', { action: 'revert', id, expectedRev });
+  if (j.project) applyProject(j.project, 'changeset');
+  return j;
+}
+
+async function revertChangesetEntry(id, selector) {
+  const j = await post('/api/changesets', { action: 'revert-one', id, ...selector });
+  if (j.project) applyProject(j.project, 'changeset');
+  return j;
+}
+
+/** Show one proposed change set on the stage without writing the project. */
+async function enterPreview(record) {
+  if (!record?.id) return null;
+  if (S.previewShadow?.id === record.id) return S.previewShadow;
+  if (S.previewShadow) exitPreview({ render: false });
+  try {
+    const j = await post('/api/changesets', {
+      action: 'preview', id: record.id, includeProject: true, expectedRev: S.project.rev,
+    });
+    if (!j.project) throw new Error('预览没有返回工程');
+    S.previewShadow = { id: record.id, project: j.project, intent: record.intent || '', record };
+    S.readOnly = true;
+    preview.setOverlay(j.project);
+    inspector?.setReadOnly?.(true);
+    showPreviewBanner(record);
+    preview.render(S.time);
+    gizmo?.draw();
+    return S.previewShadow;
+  } catch (e) {
+    toast(`预览失败: ${e.message}`, 'error');
+    return null;
+  }
+}
+
+/** Back to the real project: the only way out of the preview. */
+function exitPreview({ render = true } = {}) {
+  if (!S.previewShadow) return;
+  review?.closeCompare?.();
+  S.previewShadow = null;
+  S.previewHolding = false;
+  S.readOnly = false;
+  preview.setOverlay(S.project);
+  inspector?.setReadOnly?.(false);
+  hidePreviewBanner();
+  if (render) {
+    preview.render(S.time);
+    gizmo?.draw();
+  }
+}
+
+function showPreviewBanner(record) {
+  const banner = $('#previewBanner');
+  if (!banner) return;
+  banner.hidden = false;
+  banner.classList.remove('holding');
+  const text = banner.querySelector('.pb-text');
+  if (text) text.title = record?.intent || '';
+}
+
+function hidePreviewBanner() {
+  const banner = $('#previewBanner');
+  if (!banner) return;
+  banner.hidden = true;
+  banner.classList.remove('holding');
+}
+
+/** Hold `\`: the stage shows the real project while the key is down. */
+function setPreviewHold(on) {
+  if (!S.previewShadow || S.previewHolding === on) return;
+  S.previewHolding = on;
+  $('#previewBanner')?.classList.toggle('holding', on);
+  preview.setOverlay(on ? S.project : S.previewShadow.project);
+  preview.render(S.time);
+}
+
+/** Row click on the review page: select the host, seek, show the property. */
+function jumpToChange({ kind, id, path, frame }) {
+  if (!S.project) return;
+  if (kind === 'element' && S.project.elements.some((e) => e.id === id)) select({ elementId: id });
+  else if (kind === 'object' && (S.project.scene?.objects || []).some((o) => o.id === id)) select({ objectId: id });
+  else if (kind === 'camera') select({ camera: true });
+  if (Number.isFinite(frame)) {
+    pause();
+    setTime(frame / projectFps());
+  }
+  switchRightTab('insp');
+  requestAnimationFrame(() => inspector?.highlight?.(path));
+}
+
+/** Left = real project, right = shadow, both the current frame (§10.2-4). */
+function captureCompare({ frame } = {}) {
+  if (!S.previewShadow) return null;
+  const real = S.project;
+  const shadow = S.previewShadow.project;
+  preview.setOverlay(real);
+  const before = preview.capture();
+  preview.setOverlay(shadow);
+  const after = preview.capture();
+  preview.setOverlay(S.previewHolding ? real : shadow);
+  preview.render(S.time);
+  return {
+    before,
+    after,
+    frame: Number.isFinite(frame) ? frame : Math.round(S.time * projectFps()),
+    revBefore: real.rev,
+    revAfter: real.rev + 1,
+  };
+}
+
 // ---------------------------------------------------------------- shell: top bar, stage toolbar, transport
 function updateProjectMeta(p) {
   const m = p.meta;
@@ -2665,7 +2803,7 @@ async function boot() {
     editMode: () => S.editMode,
     grid: () => S.grid,
     following: () => !!S.followCam,
-    visible: () => S.editMode || !!S.selection.camera || !!S.selection.objectId,
+    visible: () => !S.previewShadow && (S.editMode || !!S.selection.camera || !!S.selection.objectId),
     projectPoint: (p) => preview.scene3d.projectPoint(p),
     viewCam: () => preview.scene3d.lastCam,
     stage: () => canvas,
@@ -3228,6 +3366,8 @@ async function boot() {
     getTime: () => S.time,
     captureAt: (t) => { preview.render(t); const d = preview.capture(); preview.render(S.time); return d; },
     toast,
+    // A change-set card in the conversation jumps to its rows in 审阅 (§10.1-2).
+    onOpenReview: (id) => { switchRightTab('review'); review.focus(id); },
   });
   agentPanel.setState({ available: S.agentAvailable, running: false });
 
@@ -3235,12 +3375,18 @@ async function boot() {
   // Writes stay here so the panel never fetches a write route (DESIGN.md §10).
   review = new ReviewPanel($('#panelReview'), {
     getProject: () => S.project,
+    getFps: () => projectFps(),
     toast,
-    apply: async (id) => {
-      const j = await post('/api/changesets', { action: 'apply', id, expectedRev: S.project.rev });
-      if (j.project) applyProject(j.project, 'changeset');
-      return j;
-    },
+    apply: (id) => applyChangeset(id),
+    revert: (id) => revertChangeset(id),
+    revertOne: (id, selector) => revertChangesetEntry(id, selector),
+    enterPreview: (record) => enterPreview(record),
+    exitPreview: () => exitPreview(),
+    isPreviewing: () => !!S.previewShadow,
+    previewId: () => S.previewShadow?.id || null,
+    compare: (opts) => captureCompare(opts),
+    onJump: (target) => jumpToChange(target),
+    retryAI: (intent) => { switchRightTab('ai'); agentPanel.setDraft(intent); },
   });
   review.mount($('#panelReview'));
 
@@ -3296,6 +3442,21 @@ async function boot() {
   $('#btnLast').onclick = () => { pause(); setTime(S.project?.meta.duration || 0); };
   $('#btnLoop').onclick = () => setLoop(!S.loop);
   $('#btnHelp').onclick = () => document.dispatchEvent(new CustomEvent('vdm:shortcuts'));
+
+  // preview banner: accept / discard the change set being previewed, or leave.
+  $('#pbExit').onclick = () => exitPreview();
+  $('#pbAccept').onclick = async () => {
+    const id = S.previewShadow?.id;
+    if (!id) return;
+    exitPreview();
+    await review.accept(id);
+  };
+  $('#pbDiscard').onclick = async () => {
+    const id = S.previewShadow?.id;
+    if (!id) return;
+    exitPreview();
+    await review.discard(id);
+  };
   setLoop(S.loop);
   setPlayButton(false);
   $('#btnPrev').onclick = () => stepFrames(-1);
@@ -3651,6 +3812,9 @@ async function boot() {
   canvas.addEventListener('pointerdown', (e) => {
     if (e.button !== 0 && e.button !== 2) return;
     hideContextMenu();
+    // Previewing shows a project that does not exist on disk: no drag may
+    // mutate it in memory (the commit would be refused anyway).
+    if (S.previewShadow) return;
     const { sx, sy, cx, cy } = stageXY(e);
     if (!S.editMode) {
       if (e.button === 0) {
@@ -4616,6 +4780,24 @@ async function boot() {
     dispatchCommand(e);
   });
 
+  // Hold `\` in a change-set preview: the stage shows the real project until
+  // the key comes up (§10.2-4). Not while typing, not with a modifier.
+  window.addEventListener('keydown', (e) => {
+    if (e.code !== 'Backslash' || e.ctrlKey || e.altKey || e.metaKey || e.repeat) return;
+    if (/INPUT|TEXTAREA|SELECT/.test(e.target?.tagName || '') || e.target?.isContentEditable) return;
+    if (document.querySelector('.modal:not([hidden])')) return;
+    if (!S.previewShadow) return;
+    e.preventDefault();
+    setPreviewHold(true);
+  });
+  window.addEventListener('keyup', (e) => {
+    if (e.code !== 'Backslash' || !S.previewHolding) return;
+    setPreviewHold(false);
+  });
+  window.addEventListener('blur', () => {
+    if (S.previewHolding) setPreviewHold(false);
+  });
+
   // F3 is a hold-to-inspect key, not a command: show every camfeed plane while
   // it is down, including in the normal camera view (before Tab).
   window.addEventListener('keydown', (e) => {
@@ -4662,6 +4844,14 @@ async function boot() {
     if (d.error) toast(`渲染失败: ${d.error}`, 'error');
   });
   es.addEventListener('agent', (e) => agentPanel.handleEvent(JSON.parse(e.data)));
+  // A change set landed (agent, CLI, MCP or another window): the 审阅 list and
+  // the AI card both read this one event, no polling (§10.2-1).
+  es.addEventListener('changeset', (e) => {
+    let data = null;
+    try { data = JSON.parse(e.data); } catch { return; }
+    agentPanel?.handleEvent?.({ type: 'changeset', action: data.action, record: data.record });
+    review?.refresh?.();
+  });
   es.addEventListener('pipeline', (e) => { S.pipeline = JSON.parse(e.data); pipelinePanel.set({ pipeline: S.pipeline, render: S.render }); });
   es.addEventListener('toast', (e) => { const d = JSON.parse(e.data); toast(d.message, d.level); });
   es.addEventListener('beats', () => toast('节拍已更新', 'success'));
@@ -4773,6 +4963,10 @@ async function boot() {
     setGrid: (on) => setGrid(on),
     switchRightTab: (n) => switchRightTab(n),
     switchLeftTab: (n) => switchLeftTab(n),
+    enterPreview: (record) => enterPreview(record),
+    exitPreview: () => exitPreview(),
+    captureCompare: (opts) => captureCompare(opts),
+    jumpToChange: (target) => jumpToChange(target),
   };
 }
 

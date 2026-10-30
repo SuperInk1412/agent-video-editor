@@ -162,3 +162,11 @@ div.art.file .art-thumb { color: var(--text-3); }
 .le-msg { color: var(--text-1); white-space: pre-wrap; word-break: break-word; }
 .lv-error .le-msg { color: var(--danger); }
 .le-meta { grid-column: 3; color: var(--text-3); white-space: pre-wrap; word-break: break-all; }
+
+/* A change set card in the stream links to the 审阅 page (WP2.5a). */
+.msg-link {
+  height: auto; padding: 0 4px; margin-top: 2px;
+  border: 0; background: transparent; color: var(--accent);
+  font-size: var(--fs-xs); text-decoration: underline;
+}
+.msg-link:hover { background: transparent; color: var(--accent-hover); }

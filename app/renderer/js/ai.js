@@ -251,6 +251,14 @@ export class AgentPanel {
     };
   }
 
+  /** Put a sentence in the task box (review panel: "让 AI 重新做"). */
+  setDraft(text) {
+    if (!this.task || text == null) return;
+    this.task.value = String(text);
+    this._grow();
+    this.task.focus();
+  }
+
   async _stop() {
     await fetch('/api/agent/cancel', { method: 'POST' });
     this._push({ kind: 'system', text: '已打断' });
@@ -295,6 +303,8 @@ export class AgentPanel {
         kind: 'ops',
         title: `变更集 ${record.id || ''} · ${record.status || ev.action || ''}`,
         text: `${n} 处改动${record.rev ? ` · rev ${record.rev}` : ''}`,
+        changesetId: record.id || null,
+        intent: record.intent || '',
       });
       return;
     }
@@ -406,10 +416,21 @@ export class AgentPanel {
         return n;
       }
       case 'tool':
-      case 'ops':
-        return h('div', { class: `msg msg-card msg-${e.kind}` },
+      case 'ops': {
+        // A change set card carries one extra link: jump to 审阅 (WP2.5a) so a
+        // result in the conversation points at the rows that produced it.
+        const card = h('div', { class: `msg msg-card msg-${e.kind}` },
           h('div', { class: 'msg-card-head' }, icon(e.kind === 'ops' ? 'check' : 'terminal', 'ic-sm'), h('span', {}, e.title || '')),
           e.text ? h('div', { class: 'msg-card-text' }, e.text) : null);
+        if (e.kind === 'ops' && e.changesetId && this.opts.onOpenReview) {
+          card.appendChild(h('button', {
+            type: 'button', class: 'msg-link', 'data-action': 'open-review', 'data-id': e.changesetId,
+            'data-tip': '在审阅页打开这组改动',
+            onclick: () => this.opts.onOpenReview(e.changesetId),
+          }, '审阅'));
+        }
+        return card;
+      }
       case 'error':
         return h('div', { class: 'msg msg-error' }, icon('alert', 'ic-sm'), h('span', {}, e.text));
       case 'step':

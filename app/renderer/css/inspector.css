@@ -272,3 +272,13 @@ button.insp-name:hover { background: var(--surface-2); border-color: var(--borde
 .speed-wrap { padding: 4px 0 8px; border-radius: var(--r-sm); background: var(--surface-0); margin: 2px 0 6px; }
 .speedcurve { display: block; margin: 0 auto; }
 .speed-wrap .row-btns { padding: 2px 6px 0; display: flex; gap: 4px; margin: 4px 0 0; }
+
+/* ---------------- change-set preview (WP2.5a) ---------------- */
+/* Read-only view: the stage shows the shadow project, the panel the real one. */
+.insp.ro input, .insp.ro select, .insp.ro textarea { opacity: .55; cursor: default; }
+.insp.ro .kf-btn, .insp.ro .link-btn { opacity: .4; }
+.prop.hl { animation: insp-hl 1.4s var(--ease); }
+@keyframes insp-hl {
+  0%, 45% { background: var(--accent-bg); box-shadow: inset 2px 0 0 var(--accent); }
+  100% { background: transparent; box-shadow: inset 2px 0 0 transparent; }
+}

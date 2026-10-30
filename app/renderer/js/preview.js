@@ -459,6 +459,28 @@ export class Preview {
     this.scene3d?.setCity(city);
   }
 
+  /**
+   * Swap the project the viewport draws without touching GPU resources
+   * (docs/DESIGN-WP2.5-REVIEW.md §11.3). `setProject` is wrong for a change-set
+   * preview: it would drop every image/video texture and audio player, and the
+   * shadow shares all of them with the real project (same `src`). Only the
+   * draw list is rebuilt: a new frame-IR cache, the shadow's keyframe arrays
+   * compiled, and new elements' assets loaded. Exit = `setOverlay(realProject)`.
+   */
+  setOverlay(p) {
+    if (!p) return;
+    this.project = p;
+    this._irCache = new IRCache();
+    this._ir = null;
+    // The shadow is a parsed copy: its keyframe arrays are new objects, so
+    // they are compiled here. Entries for the real project stay valid (they
+    // are keyed by the array itself), so no `clearCompiledTracks()` — the
+    // timeline keeps sampling the real project while this overlay is on.
+    compileProject(p);
+    this._hasCodeLayers = (p.elements || []).some((element) => element.type === 'code');
+    for (const el of p.elements || []) this._ensureAsset(el);
+  }
+
   setProject(p) {
     const changedAudio = this.project?.meta?.audio?.src !== p.meta.audio?.src;
     this.project = p;

@@ -177,6 +177,15 @@
           </div>
         </div>
         <div id="stageWrap">
+          <div id="previewBanner" class="preview-banner" role="status" hidden>
+            <span class="pb-dot" aria-hidden="true"></span>
+            <span class="pb-text">正在预览 AI 的修改</span>
+            <span class="pb-hint">按住 \ 看修改前</span>
+            <span class="pb-spacer"></span>
+            <button id="pbAccept" class="btn mini primary" type="button">采纳</button>
+            <button id="pbDiscard" class="btn mini" type="button">不要</button>
+            <button id="pbExit" class="btn mini ghost" type="button">退出预览</button>
+          </div>
           <div id="stageBox">
             <canvas id="stage"></canvas>
             <canvas id="gizmo"></canvas>
@@ -216,7 +225,7 @@
         <div class="tabs" role="tablist" aria-label="右栏" data-tabs="right">
           <button role="tab" data-tab="insp" class="on" aria-selected="true" aria-controls="panelInsp">属性</button>
           <button role="tab" data-tab="ai" aria-selected="false" aria-controls="panelAI">AI</button>
-          <button role="tab" data-tab="review" aria-selected="false" aria-controls="panelReview">审阅</button>
+          <button role="tab" data-tab="review" aria-selected="false" aria-controls="panelReview">审阅<span class="tab-dot" role="img" aria-label="有待审阅的变更集" hidden></span></button>
           <button role="tab" data-tab="pipe" aria-selected="false" aria-controls="panelPipe">渲染</button>
         </div>
         <div class="panel" id="panelInsp" role="tabpanel"></div>
