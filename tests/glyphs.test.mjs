@@ -359,7 +359,7 @@ test('frame IR v4: a text item carries the mesh id, the box and one shared mesh'
 });
 
 test('frame IR v4: without font bytes text stays on the v3 path (mesh null, size null)', (t) => {
-  if (skipped('latin', t)) return;
+  if (skipped('latin', t) || skipped('cjk', t)) return;
   const p = textProject();
   for (const opts of [{}, { fonts: {} }, { fonts: { Arial: new Uint8Array([1, 2, 3, 4]) } }]) {
     const ir = buildFrameIR(p, 0, opts);
@@ -381,7 +381,7 @@ test('frame IR v4: without font bytes text stays on the v3 path (mesh null, size
 });
 
 test('frame IR v4: textGeometryOf caches fonts, glyphs and meshes', (t) => {
-  if (skipped('latin', t)) return;
+  if (skipped('latin', t) || skipped('cjk', t)) return;
   const p = textProject();
   const fonts = { Arial: read(found.latin), SimHei: read(found.cjk) };
   const cache = { fonts: new Map(), glyphs: new Map(), meshes: new Map() };

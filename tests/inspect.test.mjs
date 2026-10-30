@@ -442,6 +442,9 @@ test('inspect: the MCP entry returns the same numbers as the direct call', async
 });
 
 test('inspect: the CLI prints the same JSON the service returns', async () => {
+  // `.scratch/` is gitignored, so a fresh checkout has no such directory and
+  // mkdtemp dies with ENOENT; create it instead of assuming a developer tree.
+  fs.mkdirSync(path.join(root, '.scratch'), { recursive: true });
   const dir = fs.mkdtempSync(path.join(root, '.scratch', 'inspect-cli-'));
   try {
     fs.writeFileSync(path.join(dir, 'project.vdm.json'), JSON.stringify(sceneProject(), null, 2));

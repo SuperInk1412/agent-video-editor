@@ -460,6 +460,8 @@ function textProjectWithFont() {
   const system = ['C:/Windows/Fonts/arial.ttf', '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf']
     .find((f) => fs.existsSync(f));
   if (!system) return null;
+  // `.scratch/` is gitignored; a fresh checkout has no such directory.
+  fs.mkdirSync(path.join(root, '.scratch'), { recursive: true });
   const dir = fs.mkdtempSync(path.join(root, '.scratch', 'shot-text-'));
   fs.mkdirSync(path.join(dir, 'media'), { recursive: true });
   fs.copyFileSync(system, path.join(dir, 'media', 'face.ttf'));
