@@ -8,14 +8,34 @@
 // The pool is spawned lazily on the first request and closed with the server
 // (`closeRasterPool`), which is why it lives in `ctx.rasterPool`, not at module
 // scope: two engines in one process must not share one worker pool.
+//
+// A `manim` source is the one exception (§6.4, WP5.2): its frames are produced
+// by an external renderer (`engine/manim.js`), cached as a PNG sequence under
+// `.vdm/cache/manim/`, and served here unchanged — the preview still has one
+// door and one IR item, only the producer differs. `mode=bake` never starts a
+// render: it reads the sequence the way the pool's cache-only path reads
+// `.vdm/cache/raster/`.
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { isSafeSourceId } from '../../core/code-layer.js';
 import { createRenderPool } from '../render-workers/pool.js';
 import { cacheKey, readCachedFrame, readManifest, resolveParams, runtimeKey, sourceSnapshot } from '../render-workers/cache.js';
+import { manimFrame, readManimFrame } from '../manim.js';
 
 /** HTTP status for a raster failure: the pool's own code->status table, else 500. */
 const rasterStatus = (e) => e.status || (e.code === 'RASTER_NOT_CACHED' ? 404 : 500);
+
+/**
+ * The source's manifest, or null when it is missing / unreadable — the pool
+ * reports those cases itself with its own codes, so this stays a peek.
+ */
+async function peekManifest(root, source) {
+  try {
+    return (await readManifest(path.join(root, 'sources', source), source)).manifest;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Cache-only lookup for `mode=bake`: the key the pool would use, without
@@ -90,7 +110,23 @@ export function register(router, ctx) {
     const size = [width, height];
     try {
       let pngPath;
-      if (mode === 'bake') {
+      const manifest = await peekManifest(ctx.root, source);
+      if (String(manifest?.runtime ?? '') === 'manim') {
+        // §6.4: the external renderer produces a whole PNG sequence; a live hit
+        // after the first frame is a directory read. `seed` is not a manim
+        // input (the scene is a pure function of its parameters and the frame).
+        if (mode === 'bake') {
+          const hit = await readManimFrame({ root: ctx.root, sourceId: source, frame, params, size, fps });
+          if (!hit) return fail(404, 'RASTER_NOT_CACHED', `没有缓存的帧：${source} f${frame}（manim）`);
+          pngPath = hit.pngPath;
+        } else {
+          const out = await manimFrame({
+            root: ctx.root, sourceId: source, frame, params, size, fps,
+            onLog: (line) => log.info(line),
+          });
+          pngPath = out.pngPath;
+        }
+      } else if (mode === 'bake') {
         pngPath = await cachedRasterPath(ctx, { source, frame, fps, size, seed, params });
         if (!pngPath) return fail(404, 'RASTER_NOT_CACHED', `没有缓存的帧：${source} f${frame}`);
       } else {

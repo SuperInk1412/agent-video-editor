@@ -29,6 +29,7 @@ const FIXTURES = [
   { id: 'canvas2d-bars', runtime: 'canvas2d', kind: 'code', entry: 'main.js' },
   { id: 'html-title-card', runtime: 'html', kind: 'web', entry: 'index.html', assets: ['style.css'] },
   { id: 'html-lyrics', runtime: 'html', kind: 'web', entry: 'index.html', assets: ['style.css', 'script.js'] },
+  { id: 'manim-formula', runtime: 'manim', kind: 'manim', entry: 'scene.py' },
 ];
 
 const NUMERIC_TYPES = new Set(['number', 'int', 'length', 'percent', 'angle']);
@@ -85,10 +86,15 @@ async function fixtureData(fixture) {
 // The set itself
 // ---------------------------------------------------------------------------
 
-test('the fixture directory holds exactly the five WP4.0 sources (§10.4.6)', async () => {
+test('the fixture directory holds exactly the shared sources of §10.4.6', async () => {
   const entries = await fs.readdir(DIR, { withFileTypes: true });
   const dirs = entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort();
-  assert.deepEqual(dirs, FIXTURES.map((fixture) => fixture.id).sort());
+  // The set grows WP by WP (`manim-formula` is WP5.2): every directory has to be
+  // registered in FIXTURES — that is where the per-fixture checks come from —
+  // and every registered fixture has to exist. No hard-coded count, so the next
+  // package only adds a row.
+  for (const dir of dirs) assert.ok(FIXTURES.some((fixture) => fixture.id === dir), `${dir} 没有登记在 FIXTURES 里`);
+  for (const fixture of FIXTURES) assert.ok(dirs.includes(fixture.id), `夹具目录缺失：${fixture.id}`);
   const readme = await readText(path.join(DIR, 'README.md'));
   for (const fixture of FIXTURES) assert.match(readme, new RegExp(`\`${fixture.id}\``), `README 缺 ${fixture.id}`);
 });
@@ -216,6 +222,37 @@ for (const fixture of FIXTURES.filter((entry) => entry.kind === 'web')) {
       assert.match(html, new RegExp(`(?:href|src)="${asset.replace(/\./g, '\\.')}"`), `${asset} 没被引用`);
     }
     for (const rel of Object.keys(texts)) assert.equal(isSafeSourceFile(rel), true, `${fixture.id} 文件名不安全：${rel}`);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Manim fixtures: an offline scene, checked without running manim (WP5.2)
+// ---------------------------------------------------------------------------
+
+for (const fixture of FIXTURES.filter((entry) => entry.kind === 'manim')) {
+  test(`fixture ${fixture.id}: is a deterministic offline manim scene`, async () => {
+    const { files, manifest, texts } = await fixtureData(fixture);
+    assert.deepEqual(manifestIssues(manifest), [], 'manifest 必须是合法的 manim 源');
+    assert.equal(manifest.entry, 'scene.py');
+    assert.ok(files.includes(manifest.entry), `${fixture.id} 缺入口 ${manifest.entry}`);
+    assert.equal(typeof manifest.scene, 'string', 'manim 源要声明 scene（场景类名）');
+    assert.ok(Number.isFinite(manifest.duration) && manifest.duration > 0,
+      'manim 源要声明 duration（秒，正数）——engine/manim.js 用它算帧数');
+    const scene = texts[manifest.entry];
+    assert.match(scene, new RegExp(`class\\s+${manifest.scene}\\s*\\(\\s*Scene\\s*\\)`),
+      `manifest.scene = ${manifest.scene} 必须是 scene.py 里的 Scene 子类`);
+    assert.match(scene, /VDM_MANIM_PARAMS/, '场景必须从 VDM_MANIM_PARAMS 读参数（§6.4：参数通过 JSON 传入）');
+    // 确定性规则和代码图层一样（§5.2 / §6.2）：不读挂钟、不用无种子随机、不联网。
+    for (const banned of ['import random', 'random.', 'time.time(', 'datetime.now(', 'fetch(', 'requests.']) {
+      assert.equal(scene.includes(banned), false, `scene.py 不能出现 ${banned}（画面会依赖挂钟/随机/网络）`);
+    }
+    for (const rel of Object.keys(texts)) assert.equal(isSafeSourceFile(rel), true, `${fixture.id} 文件名不安全：${rel}`);
+    // The registry round-trip is a plain text file like any other source.
+    const project = { sources: [{ id: manifest.id, manifest, files: texts }] };
+    const materialised = sourceFiles(project, manifest.id);
+    assert.equal(materialised.length, Object.keys(texts).length + 1, 'manifest.json 在最前面、其余一一对应');
+    assert.equal(materialised[0].path, SOURCE_MANIFEST);
+    for (const file of materialised.slice(1)) assert.equal(file.content, texts[file.path], `${file.path} 往返后内容变了`);
   });
 }
 

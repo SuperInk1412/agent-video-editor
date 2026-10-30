@@ -15,6 +15,7 @@
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { blenderVersion } from '../blender.js';
+import { findManim, manimVersion } from '../manim.js';
 import { analyzeBeats } from '../beats.js';
 import { STYLE_PRESETS } from '../storyboard.js';
 import { CLI_PATH, findDsh } from '../agent.js';
@@ -25,6 +26,16 @@ import { compute } from '../compute.js';
 import { readSelection, contextAt } from '../../application/queries.js';
 import { OP_KINDS } from '../../core/ops.js';
 import { PROJECT_SCHEMA, EDIT_SEMANTICS_VERSION, RENDER_PLAN_VERSION } from '../../core/version.js';
+
+/**
+ * §6.4 (WP5.2): a manim source is optional. `null` means the runtime is not
+ * installed, so the editor can grey out the manim entry points (D5).
+ */
+async function manimCapability() {
+  const bin = findManim();
+  if (!bin) return null;
+  return { bin, version: await manimVersion(bin).catch(() => null) };
+}
 
 export function register(router, ctx) {
   const { json, readBody, projects, jobs, media, broadcast, toast, transact, transactionOptions } = ctx;
@@ -60,7 +71,8 @@ export function register(router, ctx) {
         ops: OP_KINDS.filter((op) => !['restoreProject', 'replaceTimeline'].includes(op)),
         models: ['elements', 'cameras', 'scene.objects'], sceneTree: 'experimental, read-only',
         rendering: { concurrency: 1, backend: 'Blender', textLayout: 'approximate preview parity' },
-        blender: await blenderVersion().catch(() => null), revision: ctx.getProject().rev }; break;
+        blender: await blenderVersion().catch(() => null),
+        manim: await manimCapability(), revision: ctx.getProject().rev }; break;
       case 'runtime.stop': result = { ok: true }; setImmediate(() => { void ctx.closeRuntime(); }); break;
       default: return json(res, 400, { error: 'unknown runtime method', code: 'INVALID_ARGUMENT' });
     }

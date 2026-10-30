@@ -1,0 +1,39 @@
+{
+  "format": "vdm.source/1",
+  "id": "manim-formula",
+  "label": "公式动画（Manim 共享夹具）",
+  "runtime": "manim",
+  "entry": "scene.py",
+  "scene": "FormulaScene",
+  "duration": 3,
+  "deterministic": true,
+  "params": [
+    {
+      "id": "formula",
+      "label": "公式",
+      "group": "content",
+      "type": "text",
+      "default": "E = mc²",
+      "keyable": false
+    },
+    {
+      "id": "scale",
+      "label": "缩放",
+      "group": "motion",
+      "type": "number",
+      "unit": "",
+      "default": 1.6,
+      "range": [0.5, 3],
+      "step": 0.05,
+      "keyable": "frame"
+    },
+    {
+      "id": "tint",
+      "label": "颜色",
+      "group": "style",
+      "type": "color",
+      "default": "#9fd8ff",
+      "keyable": "frame"
+    }
+  ]
+}

@@ -33,17 +33,31 @@ export const CODE_PARAM_PREFIX = 'code.params.';
 /** `live`: preview renders on demand. `bake`: only already-cached frames. */
 export const CODE_CACHE_MODES = Object.freeze(['live', 'bake']);
 /** Every runtime a source may declare (the registry whitelist, §7.8.6 #8). */
-export const CODE_RUNTIMES = Object.freeze(['canvas2d', 'p5', 'glsl', 'html', 'svg']);
+export const CODE_RUNTIMES = Object.freeze(['canvas2d', 'p5', 'glsl', 'html', 'svg', 'manim']);
 /**
  * The runtimes the RenderWorkerPool draws, one frame at a time (§5). `html` /
  * `svg` are compile sources (WP4.1): they turn into native elements, so they
- * never go through the pool and have no `code` element (§7.8.6 #8).
+ * never go through the pool and have no `code` element (§7.8.6 #8). `manim` is
+ * an external renderer (§6.4, WP5.2): a Python subprocess writes the frames
+ * into `.vdm/cache/manim/`, again without the pool.
  */
 export const RASTER_RUNTIMES = Object.freeze(['canvas2d', 'p5', 'glsl']);
 /** Runtimes that compile into native elements instead of rendering per frame. */
 export const COMPILE_RUNTIMES = Object.freeze(['html', 'svg']);
+/**
+ * Runtimes whose frames come from an external renderer (`engine/manim.js`),
+ * not from the pool. They are still *raster items* — one picture per frame on
+ * a 2D node plane — so preview and export consume them through the WP3.3 /
+ * WP3.4 raster path (`.vdm/cache/manim/` is the sequence, `GET /api/raster`
+ * the door), just with a different producer.
+ */
+export const EXTERNAL_RUNTIMES = Object.freeze(['manim']);
 /** true for a runtime the pool rasterises per frame. */
 export const isRasterRuntime = (runtime) => RASTER_RUNTIMES.includes(String(runtime ?? ''));
+/** true for a runtime an external renderer produces frames for. */
+export const isExternalRuntime = (runtime) => EXTERNAL_RUNTIMES.includes(String(runtime ?? ''));
+/** true for a runtime that yields one picture per frame (`kind: "raster"` in the IR). */
+export const isRasterItemRuntime = (runtime) => isRasterRuntime(runtime) || isExternalRuntime(runtime);
 /** The one file every source directory must contain. */
 export const SOURCE_MANIFEST = 'manifest.json';
 /** Budget the contract check enforces per frame (§5.3: live preview 200 ms). */
@@ -204,7 +218,7 @@ export function manifestIssues(manifest, at = 'manifest') {
   if (!isRecord(manifest)) return [{ path: at, msg: 'must be an object' }];
   const runtime = manifest.runtime;
   if (typeof runtime !== 'string' || !runtime) push(`${at}.runtime`, `must be one of ${CODE_RUNTIMES.join(' / ')}`);
-  else if (!CODE_RUNTIMES.includes(runtime)) push(`${at}.runtime`, `unsupported runtime ${runtime}（这一版支持 ${CODE_RUNTIMES.join(' / ')}；html / svg 是编译源，不是逐帧渲染）`);
+  else if (!CODE_RUNTIMES.includes(runtime)) push(`${at}.runtime`, `unsupported runtime ${runtime}（这一版支持 ${CODE_RUNTIMES.join(' / ')}；html / svg 编译成原生元素，manim 由外部渲染器产帧）`);
   if (manifest.id !== undefined && (typeof manifest.id !== 'string' || !isSafeSourceId(manifest.id))) {
     push(`${at}.id`, 'must be a nonempty source id');
   }

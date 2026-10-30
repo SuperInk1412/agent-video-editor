@@ -8,7 +8,7 @@ import { linkIssues, normalizeLinks, projectLinkIssues } from './links.js';
 import { feedIssues } from './camfeed.js';
 import { dirRollFromRotation, normalizeRotation } from './rotation.js';
 import { normalizeCustomPresets } from './curves.js';
-import { codeIssues, isRasterRuntime, isSafeSourceFile, isSafeSourceId, manifestIssues, normalizeCode, normalizeSources, sourceManifest, SOURCE_MANIFEST } from './code-layer.js';
+import { codeIssues, COMPILE_RUNTIMES, isRasterItemRuntime, isSafeSourceFile, isSafeSourceId, manifestIssues, normalizeCode, normalizeSources, sourceManifest, SOURCE_MANIFEST } from './code-layer.js';
 import {
   SOURCE_MODES, SOURCE_PATHS, isNumericSourcePath, isSourceNodeId, isSourcePath,
 } from './source-eval.js';
@@ -567,9 +567,13 @@ export function validateProject(p) {
         issues.push(...codeIssues(e.code, `${at}.code`));
         // html / svg sources compile into native elements (WP4.1); a code
         // layer would ask the pool for a per-frame raster of a page (§7.8.6 #8).
+        // `manim` is not compiled either: its frames come from the external
+        // renderer (§6.4), so it stays a code layer.
         const runtime = sourceManifest(p, isRecord(e.code) ? e.code.source : '')?.runtime;
-        if (runtime !== undefined && runtime !== null && !isRasterRuntime(runtime)) {
-          push(`${at}.code.source`, `${runtime} 是编译源（会编译成原生元素），不能当代码图层逐帧渲染`);
+        if (runtime !== undefined && runtime !== null && !isRasterItemRuntime(runtime)) {
+          push(`${at}.code.source`, COMPILE_RUNTIMES.includes(runtime)
+            ? `${runtime} 是编译源（会编译成原生元素），不能当代码图层逐帧渲染`
+            : `${runtime} 不是逐帧渲染的运行时，不能当代码图层`);
         }
       }
     }

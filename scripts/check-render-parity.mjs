@@ -35,6 +35,19 @@
 // pixels differ by more than `TEXT_DIFF` levels (the same pixel budget as case
 // H) or more than `ALLOWED` of the 16×9 cells differ (the A–G standard).
 //
+// Case M (§6.4 / §10.4.6, WP5.2) is the Manim layer: the shared
+// `manim-formula` fixture (an offline Python scene) tilted in 3D, with an
+// opaque block in front of the middle of the formula. The frames come from
+// `engine/manim.js` — one render into `.vdm/cache/manim/`, then a sequence —
+// and both backends consume them through the case I path: the preview through
+// `GET /api/raster`, Blender through `bakeRasterLayers`. The fixture paints a
+// full-frame paper card, so the compared pixels are the picture itself and not
+// two compositors' treatment of straight alpha; the visible edges are the
+// card's, which is what makes the perspective mapping part of the comparison.
+// Same thresholds as I/A–G: 2 % of the compared pixels, 4 of the 144 grid
+// cells. Skipped, with a reason, when manim (or Blender / Electron) is not
+// installed — the runtime is optional by design (D5).
+//
 // Case J (docs/DESIGN-BACKEND-V2.md §5.4 / §10.2 WP3.5) is the screen-effect case:
 // a video, colour blocks and a line of text under every effect (bloom, CA, grain,
 // vignette, scanline, non-default grade/contrast/saturation). Blender writes a
@@ -51,7 +64,7 @@
 // `getBoundingClientRect` (0.5 px). Blender is not involved; the case is skipped
 // with a reason when Electron is missing.
 //
-//   node scripts/check-render-parity.mjs [--keep] [--only=A,B,C,D,E,F,G,H,I,J,L]
+//   node scripts/check-render-parity.mjs [--keep] [--only=A,B,C,D,E,F,G,H,I,J,L,M]
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -62,6 +75,7 @@ import { ensureSpace } from '../core/space.js';
 import { saveProject, loadProject } from '../engine/storage.js';
 import { findBlender, renderStill } from '../engine/blender.js';
 import { findElectron } from '../engine/render-workers/pool.js';
+import { findManim, ensureManimSequence } from '../engine/manim.js';
 import { rotationFromDirRoll } from '../core/rotation.js';
 import { evalElement } from '../core/evaluate.js';
 import { createAsNode } from '../core/rotation-ops.js';
@@ -86,8 +100,14 @@ const SOURCE_I = 'src_parity_i';
 const FRAME_I = 12;              // IR frame under T = 0.5 s at 24 fps
 const T_I = FRAME_I / 24;
 const CODE_ALLOWED = 0.02;       // 2 % of the compared pixels (WP3.4 acceptance)
+// Case M: the manim-layer project, its frame and the pixel budget (WP5.2).
+const PROJECT_M = path.join(WORK, 'project-m');
+const SOURCE_M = 'manim-formula';   // the shared fixture (§10.4.6)
+const FRAME_M = 21;                 // 0.875 s: the formula is fully faded in
+const T_M = FRAME_M / 24;
+const MANIM_ALLOWED = 0.02;         // same 2 % budget as I / WP5.2 acceptance
 
-const only = (process.argv.find((a) => a.startsWith('--only=')) || '--only=A,B,C,D,E,F,G,H,I,J,L').slice(7).split(',');
+const only = (process.argv.find((a) => a.startsWith('--only=')) || '--only=A,B,C,D,E,F,G,H,I,J,L,M').slice(7).split(',');
 
 const run = (cmd, args, opts = {}) => new Promise((resolve, reject) => {
   const p = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, ...opts });
@@ -1269,8 +1289,264 @@ async function htmlCase() {
   return true;
 }
 
+// ------------------------------------------------------------- case M: Manim
+
+/**
+ * Case M's project: the shared `manim-formula` fixture (§10.4.6) as a code
+ * layer — a `code` element on a 2D node plane, tilted in 3D — and one opaque
+ * block floating in front of the middle of the formula. The source sits on disk
+ * (`sources/<id>/`) and in the registry, exactly like case I: the renderer reads
+ * the directory, `core/` reads the registry.
+ */
+async function buildManimLayer() {
+  const fixtureDir = path.join(REPO, 'tests', 'fixtures', 'sources', SOURCE_M);
+  const sourceDir = path.join(PROJECT_M, 'sources', SOURCE_M);
+  await fs.mkdir(sourceDir, { recursive: true });
+  await fs.mkdir(path.join(PROJECT_M, 'media'), { recursive: true });
+  const files = {};
+  for (const entry of await fs.readdir(fixtureDir, { withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    const text = await fs.readFile(path.join(fixtureDir, entry.name), 'utf8');
+    await fs.writeFile(path.join(sourceDir, entry.name), text);
+    if (entry.name !== 'manifest.json') files[entry.name] = text;
+  }
+  const manifest = JSON.parse(await fs.readFile(path.join(fixtureDir, 'manifest.json'), 'utf8'));
+  const p = normalizeProject(createProject({ title: 'parity manim layer', background: '#000000', duration: 2 }));
+  ensureSpace(p);
+  applyOps(p, [
+    { op: 'setFx', fx: { bloom: 0, ca: 0, grain: 0, vignette: 0, scanline: 0, grade: 0, contrast: 0, saturation: 1 } },
+    { op: 'sourceAdd', id: SOURCE_M, manifest, files },
+    // Case I's plane geometry: a tilted card that leaves its edges inside the
+    // frame, so the perspective mapping is compared too, not just the block.
+    { op: 'addElement', element: {
+      id: 'el_manim', name: 'manim', type: 'code', start: 0, duration: 2, z: 2,
+      node: { pivot: [-0.3, 4.2, -2], position: [0, 0, 0], rotation: [12, 24, 0], scale: [0.9, 0.9, 1] },
+      code: { source: SOURCE_M, params: {}, seed: 0, size: [960, 540], cache: 'live' },
+    } },
+    // Narrow and tall, centred on the formula's middle: it must hide its own
+    // pixels and nothing else (the layer keeps drawing on both sides of it).
+    { op: 'addElement', element: {
+      id: 'el_block', name: 'block', type: 'solid', start: 0, duration: 2, z: 4,
+      node: { pivot: [-0.3, 4.2, 2], position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+      style: { w: 130, h: 260, fill: '#00cc60' },
+    } },
+  ]);
+  await saveProject(PROJECT_M, p, { by: 'check-render-parity' });
+}
+
+/**
+ * Runs inside the editor and pins every number case M reports in `window.__dbg`.
+ * The palette is the fixture's: its paper card (#f0b429), the formula's tint
+ * (#9fd8ff), the block's green and the black background.
+ */
+const PROBE_M = `export async function run() {
+  const out = { errors: [] };
+  const W = 1920, H = 1080, T = ${T_M}, FRAME = ${FRAME_M};
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  try {
+    const app = window.__vdm;
+    const p = app.preview;
+    app.pause();
+    p.playing = false;
+    app.setTime(T);
+    p.canvas.width = W;
+    p.canvas.height = H;
+    p._rebuildTargets();
+    // The manim PNG sequence is fetched asynchronously: wait until THIS frame
+    // is on screen (a stale fallback would compare the wrong picture).
+    let ready = false;
+    for (let i = 0; i < 240 && !ready; i++) {
+      p.render(T);
+      ready = (p.layers || []).some((L) => L.raster && !L.raster.stale && L.raster.frame === FRAME);
+      if (!ready) await sleep(100);
+    }
+    out.ready = ready;
+    out.stats = p.rasterStats ? p.rasterStats() : null;
+    if (!ready) throw new Error('the manim layer never showed frame ' + FRAME);
+    const shot = new Image();
+    shot.src = p.canvas.toDataURL('image/png');
+    await shot.decode();
+    const ref = new Image();
+    ref.src = '/media/zz-blender-m.png?t=' + Date.now();
+    await ref.decode();
+    const grab = (img) => {
+      const cv = document.createElement('canvas');
+      cv.width = W;
+      cv.height = H;
+      const ctx = cv.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(img, 0, 0, W, H);
+      return ctx.getImageData(0, 0, W, H).data;
+    };
+    const a = grab(shot); // preview
+    const b = grab(ref);  // Blender still
+    // "the manim layer drew here" = the fixture's paper (#f0b429, the full-frame
+    // card). The formula is its tint (#9fd8ff), the block is green, the
+    // background black — four disjoint colours, so occlusion and "did it draw"
+    // are two independent measurements.
+    const rasterAt = (d, i) => d[i] > 190 && d[i + 1] > 120 && d[i + 1] < 225 && d[i + 2] < 110;
+    const polys = p.layerPolygons ? p.layerPolygons() : [];
+    const wall = polys.find((poly) => poly.id === 'el_block');
+    if (!wall) throw new Error('the block did not project (no polygon)');
+    const centre = (poly) => poly.reduce((acc, pt) => [acc[0] + pt[0] / poly.length, acc[1] + pt[1] / poly.length], [0, 0]);
+    const shrink = (poly, k) => {
+      const c = centre(poly);
+      return poly.map((pt) => [c[0] + (pt[0] - c[0]) * k, c[1] + (pt[1] - c[1]) * k]);
+    };
+    const quad = shrink(wall.points, 0.86);
+    const inPoly = (poly, x, y) => {
+      let inside = false;
+      for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const [xi, yi] = poly[i];
+        const [xj, yj] = poly[j];
+        if (((yi > y) !== (yj > y)) && (x < ((xj - xi) * (y - yi)) / (yj - yi) + xi)) inside = !inside;
+      }
+      return inside;
+    };
+    let rasterA = 0, rasterB = 0, over = 0, area = 0, areaOver = 0;
+    let quadPixels = 0, quadOver = 0, quadRaster = 0;
+    for (let i = 0; i < a.length; i += 4) {
+      const d = Math.max(Math.abs(a[i] - b[i]), Math.abs(a[i + 1] - b[i + 1]), Math.abs(a[i + 2] - b[i + 2]));
+      const ra = rasterAt(a, i), rb = rasterAt(b, i);
+      if (ra) rasterA += 1;
+      if (rb) rasterB += 1;
+      if (d > ${TEXT_DIFF}) over += 1;
+      if (ra || rb) { area += 1; if (d > ${TEXT_DIFF}) areaOver += 1; }
+      const px = (i / 4) % W, py = Math.floor((i / 4) / W);
+      if (inPoly(quad, px, py)) {
+        quadPixels += 1;
+        if (d > ${TEXT_DIFF}) quadOver += 1;
+        if (ra || rb) quadRaster += 1;
+      }
+    }
+    const total = W * H;
+    out.size = [W, H];
+    out.frame = FRAME;
+    out.time = T;
+    out.rasterPixels = rasterA;
+    out.rasterPixelsBlender = rasterB;
+    out.frameDiff = { pixels: over, ratio: over / total };
+    out.rasterDiff = { pixels: areaOver, ratio: area ? areaOver / area : 0, area };
+    out.block = { pixels: quadPixels, diff: quadOver, diffRatio: quadPixels ? quadOver / quadPixels : 0, raster: quadRaster, share: quadPixels / total };
+    const palette = { paper: [240, 180, 41], tint: [159, 216, 255], green: [0, 204, 96], black: [0, 0, 0] };
+    const names = Object.keys(palette);
+    const classify = (d, i) => {
+      let best = 'black', bd = Infinity;
+      for (const name of names) {
+        const c = palette[name];
+        const dd = (d[i] - c[0]) ** 2 + (d[i + 1] - c[1]) ** 2 + (d[i + 2] - c[2]) ** 2;
+        if (dd < bd) { bd = dd; best = name; }
+      }
+      return best;
+    };
+    let gridDiff = 0;
+    const cells = [];
+    for (let j = 0; j < 9; j++) {
+      for (let i = 0; i < 16; i++) {
+        const x = Math.floor(((i + 0.5) / 16) * W);
+        const y = Math.floor(((j + 0.5) / 9) * H);
+        const k = (y * W + x) * 4;
+        const ca = classify(a, k), cb = classify(b, k);
+        if (ca !== cb) { gridDiff += 1; cells.push(i + ',' + j + ' preview ' + ca + ' blender ' + cb); }
+      }
+    }
+    out.grid = { diff: gridDiff, cells };
+  } catch (e) {
+    out.errors.push(String((e && e.stack) || e));
+  }
+  window.__dbg = out;
+}
+`;
+
+const EVAL_M = `(async () => {
+  for (let i = 0; i < 150 && !(window.__vdm && window.__vdm.preview); i++) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  if (!(window.__vdm && window.__vdm.preview)) throw new Error('the editor never booted');
+  const mod = await import('/media/parity-m.js?t=' + Date.now());
+  await mod.run();
+})().catch((e) => { window.__dbg = { errors: [String((e && e.stack) || e)] }; })`;
+
+/**
+ * Case M: the Manim layer through both backends. The scene is rendered once
+ * into `.vdm/cache/manim/` by `engine/manim.js` and then consumed as a raster
+ * sequence — the preview through `/api/raster`, Blender through
+ * `engine/raster-bake.js`; the case fails when the block does not occlude the
+ * frames, when no manim pixel is drawn, or when the pixel / grid budgets of
+ * cases I and A–G are exceeded.
+ */
+async function manimCase() {
+  if (!findManim()) {
+    console.log('[parity] M SKIP — manim 未安装（PATH 上没有 manim，也没有设置 VDM_MANIM）。'
+      + 'Manim 图层需要这个外部渲染器（§6.4 / D5）；装好 manim 或把路径设到 VDM_MANIM 后本用例自动启用。');
+    return true;
+  }
+  const blender = await findBlender().catch(() => null);
+  const electron = findElectron();
+  if (!blender || !electron) {
+    const missing = [!blender ? 'Blender' : null, !electron ? 'Electron' : null].filter(Boolean).join(' and ');
+    console.log(`[parity] M SKIP — ${missing} not found. The manim layer needs Blender for the still and`
+      + ' Electron for the one raster path (§5); without them there is no picture to compare.');
+    return true;
+  }
+  await buildManimLayer();
+  // Warm the sequence through the same engine the two backends use, so the case
+  // reports what it actually compares and a broken scene fails here, not inside
+  // a 120 s capture.
+  const sequence = await ensureManimSequence({
+    root: PROJECT_M, sourceId: SOURCE_M, size: [960, 540], fps: 24,
+    onLog: (line) => console.log(`[parity] M ${line}`),
+  });
+  console.log(`[parity] M manim sequence ${sequence.key.slice(0, 12)}: ${sequence.count} frames`
+    + ` (${sequence.cached ? 'cache hit' : 'rendered'}), ${sequence.pattern}`);
+  const logs = [];
+  const still = await renderStill({
+    dir: PROJECT_M, project: await loadProject(PROJECT_M), time: T_M, scale: 1, samples: 16,
+    out: path.join(WORK, 'blender-m.png'), onLog: (line) => logs.push(String(line)),
+  });
+  for (const line of logs.filter((entry) => entry.includes('raster'))) {
+    console.log(`[parity] M ${line.trim()}`);
+  }
+  await fs.copyFile(still, path.join(PROJECT_M, 'media', 'zz-blender-m.png'));
+  await fs.writeFile(path.join(PROJECT_M, 'media', 'parity-m.js'), PROBE_M);
+  const r = await run(process.execPath, [path.join(HERE, 'dev.mjs'), '--project', PROJECT_M,
+    `--capture=${path.join(WORK, 'preview-m.png')}`, `--at=${T_M}`, '--delay=2600', '--hold=3000', `--eval=${EVAL_M}`], { cwd: REPO });
+  const line = String(r.out).split('\n').find((entry) => entry.includes('[capture]'));
+  if (!line) throw new Error(`no preview capture for case M: ${r.err.slice(-1200)}`);
+  const dbg = captureDbg(line);
+  if (!dbg) throw new Error(`could not parse case M: ${line.slice(0, 400)}`);
+  if (dbg.errors && dbg.errors.length) {
+    console.log(`[parity] M FAIL — the probe threw: ${dbg.errors[0].split('\n')[0]}`);
+    return false;
+  }
+  console.log(`[parity] M manim layer frame ${dbg.frame} (t=${dbg.time}s) ${dbg.size[0]}x${dbg.size[1]}:`
+    + ` raster pixels preview ${dbg.rasterPixels}, Blender ${dbg.rasterPixelsBlender}`);
+  console.log(`[parity] M block quad ${dbg.block.pixels} px (${pct(dbg.block.share)} of the frame):`
+    + ` diff ${dbg.block.diff} px (${pct(dbg.block.diffRatio)} of the quad),`
+    + ` raster pixels inside ${dbg.block.raster}`);
+  console.log(`[parity] M raster area ${dbg.rasterDiff.area} px:`
+    + ` diff ${dbg.rasterDiff.pixels} px (${pct(dbg.rasterDiff.ratio)})`);
+  console.log(`[parity] M whole frame: diff ${dbg.frameDiff.pixels} px (${pct(dbg.frameDiff.ratio)})`);
+  console.log(`[parity] M grid: ${dbg.grid.diff} of 144 cells differ (allowed ${ALLOWED})`
+    + (dbg.grid.cells.length ? ` — ${dbg.grid.cells.join('; ')}` : ''));
+  const failures = [];
+  if (!(dbg.rasterPixels > 0)) failures.push('the preview drew no manim pixel');
+  if (!(dbg.rasterPixelsBlender > 0)) failures.push('Blender drew no manim pixel');
+  if (!(dbg.block.raster === 0)) failures.push(`${dbg.block.raster} manim pixels show through the block`);
+  if (dbg.block.diffRatio > MANIM_ALLOWED) failures.push(`the block differs by ${pct(dbg.block.diffRatio)}`);
+  if (dbg.rasterDiff.ratio > MANIM_ALLOWED) failures.push(`the manim layer differs by ${pct(dbg.rasterDiff.ratio)}`);
+  if (dbg.frameDiff.ratio > MANIM_ALLOWED) failures.push(`the frame differs by ${pct(dbg.frameDiff.ratio)}`);
+  if (dbg.grid.diff > ALLOWED) failures.push(`${dbg.grid.diff} grid cells differ (allowed ${ALLOWED})`);
+  if (failures.length) {
+    console.log(`[parity] M FAIL — ${failures.join('; ')}`);
+    return false;
+  }
+  console.log(`[parity] M PASS — the manim frames are drawn and occluded by both backends`
+    + ` (${pct(MANIM_ALLOWED)} of the compared pixels allowed, ${TEXT_DIFF} levels)`);
+  return true;
+}
+
 async function main() {
-  const gridCases = only.filter((k) => !['H', 'I', 'J', 'L'].includes(k));
+  const gridCases = only.filter((k) => !['H', 'I', 'J', 'L', 'M'].includes(k));
   let failed = false;
   if (!gridCases.length) {
     await fs.rm(WORK, { recursive: true, force: true });
@@ -1327,6 +1603,11 @@ async function main() {
   // Case L: compiled HTML vs the browser's own frame (§7.1 / WP4.1).
   if (only.includes('L')) {
     if (!(await htmlCase())) failed = true;
+  }
+  // Case M: the Manim layer through the raster path, occluded by a block
+  // (§6.4 / WP5.2). Skipped, with a reason, when manim is not installed.
+  if (only.includes('M')) {
+    if (!(await manimCase())) failed = true;
   }
   if (failed) {
     if (!process.argv.includes('--keep')) console.log('[parity] work dir kept for inspection:', WORK);

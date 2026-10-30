@@ -42,12 +42,19 @@
 // preview's rule — and the log says `raster fallback`. An item with no good
 // frame at all is simply absent from the payload, so the Python side draws
 // nothing for it, exactly like the preview while its PNG is missing.
+//
+// `manim` items (§6.4, WP5.2) ride the same path with a different producer
+// (`engine/manim.js`): the frames come from a cached PNG sequence, the staged
+// sequence and the `v3.rasters` description are identical. A machine without
+// manim leaves those items out of the job (logged `MANIM_UNAVAILABLE`) instead
+// of failing the whole render.
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { canonicalJson, rasterDir, sha256 } from './render-workers/cache.js';
 import { createRenderPool } from './render-workers/pool.js';
 import { DEFAULT_EXPORT_TIMEOUT_MS } from './render-workers/protocol.js';
 import { shotV3FrameItems } from './shot.js';
+import { manimFrame } from './manim.js';
 
 /** File names inside a staged sequence (the video path's convention). */
 export const RASTER_SEQUENCE_PATTERN = 'f_%05d.png';
@@ -111,6 +118,7 @@ export function rasterPlan(v3, f0, f1, { timeIndependent = new Set() } = {}) {
     const isStatic = reusable && group.entries.every((entry) => entry.key === head.key);
     plans.push({
       id: group.id,
+      runtime: head.runtime,
       static: isStatic,
       entries: isStatic ? [head] : group.entries,
       fromIR: head.ir,
@@ -130,8 +138,9 @@ export function rasterPlan(v3, f0, f1, { timeIndependent = new Set() } = {}) {
  * `engine/blender.js` builds it from the job's source registry. The default is
  * empty — every frame is rendered, which is always correct.
  *
- * The pool is created here, used for every item and closed again (one pool per
- * job, §5.1); a caller that already owns one may pass `pool`.
+ * The pool is created here, used for every pool item and closed again (one
+ * pool per job, §5.1); a caller that already owns one may pass `pool`. A job
+ * with only manim items never creates one.
  */
 export async function bakeRasterLayers(root, v3, {
   fps = 24, f0 = 1, f1 = 1, onLog, signal, pool = null, timeIndependent = new Set(),
@@ -139,7 +148,11 @@ export async function bakeRasterLayers(root, v3, {
   if (!v3 || !Array.isArray(v3.items) || !v3.items.length) return {};
   const plans = rasterPlan(v3, f0, f1, { timeIndependent });
   if (!plans.length) return {};
-  const own = pool ? null : createRenderPool({ root, timeoutMs: DEFAULT_EXPORT_TIMEOUT_MS });
+  // A job made only of manim layers never needs the Electron rasteriser: its
+  // frames come from `engine/manim.js` (§6.4, WP5.2). Creating a pool anyway
+  // would spawn a worker for nothing.
+  const needsPool = plans.some((plan) => plan.runtime !== 'manim');
+  const own = pool || !needsPool ? null : createRenderPool({ root, timeoutMs: DEFAULT_EXPORT_TIMEOUT_MS });
   const active = pool || own;
   const rasters = {};
   let gaveUp = false;
@@ -179,25 +192,50 @@ async function bakeRaster(pool, root, plan, { fps, onLog, signal }) {
   for (const entry of plan.entries) {
     signal?.throwIfAborted();
     try {
-      // `useCache: true`: a frame already in `.vdm/cache/raster/` is copied,
+      // `useCache: true`: a frame already in the renderer's cache is copied,
       // not rendered. `mode` (`live` / `bake`) is a *preview* policy (§6.1) —
       // an export job is the bake, so it fills the cache in either mode.
-      const out = await pool.render({
-        sourceId: entry.sourceId,
-        runtime: entry.runtime,
-        params: entry.params,
-        frame: entry.ir,
-        fps,
-        size: entry.size || size,
-        seed: entry.seed,
-        useCache: true,
-      });
-      if (!out || !out.pngPath) throw Object.assign(new Error('the pool returned no PNG'), { code: 'RASTER_FAILED' });
-      rendered.push({ ir: entry.ir, pngPath: out.pngPath, cacheKey: out.cacheKey });
-      if (out.cached) cachedCount += 1; else renderedCount += 1;
+      //
+      // A `manim` item (§6.4, WP5.2) is the same raster item with a different
+      // producer: `engine/manim.js` renders the whole scene once and the frame
+      // lookup afterwards is a cached-file copy. Everything below — the staged
+      // sequence, the fallbacks, the `v3.rasters` payload — is unchanged, so
+      // Blender still sees one image sequence per item.
+      const record = entry.runtime === 'manim'
+        ? await manimFrame({
+          root,
+          sourceId: entry.sourceId,
+          params: entry.params,
+          frame: entry.ir,
+          fps,
+          size: entry.size || size,
+          onLog: log,
+          signal,
+          useCache: true,
+        })
+        : await pool.render({
+          sourceId: entry.sourceId,
+          runtime: entry.runtime,
+          params: entry.params,
+          frame: entry.ir,
+          fps,
+          size: entry.size || size,
+          seed: entry.seed,
+          useCache: true,
+        });
+      if (!record || !record.pngPath) throw Object.assign(new Error('the renderer returned no PNG'), { code: 'RASTER_FAILED' });
+      rendered.push({ ir: entry.ir, pngPath: record.pngPath, cacheKey: record.cacheKey ?? record.key });
+      if (record.cached) cachedCount += 1; else renderedCount += 1;
     } catch (error) {
       if (error?.code === 'DEPENDENCY_MISSING') return { giveUp: true, reason: error.message };
-      if (signal?.aborted) throw error;
+      if (signal?.aborted || error?.code === 'CANCELLED') throw error;
+      if (entry.runtime === 'manim') {
+        // §6.4: one manim run covers the whole sequence, so a failure is not
+        // retried per frame (a timeout would multiply by the frame count) —
+        // the layer is left out and the job carries on with the others.
+        log(`raster fallback: ${plan.id} — ${error?.code || 'MANIM_RENDER_FAILED'}: ${error?.message || error}；manim 图层本作业跳过`);
+        return null;
+      }
       fallbacks += 1;
       log(`raster fallback: ${plan.id} f${entry.frame} (ir${entry.ir}) — ${error?.code || 'RASTER_FAILED'}: ${error?.message || error}`);
     }
